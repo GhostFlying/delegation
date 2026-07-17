@@ -47,14 +47,24 @@ printf '%s  %s\n' "$checksum" "$artifact" >"$tmp/plugin/release-artifacts.sha256
 cat >"$tmp/fake-bin/curl" <<'EOF'
 #!/bin/sh
 set -eu
+url=
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--output" ]; then
     output=$2
     shift 2
     continue
   fi
+  case "$1" in
+    --*) ;;
+    *) url=$1 ;;
+  esac
   shift
 done
+if [ "$url" != "$DELEGATION_TEST_EXPECTED_URL" ]; then
+  printf '%s\n' "unexpected download URL: $url" >&2
+  exit 1
+fi
+printf '%s\n' "$url" >>"$DELEGATION_TEST_DOWNLOAD_LOG"
 cp "$DELEGATION_TEST_ARTIFACT" "$output"
 if [ -n "${DELEGATION_TEST_CREATE_TARGET:-}" ]; then
   mkdir -p "$DELEGATION_TEST_CREATE_TARGET"
@@ -99,12 +109,56 @@ exit "$link_status"
 EOF
 chmod 0755 "$tmp/fake-bin/link"
 
+expected_url="https://github.com/GhostFlying/delegation/releases/download/v0.1.0-alpha.0/$artifact"
+download_log="$tmp/downloads.log"
+DELEGATION_TEST_EXPECTED_URL=$expected_url
+DELEGATION_TEST_DOWNLOAD_LOG=$download_log
+export DELEGATION_TEST_EXPECTED_URL DELEGATION_TEST_DOWNLOAD_LOG
+
+cp -R "$tmp/plugin" "$tmp/missing-checksum-plugin"
+printf '%s\n' '# intentionally empty for this test' >"$tmp/missing-checksum-plugin/release-artifacts.sha256"
+: >"$download_log"
+if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$tmp/missing-checksum-home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/missing-checksum-plugin/scripts/install-runtime" >"$tmp/missing-checksum-out" 2>"$tmp/missing-checksum-err"; then
+  printf '%s\n' 'expected a release without a pinned checksum to fail' >&2
+  exit 1
+fi
+grep -F 'no pinned SHA-256' "$tmp/missing-checksum-err" >/dev/null
+test ! -s "$download_log"
+
+cp -R "$tmp/plugin" "$tmp/bad-checksum-plugin"
+printf '%064d  %s\n' 0 "$artifact" >"$tmp/bad-checksum-plugin/release-artifacts.sha256"
+: >"$download_log"
+if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$tmp/bad-checksum-home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/bad-checksum-plugin/scripts/install-runtime" >"$tmp/bad-checksum-out" 2>"$tmp/bad-checksum-err"; then
+  printf '%s\n' 'expected an artifact with the wrong checksum to fail' >&2
+  exit 1
+fi
+grep -F 'SHA-256 mismatch' "$tmp/bad-checksum-err" >/dev/null
+test "$(wc -l <"$download_log")" -eq 1
+
+cp -R "$tmp/plugin" "$tmp/version-plugin"
+printf '%s\n' '9.9.9-test' >"$tmp/version-plugin/VERSION"
+version_artifact="delegation_9.9.9-test_${os}_${arch}.tar.gz"
+printf '%s  %s\n' "$checksum" "$version_artifact" >"$tmp/version-plugin/release-artifacts.sha256"
+DELEGATION_TEST_EXPECTED_URL="https://github.com/GhostFlying/delegation/releases/download/v9.9.9-test/$version_artifact"
+: >"$download_log"
+if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$tmp/version-home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/version-plugin/scripts/install-runtime" >"$tmp/version-out" 2>"$tmp/version-err"; then
+  printf '%s\n' 'expected a downloaded runtime with the wrong version to fail' >&2
+  exit 1
+fi
+grep -F 'downloaded runtime reports version' "$tmp/version-err" >/dev/null
+test "$(wc -l <"$download_log")" -eq 1
+DELEGATION_TEST_EXPECTED_URL=$expected_url
+
 mkdir -p "$tmp/home/.locks/install-0.1.0-alpha.0-$os-$arch"
+: >"$download_log"
 installed=$(PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$tmp/home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime")
 test "$installed" = "$tmp/home/bin/0.1.0-alpha.0/$os-$arch/delegation"
 test -x "$installed"
+test "$(wc -l <"$download_log")" -eq 1
 "$installed" version --json >"$tmp/installed-version"
 grep -F '"version":"0.1.0-alpha.0"' "$tmp/installed-version" >/dev/null
+DELEGATION_HOME="$tmp/home" "$tmp/plugin/scripts/delegation-mcp" version --json >"$tmp/launcher-installed-version"
+grep -F '"version":"0.1.0-alpha.0"' "$tmp/launcher-installed-version" >/dev/null
 printf '%s\n' unexpected >"$(dirname "$installed")/unexpected.txt"
 if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$tmp/home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime" >"$tmp/existing-extra-out" 2>"$tmp/existing-extra-err"; then
   printf '%s\n' 'expected an installed directory with extra files to fail' >&2
