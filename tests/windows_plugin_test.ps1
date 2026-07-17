@@ -47,6 +47,38 @@ function Invoke-ChildProcess {
     }
 }
 
+function Invoke-WindowsPowerShellInstall {
+    param(
+        [Parameter(Mandatory = $true)] [string] $PowerShell,
+        [Parameter(Mandatory = $true)] [string] $Installer,
+        [Parameter(Mandatory = $true)] [string] $Artifact,
+        [Parameter(Mandatory = $true)] [string] $ExpectedUrl,
+        [Parameter(Mandatory = $true)] [string] $DelegationHome
+    )
+    $command = @'
+$ErrorActionPreference = "Stop"
+function Invoke-WebRequest {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Uri,
+        [Parameter(Mandatory = $true)] [string] $OutFile,
+        [switch] $UseBasicParsing
+    )
+    if ($Uri -cne $env:DELEGATION_TEST_EXPECTED_URL) {
+        throw "unexpected download URL: $Uri"
+    }
+    Copy-Item -LiteralPath $env:DELEGATION_TEST_ARTIFACT -Destination $OutFile
+}
+& $env:DELEGATION_TEST_INSTALLER_PS1
+'@
+    Invoke-ChildProcess $PowerShell @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $command) @{
+        DELEGATION_BINARY = $null
+        DELEGATION_HOME = $DelegationHome
+        DELEGATION_TEST_ARTIFACT = $Artifact
+        DELEGATION_TEST_EXPECTED_URL = $ExpectedUrl
+        DELEGATION_TEST_INSTALLER_PS1 = $Installer
+    }
+}
+
 function Write-ArtifactChecksum {
     param(
         [Parameter(Mandatory = $true)] [string] $PluginRoot,
@@ -62,6 +94,7 @@ $pluginRoot = Join-Path $repoRoot "plugins\delegation"
 $launcherPS = Join-Path $pluginRoot "scripts\delegation-mcp.ps1"
 $launcherCmd = Join-Path $pluginRoot "scripts\delegation-mcp.cmd"
 $pwsh = (Get-Command pwsh.exe).Source
+$windowsPowerShell = (Get-Command powershell.exe).Source
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("delegation-plugin-test-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 
@@ -121,6 +154,39 @@ try {
     Compress-Archive -LiteralPath (Join-Path $payload "delegation.exe") -DestinationPath $artifact
     Write-ArtifactChecksum $testPlugin $artifact $artifactName
 
+    $expectedUrl = "https://github.com/GhostFlying/delegation/releases/download/v0.1.0-alpha.0/$artifactName"
+    $windowsPowerShellHome = Join-Path $tempRoot "windows-powershell-home"
+    $windowsPowerShellInstall = Invoke-WindowsPowerShellInstall $windowsPowerShell (Join-Path $testPlugin "scripts\install-runtime.ps1") $artifact $expectedUrl $windowsPowerShellHome
+    $windowsPowerShellBinary = Join-Path $windowsPowerShellHome "bin\0.1.0-alpha.0\windows-$arch\delegation.exe"
+    Assert-True ($windowsPowerShellInstall.ExitCode -eq 0) "Windows PowerShell installation failed: $($windowsPowerShellInstall.Stderr)"
+    Assert-True (($windowsPowerShellInstall.Stdout | Out-String).Trim() -eq $windowsPowerShellBinary) "Windows PowerShell installer returned an unexpected path"
+    Assert-True (Test-Path -LiteralPath $windowsPowerShellBinary -PathType Leaf) "Windows PowerShell did not commit the runtime"
+
+    $installerCmdCommand = "call `"$(Join-Path $testPlugin 'scripts\install-runtime.cmd')`""
+    $windowsPowerShellEnvironment = @{
+        DELEGATION_BINARY = $null
+        DELEGATION_HOME = $windowsPowerShellHome
+    }
+    $installerCmdRepeat = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", $installerCmdCommand) $windowsPowerShellEnvironment
+    Assert-True ($installerCmdRepeat.ExitCode -eq 0) "cmd installer repeat failed: $($installerCmdRepeat.Stderr)"
+    Assert-True (($installerCmdRepeat.Stdout | Out-String).Trim() -eq $windowsPowerShellBinary) "cmd installer did not reuse the existing runtime"
+
+    $windowsPowerShellLock = Join-Path $windowsPowerShellHome ".locks\install-0.1.0-alpha.0-windows-$arch.lock"
+    $heldWindowsPowerShellLock = [System.IO.File]::Open(
+        $windowsPowerShellLock,
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $installerCmdLocked = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", $installerCmdCommand) $windowsPowerShellEnvironment
+    } finally {
+        $heldWindowsPowerShellLock.Dispose()
+    }
+    Assert-True ($installerCmdLocked.ExitCode -ne 0 -and $installerCmdLocked.Stderr -match "another runtime installation is in progress") "cmd installer ignored an active Windows PowerShell lock"
+    $installerCmdRecovered = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", $installerCmdCommand) $windowsPowerShellEnvironment
+    Assert-True ($installerCmdRecovered.ExitCode -eq 0) "cmd installer did not recover after the process-held lock was released"
+
     function global:Invoke-WebRequest {
         param(
             [Parameter(Mandatory = $true)] [string] $Uri,
@@ -132,12 +198,19 @@ try {
         }
         $global:DelegationTestDownloadCount++
         Copy-Item -LiteralPath $env:DELEGATION_TEST_ARTIFACT -Destination $OutFile
+        if ($env:DELEGATION_TEST_CREATE_TARGET) {
+            New-Item -ItemType Directory -Force -Path $env:DELEGATION_TEST_CREATE_TARGET | Out-Null
+        }
     }
 
     $env:DELEGATION_TEST_ARTIFACT = $artifact
-    $env:DELEGATION_TEST_EXPECTED_URL = "https://github.com/GhostFlying/delegation/releases/download/v0.1.0-alpha.0/$artifactName"
+    $env:DELEGATION_TEST_EXPECTED_URL = $expectedUrl
     $global:DelegationTestDownloadCount = 0
     $env:DELEGATION_HOME = Join-Path $tempRoot "installed-home"
+    $staleLockDirectory = Join-Path $env:DELEGATION_HOME ".locks"
+    New-Item -ItemType Directory -Force -Path $staleLockDirectory | Out-Null
+    $staleLock = Join-Path $staleLockDirectory "install-0.1.0-alpha.0-windows-$arch.lock"
+    Set-Content -LiteralPath $staleLock -Value "stale" -Encoding ascii
     $installed = & (Join-Path $testPlugin "scripts\install-runtime.ps1")
     $expectedBinary = Join-Path $env:DELEGATION_HOME "bin\0.1.0-alpha.0\windows-$arch\delegation.exe"
     Assert-True ($installed -eq $expectedBinary) "installer returned $installed, expected $expectedBinary"
@@ -152,6 +225,89 @@ try {
     Assert-True ($installedPS.ExitCode -eq 0 -and $installedPS.Stdout -match '"version":"0.1.0-alpha.0"') "PowerShell launcher did not find the installed runtime"
     $installedCmd = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", "call `"$launcherCmd`" version --json") $installedEnvironment
     Assert-True ($installedCmd.ExitCode -eq 0 -and $installedCmd.Stdout -match '"version":"0.1.0-alpha.0"') "cmd launcher did not find the installed runtime"
+    Assert-True (Test-Path -LiteralPath $staleLock -PathType Leaf) "installer removed its persistent lock file"
+
+    $installedExtra = Join-Path (Split-Path -Parent $expectedBinary) "unexpected.txt"
+    Set-Content -LiteralPath $installedExtra -Value "unexpected"
+    $existingExtraFailed = $false
+    try {
+        & (Join-Path $testPlugin "scripts\install-runtime.ps1") | Out-Null
+    } catch {
+        $existingExtraFailed = $_.Exception.Message -match "installed runtime directory contains unexpected files"
+    } finally {
+        Remove-Item -LiteralPath $installedExtra -Force
+    }
+    Assert-True $existingExtraFailed "installer accepted an installed runtime directory with extra files"
+
+    $reparseHome = Join-Path $tempRoot "reparse-home"
+    $reparseTarget = Join-Path $reparseHome "bin\0.1.0-alpha.0\windows-$arch"
+    New-Item -ItemType Directory -Force -Path $reparseTarget | Out-Null
+    $reparseBinary = Join-Path $reparseTarget "delegation.exe"
+    $reparseCreated = $false
+    try {
+        New-Item -ItemType SymbolicLink -Path $reparseBinary -Target $runtime -ErrorAction Stop | Out-Null
+        $reparseCreated = $true
+    } catch {
+        Write-Verbose "file symlink test unavailable: $($_.Exception.Message)"
+    }
+    if ($reparseCreated) {
+        $reparseResult = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", $installerCmdCommand) @{
+            DELEGATION_BINARY = $null
+            DELEGATION_HOME = $reparseHome
+        }
+        Assert-True ($reparseResult.ExitCode -ne 0 -and $reparseResult.Stderr -match "installed runtime must not be a reparse point") "Windows PowerShell installer accepted a reparse-point runtime binary"
+    }
+
+    $junctionHome = Join-Path $tempRoot "junction-home"
+    $junctionParent = Join-Path $junctionHome "bin\0.1.0-alpha.0"
+    $junctionOutside = Join-Path $tempRoot "junction-outside"
+    New-Item -ItemType Directory -Force -Path $junctionParent, $junctionOutside | Out-Null
+    $junctionTarget = Join-Path $junctionParent "windows-$arch"
+    New-Item -ItemType Junction -Path $junctionTarget -Target $junctionOutside | Out-Null
+    $junctionResult = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", $installerCmdCommand) @{
+        DELEGATION_BINARY = $null
+        DELEGATION_HOME = $junctionHome
+    }
+    Assert-True ($junctionResult.ExitCode -ne 0 -and $junctionResult.Stderr -match "runtime target must not be a reparse point") "Windows PowerShell installer accepted a reparse-point target directory"
+
+    $raceHome = Join-Path $tempRoot "race-home"
+    $raceTarget = Join-Path $raceHome "bin\0.1.0-alpha.0\windows-$arch"
+    $env:DELEGATION_HOME = $raceHome
+    $env:DELEGATION_TEST_CREATE_TARGET = $raceTarget
+    $raceFailed = $false
+    try {
+        & (Join-Path $testPlugin "scripts\install-runtime.ps1") | Out-Null
+    } catch {
+        $raceFailed = $_.Exception.Message -match "runtime target appeared during installation"
+    } finally {
+        Remove-Item Env:\DELEGATION_TEST_CREATE_TARGET -ErrorAction SilentlyContinue
+    }
+    Assert-True $raceFailed "installer reported success after a racing target appeared"
+    Assert-True ((Get-ChildItem -LiteralPath $raceTarget -Force).Count -eq 0) "installer nested staging output under a racing target"
+
+    $activeHome = Join-Path $tempRoot "active-lock-home"
+    $activeLockDirectory = Join-Path $activeHome ".locks"
+    New-Item -ItemType Directory -Force -Path $activeLockDirectory | Out-Null
+    $activeLock = Join-Path $activeLockDirectory "install-0.1.0-alpha.0-windows-$arch.lock"
+    $heldLock = [System.IO.File]::Open(
+        $activeLock,
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None
+    )
+    $env:DELEGATION_HOME = $activeHome
+    $activeLockFailed = $false
+    try {
+        & (Join-Path $testPlugin "scripts\install-runtime.ps1") | Out-Null
+    } catch {
+        $activeLockFailed = $_.Exception.Message -match "another runtime installation is in progress"
+    } finally {
+        $heldLock.Dispose()
+    }
+    Assert-True $activeLockFailed "installer ignored an active process-held lock"
+    $recovered = & (Join-Path $testPlugin "scripts\install-runtime.ps1")
+    $expectedRecovered = Join-Path $activeHome "bin\0.1.0-alpha.0\windows-$arch\delegation.exe"
+    Assert-True ($recovered -eq $expectedRecovered -and (Test-Path -LiteralPath $expectedRecovered -PathType Leaf)) "installer did not recover after the process-held lock was released"
 
     $badChecksumPlugin = Join-Path $tempRoot "bad-checksum-plugin"
     Copy-Item -LiteralPath $testPlugin -Destination $badChecksumPlugin -Recurse
@@ -207,6 +363,7 @@ try {
     Remove-Item Function:\Invoke-WebRequest -ErrorAction SilentlyContinue
     Remove-Item Env:\DELEGATION_TEST_ARTIFACT -ErrorAction SilentlyContinue
     Remove-Item Env:\DELEGATION_TEST_EXPECTED_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:\DELEGATION_TEST_CREATE_TARGET -ErrorAction SilentlyContinue
     Remove-Item Env:\DELEGATION_HOME -ErrorAction SilentlyContinue
     Remove-Variable DelegationTestDownloadCount -Scope Global -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

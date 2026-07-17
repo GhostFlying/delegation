@@ -42,7 +42,19 @@ delegation_home=${DELEGATION_HOME:-"$HOME/.delegation"}
 target_parent="$delegation_home/bin/$version"
 target="$target_parent/$os-$arch"
 binary="$target/delegation"
-if [ -x "$binary" ]; then
+if [ -L "$target" ]; then
+  printf '%s\n' "delegation: runtime target must not be a symbolic link: $target" >&2
+  exit 1
+fi
+if [ -e "$binary" ] || [ -L "$binary" ]; then
+  if [ ! -f "$binary" ] || [ -L "$binary" ] || [ ! -x "$binary" ]; then
+    printf '%s\n' "delegation: installed runtime is not a regular executable: $binary" >&2
+    exit 1
+  fi
+  if [ "$(LC_ALL=C ls -A1 "$target")" != "delegation" ]; then
+    printf '%s\n' "delegation: installed runtime directory contains unexpected files: $target" >&2
+    exit 1
+  fi
   installed_version=$("$binary" version)
   if [ "$installed_version" != "$version" ]; then
     printf '%s\n' "delegation: installed runtime reports version $installed_version, expected $version" >&2
@@ -51,24 +63,24 @@ if [ -x "$binary" ]; then
   printf '%s\n' "$binary"
   exit 0
 fi
-if [ -e "$target" ]; then
+if [ -e "$target" ] && [ ! -d "$target" ]; then
   printf '%s\n' "delegation: incomplete runtime directory already exists: $target" >&2
   exit 1
 fi
-
-locks="$delegation_home/.locks"
-lock="$locks/install-$version-$os-$arch"
-mkdir -p "$locks" "$target_parent"
-if ! mkdir "$lock" 2>/dev/null; then
-  printf '%s\n' "delegation: another runtime installation is in progress for $version $os-$arch" >&2
+if [ -d "$target" ] && [ -n "$(LC_ALL=C ls -A1 "$target")" ]; then
+  printf '%s\n' "delegation: incomplete runtime directory already exists: $target" >&2
+  exit 1
+fi
+if ! command -v link >/dev/null 2>&1; then
+  printf '%s\n' 'delegation: POSIX link utility is required for atomic installation' >&2
   exit 1
 fi
 
+mkdir -p "$target_parent"
 staging=$(mktemp -d "$target_parent/.install-$os-$arch.XXXXXX")
 archive="$staging/$artifact"
 cleanup() {
   rm -rf "$staging"
-  rmdir "$lock" 2>/dev/null || true
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -113,7 +125,53 @@ if [ "$installed_version" != "$version" ]; then
   exit 1
 fi
 rm "$archive"
-mv "$staging" "$target"
-trap - EXIT HUP INT TERM
-rmdir "$lock"
+
+if ! mkdir "$target" 2>/dev/null; then
+  if [ ! -d "$target" ] || [ -L "$target" ]; then
+    printf '%s\n' "delegation: runtime target appeared during installation: $target" >&2
+    exit 1
+  fi
+fi
+target_entries=$(LC_ALL=C ls -A1 "$target")
+case "$target_entries" in
+  "") ;;
+  delegation)
+    if [ ! -f "$binary" ] || [ -L "$binary" ] || [ ! -x "$binary" ]; then
+      printf '%s\n' "delegation: racing runtime is not a regular executable: $binary" >&2
+      exit 1
+    fi
+    installed_version=$("$binary" version)
+    if [ "$installed_version" != "$version" ]; then
+      printf '%s\n' "delegation: racing runtime reports version $installed_version, expected $version" >&2
+      exit 1
+    fi
+    printf '%s\n' "$binary"
+    exit 0
+    ;;
+  *)
+    printf '%s\n' "delegation: runtime target contains unexpected files: $target" >&2
+    exit 1
+    ;;
+esac
+
+# The POSIX link utility addresses the exact destination and never treats it as a directory.
+if ! link "$staging/delegation" "$binary" 2>/dev/null; then
+  if [ ! -f "$binary" ] || [ -L "$binary" ] || [ ! -x "$binary" ]; then
+    printf '%s\n' "delegation: failed to publish runtime without replacing another file: $binary" >&2
+    exit 1
+  fi
+  installed_version=$("$binary" version)
+  if [ "$installed_version" != "$version" ]; then
+    printf '%s\n' "delegation: racing runtime reports version $installed_version, expected $version" >&2
+    exit 1
+  fi
+fi
+if [ ! -f "$binary" ] || [ -L "$binary" ] || [ ! -x "$binary" ]; then
+  printf '%s\n' "delegation: published runtime is not a regular executable: $binary" >&2
+  exit 1
+fi
+if [ "$(LC_ALL=C ls -A1 "$target")" != "delegation" ]; then
+  printf '%s\n' "delegation: runtime target contains unexpected files after publication: $target" >&2
+  exit 1
+fi
 printf '%s\n' "$binary"
