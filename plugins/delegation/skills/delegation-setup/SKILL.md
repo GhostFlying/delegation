@@ -43,8 +43,9 @@ file path and refuses to overwrite an existing configuration.
 ## Verify And Hand Off
 
 Run `delegation version --json` through the installed path and confirm it exactly matches `VERSION`,
-then report the installed version, configured role, configuration path, and token file path without
-printing credentials. M0 validates configuration locally; broker connectivity is added in M1.
+then run `delegation doctor`. Report the installed version, configured role, configuration path, and
+checks without printing credentials. M0 validates configuration locally; broker connectivity is
+added in M1.
 
 After a plugin or runtime update, tell the user to start a new Codex task so the updated skills and
 MCP configuration are loaded. Do not attempt to reload a managed worker in place.

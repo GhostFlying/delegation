@@ -51,12 +51,14 @@ role-specific flags before setup:
 delegation setup broker --help
 delegation setup controller --help
 delegation setup device --help
+delegation doctor --help
 ```
 
 Token authentication is the default. Controller and device setup accept only a token file path;
 the token itself is never accepted as a command-line value. Setup validates the complete role
 configuration before creating local credentials and never overwrites an existing configuration.
-Broker connectivity starts in M1.
+Run `delegation doctor` after setup to validate the local schema and protected token file. Broker
+connectivity starts in M1.
 
 ## License
 

@@ -27,6 +27,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runVersion(args[1:], stdout, stderr)
 	case "setup":
 		return runSetup(args[1:], stdout, stderr)
+	case "doctor":
+		return runDoctor(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stderr)
 	default:
@@ -72,5 +74,6 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "commands:")
 	fmt.Fprintln(w, "  version [--json]  print runtime version")
 	fmt.Fprintln(w, "  setup <role>      configure a broker, controller, or device")
+	fmt.Fprintln(w, "  doctor [--json]   validate the local configuration")
 	fmt.Fprintln(w, "  mcp root          start the root MCP server")
 }
