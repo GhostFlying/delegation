@@ -1,0 +1,28 @@
+{
+  "name": "delegation",
+  "version": "0.1.0-alpha.0",
+  "description": "Delegate Codex work to managed devices with platform-specific environments.",
+  "author": {
+    "name": "GhostFlying",
+    "url": "https://github.com/GhostFlying"
+  },
+  "homepage": "https://github.com/GhostFlying/delegation",
+  "repository": "https://github.com/GhostFlying/delegation",
+  "license": "Apache-2.0",
+  "keywords": ["codex", "delegation", "remote", "cross-platform"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Delegation",
+    "shortDescription": "Delegate Codex tasks across managed devices",
+    "longDescription": "Choose an appropriate managed device, prepare its workspace, and collaborate with a remote Codex worker without moving the root task.",
+    "developerName": "GhostFlying",
+    "category": "Developer Tools",
+    "capabilities": ["Cross-device delegation", "Managed workspaces"],
+    "websiteURL": "https://github.com/GhostFlying/delegation",
+    "defaultPrompt": [
+      "List the devices available for this task.",
+      "Delegate this platform-specific validation to an appropriate device."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

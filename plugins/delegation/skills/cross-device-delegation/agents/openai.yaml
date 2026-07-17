@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cross-device Delegation"
+  short_description: "Delegate platform-specific work to remote devices"
+  default_prompt: "Use $cross-device-delegation to delegate this task to an appropriate device."

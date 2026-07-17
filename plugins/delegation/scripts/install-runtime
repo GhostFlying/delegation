@@ -1,0 +1,119 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+plugin_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+version=$(sed -n '1p' "$plugin_root/VERSION")
+checksums="$plugin_root/release-artifacts.sha256"
+
+case "$(uname -s)" in
+  Linux) os=linux ;;
+  Darwin) os=darwin ;;
+  *)
+    printf '%s\n' "delegation: unsupported operating system: $(uname -s)" >&2
+    exit 1
+    ;;
+esac
+
+case "$(uname -m)" in
+  x86_64|amd64) arch=amd64 ;;
+  arm64|aarch64) arch=arm64 ;;
+  *)
+    printf '%s\n' "delegation: unsupported architecture: $(uname -m)" >&2
+    exit 1
+    ;;
+esac
+
+artifact="delegation_${version}_${os}_${arch}.tar.gz"
+expected=$(awk -v name="$artifact" '$2 == name { print $1; exit }' "$checksums")
+case "$expected" in
+  [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*) ;;
+  *)
+    printf '%s\n' "delegation: no pinned SHA-256 for $artifact" >&2
+    exit 1
+    ;;
+esac
+if [ "${#expected}" -ne 64 ]; then
+  printf '%s\n' "delegation: invalid pinned SHA-256 for $artifact" >&2
+  exit 1
+fi
+
+delegation_home=${DELEGATION_HOME:-"$HOME/.delegation"}
+target_parent="$delegation_home/bin/$version"
+target="$target_parent/$os-$arch"
+binary="$target/delegation"
+if [ -x "$binary" ]; then
+  installed_version=$("$binary" version)
+  if [ "$installed_version" != "$version" ]; then
+    printf '%s\n' "delegation: installed runtime reports version $installed_version, expected $version" >&2
+    exit 1
+  fi
+  printf '%s\n' "$binary"
+  exit 0
+fi
+if [ -e "$target" ]; then
+  printf '%s\n' "delegation: incomplete runtime directory already exists: $target" >&2
+  exit 1
+fi
+
+locks="$delegation_home/.locks"
+lock="$locks/install-$version-$os-$arch"
+mkdir -p "$locks" "$target_parent"
+if ! mkdir "$lock" 2>/dev/null; then
+  printf '%s\n' "delegation: another runtime installation is in progress for $version $os-$arch" >&2
+  exit 1
+fi
+
+staging=$(mktemp -d "$target_parent/.install-$os-$arch.XXXXXX")
+archive="$staging/$artifact"
+cleanup() {
+  rm -rf "$staging"
+  rmdir "$lock" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+url="https://github.com/GhostFlying/delegation/releases/download/v$version/$artifact"
+curl --fail --location --silent --show-error --output "$archive" "$url"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$archive" | awk '{ print $1 }')
+elif command -v shasum >/dev/null 2>&1; then
+  actual=$(shasum -a 256 "$archive" | awk '{ print $1 }')
+else
+  printf '%s\n' 'delegation: sha256sum or shasum is required' >&2
+  exit 1
+fi
+if [ "$actual" != "$expected" ]; then
+  printf '%s\n' "delegation: SHA-256 mismatch for $artifact" >&2
+  exit 1
+fi
+
+entries=$(tar -tzf "$archive" | sed 's#^\./##')
+if [ "$entries" != "delegation" ]; then
+  printf '%s\n' "delegation: unexpected files in $artifact" >&2
+  exit 1
+fi
+entry_details=$(tar -tvzf "$archive")
+case "$entry_details" in
+  -*) ;;
+  *)
+    printf '%s\n' "delegation: $artifact must contain one regular file" >&2
+    exit 1
+    ;;
+esac
+tar -xzf "$archive" -C "$staging"
+if [ ! -f "$staging/delegation" ] || [ -L "$staging/delegation" ]; then
+  printf '%s\n' "delegation: $artifact did not extract a regular runtime file" >&2
+  exit 1
+fi
+chmod 0755 "$staging/delegation"
+installed_version=$("$staging/delegation" version)
+if [ "$installed_version" != "$version" ]; then
+  printf '%s\n' "delegation: downloaded runtime reports version $installed_version, expected $version" >&2
+  exit 1
+fi
+rm "$archive"
+mv "$staging" "$target"
+trap - EXIT HUP INT TERM
+rmdir "$lock"
+printf '%s\n' "$binary"

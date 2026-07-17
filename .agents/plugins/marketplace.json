@@ -1,0 +1,20 @@
+{
+  "name": "delegation",
+  "interface": {
+    "displayName": "Delegation"
+  },
+  "plugins": [
+    {
+      "name": "delegation",
+      "source": {
+        "source": "local",
+        "path": "./plugins/delegation"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

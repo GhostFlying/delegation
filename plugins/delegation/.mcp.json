@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "delegation": {
+      "command": "./scripts/delegation-mcp",
+      "args": ["mcp", "root"],
+      "cwd": ".",
+      "required": false,
+      "startup_timeout_sec": 30,
+      "tool_timeout_sec": 330,
+      "env_vars": [
+        "DELEGATION_BINARY",
+        "DELEGATION_CONFIG",
+        "DELEGATION_HOME"
+      ]
+    }
+  }
+}

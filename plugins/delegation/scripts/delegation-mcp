@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+plugin_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+version=$(sed -n '1p' "$plugin_root/VERSION")
+
+if [ -n "${DELEGATION_BINARY:-}" ]; then
+  if [ ! -x "$DELEGATION_BINARY" ]; then
+    printf '%s\n' "delegation: DELEGATION_BINARY is not executable: $DELEGATION_BINARY" >&2
+    exit 126
+  fi
+  exec "$DELEGATION_BINARY" "$@"
+fi
+
+case "$(uname -s)" in
+  Linux) os=linux ;;
+  Darwin) os=darwin ;;
+  *)
+    printf '%s\n' "delegation: unsupported operating system: $(uname -s)" >&2
+    exit 126
+    ;;
+esac
+
+case "$(uname -m)" in
+  x86_64|amd64) arch=amd64 ;;
+  arm64|aarch64) arch=arm64 ;;
+  *)
+    printf '%s\n' "delegation: unsupported architecture: $(uname -m)" >&2
+    exit 126
+    ;;
+esac
+
+delegation_home=${DELEGATION_HOME:-"$HOME/.delegation"}
+binary="$delegation_home/bin/$version/$os-$arch/delegation"
+if [ ! -x "$binary" ]; then
+  printf '%s\n' "delegation: runtime $version is not installed for $os-$arch" >&2
+  printf '%s\n' 'delegation: run $delegation-setup in a new Codex task or set DELEGATION_BINARY' >&2
+  exit 127
+fi
+
+exec "$binary" "$@"
