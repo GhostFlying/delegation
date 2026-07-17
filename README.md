@@ -58,7 +58,15 @@ Token authentication is the default. Controller and device setup accept only a t
 the token itself is never accepted as a command-line value. Setup validates the complete role
 configuration before creating local credentials and never overwrites an existing configuration.
 Run `delegation doctor` after setup to validate the local schema and protected token file. Broker
-connectivity starts in M1.
+connectivity starts in M1. Prepare the current platform's user-service definition with:
+
+```bash
+delegation service install
+```
+
+M0 leaves the systemd user unit, LaunchAgent, or Windows Scheduled Task inactive. It does not load,
+enable, start, replace, or remove an existing service; the long-running service runtime starts in
+M1.
 
 ## License
 

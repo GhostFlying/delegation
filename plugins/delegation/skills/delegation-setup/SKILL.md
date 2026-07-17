@@ -40,6 +40,11 @@ Choose exactly one role and run `delegation setup <role> --help` before writing 
 Never pass token material as a command-line argument. Configuration stores only the absolute token
 file path and refuses to overwrite an existing configuration.
 
+After configuration succeeds, run `delegation service install --config <path>` to prepare the
+current platform's user-service definition. M0 leaves it inactive and refuses to replace an
+existing definition. Do not load, enable, or start it manually; service activation and managed
+updates arrive with the M1 runtime.
+
 ## Verify And Hand Off
 
 Run `delegation version --json` through the installed path and confirm it exactly matches `VERSION`,
