@@ -59,6 +59,7 @@ func TestRenderScheduledTaskProducesDisabledValidXML(t *testing.T) {
 		`C:\Program Files\Delegation & Tools\delegation.exe`,
 		`C:\Users\test\Config One.json`,
 		`S-1-5-21-1000`,
+		ScheduledTask,
 		escape,
 	)
 	if err != nil {
@@ -73,6 +74,7 @@ func TestRenderScheduledTaskProducesDisabledValidXML(t *testing.T) {
 		`<Enabled>false</Enabled>`,
 		`<LogonType>InteractiveToken</LogonType>`,
 		`<RunLevel>LeastPrivilege</RunLevel>`,
+		`<URI>\Delegation Connector</URI>`,
 		`<AllowStartOnDemand>true</AllowStartOnDemand>`,
 		`<RunOnlyIfIdle>false</RunOnlyIfIdle>`,
 		`<Command>C:\Program Files\Delegation &amp; Tools\delegation.exe</Command>`,
@@ -96,14 +98,17 @@ func TestRenderersRejectUnsafePaths(t *testing.T) {
 	if _, err := RenderLaunchAgent("/binary", "/config\nline"); err == nil {
 		t.Fatal("RenderLaunchAgent() accepted control character")
 	}
-	if _, err := RenderScheduledTask(`C:\binary.exe`, `relative`, "S-1-5-21", func(value string) string { return value }); err == nil {
+	if _, err := RenderScheduledTask(`C:\binary.exe`, `relative`, "S-1-5-21", ScheduledTask, func(value string) string { return value }); err == nil {
 		t.Fatal("RenderScheduledTask() accepted relative config path")
 	}
 	if _, err := RenderSystemd("/binary", "/config\xff"); err == nil {
 		t.Fatal("RenderSystemd() accepted invalid UTF-8")
 	}
-	if _, err := RenderScheduledTask(`\\server`, `C:\config`, "S-1-5-21", func(value string) string { return value }); err == nil {
+	if _, err := RenderScheduledTask(`\\server`, `C:\config`, "S-1-5-21", ScheduledTask, func(value string) string { return value }); err == nil {
 		t.Fatal("RenderScheduledTask() accepted incomplete UNC binary path")
+	}
+	if _, err := RenderScheduledTask(`C:\binary.exe`, `C:\config`, "S-1-5-21", "relative", func(value string) string { return value }); err == nil {
+		t.Fatal("RenderScheduledTask() accepted relative task path")
 	}
 }
 

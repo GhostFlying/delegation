@@ -15,7 +15,7 @@ const (
 	Marker          = "delegation-managed:v1"
 	SystemdUnitName = "delegation.service"
 	LaunchAgentName = "com.github.ghostflying.delegation"
-	ScheduledTask   = "Delegation Connector"
+	ScheduledTask   = `\Delegation Connector`
 )
 
 type Kind string
@@ -99,21 +99,27 @@ func RenderLaunchAgent(binaryPath, configPath string) (Descriptor, error) {
 	return Descriptor{Kind: KindLaunchAgent, Name: LaunchAgentName, Content: []byte(content)}, nil
 }
 
-func RenderScheduledTask(binaryPath, configPath, userSID string, escapeArg func(string) string) (Descriptor, error) {
+func RenderScheduledTask(binaryPath, configPath, userSID, taskPath string, escapeArg func(string) string) (Descriptor, error) {
 	if !windowsAbsolute(binaryPath) || !windowsAbsolute(configPath) {
 		return Descriptor{}, errors.New("service binary and config paths must be absolute Windows paths")
 	}
-	if err := validateTextPaths(binaryPath, configPath); err != nil {
+	if err := validateTextPaths(binaryPath, configPath, taskPath); err != nil {
 		return Descriptor{}, err
 	}
-	if strings.TrimSpace(userSID) == "" || escapeArg == nil {
-		return Descriptor{}, errors.New("Windows user SID and argument escaper are required")
+	if strings.TrimSpace(userSID) == "" || len(taskPath) < 2 || taskPath[0] != '\\' ||
+		strings.HasPrefix(taskPath, `\\`) || strings.HasSuffix(taskPath, `\`) ||
+		strings.Contains(taskPath, "/") || strings.Contains(taskPath[1:], `\\`) || escapeArg == nil {
+		return Descriptor{}, errors.New("Windows user SID, absolute task path, and argument escaper are required")
 	}
 	binaryXML, err := escapeXML(binaryPath)
 	if err != nil {
 		return Descriptor{}, err
 	}
 	sidXML, err := escapeXML(userSID)
+	if err != nil {
+		return Descriptor{}, err
+	}
+	taskPathXML, err := escapeXML(taskPath)
 	if err != nil {
 		return Descriptor{}, err
 	}
@@ -131,7 +137,7 @@ func RenderScheduledTask(binaryPath, configPath, userSID string, escapeArg func(
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>%s</Description>
-    <URI>\Delegation\Connector</URI>
+    <URI>%s</URI>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -172,8 +178,8 @@ func RenderScheduledTask(binaryPath, configPath, userSID string, escapeArg func(
     </Exec>
   </Actions>
 </Task>
-`, Marker, sidXML, sidXML, binaryXML, argumentsXML)
-	return Descriptor{Kind: KindScheduledTask, Name: ScheduledTask, Content: []byte(content)}, nil
+`, Marker, taskPathXML, sidXML, sidXML, binaryXML, argumentsXML)
+	return Descriptor{Kind: KindScheduledTask, Name: taskPath, Content: []byte(content)}, nil
 }
 
 func validatePOSIXPaths(paths ...string) error {

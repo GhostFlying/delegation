@@ -51,7 +51,7 @@ type taskXMLBudget struct {
 }
 
 func taskOwned(task taskDefinition) bool {
-	return task.Description == Marker && task.URI == `\Delegation\Connector`
+	return task.Description == Marker && task.URI == ScheduledTask
 }
 
 func parseTaskDefinition(data []byte) (taskDefinition, error) {

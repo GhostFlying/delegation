@@ -11,6 +11,7 @@ const (
 	StateAbsent          State = "absent"
 	StatePrepared        State = "prepared"
 	StateForeignConflict State = "foreignConflict"
+	StateIndeterminate   State = "indeterminate"
 )
 
 type CommittedError struct {

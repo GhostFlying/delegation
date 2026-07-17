@@ -35,7 +35,7 @@ func installManagedFile(path string, descriptor Descriptor) (State, error) {
 		if bytes.Equal(existing, descriptor.Content) {
 			return StatePrepared, nil
 		}
-		return StatePrepared, errors.New("managed service definition differs; uninstall it before reinstalling")
+		return StatePrepared, errors.New("managed service definition differs; remove it explicitly before reinstalling")
 	case StateForeignConflict:
 		return state, errors.New("service definition path is occupied by an unmanaged file")
 	case StateAbsent:

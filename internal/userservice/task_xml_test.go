@@ -163,6 +163,7 @@ func testTaskDescriptor(t *testing.T) Descriptor {
 		`C:\Delegation\delegation.exe`,
 		`C:\Users\test\config.json`,
 		"S-1-5-21-test",
+		ScheduledTask,
 		func(value string) string { return value },
 	)
 	if err != nil {
