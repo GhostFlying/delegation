@@ -12,22 +12,28 @@ Never download `latest`, skip checksum verification, or expose a broker token to
 
 Resolve the plugin root from this skill directory. Read `VERSION` and
 `release-artifacts.sha256` there before installing anything. Treat `VERSION` as the exact release
-version; do not substitute a newer version.
+version; do not substitute a newer version. Resolve the runtime launcher as
+`scripts/delegation-mcp` on Linux or macOS and `scripts/delegation-mcp.cmd` on Windows. Use that
+launcher for every runtime command below.
 
 ## Install The Runtime
 
-1. If `DELEGATION_BINARY` is set, run that binary with `version --json` and verify the reported
-   version. Keep the override for development, offline, or managed enterprise installations.
+1. If `DELEGATION_BINARY` is set, run the launcher with `version --json` and verify the reported
+   version. The launcher applies the override for development, offline, or managed enterprise
+   installations.
 2. Otherwise run `scripts/install-runtime` on Linux or macOS, or
    `scripts/install-runtime.cmd` on Windows. The installer must select the current OS and
    architecture, fetch the exact GitHub Release version, verify the pinned SHA-256, and install
    atomically under the user's Delegation home.
 3. Stop on a missing checksum, version mismatch, unsupported platform, or failed verification.
    Do not fall back to an unverified binary.
+4. Run the launcher with `version --json` after installation. Do not invoke a bare `delegation`
+   command or assume setup created a `PATH` shim; the runtime remains in its versioned directory.
 
 ## Configure The Role
 
-Choose exactly one role and run `delegation setup <role> --help` before writing configuration:
+Choose exactly one role and run the launcher with `setup <role> --help` before writing
+configuration:
 
 - Use `setup broker` to create a trust domain and listener configuration. Token authentication is
   the default and creates a protected token file when none is supplied. For auth mode `none`, keep
@@ -40,15 +46,15 @@ Choose exactly one role and run `delegation setup <role> --help` before writing 
 Never pass token material as a command-line argument. Configuration stores only the absolute token
 file path and refuses to overwrite an existing configuration.
 
-After configuration succeeds, run `delegation service install --config <path>` to prepare the
-current platform's user-service definition. M0 leaves it inactive and refuses to replace an
+After configuration succeeds, run the launcher with `service install --config <path>` to prepare
+the current platform's user-service definition. M0 leaves it inactive and refuses to replace an
 existing definition. Do not load, enable, or start it manually; service activation and managed
 updates arrive with the M1 runtime.
 
 ## Verify And Hand Off
 
-Run `delegation version --json` through the installed path and confirm it exactly matches `VERSION`,
-then run `delegation doctor`. Report the installed version, configured role, configuration path, and
+Run the launcher with `version --json` and confirm it exactly matches `VERSION`, then run the
+launcher with `doctor`. Report the installed version, configured role, configuration path, and
 checks without printing credentials. M0 validates configuration locally; broker connectivity is
 added in M1.
 

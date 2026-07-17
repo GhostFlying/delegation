@@ -159,6 +159,43 @@ test "$(wc -l <"$download_log")" -eq 1
 grep -F '"version":"0.1.0-alpha.0"' "$tmp/installed-version" >/dev/null
 DELEGATION_HOME="$tmp/home" "$tmp/plugin/scripts/delegation-mcp" version --json >"$tmp/launcher-installed-version"
 grep -F '"version":"0.1.0-alpha.0"' "$tmp/launcher-installed-version" >/dev/null
+launcher="$tmp/plugin/scripts/delegation-mcp"
+config="$tmp/controller.json"
+DELEGATION_HOME="$tmp/home" "$launcher" setup controller \
+  --config "$config" \
+  --controller-id 11111111-1111-4111-8111-111111111111 \
+  --device-id 22222222-2222-4222-8222-222222222222 \
+  --device-name acceptance-device \
+  --broker-url ws://127.0.0.1:8787 \
+  --auth-mode none \
+  --json >"$tmp/launcher-setup"
+grep -F '"role":"controller"' "$tmp/launcher-setup" >/dev/null
+DELEGATION_HOME="$tmp/home" "$launcher" doctor --config "$config" --json >"$tmp/launcher-doctor"
+grep -F '"ok":true' "$tmp/launcher-doctor" >/dev/null
+case "$os" in
+  linux)
+    service_kind=systemdUser
+    service_artifact="$tmp/service-home/xdg/systemd/user/delegation.service"
+    ;;
+  darwin)
+    service_kind=launchAgent
+    service_artifact="$tmp/service-home/Library/LaunchAgents/com.github.ghostflying.delegation.plist"
+    ;;
+esac
+mkdir -p "$tmp/service-home"
+HOME="$tmp/service-home" XDG_CONFIG_HOME="$tmp/service-home/xdg" DELEGATION_HOME="$tmp/home" "$launcher" service install --config "$config" --json >"$tmp/launcher-service"
+grep -F '"state":"prepared"' "$tmp/launcher-service" >/dev/null
+grep -F "\"kind\":\"$service_kind\"" "$tmp/launcher-service" >/dev/null
+grep -F "\"artifact\":\"$service_artifact\"" "$tmp/launcher-service" >/dev/null
+test -f "$service_artifact"
+case "$os" in
+  linux)
+    test ! -e "$tmp/service-home/xdg/systemd/user/default.target.wants/delegation.service"
+    ;;
+  darwin)
+    awk '/<key>Disabled<\/key>/{ getline; if ($0 ~ /<true\/>/) found=1 } END{ exit !found }' "$service_artifact"
+    ;;
+esac
 printf '%s\n' unexpected >"$(dirname "$installed")/unexpected.txt"
 if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$tmp/home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime" >"$tmp/existing-extra-out" 2>"$tmp/existing-extra-err"; then
   printf '%s\n' 'expected an installed directory with extra files to fail' >&2

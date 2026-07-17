@@ -24,6 +24,7 @@ For source development, build the native runtime and point the plugin at it:
 ```bash
 go build -o ./bin/delegation ./cmd/delegation
 export DELEGATION_BINARY="$PWD/bin/delegation"
+plugins/delegation/scripts/delegation-mcp version --json
 ```
 
 ## Development
@@ -62,24 +63,29 @@ Release signing and provenance hardening are deferred to M4.
 
 ## Configure A Role
 
-The M0 runtime writes a versioned local configuration without embedding token material. Inspect the
-role-specific flags before setup:
+The runtime installer deliberately creates no `PATH` shim. `$delegation-setup` resolves the
+plugin's launcher and uses it for every command. In a source checkout on Linux or macOS, inspect
+the role-specific flags through the same launcher:
 
 ```bash
-delegation setup broker --help
-delegation setup controller --help
-delegation setup device --help
-delegation doctor --help
+plugins/delegation/scripts/delegation-mcp setup broker --help
+plugins/delegation/scripts/delegation-mcp setup controller --help
+plugins/delegation/scripts/delegation-mcp setup device --help
+plugins/delegation/scripts/delegation-mcp doctor --help
 ```
+
+On Windows, use `plugins\delegation\scripts\delegation-mcp.cmd` instead. The M0 runtime writes a
+versioned local configuration without embedding token material.
 
 Token authentication is the default. Controller and device setup accept only a token file path;
 the token itself is never accepted as a command-line value. Setup validates the complete role
 configuration before creating local credentials and never overwrites an existing configuration.
-Run `delegation doctor` after setup to validate the local schema and protected token file. Broker
-connectivity starts in M1. Prepare the current platform's user-service definition with:
+Run `doctor` through the launcher after setup to validate the local schema and protected token
+file. Broker connectivity starts in M1. Prepare the current platform's user-service definition
+through the launcher with:
 
 ```bash
-delegation service install
+plugins/delegation/scripts/delegation-mcp service install
 ```
 
 M0 leaves the systemd user unit, LaunchAgent, or Windows Scheduled Task inactive. It does not load,
