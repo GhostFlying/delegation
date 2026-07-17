@@ -9,7 +9,8 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 go_bin=${GO:-go}
-"$go_bin" -C "$repo_root" build -trimpath -o "$tmp/delegation" ./cmd/delegation
+"$go_bin" -C "$repo_root" build -trimpath -buildvcs=false -o "$tmp/delegation" ./cmd/delegation
+unset DELEGATION_BINARY
 
 if DELEGATION_HOME="$tmp/missing" "$plugin_root/scripts/delegation-mcp" mcp root >"$tmp/out" 2>"$tmp/err"; then
   printf '%s\n' 'expected missing runtime launcher to fail' >&2

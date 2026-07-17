@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  native:
+    name: Native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: true
+      - name: Verify Go toolchain
+        run: go env GOVERSION
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test POSIX launchers and installer
+        if: runner.os != 'Windows'
+        shell: bash
+        run: GO=go ./tests/posix_plugin_test.sh
+      - name: Test Windows launchers and installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/windows_plugin_test.ps1
+      - name: Test Windows Task Scheduler round trip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          DELEGATION_WINDOWS_INTEGRATION: "1"
+        run: go test ./internal/userservice -run TestWindowsTaskSchedulerRoundTrip -count=1
+
+  race:
+    name: Race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: true
+      - run: go test -race ./...
+
+  cross-compile:
+    name: Cross compile (${{ matrix.goos }}-${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: true
+      - name: Compile tests
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go test -run '^$' -exec /bin/true ./...
+
+  plugin-contract:
+    name: Plugin contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Check out pinned Codex validators
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: openai/codex
+          ref: 44918ea10c0f99151c6710411b4322c2f5c96bea
+          path: .ci/codex
+          persist-credentials: false
+          sparse-checkout: |
+            codex-rs/skills/src/assets/samples/plugin-creator/scripts
+            codex-rs/skills/src/assets/samples/skill-creator/scripts
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
+        with:
+          node-version: 24.15.0
+      - name: Install validation tools
+        run: |
+          python -m pip install 'PyYAML==6.0.3'
+          npm install --global '@openai/codex@0.144.1'
+      - name: Validate plugin and skills
+        run: |
+          python .ci/codex/codex-rs/skills/src/assets/samples/plugin-creator/scripts/validate_plugin.py plugins/delegation
+          python .ci/codex/codex-rs/skills/src/assets/samples/skill-creator/scripts/quick_validate.py plugins/delegation/skills/delegation-setup
+          python .ci/codex/codex-rs/skills/src/assets/samples/skill-creator/scripts/quick_validate.py plugins/delegation/skills/cross-device-delegation
+      - name: Install from the local marketplace
+        shell: bash
+        run: |
+          export CODEX_HOME="$HOME/.codex-delegation-ci"
+          mkdir -p "$CODEX_HOME"
+          codex --version | grep -F 'codex-cli 0.144.1'
+          codex plugin marketplace add "$GITHUB_WORKSPACE" --json > "$RUNNER_TEMP/marketplace-add.json"
+          codex plugin add delegation@delegation --json > "$RUNNER_TEMP/plugin-add.json"
+          codex plugin list --available --json > "$RUNNER_TEMP/plugin-list.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          added = json.loads((temp / "plugin-add.json").read_text())
+          listed = json.loads((temp / "plugin-list.json").read_text())
+          assert added["pluginId"] == "delegation@delegation"
+          assert added["version"] == "0.1.0-alpha.0"
+          entry = next(item for item in listed["installed"] if item["pluginId"] == "delegation@delegation")
+          assert entry["installed"] is True
+          assert entry["enabled"] is True
+          assert entry["installPolicy"] == "AVAILABLE"
+          assert entry["authPolicy"] == "ON_INSTALL"
+          launcher = Path(added["installedPath"]) / "scripts" / "delegation-mcp"
+          assert os.access(launcher, os.X_OK)
+          PY
