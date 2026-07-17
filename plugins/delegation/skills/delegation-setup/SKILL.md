@@ -25,11 +25,26 @@ version; do not substitute a newer version.
 3. Stop on a missing checksum, version mismatch, unsupported platform, or failed verification.
    Do not fall back to an unverified binary.
 
+## Configure The Role
+
+Choose exactly one role and run `delegation setup <role> --help` before writing configuration:
+
+- Use `setup broker` to create a trust domain and listener configuration. Token authentication is
+  the default and creates a protected token file when none is supplied. For auth mode `none`, keep
+  the listener on loopback unless the user explicitly accepts `--allow-insecure-nonloopback`.
+- Use `setup controller` for a device that hosts root tasks. Supply the broker URL, controller ID,
+  and an existing token file when token authentication is enabled.
+- Use `setup device` for a worker-only device. Supply the same controller ID, the broker URL, and
+  that device's token file. Let setup generate a stable device ID unless one is already assigned.
+
+Never pass token material as a command-line argument. Configuration stores only the absolute token
+file path and refuses to overwrite an existing configuration.
+
 ## Verify And Hand Off
 
-Run `delegation version --json` through the installed path and confirm it exactly matches `VERSION`.
-Report the installed version and path without printing credentials. Runtime installation alone does
-not configure a broker, controller, connector, or user service.
+Run `delegation version --json` through the installed path and confirm it exactly matches `VERSION`,
+then report the installed version, configured role, configuration path, and token file path without
+printing credentials. M0 validates configuration locally; broker connectivity is added in M1.
 
 After a plugin or runtime update, tell the user to start a new Codex task so the updated skills and
 MCP configuration are loaded. Do not attempt to reload a managed worker in place.
