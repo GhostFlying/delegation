@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +99,20 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 		}
 		if _, err := tokenfile.Ensure(auth.TokenFile); err != nil {
 			return writeError(stderr, err)
+		}
+	}
+	listenerHost, _, _ := net.SplitHostPort(cfg.Broker.Listen)
+	listenerIP := net.ParseIP(listenerHost)
+	insecureNonLoopback := cfg.Broker.Auth.Mode == delegationconfig.AuthModeNone &&
+		!strings.EqualFold(listenerHost, "localhost") &&
+		(listenerIP == nil || !listenerIP.IsLoopback())
+	if insecureNonLoopback {
+		if _, err := fmt.Fprintf(
+			stderr,
+			"delegation: warning: broker %s accepts unauthenticated non-loopback connections; enforce an external trusted network boundary\n",
+			cfg.Broker.Listen,
+		); err != nil {
+			return writeError(stderr, fmt.Errorf("write security warning: %w", err))
 		}
 	}
 	if err := delegationconfig.WriteNew(resolvedConfig, cfg); err != nil {
