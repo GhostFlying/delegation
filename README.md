@@ -42,6 +42,24 @@ python3 /path/to/skill-creator/scripts/quick_validate.py \
 The Python paths above refer to the validators bundled with the local Codex installation; they are
 not runtime dependencies of Delegation.
 
+## Prepare A Release
+
+Run the `Release candidate` workflow from the exact commit intended for release. It builds all six
+runtime archives twice, requires byte-identical output, and uploads a candidate containing the
+generated `release-artifacts.sha256`. Review that candidate, then replace the comments in the
+plugin's checksum file with the reviewed manifest in a normal commit.
+
+Before enabling releases, configure the `github-release` environment to accept deployments only
+from `main` and require approval. Also add a tag ruleset that prevents updates and deletion for
+`v*`, and enable immutable releases. The ruleset closes the force-move window while a release is
+being published; immutability protects its tag and assets after publication.
+
+After the checksum commit passes CI, create `v<VERSION>` at that exact commit. Dispatch the
+`Release` workflow from `main` with that tag. Separate jobs validate the tag against `main`, build
+the six archives at the tagged commit, and verify them against the reviewed checksum manifest
+before the write-scoped job publishes them. Candidate preparation never creates a tag or release.
+Release signing and provenance hardening are deferred to M4.
+
 ## Configure A Role
 
 The M0 runtime writes a versioned local configuration without embedding token material. Inspect the
