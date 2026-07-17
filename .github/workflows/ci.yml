@@ -176,3 +176,28 @@ jobs:
           go run ./cmd/releasepack -out dist-second
       - name: Compare candidate bytes
         run: diff -r dist-first dist-second
+      - name: Verify exact release target matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(tr -d '\r\n' < plugins/delegation/VERSION)
+          expected="$RUNNER_TEMP/expected-release-assets.txt"
+          actual="$RUNNER_TEMP/actual-release-assets.txt"
+          manifest="$RUNNER_TEMP/manifest-release-assets.txt"
+          printf '%s\n' \
+            "delegation_${version}_darwin_amd64.tar.gz" \
+            "delegation_${version}_darwin_arm64.tar.gz" \
+            "delegation_${version}_linux_amd64.tar.gz" \
+            "delegation_${version}_linux_arm64.tar.gz" \
+            "delegation_${version}_windows_amd64.zip" \
+            "delegation_${version}_windows_arm64.zip" \
+            | LC_ALL=C sort > "$expected"
+          LC_ALL=C find dist-first -mindepth 1 -maxdepth 1 -type f \
+            -name 'delegation_*' -printf '%f\n' | LC_ALL=C sort > "$actual"
+          sed -nE 's/^[0-9a-f]{64}  (delegation_[A-Za-z0-9._+-]+)$/\1/p' \
+            dist-first/release-artifacts.sha256 | LC_ALL=C sort > "$manifest"
+          test "$(find dist-first -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 7
+          test "$(find dist-first -mindepth 1 -maxdepth 1 ! -type f | wc -l)" -eq 0
+          diff -u "$expected" "$actual"
+          diff -u "$expected" "$manifest"
+          (cd dist-first && sha256sum --strict -c release-artifacts.sha256)

@@ -100,6 +100,8 @@ jobs:
           path: dist
       - name: Verify tracked manifest and files
         shell: bash
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
         run: |
           set -euo pipefail
           diff -u \
@@ -118,7 +120,7 @@ jobs:
               name = substr($0, 67)
               if (length(digest) != 64 || digest !~ /^[0-9a-f]+$/ ||
                   separator != "  " ||
-                  name !~ /^delegation_[A-Za-z0-9][A-Za-z0-9._-]*$/) {
+                  name !~ /^delegation_[A-Za-z0-9][A-Za-z0-9._+-]*$/) {
                 exit 1
               }
               print name
@@ -128,6 +130,16 @@ jobs:
           test "$(wc -l < "$manifest_assets")" -eq 6
           test "$(LC_ALL=C sort -u "$manifest_assets" | wc -l)" -eq 6
           diff -u "$manifest_assets" "$archive_assets"
+          expected_assets="$RUNNER_TEMP/expected-assets.txt"
+          printf '%s\n' \
+            "delegation_${VERSION}_darwin_amd64.tar.gz" \
+            "delegation_${VERSION}_darwin_arm64.tar.gz" \
+            "delegation_${VERSION}_linux_amd64.tar.gz" \
+            "delegation_${VERSION}_linux_arm64.tar.gz" \
+            "delegation_${VERSION}_windows_amd64.zip" \
+            "delegation_${VERSION}_windows_arm64.zip" \
+            | LC_ALL=C sort > "$expected_assets"
+          diff -u "$expected_assets" "$manifest_assets"
           (cd dist && sha256sum --strict -c release-artifacts.sha256)
 
   publish:
@@ -175,7 +187,7 @@ jobs:
               name = substr($0, 67)
               if (length(digest) != 64 || digest !~ /^[0-9a-f]+$/ ||
                   separator != "  " ||
-                  name !~ /^delegation_[A-Za-z0-9][A-Za-z0-9._-]*$/) {
+                  name !~ /^delegation_[A-Za-z0-9][A-Za-z0-9._+-]*$/) {
                 exit 1
               }
               print name
@@ -185,6 +197,16 @@ jobs:
           test "$(wc -l < "$manifest_assets")" -eq 6
           test "$(LC_ALL=C sort -u "$manifest_assets" | wc -l)" -eq 6
           diff -u "$manifest_assets" "$archive_assets"
+          expected_assets="$RUNNER_TEMP/expected-assets.txt"
+          printf '%s\n' \
+            "delegation_${VERSION}_darwin_amd64.tar.gz" \
+            "delegation_${VERSION}_darwin_arm64.tar.gz" \
+            "delegation_${VERSION}_linux_amd64.tar.gz" \
+            "delegation_${VERSION}_linux_arm64.tar.gz" \
+            "delegation_${VERSION}_windows_amd64.zip" \
+            "delegation_${VERSION}_windows_arm64.zip" \
+            | LC_ALL=C sort > "$expected_assets"
+          diff -u "$expected_assets" "$manifest_assets"
           (cd dist && sha256sum --strict -c release-artifacts.sha256)
 
           mapfile -t asset_names < "$archive_assets"
