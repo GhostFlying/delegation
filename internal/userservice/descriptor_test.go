@@ -73,6 +73,8 @@ func TestRenderScheduledTaskProducesDisabledValidXML(t *testing.T) {
 		`<Enabled>false</Enabled>`,
 		`<LogonType>InteractiveToken</LogonType>`,
 		`<RunLevel>LeastPrivilege</RunLevel>`,
+		`<AllowStartOnDemand>true</AllowStartOnDemand>`,
+		`<RunOnlyIfIdle>false</RunOnlyIfIdle>`,
 		`<Command>C:\Program Files\Delegation &amp; Tools\delegation.exe</Command>`,
 		`<Arguments>ESC[service] ESC[run] ESC[--config] ESC[C:\Users\test\Config One.json]</Arguments>`,
 		Marker,
