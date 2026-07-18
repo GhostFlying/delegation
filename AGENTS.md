@@ -13,10 +13,12 @@
 - Use English Conventional Commit titles and keep each commit focused on one behavior.
 - Include the implementation, focused tests, and required schema or documentation updates in the
   same commit.
-- Before every non-documentation commit, stage the intended diff and obtain an independent,
-  read-only agent review. Fix and re-review until no actionable findings remain, then commit.
-- A documentation-only exemption applies only when every changed file is prose or documentation
-  media. Manifests, configuration, scripts, CI, schemas, lockfiles, and tests require review.
+- Keep commits atomic, but review at runnable functional checkpoints instead of reviewing every
+  commit. A checkpoint must expose an end-to-end behavior with an executable acceptance test or
+  smoke path.
+- At each checkpoint, obtain an independent, read-only agent review of the complete checkpoint
+  commit range and current tree. Fix and re-review until no actionable findings remain before
+  declaring the checkpoint accepted. Intermediate commits do not require separate reviews.
 - Use `feat/<topic>`, `bugfix/<topic>`, `refactor/<topic>`, `test/<topic>`, `docs/<topic>`,
   `chore/<topic>`, or `release/<version>` for parallel implementation branches. Do not include
   personal names, device identifiers, or task identifiers in branch names.
