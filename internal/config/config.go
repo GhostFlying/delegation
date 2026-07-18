@@ -76,6 +76,14 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, "config.json"), nil
 }
 
+func DefaultStatePath() (string, error) {
+	home, err := DefaultHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "state", "broker.sqlite3"), nil
+}
+
 func Read(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

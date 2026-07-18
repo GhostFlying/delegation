@@ -167,6 +167,19 @@ func TestReadRejectsUnknownAndTrailingFields(t *testing.T) {
 	}
 }
 
+func TestDefaultStatePathUsesDelegationHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DELEGATION_HOME", home)
+	path, err := DefaultStatePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, "state", "broker.sqlite3")
+	if path != want {
+		t.Fatalf("DefaultStatePath() = %q, want %q", path, want)
+	}
+}
+
 func TestTokenAuthRejectsInsecureAcknowledgement(t *testing.T) {
 	cfg := Config{
 		SchemaVersion: CurrentSchemaVersion,
