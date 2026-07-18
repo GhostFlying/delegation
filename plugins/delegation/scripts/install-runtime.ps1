@@ -1,5 +1,22 @@
 $ErrorActionPreference = "Stop"
 
+function Get-SHA256Hash {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $digest = $sha256.ComputeHash($stream)
+            return ([System.BitConverter]::ToString($digest)).Replace("-", "").ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content -LiteralPath (Join-Path $pluginRoot "VERSION") -TotalCount 1).Trim()
 $checksums = Join-Path $pluginRoot "release-artifacts.sha256"
@@ -79,7 +96,7 @@ try {
     $url = "https://github.com/GhostFlying/delegation/releases/download/v$version/$artifact"
     Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
 
-    $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actual = Get-SHA256Hash -Path $archive
     if ($actual -ne $expected) {
         throw "delegation: SHA-256 mismatch for $artifact"
     }

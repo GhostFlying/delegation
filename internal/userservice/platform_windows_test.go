@@ -3,7 +3,7 @@
 package userservice
 
 import (
-	"encoding/binary"
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -26,7 +26,9 @@ func TestWindowsInstallCreatesTaskWithoutForce(t *testing.T) {
 			t.Fatal(err)
 		}
 		definition, err := parseTaskDefinition(data)
-		if err != nil || !taskOwned(definition) || !strings.Contains(string(data), "<Enabled>false</Enabled>") {
+		document, normalizeErr := normalizeTaskXML(data)
+		if err != nil || normalizeErr != nil || !taskOwned(definition) ||
+			!bytes.HasPrefix(data, []byte{0xff, 0xfe}) || !strings.Contains(string(document), "<Enabled>false</Enabled>") {
 			t.Fatalf("generated task = %#v, %v", definition, err)
 		}
 		return taskCommandResult{}, nil
@@ -55,7 +57,7 @@ func TestWindowsInstallRecognizesExactUTF16Task(t *testing.T) {
 			}
 			return taskCommandResult{ExitCode: 1}, nil
 		}
-		return taskCommandResult{Output: encodeTaskUTF16(string(desired), binary.LittleEndian, []byte{0xff, 0xfe})}, nil
+		return taskCommandResult{Output: desired}, nil
 	}
 
 	result, err := platformInstall(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
@@ -97,7 +99,7 @@ func TestWindowsInstallRejectsManagedDriftAndForeignSubstring(t *testing.T) {
 		if foreign {
 			return taskCommandResult{Output: []byte(`<?xml version="1.0"?><Task version="1.4" xmlns="` + taskXMLNamespace + `"><RegistrationInfo><Description>foreign ` + Marker + `</Description><URI>` + ScheduledTask + `</URI></RegistrationInfo><Triggers/><Principals/><Settings/><Actions/></Task>`)}, nil
 		}
-		descriptor, err := RenderScheduledTask(`C:\Other\delegation.exe`, `C:\Users\test\config.json`, "S-1-5-21-foreign", ScheduledTask, func(value string) string { return value })
+		descriptor, err := RenderScheduledTask(`C:\Other\delegation.exe`, `C:\Users\test\config.json`, "S-1-5-18", ScheduledTask, func(value string) string { return value })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -152,6 +154,20 @@ func TestTaskSchedulerExecutableIgnoresSystemRoot(t *testing.T) {
 	}
 }
 
+func TestWindowsTaskUserIDsEqualUsesSIDIdentity(t *testing.T) {
+	equal, err := windowsTaskUserIDsEqual("S-1-5-18", "S-1-5-18")
+	if err != nil || !equal {
+		t.Fatalf("windowsTaskUserIDsEqual() = %v, %v", equal, err)
+	}
+	equal, err = windowsTaskUserIDsEqual("S-1-5-18", "S-1-5-19")
+	if err != nil || equal {
+		t.Fatalf("windowsTaskUserIDsEqual() accepted different SIDs: %v, %v", equal, err)
+	}
+	if _, err := resolveTaskUserSID(""); err == nil {
+		t.Fatal("resolveTaskUserSID() accepted an empty identity")
+	}
+}
+
 func TestWindowsTaskSchedulerRoundTrip(t *testing.T) {
 	if os.Getenv("DELEGATION_WINDOWS_INTEGRATION") != "1" {
 		t.Skip("set DELEGATION_WINDOWS_INTEGRATION=1 to use the real Task Scheduler")
@@ -161,7 +177,7 @@ func TestWindowsTaskSchedulerRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	taskName := fmt.Sprintf(`\Delegation Connector Test %d`, os.Getpid())
-	descriptor, err := RenderScheduledTask(`C:\Windows\System32\cmd.exe`, `C:\Windows\Temp\delegation-test.json`, sid, taskName, windows.EscapeArg)
+	descriptor, err := RenderScheduledTask(`C:\Windows\System32\cmd.exe`, "C:\\Windows\\Temp\\delegation-\u9a8c\u8bc1.json", sid, taskName, windows.EscapeArg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +207,11 @@ func TestWindowsTaskSchedulerRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	existing, err := parseTaskDefinition(query.Output)
-	if err != nil || existing != desired {
+	if err != nil {
+		t.Fatal(err)
+	}
+	equivalent, err := taskDefinitionsEquivalent(desired, existing, windowsTaskUserIDsEqual)
+	if err != nil || !equivalent {
 		t.Fatalf("round-trip task = %#v, %v; want %#v", existing, err, desired)
 	}
 	second, err := executeTaskCommand("/Create", "/TN", taskName, "/XML", tempPath)

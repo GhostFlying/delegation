@@ -80,7 +80,11 @@ func platformInstall(binaryPath, configPath string) (Result, error) {
 	if !taskOwned(existing) {
 		return Result{State: StateForeignConflict, Kind: descriptor.Kind, Artifact: ScheduledTask}, errors.New("scheduled task name is occupied by an unmanaged task")
 	}
-	if existing != desired {
+	equivalent, err := taskDefinitionsEquivalent(desired, existing, windowsTaskUserIDsEqual)
+	if err != nil {
+		return indeterminate, errors.Join(createFailure, fmt.Errorf("compare existing scheduled task identity: %w", err))
+	}
+	if !equivalent {
 		return result, errors.New("managed scheduled task differs; remove it explicitly before reinstalling")
 	}
 	return result, nil
@@ -126,4 +130,30 @@ func windowsUserSID() (string, error) {
 		return "", fmt.Errorf("resolve current Windows user: %w", err)
 	}
 	return user.User.Sid.String(), nil
+}
+
+func windowsTaskUserIDsEqual(left, right string) (bool, error) {
+	leftSID, err := resolveTaskUserSID(left)
+	if err != nil {
+		return false, err
+	}
+	rightSID, err := resolveTaskUserSID(right)
+	if err != nil {
+		return false, err
+	}
+	return leftSID.Equals(rightSID), nil
+}
+
+func resolveTaskUserSID(identifier string) (*windows.SID, error) {
+	if identifier == "" {
+		return nil, errors.New("scheduled task user identity is empty")
+	}
+	if sid, err := windows.StringToSid(identifier); err == nil {
+		return sid, nil
+	}
+	sid, _, _, err := windows.LookupSID("", identifier)
+	if err != nil {
+		return nil, fmt.Errorf("resolve scheduled task user identity: %w", err)
+	}
+	return sid, nil
 }

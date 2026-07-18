@@ -5,7 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -133,7 +133,8 @@ func RenderScheduledTask(binaryPath, configPath, userSID, taskPath string, escap
 	if err != nil {
 		return Descriptor{}, err
 	}
-	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+	// Omit values that Task Scheduler exports as defaults, while pinning effective non-default behavior.
+	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>%s</Description>
@@ -141,7 +142,6 @@ func RenderScheduledTask(binaryPath, configPath, userSID, taskPath string, escap
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
-      <Enabled>true</Enabled>
       <UserId>%s</UserId>
     </LogonTrigger>
   </Triggers>
@@ -149,27 +149,20 @@ func RenderScheduledTask(binaryPath, configPath, userSID, taskPath string, escap
     <Principal id="Author">
       <UserId>%s</UserId>
       <LogonType>InteractiveToken</LogonType>
-      <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
     <IdleSettings>
       <StopOnIdleEnd>false</StopOnIdleEnd>
       <RestartOnIdle>false</RestartOnIdle>
     </IdleSettings>
-    <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>false</Enabled>
-    <Hidden>false</Hidden>
-    <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -179,12 +172,16 @@ func RenderScheduledTask(binaryPath, configPath, userSID, taskPath string, escap
   </Actions>
 </Task>
 `, Marker, taskPathXML, sidXML, sidXML, binaryXML, argumentsXML)
-	return Descriptor{Kind: KindScheduledTask, Name: taskPath, Content: []byte(content)}, nil
+	encoded, err := encodeTaskXMLUTF16LE(content)
+	if err != nil {
+		return Descriptor{}, err
+	}
+	return Descriptor{Kind: KindScheduledTask, Name: taskPath, Content: encoded}, nil
 }
 
 func validatePOSIXPaths(paths ...string) error {
-	for _, path := range paths {
-		if !filepath.IsAbs(path) {
+	for _, value := range paths {
+		if !path.IsAbs(value) {
 			return errors.New("service binary and config paths must be absolute")
 		}
 	}

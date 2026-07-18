@@ -3,6 +3,7 @@ package userservice
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -15,15 +16,16 @@ func TestTaskDefinitionAcceptsUTF16ByteOrders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	document := taskXMLText(t, descriptor.Content)
 	withSurrogatePair := strings.Replace(
-		string(descriptor.Content),
+		document,
 		"<Description>",
 		"<Author>\U0001f600</Author><Description>",
 		1,
 	)
 	for name, encoded := range map[string][]byte{
-		"little endian":        encodeTaskUTF16(string(descriptor.Content), binary.LittleEndian, []byte{0xff, 0xfe}),
-		"big endian":           encodeTaskUTF16(string(descriptor.Content), binary.BigEndian, []byte{0xfe, 0xff}),
+		"little endian":        encodeTaskUTF16(document, binary.LittleEndian, []byte{0xff, 0xfe}),
+		"big endian":           encodeTaskUTF16(document, binary.BigEndian, []byte{0xfe, 0xff}),
 		"valid surrogate pair": encodeTaskUTF16(withSurrogatePair, binary.LittleEndian, []byte{0xff, 0xfe}),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -41,6 +43,7 @@ func TestTaskDefinitionDetectsBehaviorDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	document := taskXMLText(t, descriptor.Content)
 	mutations := map[string]func(string) string{
 		"extra trigger": func(document string) string {
 			return strings.Replace(document, "</Triggers>", "<TimeTrigger><Enabled>true</Enabled></TimeTrigger></Triggers>", 1)
@@ -51,27 +54,138 @@ func TestTaskDefinitionDetectsBehaviorDrift(t *testing.T) {
 		"changed setting": func(document string) string {
 			return strings.Replace(document, "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>", "<MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>", 1)
 		},
+		"enabled task": func(document string) string {
+			return strings.Replace(document, "<Enabled>false</Enabled>", "<Enabled>true</Enabled>", 1)
+		},
+		"disabled unified engine": func(document string) string {
+			return strings.Replace(document, "<UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>", "<UseUnifiedSchedulingEngine>false</UseUnifiedSchedulingEngine>", 1)
+		},
+		"elevated principal": func(document string) string {
+			return strings.Replace(document, "</LogonType>", "</LogonType><RunLevel>HighestAvailable</RunLevel>", 1)
+		},
+		"changed command": func(document string) string {
+			return strings.Replace(document, "<Command>C:\\Delegation\\delegation.exe</Command>", "<Command>C:\\Other\\delegation.exe</Command>", 1)
+		},
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
-			got, err := parseTaskDefinition([]byte(mutate(string(descriptor.Content))))
+			got, err := parseTaskDefinition([]byte(mutate(document)))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got == want {
-				t.Fatal("behavior drift produced an identical task definition")
+			equivalent, err := taskDefinitionsEquivalent(want, got, func(left, right string) (bool, error) {
+				return left == right, nil
+			})
+			if err != nil || equivalent {
+				t.Fatalf("taskDefinitionsEquivalent() = %v, %v; want drift", equivalent, err)
 			}
 		})
 	}
 }
 
+func TestTaskDefinitionsEquivalentNormalizesSchedulerRepresentation(t *testing.T) {
+	descriptor := testTaskDescriptor(t)
+	desired, err := parseTaskDefinition(descriptor.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := taskXMLText(t, descriptor.Content)
+	document = replaceTaskFixture(t, document, "<UserId>S-1-5-21-test</UserId>", `<UserId>HOST\runner</UserId>`)
+	document = replaceTaskFixture(
+		t,
+		document,
+		"    <LogonTrigger>\n      <UserId>",
+		"    <LogonTrigger>\n      <Enabled>true</Enabled>\n      <ExecutionTimeLimit>PT72H</ExecutionTimeLimit>\n      <Delay>PT0M</Delay>\n      <UserId>",
+	)
+	document = replaceTaskFixture(
+		t,
+		document,
+		"      <LogonType>InteractiveToken</LogonType>",
+		"      <LogonType>InteractiveToken</LogonType>\n      <RunLevel>LeastPrivilege</RunLevel>",
+	)
+	document = replaceTaskFixture(
+		t,
+		document,
+		"    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+		"    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n    <AllowStartOnDemand>true</AllowStartOnDemand>\n    <AllowHardTerminate>true</AllowHardTerminate>\n    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>\n    <Hidden>false</Hidden>\n    <WakeToRun>false</WakeToRun>\n    <RunOnlyIfIdle>false</RunOnlyIfIdle>\n    <Priority>7</Priority>",
+	)
+	document = replaceTaskFixture(
+		t,
+		document,
+		"      <RestartOnIdle>false</RestartOnIdle>",
+		"      <RestartOnIdle>false</RestartOnIdle>\n      <Duration>PT10M</Duration>\n      <WaitTimeout>PT1H</WaitTimeout>",
+	)
+	document = replaceTaskFixture(
+		t,
+		document,
+		"    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
+		"    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+	)
+	document = replaceTaskFixture(
+		t,
+		document,
+		"      <StopOnIdleEnd>false</StopOnIdleEnd>\n      <RestartOnIdle>false</RestartOnIdle>",
+		"      <RestartOnIdle>false</RestartOnIdle>\n      <StopOnIdleEnd>false</StopOnIdleEnd>",
+	)
+	document = replaceTaskFixture(
+		t,
+		document,
+		"      <UserId>S-1-5-21-test</UserId>\n      <LogonType>InteractiveToken</LogonType>",
+		"      <LogonType>InteractiveToken</LogonType>\n      <UserId>S-1-5-21-test</UserId>",
+	)
+	existing, err := parseTaskDefinition([]byte(document))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveAlias := func(left, right string) (bool, error) {
+		aliases := map[string]string{
+			"S-1-5-21-test": "S-1-5-21-test",
+			`HOST\runner`:   "S-1-5-21-test",
+			`OTHER\runner`:  "S-1-5-21-other",
+		}
+		return aliases[left] != "" && aliases[left] == aliases[right], nil
+	}
+	equivalent, err := taskDefinitionsEquivalent(desired, existing, resolveAlias)
+	if err != nil || !equivalent {
+		t.Fatalf("taskDefinitionsEquivalent() = %v, %v", equivalent, err)
+	}
+
+	existing.TriggerUserID = `OTHER\runner`
+	equivalent, err = taskDefinitionsEquivalent(desired, existing, resolveAlias)
+	if err != nil || equivalent {
+		t.Fatalf("taskDefinitionsEquivalent() accepted another trigger identity: %v, %v", equivalent, err)
+	}
+	existing.TriggerUserID = `HOST\runner`
+	identityErr := errors.New("identity lookup failed")
+	_, err = taskDefinitionsEquivalent(desired, existing, func(string, string) (bool, error) {
+		return false, identityErr
+	})
+	if !errors.Is(err, identityErr) {
+		t.Fatalf("taskDefinitionsEquivalent() error = %v, want %v", err, identityErr)
+	}
+}
+
 func TestTaskDefinitionRejectsEnvelopeExtensions(t *testing.T) {
 	descriptor := testTaskDescriptor(t)
+	document := taskXMLText(t, descriptor.Content)
 	tests := map[string]string{
-		"root data":           strings.Replace(string(descriptor.Content), "</Task>", "<Data>foreign</Data></Task>", 1),
-		"security descriptor": strings.Replace(string(descriptor.Content), "</RegistrationInfo>", "<SecurityDescriptor>D:(A;;GA;;;WD)</SecurityDescriptor></RegistrationInfo>", 1),
-		"root attribute":      strings.Replace(string(descriptor.Content), `<Task version="1.4"`, `<Task version="1.4" foreign="true"`, 1),
-		"duplicate actions":   strings.Replace(string(descriptor.Content), "</Task>", "<Actions Context=\"Author\"/></Task>", 1),
+		"root data":           strings.Replace(document, "</Task>", "<Data>foreign</Data></Task>", 1),
+		"security descriptor": strings.Replace(document, "</RegistrationInfo>", "<SecurityDescriptor>D:(A;;GA;;;WD)</SecurityDescriptor></RegistrationInfo>", 1),
+		"root attribute":      strings.Replace(document, `<Task version="1.4"`, `<Task version="1.4" foreign="true"`, 1),
+		"duplicate actions":   strings.Replace(document, "</Task>", "<Actions Context=\"Author\"/></Task>", 1),
+		"duplicate setting":   strings.Replace(document, "</Settings>", "<Enabled>true</Enabled></Settings>", 1),
+		"duplicate trigger user": strings.Replace(
+			document,
+			"</LogonTrigger>",
+			"<UserId>S-1-5-21-other</UserId></LogonTrigger>",
+			1,
+		),
+		"duplicate principal user": strings.Replace(
+			document,
+			"</Principal>",
+			"<UserId>S-1-5-21-other</UserId></Principal>",
+			1,
+		),
 	}
 	for name, document := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -115,7 +229,7 @@ func TestTaskDefinitionRejectsResourceExhaustion(t *testing.T) {
 func TestTaskDefinitionRejectsUnpairedUTF16Surrogates(t *testing.T) {
 	descriptor := testTaskDescriptor(t)
 	document := strings.Replace(
-		string(descriptor.Content),
+		taskXMLText(t, descriptor.Content),
 		"<Description>",
 		"<Author>X</Author><Description>",
 		1,
@@ -147,7 +261,7 @@ func TestTaskDefinitionRejectsUnpairedUTF16Surrogates(t *testing.T) {
 
 func TestTaskOwnershipRequiresExactDescriptionAndURI(t *testing.T) {
 	descriptor := testTaskDescriptor(t)
-	document := strings.Replace(string(descriptor.Content), "<Description>"+Marker+"</Description>", "<Description>foreign "+Marker+"</Description>", 1)
+	document := strings.Replace(taskXMLText(t, descriptor.Content), "<Description>"+Marker+"</Description>", "<Description>foreign "+Marker+"</Description>", 1)
 	definition, err := parseTaskDefinition([]byte(document))
 	if err != nil {
 		t.Fatal(err)
@@ -155,6 +269,20 @@ func TestTaskOwnershipRequiresExactDescriptionAndURI(t *testing.T) {
 	if taskOwned(definition) {
 		t.Fatal("taskOwned() accepted a marker substring")
 	}
+}
+
+func TestEncodeTaskXMLUTF16LERejectsInvalidUTF8(t *testing.T) {
+	if _, err := encodeTaskXMLUTF16LE("<Task>\xff</Task>"); err == nil {
+		t.Fatal("encodeTaskXMLUTF16LE() accepted invalid UTF-8")
+	}
+}
+
+func replaceTaskFixture(t *testing.T, document, old, replacement string) string {
+	t.Helper()
+	if !strings.Contains(document, old) {
+		t.Fatalf("task fixture does not contain %q", old)
+	}
+	return strings.Replace(document, old, replacement, 1)
 }
 
 func testTaskDescriptor(t *testing.T) Descriptor {

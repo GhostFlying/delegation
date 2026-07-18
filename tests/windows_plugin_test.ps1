@@ -47,6 +47,16 @@ function Invoke-ChildProcess {
     }
 }
 
+function Invoke-BatchFile {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [string[]] $ScriptArguments = @(),
+        [hashtable] $Environment = @{}
+    )
+    $arguments = @("/d", "/s", "/c", "call", $Path) + $ScriptArguments
+    Invoke-ChildProcess $env:ComSpec $arguments $Environment
+}
+
 function Invoke-WindowsPowerShellInstall {
     param(
         [Parameter(Mandatory = $true)] [string] $PowerShell,
@@ -57,6 +67,9 @@ function Invoke-WindowsPowerShellInstall {
     )
     $command = @'
 $ErrorActionPreference = "Stop"
+function Get-FileHash {
+    throw "test: installer must not call Get-FileHash"
+}
 function Invoke-WebRequest {
     param(
         [Parameter(Mandatory = $true)] [string] $Uri,
@@ -113,9 +126,8 @@ try {
     Assert-True ($missingPS.ExitCode -eq 127) "PowerShell launcher missing-runtime exit was $($missingPS.ExitCode)"
     Assert-True ($missingPS.Stderr -match "runtime 0.1.0-alpha.0 is not installed") "PowerShell launcher missing-runtime error was unclear"
 
-    $cmdCommand = "call `"$launcherCmd`" mcp root"
-    $missingCmd = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", $cmdCommand) $missingEnvironment
-    Assert-True ($missingCmd.ExitCode -eq 127) "cmd launcher missing-runtime exit was $($missingCmd.ExitCode)"
+    $missingCmd = Invoke-BatchFile -Path $launcherCmd -ScriptArguments @("mcp", "root") -Environment $missingEnvironment
+    Assert-True ($missingCmd.ExitCode -eq 127) "cmd launcher missing-runtime exit was $($missingCmd.ExitCode); stdout: $($missingCmd.Stdout); stderr: $($missingCmd.Stderr)"
 
     $overrideEnvironment = @{
         DELEGATION_BINARY = $runtime
@@ -124,21 +136,21 @@ try {
     $override = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", $launcherPS, "version", "--json") $overrideEnvironment
     Assert-True ($override.ExitCode -eq 0) "PowerShell launcher override failed: $($override.Stderr)"
     Assert-True ($override.Stdout -match '"version":"0.1.0-alpha.0"') "PowerShell launcher did not pass arguments through"
-    $overrideUnavailable = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", "call `"$launcherCmd`" mcp root") $overrideEnvironment
+    $overrideUnavailable = Invoke-BatchFile -Path $launcherCmd -ScriptArguments @("mcp", "root") -Environment $overrideEnvironment
     Assert-True ($overrideUnavailable.ExitCode -eq 69) "cmd launcher did not preserve runtime exit code"
 
     $missingChecksumPlugin = Join-Path $tempRoot "missing-checksum-plugin"
     Copy-Item -LiteralPath $pluginRoot -Destination $missingChecksumPlugin -Recurse
     Set-Content -LiteralPath (Join-Path $missingChecksumPlugin "release-artifacts.sha256") -Value "# intentionally empty for this test" -Encoding ascii
     $missingChecksumInstaller = Join-Path $missingChecksumPlugin "scripts\install-runtime.cmd"
-    $missingChecksum = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", "call `"$missingChecksumInstaller`"") @{
+    $missingChecksum = Invoke-BatchFile -Path $missingChecksumInstaller -Environment @{
         DELEGATION_BINARY = $null
         DELEGATION_HOME = (Join-Path $tempRoot "no-checksum")
     }
     Assert-True ($missingChecksum.ExitCode -ne 0) "installer accepted a release without a pinned checksum"
     Assert-True ($missingChecksum.Stderr -match "no pinned SHA-256") "installer checksum error was unclear"
 
-    $testPlugin = Join-Path $tempRoot "plugin"
+    $testPlugin = Join-Path $tempRoot "plugin with spaces"
     Copy-Item -LiteralPath $pluginRoot -Destination $testPlugin -Recurse
     $payload = Join-Path $tempRoot "payload"
     New-Item -ItemType Directory -Path $payload | Out-Null
@@ -162,12 +174,12 @@ try {
     Assert-True (($windowsPowerShellInstall.Stdout | Out-String).Trim() -eq $windowsPowerShellBinary) "Windows PowerShell installer returned an unexpected path"
     Assert-True (Test-Path -LiteralPath $windowsPowerShellBinary -PathType Leaf) "Windows PowerShell did not commit the runtime"
 
-    $installerCmdCommand = "call `"$(Join-Path $testPlugin 'scripts\install-runtime.cmd')`""
+    $installerCmd = Join-Path $testPlugin "scripts\install-runtime.cmd"
     $windowsPowerShellEnvironment = @{
         DELEGATION_BINARY = $null
         DELEGATION_HOME = $windowsPowerShellHome
     }
-    $installerCmdRepeat = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", $installerCmdCommand) $windowsPowerShellEnvironment
+    $installerCmdRepeat = Invoke-BatchFile -Path $installerCmd -Environment $windowsPowerShellEnvironment
     Assert-True ($installerCmdRepeat.ExitCode -eq 0) "cmd installer repeat failed: $($installerCmdRepeat.Stderr)"
     Assert-True (($installerCmdRepeat.Stdout | Out-String).Trim() -eq $windowsPowerShellBinary) "cmd installer did not reuse the existing runtime"
 
@@ -179,12 +191,12 @@ try {
         [System.IO.FileShare]::None
     )
     try {
-        $installerCmdLocked = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", $installerCmdCommand) $windowsPowerShellEnvironment
+        $installerCmdLocked = Invoke-BatchFile -Path $installerCmd -Environment $windowsPowerShellEnvironment
     } finally {
         $heldWindowsPowerShellLock.Dispose()
     }
     Assert-True ($installerCmdLocked.ExitCode -ne 0 -and $installerCmdLocked.Stderr -match "another runtime installation is in progress") "cmd installer ignored an active Windows PowerShell lock"
-    $installerCmdRecovered = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", $installerCmdCommand) $windowsPowerShellEnvironment
+    $installerCmdRecovered = Invoke-BatchFile -Path $installerCmd -Environment $windowsPowerShellEnvironment
     Assert-True ($installerCmdRecovered.ExitCode -eq 0) "cmd installer did not recover after the process-held lock was released"
 
     function global:Invoke-WebRequest {
@@ -223,7 +235,7 @@ try {
     }
     $installedPS = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", $launcherPS, "version", "--json") $installedEnvironment
     Assert-True ($installedPS.ExitCode -eq 0 -and $installedPS.Stdout -match '"version":"0.1.0-alpha.0"') "PowerShell launcher did not find the installed runtime"
-    $installedCmd = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", "call `"$launcherCmd`" version --json") $installedEnvironment
+    $installedCmd = Invoke-BatchFile -Path $launcherCmd -ScriptArguments @("version", "--json") -Environment $installedEnvironment
     Assert-True ($installedCmd.ExitCode -eq 0 -and $installedCmd.Stdout -match '"version":"0.1.0-alpha.0"') "cmd launcher did not find the installed runtime"
     Assert-True (Test-Path -LiteralPath $staleLock -PathType Leaf) "installer removed its persistent lock file"
 
@@ -251,7 +263,7 @@ try {
         Write-Verbose "file symlink test unavailable: $($_.Exception.Message)"
     }
     if ($reparseCreated) {
-        $reparseResult = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", $installerCmdCommand) @{
+        $reparseResult = Invoke-BatchFile -Path $installerCmd -Environment @{
             DELEGATION_BINARY = $null
             DELEGATION_HOME = $reparseHome
         }
@@ -264,7 +276,7 @@ try {
     New-Item -ItemType Directory -Force -Path $junctionParent, $junctionOutside | Out-Null
     $junctionTarget = Join-Path $junctionParent "windows-$arch"
     New-Item -ItemType Junction -Path $junctionTarget -Target $junctionOutside | Out-Null
-    $junctionResult = Invoke-ChildProcess $env:ComSpec @("/d", "/s", "/c", $installerCmdCommand) @{
+    $junctionResult = Invoke-BatchFile -Path $installerCmd -Environment @{
         DELEGATION_BINARY = $null
         DELEGATION_HOME = $junctionHome
     }
@@ -283,7 +295,7 @@ try {
         Remove-Item Env:\DELEGATION_TEST_CREATE_TARGET -ErrorAction SilentlyContinue
     }
     Assert-True $raceFailed "installer reported success after a racing target appeared"
-    Assert-True ((Get-ChildItem -LiteralPath $raceTarget -Force).Count -eq 0) "installer nested staging output under a racing target"
+    Assert-True (@(Get-ChildItem -LiteralPath $raceTarget -Force).Count -eq 0) "installer nested staging output under a racing target"
 
     $activeHome = Join-Path $tempRoot "active-lock-home"
     $activeLockDirectory = Join-Path $activeHome ".locks"

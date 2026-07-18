@@ -3,7 +3,6 @@ package userservice
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -22,15 +21,6 @@ const (
 	maxTaskXMLAttributes = 1024
 )
 
-type taskDefinition struct {
-	Description string
-	URI         string
-	Triggers    string
-	Principals  string
-	Settings    string
-	Actions     string
-}
-
 type taskXMLAttribute struct {
 	Space string
 	Local string
@@ -48,10 +38,6 @@ type taskXMLNode struct {
 type taskXMLBudget struct {
 	nodes      int
 	attributes int
-}
-
-func taskOwned(task taskDefinition) bool {
-	return task.Description == Marker && task.URI == ScheduledTask
 }
 
 func parseTaskDefinition(data []byte) (taskDefinition, error) {
@@ -85,24 +71,35 @@ func parseTaskDefinition(data []byte) (taskDefinition, error) {
 		return taskDefinition{}, err
 	}
 	canonical := make(map[string]string, 4)
+	var triggerUserID string
+	var principalUserID string
 	for _, name := range []string{"Triggers", "Principals", "Settings", "Actions"} {
 		child, err := uniqueTaskChild(root, name)
 		if err != nil {
 			return taskDefinition{}, err
 		}
-		encoded, err := json.Marshal(child)
+		encoded, userID, err := canonicalizeTaskComponent(name, child)
 		if err != nil {
-			return taskDefinition{}, fmt.Errorf("canonicalize scheduled task %s: %w", name, err)
+			return taskDefinition{}, err
 		}
-		canonical[name] = string(encoded)
+		switch name {
+		case "Triggers":
+			triggerUserID = userID
+		case "Principals":
+			principalUserID = userID
+		case "Settings", "Actions":
+		}
+		canonical[name] = encoded
 	}
 	return taskDefinition{
-		Description: description,
-		URI:         uri,
-		Triggers:    canonical["Triggers"],
-		Principals:  canonical["Principals"],
-		Settings:    canonical["Settings"],
-		Actions:     canonical["Actions"],
+		Description:     description,
+		URI:             uri,
+		TriggerUserID:   triggerUserID,
+		PrincipalUserID: principalUserID,
+		Triggers:        canonical["Triggers"],
+		Principals:      canonical["Principals"],
+		Settings:        canonical["Settings"],
+		Actions:         canonical["Actions"],
 	}, nil
 }
 
@@ -286,6 +283,17 @@ func readTaskXMLNode(decoder *xml.Decoder, start xml.StartElement, depth int, bu
 }
 
 func uniqueTaskChild(parent taskXMLNode, name string) (taskXMLNode, error) {
+	matched, err := optionalUniqueTaskChild(&parent, name)
+	if err != nil {
+		return taskXMLNode{}, err
+	}
+	if matched == nil {
+		return taskXMLNode{}, fmt.Errorf("scheduled task XML is missing %s", name)
+	}
+	return *matched, nil
+}
+
+func optionalUniqueTaskChild(parent *taskXMLNode, name string) (*taskXMLNode, error) {
 	var matched *taskXMLNode
 	for i := range parent.Children {
 		child := &parent.Children[i]
@@ -293,14 +301,11 @@ func uniqueTaskChild(parent taskXMLNode, name string) (taskXMLNode, error) {
 			continue
 		}
 		if matched != nil {
-			return taskXMLNode{}, fmt.Errorf("scheduled task XML contains duplicate %s", name)
+			return nil, fmt.Errorf("scheduled task XML contains duplicate %s", name)
 		}
 		matched = child
 	}
-	if matched == nil {
-		return taskXMLNode{}, fmt.Errorf("scheduled task XML is missing %s", name)
-	}
-	return *matched, nil
+	return matched, nil
 }
 
 func uniqueTaskLeaf(parent taskXMLNode, name string) (string, error) {
@@ -357,6 +362,19 @@ func normalizeTaskXML(data []byte) ([]byte, error) {
 		trimmed = strings.TrimSpace(trimmed[end+2:])
 	}
 	return []byte(trimmed), nil
+}
+
+func encodeTaskXMLUTF16LE(document string) ([]byte, error) {
+	if !utf8.ValidString(document) {
+		return nil, errors.New("scheduled task XML must be valid UTF-8 before encoding")
+	}
+	units := utf16.Encode([]rune(document))
+	encoded := make([]byte, 2+len(units)*2)
+	copy(encoded, []byte{0xff, 0xfe})
+	for i, unit := range units {
+		binary.LittleEndian.PutUint16(encoded[2+i*2:], unit)
+	}
+	return encoded, nil
 }
 
 func decodeUTF16(data []byte, order binary.ByteOrder) (string, error) {
