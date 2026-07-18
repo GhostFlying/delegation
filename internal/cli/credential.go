@@ -39,12 +39,14 @@ var credentialNow = func() time.Time {
 
 func runCredential(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: delegation credential issue [options]")
+		fmt.Fprintln(stderr, "usage: delegation credential <issue|revoke> [options]")
 		return exitUsage
 	}
 	switch args[0] {
 	case "issue":
 		return runCredentialIssue(args[1:], stdout, stderr)
+	case "revoke":
+		return runCredentialRevoke(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "delegation: unsupported credential action %q\n", args[0])
 		return exitUsage

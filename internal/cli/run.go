@@ -79,7 +79,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "  version [--json]  print runtime version")
 	fmt.Fprintln(w, "  setup <role>      configure a broker, controller, or device")
 	fmt.Fprintln(w, "  doctor [--json]   validate the local configuration")
-	fmt.Fprintln(w, "  credential issue   issue a device credential")
+	fmt.Fprintln(w, "  credential <action>  issue or revoke a device credential")
 	fmt.Fprintln(w, "  service <action>  prepare or run the user service")
 	fmt.Fprintln(w, "  mcp root          start the root MCP server")
 }
