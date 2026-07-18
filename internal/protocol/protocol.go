@@ -63,6 +63,7 @@ const (
 	ErrorInternal        = -32603
 	ErrorUnauthenticated = -32001
 	ErrorForbidden       = -32003
+	ErrorNotFound        = -32004
 	ErrorConflict        = -32009
 	ErrorUnavailable     = -32010
 )
@@ -169,6 +170,7 @@ func (e Error) Validate() error {
 		ErrorInternal,
 		ErrorUnauthenticated,
 		ErrorForbidden,
+		ErrorNotFound,
 		ErrorConflict,
 		ErrorUnavailable:
 	default:

@@ -39,6 +39,9 @@ type Registry interface {
 	MarkDeviceOffline(context.Context, string, string, uint64, time.Time) (control.Device, error)
 	BeginBrokerEpoch(context.Context, string) (store.PresenceTransition, error)
 	EnsureRootTree(context.Context, string, string, string, time.Time) (control.Tree, control.Principal, error)
+	AuthorizePrincipal(context.Context, control.PrincipalIdentity, control.Capability) (control.Principal, error)
+	ListDevices(context.Context, string, store.DevicePageRequest) (store.DevicePage, error)
+	DescribeDevice(context.Context, string, string) (store.DeviceRecord, error)
 }
 
 type Options struct {
@@ -480,8 +483,13 @@ func (s *session) handleEnvelope(ctx context.Context, envelope protocol.Envelope
 	default:
 		return false, errors.New("connection sent an unsupported envelope kind")
 	}
-	if envelope.Method == protocol.MethodEnsureRootTree {
+	switch envelope.Method {
+	case protocol.MethodEnsureRootTree:
 		return false, s.handleEnsureRootTree(ctx, envelope)
+	case protocol.MethodListDevices:
+		return false, s.handleListDevices(ctx, envelope)
+	case protocol.MethodDescribeDevice:
+		return false, s.handleDescribeDevice(ctx, envelope)
 	}
 	if envelope.Method != protocol.MethodHeartbeat {
 		return false, s.server.writeError(ctx, s.connection, envelope, protocol.ErrorMethodNotFound, "method not found")

@@ -87,6 +87,16 @@ func TestProtocolErrorUsesStandardMethodNotFoundCode(t *testing.T) {
 	}
 }
 
+func TestProtocolErrorUsesStableNotFoundCode(t *testing.T) {
+	err := Error{Code: ErrorNotFound, Message: "not found"}
+	if validateErr := err.Validate(); validateErr != nil {
+		t.Fatal(validateErr)
+	}
+	if err.Code != -32004 {
+		t.Fatalf("not-found code = %d, want -32004", err.Code)
+	}
+}
+
 func TestProtocolAcceptsImplementationDefinedServerError(t *testing.T) {
 	err := Error{Code: -32042, Message: "future server error"}
 	if validateErr := err.Validate(); validateErr != nil {
