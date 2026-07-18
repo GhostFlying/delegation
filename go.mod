@@ -3,6 +3,7 @@ module github.com/GhostFlying/delegation
 go 1.26.5
 
 require (
+	github.com/coder/websocket v1.8.15
 	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.54.0
 )
