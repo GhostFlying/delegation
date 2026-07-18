@@ -555,6 +555,15 @@ func TestHeartbeatTimeoutAndBrokerEpochMarkDevicesOffline(t *testing.T) {
 }
 
 func newBrokerHarness(t *testing.T, authMode config.AuthMode, interval time.Duration) brokerHarness {
+	return newBrokerHarnessForRole(t, authMode, interval, control.DeviceRoleWorker)
+}
+
+func newBrokerHarnessForRole(
+	t *testing.T,
+	authMode config.AuthMode,
+	interval time.Duration,
+	credentialRole control.DeviceRole,
+) brokerHarness {
 	t.Helper()
 	registry, err := store.Open(
 		context.Background(), filepath.Join(t.TempDir(), "state", "broker.sqlite3"),
@@ -579,7 +588,7 @@ func newBrokerHarness(t *testing.T, authMode config.AuthMode, interval time.Dura
 		if err := registry.CreateCredential(context.Background(), store.NewCredential(
 			brokerTestControllerID,
 			brokerTestDeviceID,
-			control.DeviceRoleWorker,
+			credentialRole,
 			mac,
 			time.Unix(1, 0),
 		)); err != nil {
@@ -663,18 +672,23 @@ func hello(role control.DeviceRole) protocol.Hello {
 
 func request(t *testing.T, method string, payload any) protocol.Envelope {
 	t.Helper()
-	data, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
 	return protocol.Envelope{
 		ProtocolVersion: protocol.Version,
 		Kind:            protocol.KindRequest,
 		RequestID:       newRequestID(t),
 		Method:          method,
 		ControllerID:    brokerTestControllerID,
-		Payload:         data,
+		Payload:         marshalPayload(t, payload),
 	}
+}
+
+func marshalPayload(t *testing.T, payload any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func newRequestID(t *testing.T) string {

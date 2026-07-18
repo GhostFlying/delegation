@@ -1,0 +1,43 @@
+package broker
+
+import (
+	"context"
+	"errors"
+
+	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/protocol"
+	"github.com/GhostFlying/delegation/internal/store"
+)
+
+func (s *session) handleEnsureRootTree(ctx context.Context, request protocol.Envelope) error {
+	if s.role != control.DeviceRoleController {
+		return s.server.writeError(ctx, s.connection, request, protocol.ErrorForbidden, "controller role required")
+	}
+	if request.TreeID != "" || request.Source != nil {
+		return s.server.writeError(ctx, s.connection, request, protocol.ErrorInvalidRequest, "invalid root tree request")
+	}
+	params, err := protocol.DecodePayload[protocol.EnsureRootTreeParams](request.Payload)
+	if err != nil || params.Validate() != nil {
+		return s.server.writeError(ctx, s.connection, request, protocol.ErrorInvalidParams, "invalid root tree payload")
+	}
+	tree, principal, err := s.server.registry.EnsureRootTree(
+		ctx,
+		s.server.controllerID,
+		params.ExternalThreadID,
+		s.deviceID,
+		s.server.now(),
+	)
+	if err == nil {
+		return s.server.writeResult(ctx, s.connection, request, protocol.EnsureRootTreeResult{
+			Tree: tree, Principal: principal,
+		})
+	}
+	if isContextError(err) {
+		return err
+	}
+	if errors.Is(err, store.ErrConflict) {
+		return s.server.writeError(ctx, s.connection, request, protocol.ErrorConflict, "root tree binding conflicts with existing state")
+	}
+	_ = s.server.writeError(ctx, s.connection, request, protocol.ErrorUnavailable, "broker unavailable")
+	return &internalError{operation: "ensure root tree", err: err}
+}

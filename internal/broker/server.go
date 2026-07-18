@@ -38,6 +38,7 @@ type Registry interface {
 	HeartbeatDevice(context.Context, string, string, uint64, time.Time) (control.Device, error)
 	MarkDeviceOffline(context.Context, string, string, uint64, time.Time) (control.Device, error)
 	BeginBrokerEpoch(context.Context, string) (store.PresenceTransition, error)
+	EnsureRootTree(context.Context, string, string, string, time.Time) (control.Tree, control.Principal, error)
 }
 
 type Options struct {
@@ -81,6 +82,7 @@ type session struct {
 	connection   *websocket.Conn
 	connectionID string
 	deviceID     string
+	role         control.DeviceRole
 	revision     atomic.Uint64
 }
 
@@ -378,12 +380,13 @@ func (s *Server) acceptHello(
 		server:       s,
 		connection:   connection,
 		connectionID: connectionID,
-		deviceID:     hello.DeviceID,
+		deviceID:     device.DeviceID,
+		role:         device.Role,
 	}
 	current.revision.Store(device.Revision)
 	result := protocol.HelloResult{
 		ConnectionID:        connectionID,
-		Features:            []string{protocol.FeatureDeviceRegistry},
+		Features:            []string{protocol.FeatureDeviceRegistry, protocol.FeatureRootTree},
 		HeartbeatIntervalMS: s.heartbeatInterval.Milliseconds(),
 		Revision:            device.Revision,
 	}
@@ -476,6 +479,9 @@ func (s *session) handleEnvelope(ctx context.Context, envelope protocol.Envelope
 	case protocol.KindRequest:
 	default:
 		return false, errors.New("connection sent an unsupported envelope kind")
+	}
+	if envelope.Method == protocol.MethodEnsureRootTree {
+		return false, s.handleEnsureRootTree(ctx, envelope)
 	}
 	if envelope.Method != protocol.MethodHeartbeat {
 		return false, s.server.writeError(ctx, s.connection, envelope, protocol.ErrorMethodNotFound, "method not found")
