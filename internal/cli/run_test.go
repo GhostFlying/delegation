@@ -22,16 +22,17 @@ func TestVersionJSON(t *testing.T) {
 	}
 }
 
-func TestMCPRootIsExplicitlyUnavailable(t *testing.T) {
+func TestMCPRootReportsMissingConfiguration(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	t.Setenv("DELEGATION_CONFIG", t.TempDir()+"/missing.json")
 
 	code := Run([]string{"mcp", "root"}, &stdout, &stderr)
 
-	if code != exitUnavailable {
-		t.Fatalf("Run() code = %d, want %d", code, exitUnavailable)
+	if code != 1 {
+		t.Fatalf("Run() code = %d, want 1", code)
 	}
-	if got, want := stderr.String(), "delegation: root MCP is not available in the M0 runtime scaffold\n"; got != want {
-		t.Fatalf("Run() stderr = %q, want %q", got, want)
+	if got := stderr.String(); !bytes.Contains([]byte(got), []byte("read config")) {
+		t.Fatalf("Run() stderr = %q, want missing config error", got)
 	}
 }

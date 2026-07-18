@@ -15,13 +15,15 @@ function Invoke-ChildProcess {
     param(
         [Parameter(Mandatory = $true)] [string] $FilePath,
         [Parameter(Mandatory = $true)] [string[]] $Arguments,
-        [hashtable] $Environment = @{}
+        [hashtable] $Environment = @{},
+        [AllowNull()] [string] $StandardInput = $null
     )
     $start = [System.Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $FilePath
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
+    $start.RedirectStandardInput = $null -ne $StandardInput
     foreach ($argument in $Arguments) {
         $start.ArgumentList.Add($argument)
     }
@@ -37,6 +39,12 @@ function Invoke-ChildProcess {
     if (-not $process.Start()) {
         throw "failed to start $FilePath"
     }
+    if ($null -ne $StandardInput) {
+        $process.StandardInput.Write($StandardInput)
+		$process.StandardInput.Flush()
+		Start-Sleep -Milliseconds 1000
+        $process.StandardInput.Close()
+    }
     $stdout = $process.StandardOutput.ReadToEnd()
     $stderr = $process.StandardError.ReadToEnd()
     $process.WaitForExit()
@@ -51,10 +59,11 @@ function Invoke-BatchFile {
     param(
         [Parameter(Mandatory = $true)] [string] $Path,
         [string[]] $ScriptArguments = @(),
-        [hashtable] $Environment = @{}
+        [hashtable] $Environment = @{},
+        [AllowNull()] [string] $StandardInput = $null
     )
     $arguments = @("/d", "/s", "/c", "call", $Path) + $ScriptArguments
-    Invoke-ChildProcess $env:ComSpec $arguments $Environment
+    Invoke-ChildProcess $env:ComSpec $arguments $Environment $StandardInput
 }
 
 function Invoke-WindowsPowerShellInstall {
@@ -136,8 +145,29 @@ try {
     $override = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", $launcherPS, "version", "--json") $overrideEnvironment
     Assert-True ($override.ExitCode -eq 0) "PowerShell launcher override failed: $($override.Stderr)"
     Assert-True ($override.Stdout -match '"version":"0.1.0-alpha.0"') "PowerShell launcher did not pass arguments through"
-    $overrideUnavailable = Invoke-BatchFile -Path $launcherCmd -ScriptArguments @("mcp", "root") -Environment $overrideEnvironment
-    Assert-True ($overrideUnavailable.ExitCode -eq 69) "cmd launcher did not preserve runtime exit code"
+    $overrideConfig = Join-Path $tempRoot "override\controller.json"
+    $overrideSetup = Invoke-ChildProcess $runtime @(
+        "setup", "controller",
+        "--config", $overrideConfig,
+        "--controller-id", "11111111-1111-4111-8111-111111111111",
+        "--device-id", "22222222-2222-4222-8222-222222222222",
+        "--device-name", "acceptance-device",
+        "--broker-url", "ws://127.0.0.1:8787",
+        "--auth-mode", "none",
+        "--json"
+    ) $overrideEnvironment
+    Assert-True ($overrideSetup.ExitCode -eq 0) "controller setup for MCP launcher failed: $($overrideSetup.Stderr)"
+    $overrideEnvironment.DELEGATION_CONFIG = $overrideConfig
+    $mcpInput = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"launcher-test","version":"1"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}',
+        '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+    ) -join "`n"
+    $mcpInput += "`n"
+    $overrideMCP = Invoke-BatchFile -Path $launcherCmd -ScriptArguments @("mcp", "root") -Environment $overrideEnvironment -StandardInput $mcpInput
+    Assert-True ($overrideMCP.ExitCode -eq 0) "cmd launcher root MCP failed: $($overrideMCP.Stderr)"
+    Assert-True ($overrideMCP.Stdout -match '"name":"list_devices"') "cmd launcher root MCP did not expose list_devices"
+    Assert-True ($overrideMCP.Stdout -match '"name":"describe_device"') "cmd launcher root MCP did not expose describe_device"
 
     $missingChecksumPlugin = Join-Path $tempRoot "missing-checksum-plugin"
     Copy-Item -LiteralPath $pluginRoot -Destination $missingChecksumPlugin -Recurse

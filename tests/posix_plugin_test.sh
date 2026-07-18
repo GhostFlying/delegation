@@ -172,6 +172,14 @@ DELEGATION_HOME="$tmp/home" "$launcher" setup controller \
 grep -F '"role":"controller"' "$tmp/launcher-setup" >/dev/null
 DELEGATION_HOME="$tmp/home" "$launcher" doctor --config "$config" --json >"$tmp/launcher-doctor"
 grep -F '"ok":true' "$tmp/launcher-doctor" >/dev/null
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"launcher-test","version":"1"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+  sleep 1
+} | DELEGATION_CONFIG="$config" DELEGATION_HOME="$tmp/home" "$launcher" mcp root >"$tmp/launcher-mcp"
+grep -F '"name":"list_devices"' "$tmp/launcher-mcp" >/dev/null
+grep -F '"name":"describe_device"' "$tmp/launcher-mcp" >/dev/null
 case "$os" in
   linux)
     service_kind=systemdUser

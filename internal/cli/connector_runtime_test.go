@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"os"
@@ -16,8 +17,10 @@ import (
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/protocol"
+	"github.com/GhostFlying/delegation/internal/rootmcp"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const (
@@ -133,6 +136,7 @@ func TestConnectorServicesRegisterDevicesAndServeControllerBridge(t *testing.T) 
 		devices.Devices[1].Role != control.DeviceRoleWorker {
 		t.Fatalf("devices through controller bridge = %#v", devices.Devices)
 	}
+	assertRootMCPDevices(t, controllerPath)
 
 	duplicateContext, cancelDuplicate := context.WithTimeout(context.Background(), time.Second)
 	err = runConnectorService(duplicateContext, controllerPath, controllerConfig, &bytes.Buffer{})
@@ -155,6 +159,56 @@ func TestConnectorServicesRegisterDevicesAndServeControllerBridge(t *testing.T) 
 	if !strings.Contains(controllerLog.String(), "controller connector service started") ||
 		!strings.Contains(deviceLog.String(), "device connector service started") {
 		t.Fatalf("connector logs = %q / %q", controllerLog.String(), deviceLog.String())
+	}
+}
+
+func assertRootMCPDevices(t *testing.T, configPath string) {
+	t.Helper()
+	server, err := loadRootMCPServer(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(context.Background(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "integration-test", Version: "1"}, nil)
+	clientSession, err := client.Connect(context.Background(), clientTransport, nil)
+	if err != nil {
+		serverSession.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := clientSession.Close(); err != nil {
+			t.Errorf("close root MCP client: %v", err)
+		}
+		if err := serverSession.Close(); err != nil {
+			t.Errorf("close root MCP server: %v", err)
+		}
+	})
+	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{
+		Meta:      mcp.Meta{"threadId": runtimeThreadID},
+		Name:      rootmcp.ToolListDevices,
+		Arguments: map[string]any{"limit": 10},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("list_devices through root MCP = %#v", result)
+	}
+	data, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output rootmcp.ListDevicesOutput
+	if err := json.Unmarshal(data, &output); err != nil {
+		t.Fatal(err)
+	}
+	if len(output.Devices) != 2 || output.Devices[0].DeviceID != runtimeDeviceID ||
+		output.Devices[1].DeviceID != runtimeWorkerID {
+		t.Fatalf("devices through root MCP = %#v", output.Devices)
 	}
 }
 

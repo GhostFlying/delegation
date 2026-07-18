@@ -62,16 +62,6 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runMCP(args []string, stderr io.Writer) int {
-	if len(args) != 1 || args[0] != "root" {
-		fmt.Fprintln(stderr, "usage: delegation mcp root")
-		return exitUsage
-	}
-
-	fmt.Fprintln(stderr, "delegation: root MCP is not available in the M0 runtime scaffold")
-	return exitUnavailable
-}
-
 func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: delegation <command>")
 	fmt.Fprintln(w)
