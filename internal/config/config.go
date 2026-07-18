@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/GhostFlying/delegation/internal/identity"
 )
 
 const CurrentSchemaVersion = 1
@@ -98,7 +100,7 @@ func (c Config) Validate() error {
 	if c.SchemaVersion != CurrentSchemaVersion {
 		return fmt.Errorf("unsupported config schema version %d", c.SchemaVersion)
 	}
-	if !validID(c.ControllerID) {
+	if identity.ValidateID(c.ControllerID) != nil {
 		return errors.New("controllerId must be a UUID")
 	}
 
@@ -111,7 +113,7 @@ func (c Config) Validate() error {
 			return err
 		}
 	case RoleController, RoleDevice:
-		if !validID(c.DeviceID) {
+		if identity.ValidateID(c.DeviceID) != nil {
 			return errors.New("deviceId must be a UUID")
 		}
 		if strings.TrimSpace(c.DeviceName) == "" {
@@ -211,22 +213,4 @@ func loopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-
-func validID(value string) bool {
-	if len(value) != 36 {
-		return false
-	}
-	for i, char := range value {
-		if i == 8 || i == 13 || i == 18 || i == 23 {
-			if char != '-' {
-				return false
-			}
-			continue
-		}
-		if !strings.ContainsRune("0123456789abcdefABCDEF", char) {
-			return false
-		}
-	}
-	return true
 }

@@ -405,20 +405,6 @@ func TestConcurrentBrokerSetupKeepsWinningToken(t *testing.T) {
 	}
 }
 
-func TestNewUUID(t *testing.T) {
-	first, err := newUUID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := newUUID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first == second || len(first) != 36 || first[14] != '4' {
-		t.Fatalf("generated UUIDs = %q, %q", first, second)
-	}
-}
-
 type setupFailingWriter struct{}
 
 func (setupFailingWriter) Write([]byte) (int, error) {
