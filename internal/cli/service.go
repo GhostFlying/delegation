@@ -63,6 +63,8 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 		if _, err := loadBrokerAuthority(resolvedConfig, cfg); err != nil {
 			return writeError(stderr, err)
 		}
+	} else if _, err := loadConnectorAuthority(resolvedConfig, cfg); err != nil {
+		return writeError(stderr, err)
 	}
 	binaryPath, err := os.Executable()
 	if err != nil {
@@ -140,14 +142,19 @@ func runServiceRuntime(args []string, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
-	if cfg.Role != delegationconfig.RoleBroker {
-		fmt.Fprintf(stderr, "delegation: %s service runtime is not implemented\n", cfg.Role)
-		return exitUnavailable
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := runBrokerService(ctx, resolvedConfig, cfg, stderr, brokerRuntimeOptions{}); err != nil {
-		return writeError(stderr, err)
+	var runErr error
+	switch cfg.Role {
+	case delegationconfig.RoleBroker:
+		runErr = runBrokerService(ctx, resolvedConfig, cfg, stderr, brokerRuntimeOptions{})
+	case delegationconfig.RoleController, delegationconfig.RoleDevice:
+		runErr = runConnectorService(ctx, resolvedConfig, cfg, stderr)
+	default:
+		runErr = fmt.Errorf("unsupported service role %q", cfg.Role)
+	}
+	if runErr != nil {
+		return writeError(stderr, runErr)
 	}
 	return 0
 }

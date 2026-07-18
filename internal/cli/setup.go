@@ -190,6 +190,9 @@ func runSetupDevice(role delegationconfig.Role, args []string, stdout, stderr io
 	if err := ensureConfigAvailable(resolvedConfig); err != nil {
 		return writeError(stderr, err)
 	}
+	if err := pathguard.ValidateConnectorAuthority(resolvedConfig, auth.TokenFile); err != nil {
+		return writeError(stderr, err)
+	}
 	if auth.Mode == delegationconfig.AuthModeToken {
 		if err := tokenfile.Validate(auth.TokenFile); err != nil {
 			return writeError(stderr, err)

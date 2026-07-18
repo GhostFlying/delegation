@@ -19,6 +19,25 @@ func TestValidateBrokerAuthorityAcceptsDistinctPaths(t *testing.T) {
 	}
 }
 
+func TestValidateConnectorAuthorityRejectsAliases(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	tokenPath := filepath.Join(root, "device.token")
+	if err := ValidateConnectorAuthority(configPath, tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("config"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(configPath, tokenPath); err != nil {
+		t.Skipf("creating a hard link is unavailable: %v", err)
+	}
+	if err := ValidateConnectorAuthority(configPath, tokenPath); err == nil ||
+		!strings.Contains(err.Error(), "device token") {
+		t.Fatalf("ValidateConnectorAuthority() error = %v", err)
+	}
+}
+
 func TestValidateBrokerAuthorityRejectsAliases(t *testing.T) {
 	t.Run("case folded master token", func(t *testing.T) {
 		root := t.TempDir()

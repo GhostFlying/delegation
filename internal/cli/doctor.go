@@ -8,7 +8,6 @@ import (
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
-	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
 
 type doctorResult struct {
@@ -45,10 +44,11 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 			return writeError(stderr, err)
 		}
 		checks = append(checks, "broker state and authority paths are safe")
-	} else if cfg.Broker.Auth.Mode == delegationconfig.AuthModeToken {
-		if err := tokenfile.Validate(cfg.Broker.Auth.TokenFile); err != nil {
+	} else {
+		if _, err := loadConnectorAuthority(resolvedConfig, cfg); err != nil {
 			return writeError(stderr, err)
 		}
+		checks = append(checks, "connector authority paths are safe")
 	}
 	if cfg.Broker.Auth.Mode == delegationconfig.AuthModeToken {
 		checks = append(checks, "token file exists and is protected")

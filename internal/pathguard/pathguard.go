@@ -13,6 +13,22 @@ type namedPath struct {
 	path string
 }
 
+// ValidateConnectorAuthority rejects an alias between a connector's
+// configuration and device token.
+func ValidateConnectorAuthority(configPath, tokenPath string) error {
+	if tokenPath == "" {
+		return nil
+	}
+	conflicts, err := equivalent(configPath, tokenPath)
+	if err != nil {
+		return err
+	}
+	if conflicts {
+		return errors.New("device token path conflicts with connector configuration")
+	}
+	return nil
+}
+
 // ValidateBrokerAuthority rejects aliases between the configuration, master
 // token, and SQLite database files that make up a broker authority.
 func ValidateBrokerAuthority(configPath, statePath, masterPath string) error {
