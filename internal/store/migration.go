@@ -80,6 +80,39 @@ ALTER TABLE credentials ADD COLUMN pending INTEGER NOT NULL DEFAULT 0
 PRAGMA user_version = 2;
 `
 
+const schemaV3 = `
+CREATE TABLE controller_registries (
+    controller_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL CHECK (revision >= 0)
+) STRICT;
+
+WITH controllers(controller_id) AS (
+    SELECT controller_id FROM credentials
+    UNION
+    SELECT controller_id FROM devices
+    UNION
+    SELECT controller_id FROM trees
+)
+INSERT INTO controller_registries(controller_id, revision)
+SELECT
+    controllers.controller_id,
+    max(
+        coalesce(
+            (SELECT integer_value FROM metadata WHERE key = 'registry_revision'),
+            0
+        ),
+        coalesce(
+            (SELECT max(devices.revision)
+             FROM devices
+             WHERE devices.controller_id = controllers.controller_id),
+            0
+        )
+    )
+FROM controllers;
+
+PRAGMA user_version = 3;
+`
+
 func (s *Store) migrate(ctx context.Context) error {
 	return s.withImmediateTransaction(ctx, func(connection *sql.Conn) error {
 		var version int
@@ -98,6 +131,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		if version == 1 {
 			if _, err := connection.ExecContext(ctx, schemaV2); err != nil {
 				return fmt.Errorf("migrate broker state schema to version 2: %w", err)
+			}
+			version = 2
+		}
+		if version == 2 {
+			if _, err := connection.ExecContext(ctx, schemaV3); err != nil {
+				return fmt.Errorf("migrate broker state schema to version 3: %w", err)
 			}
 		}
 		return nil

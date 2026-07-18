@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -194,6 +196,175 @@ VALUES (?, ?, ?, ?, 0, 1700000000), (?, ?, ?, ?, 1, 1700000001)
 	}
 	if _, err := store.AuthenticateCredential(context.Background(), disabledMAC); !errors.Is(err, ErrCredentialDisabled) {
 		t.Fatalf("migrated disabled authentication error = %v, want ErrCredentialDisabled", err)
+	}
+}
+
+func TestOpenMigratesVersionTwoControllerRevisions(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "broker.sqlite3")
+	db, err := sql.Open("sqlite", dataSourceName(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaV1); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaV2); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	const (
+		secondControllerID     = "123e4567-e89b-42d3-a456-426614174020"
+		credentialControllerID = "123e4567-e89b-42d3-a456-426614174022"
+		treeControllerID       = "123e4567-e89b-42d3-a456-426614174023"
+	)
+	if _, err := db.Exec("UPDATE metadata SET integer_value = 9 WHERE key = 'registry_revision'"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+INSERT INTO devices(
+    controller_id, device_id, name, role, os, arch, runtime_version,
+    protocol_version, features_json, online, last_seen_at, revision
+) VALUES
+    (?, ?, 'first', 'device', 'linux', 'amd64', 'test', 1, '[]', 1, 1, 7),
+    (?, ?, 'second', 'device', 'windows', 'amd64', 'test', 1, '[]', 0, 2, 12)
+`,
+		testControllerID,
+		testDeviceID,
+		secondControllerID,
+		"123e4567-e89b-42d3-a456-426614174021",
+	); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	credentialMAC := CredentialMAC{3}
+	if _, err := db.Exec(`
+INSERT INTO credentials(
+    controller_id, device_id, role, token_mac, disabled, issued_at, pending
+) VALUES (?, ?, 'device', ?, 0, 3, 0)
+`, credentialControllerID, "123e4567-e89b-42d3-a456-426614174024", credentialMAC[:]); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+INSERT INTO trees(
+    controller_id, external_thread_id, tree_id, root_agent_id, root_device_id, created_at
+) VALUES (?, ?, ?, ?, ?, 4)
+`,
+		treeControllerID,
+		"123e4567-e89b-42d3-a456-426614174025",
+		"123e4567-e89b-42d3-a456-426614174026",
+		"123e4567-e89b-42d3-a456-426614174027",
+		"123e4567-e89b-42d3-a456-426614174028",
+	); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	registry, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registry.Close()
+	rows, err := registry.db.Query(`
+SELECT controller_id, revision FROM controller_registries ORDER BY controller_id
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]int64{}
+	for rows.Next() {
+		var controllerID string
+		var revision int64
+		if err := rows.Scan(&controllerID, &revision); err != nil {
+			t.Fatal(err)
+		}
+		got[controllerID] = revision
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int64{
+		testControllerID:       9,
+		secondControllerID:     12,
+		credentialControllerID: 9,
+		treeControllerID:       9,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("controller revisions = %#v, want %#v", got, want)
+	}
+}
+
+func TestOpenMigratesVersionTwoRevisionBoundaries(t *testing.T) {
+	for _, testCase := range []struct {
+		name           string
+		globalRevision int64
+		wantRevision   int64
+	}{
+		{name: "negative becomes zero", globalRevision: -1, wantRevision: 0},
+		{name: "maximum is preserved", globalRevision: math.MaxInt64, wantRevision: math.MaxInt64},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			directory := filepath.Join(t.TempDir(), "state")
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(directory, "broker.sqlite3")
+			db, err := sql.Open("sqlite", dataSourceName(path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(schemaV1); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(schemaV2); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			mac := CredentialMAC{4}
+			if _, err := db.Exec(`
+INSERT INTO credentials(
+    controller_id, device_id, role, token_mac, disabled, issued_at, pending
+) VALUES (?, ?, 'device', ?, 0, 1, 0)
+`, testControllerID, testDeviceID, mac[:]); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(
+				"UPDATE metadata SET integer_value = ? WHERE key = 'registry_revision'",
+				testCase.globalRevision,
+			); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			registry, err := Open(context.Background(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer registry.Close()
+			var revision int64
+			if err := registry.db.QueryRow(`
+SELECT revision FROM controller_registries WHERE controller_id = ?
+`, testControllerID).Scan(&revision); err != nil {
+				t.Fatal(err)
+			}
+			if revision != testCase.wantRevision {
+				t.Fatalf("migrated revision = %d, want %d", revision, testCase.wantRevision)
+			}
+		})
 	}
 }
 
