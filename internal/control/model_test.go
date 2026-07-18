@@ -97,7 +97,7 @@ func TestWireIdentityDoesNotContainCapabilities(t *testing.T) {
 }
 
 func TestDeviceMetadataIsBounded(t *testing.T) {
-	device := Device{
+	descriptor := DeviceDescriptor{
 		ControllerID:    testControllerID,
 		DeviceID:        testDeviceID,
 		Name:            "windows-builder",
@@ -108,11 +108,61 @@ func TestDeviceMetadataIsBounded(t *testing.T) {
 		ProtocolVersion: 1,
 		Features:        []string{"deviceRegistryV1", "fullDuplexRpcV1"},
 	}
+	if err := descriptor.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	device := Device{
+		ControllerID:    descriptor.ControllerID,
+		DeviceID:        descriptor.DeviceID,
+		Name:            descriptor.Name,
+		Role:            descriptor.Role,
+		OS:              descriptor.OS,
+		Arch:            descriptor.Arch,
+		RuntimeVersion:  descriptor.RuntimeVersion,
+		ProtocolVersion: descriptor.ProtocolVersion,
+		Features:        descriptor.Features,
+		Revision:        1,
+	}
 	if err := device.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	device.Name = strings.Repeat("n", 129)
+	device.Revision = 0
 	if err := device.Validate(); err == nil {
+		t.Fatal("device accepted a zero revision")
+	}
+	descriptor.Name = strings.Repeat("n", 129)
+	if err := descriptor.Validate(); err == nil {
 		t.Fatal("device accepted an oversized name")
+	}
+}
+
+func TestDeviceDescriptorExcludesBrokerPresence(t *testing.T) {
+	device := Device{
+		ControllerID:    testControllerID,
+		DeviceID:        testDeviceID,
+		Name:            "builder",
+		Role:            DeviceRoleWorker,
+		OS:              "linux",
+		Arch:            "amd64",
+		RuntimeVersion:  "test",
+		ProtocolVersion: 1,
+		Features:        []string{"deviceRegistryV1"},
+		Online:          true,
+		LastSeenAt:      10,
+		Revision:        2,
+	}
+	descriptor := device.Descriptor()
+	data, err := json.Marshal(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, brokerField := range [][]byte{[]byte("online"), []byte("lastSeenAt"), []byte("revision")} {
+		if bytes.Contains(data, brokerField) {
+			t.Fatalf("descriptor exposed broker field %q: %s", brokerField, data)
+		}
+	}
+	descriptor.Features[0] = "modified"
+	if device.Features[0] == descriptor.Features[0] {
+		t.Fatal("descriptor features share device backing storage")
 	}
 }

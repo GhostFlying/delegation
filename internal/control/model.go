@@ -198,9 +198,48 @@ type Device struct {
 	Revision        uint64     `json:"revision"`
 }
 
+type DeviceDescriptor struct {
+	ControllerID    string     `json:"controllerId"`
+	DeviceID        string     `json:"deviceId"`
+	Name            string     `json:"name"`
+	Role            DeviceRole `json:"role"`
+	OS              string     `json:"os"`
+	Arch            string     `json:"arch"`
+	RuntimeVersion  string     `json:"runtimeVersion"`
+	ProtocolVersion int        `json:"protocolVersion"`
+	Features        []string   `json:"features"`
+}
+
 var featurePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]{0,63}$`)
 
 func (d Device) Validate() error {
+	if err := d.Descriptor().Validate(); err != nil {
+		return err
+	}
+	if d.LastSeenAt < 0 {
+		return errors.New("lastSeenAt must not be negative")
+	}
+	if d.Revision == 0 {
+		return errors.New("revision must be positive")
+	}
+	return nil
+}
+
+func (d Device) Descriptor() DeviceDescriptor {
+	return DeviceDescriptor{
+		ControllerID:    d.ControllerID,
+		DeviceID:        d.DeviceID,
+		Name:            d.Name,
+		Role:            d.Role,
+		OS:              d.OS,
+		Arch:            d.Arch,
+		RuntimeVersion:  d.RuntimeVersion,
+		ProtocolVersion: d.ProtocolVersion,
+		Features:        slices.Clone(d.Features),
+	}
+}
+
+func (d DeviceDescriptor) Validate() error {
 	if err := identity.ValidateID(d.ControllerID); err != nil {
 		return fmt.Errorf("controllerId %w", err)
 	}
@@ -243,9 +282,6 @@ func (d Device) Validate() error {
 			return errors.New("features must be sorted and unique")
 		}
 		previous = feature
-	}
-	if d.LastSeenAt < 0 {
-		return errors.New("lastSeenAt must not be negative")
 	}
 	return nil
 }
