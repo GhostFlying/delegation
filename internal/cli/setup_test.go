@@ -270,68 +270,157 @@ func TestSetupControllerWithTokenAuthentication(t *testing.T) {
 	}
 }
 
-func TestSetupBrokerRejectsUnauthenticatedNonLoopback(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+func TestSetupClientRequiresAcknowledgementForRemotePlaintext(t *testing.T) {
+	for _, role := range []string{"controller", "device"} {
+		for _, authMode := range []string{"none", "token"} {
+			t.Run(role+"/"+authMode, func(t *testing.T) {
+				dir := t.TempDir()
+				configPath := filepath.Join(dir, role+".json")
+				args := []string{
+					"setup", role,
+					"--config", configPath,
+					"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+					"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+					"--device-name", "managed-device",
+					"--broker-url", "ws://broker.example.test:8787",
+					"--auth-mode", authMode,
+				}
+				if authMode == "token" {
+					tokenPath := filepath.Join(dir, role+".token")
+					if _, err := tokenfile.Ensure(tokenPath); err != nil {
+						t.Fatal(err)
+					}
+					args = append(args, "--token-file", tokenPath)
+				}
 
-	code := Run([]string{
-		"setup", "broker",
-		"--config", configPath,
-		"--listen", "0.0.0.0:8787",
-		"--auth-mode", "none",
-	}, &stdout, &stderr)
+				var stdout bytes.Buffer
+				var stderr bytes.Buffer
+				if code := Run(args, &stdout, &stderr); code == 0 {
+					t.Fatal("setup accepted remote plaintext transport without acknowledgement")
+				}
+				if !strings.Contains(stderr.String(), "requires explicit acknowledgement") {
+					t.Fatalf("stderr = %q", stderr.String())
+				}
+				if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+					t.Fatalf("config was created after failed setup: %v", err)
+				}
 
-	if code == 0 {
-		t.Fatal("setup accepted unauthenticated non-loopback listener")
-	}
-	if !strings.Contains(stderr.String(), "requires explicit acknowledgement") {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
-		t.Fatalf("config was created after failed setup: %v", err)
+				stdout.Reset()
+				stderr.Reset()
+				args = append(args, "--allow-insecure-nonloopback")
+				if code := Run(args, &stdout, &stderr); code != 0 {
+					t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+				}
+				for _, text := range []string{"warning", "ws://broker.example.test:8787", "plaintext non-loopback", "Tailscale"} {
+					if !strings.Contains(stderr.String(), text) {
+						t.Fatalf("stderr = %q, want %q", stderr.String(), text)
+					}
+				}
+				cfg, err := delegationconfig.Read(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if cfg.Role != delegationconfig.Role(role) || !cfg.Broker.AllowInsecureNonLoopback {
+					t.Fatalf("config = %#v", cfg)
+				}
+			})
+		}
 	}
 }
 
-func TestSetupBrokerWarnsForAcknowledgedUnauthenticatedNonLoopback(t *testing.T) {
-	for _, listen := range []string{"0.0.0.0:8787", "[::]:8787", "broker.example.test:8787"} {
-		t.Run(listen, func(t *testing.T) {
-			configPath := filepath.Join(t.TempDir(), "config.json")
+func TestSetupClientWarningFailureDoesNotCreateConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "device.json")
+	var stdout bytes.Buffer
+	code := Run([]string{
+		"setup", "device",
+		"--config", configPath,
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--device-name", "managed-device",
+		"--broker-url", "ws://broker.example.test:8787",
+		"--auth-mode", "none",
+		"--allow-insecure-nonloopback",
+	}, &stdout, setupFailingWriter{})
+
+	if code == 0 {
+		t.Fatal("setup ignored a security warning output failure")
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("config was created without a delivered security warning: %v", err)
+	}
+}
+
+func TestSetupBrokerRejectsUnacknowledgedNonLoopback(t *testing.T) {
+	for _, authMode := range []string{"none", "token"} {
+		t.Run(authMode, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.json")
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 
 			code := Run([]string{
 				"setup", "broker",
 				"--config", configPath,
-				"--listen", listen,
-				"--auth-mode", "none",
-				"--allow-insecure-nonloopback",
-				"--json",
+				"--listen", "0.0.0.0:8787",
+				"--auth-mode", authMode,
 			}, &stdout, &stderr)
 
-			if code != 0 {
-				t.Fatalf("setup code = %d, want 0; stderr = %q", code, stderr.String())
+			if code == 0 {
+				t.Fatal("setup accepted unacknowledged non-loopback listener")
 			}
-			for _, text := range []string{"warning", listen, "unauthenticated non-loopback", "external trusted network boundary"} {
-				if !strings.Contains(stderr.String(), text) {
-					t.Fatalf("stderr = %q, want %q", stderr.String(), text)
+			if !strings.Contains(stderr.String(), "requires explicit acknowledgement") {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+			for _, path := range []string{configPath, filepath.Join(dir, "secrets", "broker.token")} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("setup created %s after failed setup: %v", path, err)
 				}
 			}
-			var result setupResult
-			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-				t.Fatal(err)
-			}
-			if result.Role != delegationconfig.RoleBroker || result.ConfigPath != configPath {
-				t.Fatalf("setup result = %#v", result)
-			}
-			cfg, err := delegationconfig.Read(configPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !cfg.Broker.AllowInsecureNonLoopback || cfg.Broker.Auth.Mode != delegationconfig.AuthModeNone {
-				t.Fatalf("broker config = %#v", cfg.Broker)
-			}
 		})
+	}
+}
+
+func TestSetupBrokerWarnsForAcknowledgedNonLoopback(t *testing.T) {
+	for _, authMode := range []string{"none", "token"} {
+		for _, listen := range []string{"0.0.0.0:8787", "[::]:8787", "broker.example.test:8787"} {
+			t.Run(authMode+"/"+listen, func(t *testing.T) {
+				configPath := filepath.Join(t.TempDir(), "config.json")
+				var stdout bytes.Buffer
+				var stderr bytes.Buffer
+
+				code := Run([]string{
+					"setup", "broker",
+					"--config", configPath,
+					"--listen", listen,
+					"--auth-mode", authMode,
+					"--allow-insecure-nonloopback",
+					"--json",
+				}, &stdout, &stderr)
+
+				if code != 0 {
+					t.Fatalf("setup code = %d, want 0; stderr = %q", code, stderr.String())
+				}
+				for _, text := range []string{"warning", listen, "plaintext non-loopback", "Tailscale"} {
+					if !strings.Contains(stderr.String(), text) {
+						t.Fatalf("stderr = %q, want %q", stderr.String(), text)
+					}
+				}
+				var result setupResult
+				if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				if result.Role != delegationconfig.RoleBroker || result.ConfigPath != configPath {
+					t.Fatalf("setup result = %#v", result)
+				}
+				cfg, err := delegationconfig.Read(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !cfg.Broker.AllowInsecureNonLoopback || cfg.Broker.Auth.Mode != delegationconfig.AuthMode(authMode) {
+					t.Fatalf("broker config = %#v", cfg.Broker)
+				}
+			})
+		}
 	}
 }
 
@@ -345,7 +434,7 @@ func TestSetupBrokerDoesNotWarnForSafeListener(t *testing.T) {
 		{name: "IPv4 loopback", listen: "127.0.0.1:8787", authMode: "none", allow: true},
 		{name: "IPv6 loopback", listen: "[::1]:8787", authMode: "none", allow: true},
 		{name: "localhost", listen: "LOCALHOST:8787", authMode: "none", allow: true},
-		{name: "authenticated non-loopback", listen: "0.0.0.0:8787", authMode: "token"},
+		{name: "token IPv4 loopback", listen: "127.0.0.1:8787", authMode: "token", allow: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -375,14 +464,14 @@ func TestSetupBrokerDoesNotWarnForSafeListener(t *testing.T) {
 }
 
 func TestSetupBrokerWarningFailureDoesNotCreateConfig(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
 	var stdout bytes.Buffer
 
 	code := Run([]string{
 		"setup", "broker",
 		"--config", configPath,
 		"--listen", "0.0.0.0:8787",
-		"--auth-mode", "none",
 		"--allow-insecure-nonloopback",
 	}, &stdout, setupFailingWriter{})
 
@@ -391,6 +480,10 @@ func TestSetupBrokerWarningFailureDoesNotCreateConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 		t.Fatalf("config was created without a delivered security warning: %v", err)
+	}
+	tokenPath := filepath.Join(dir, "secrets", "broker.token")
+	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+		t.Fatalf("token was created without a delivered security warning: %v", err)
 	}
 }
 

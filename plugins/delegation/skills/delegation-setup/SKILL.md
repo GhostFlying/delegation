@@ -36,24 +36,31 @@ Choose exactly one role and run the launcher with `setup <role> --help` before w
 configuration:
 
 - Use `setup broker` to create a trust domain and listener configuration. Token authentication is
-  the default and creates a protected token file when none is supplied. For auth mode `none`, keep
-  the listener on loopback unless the user explicitly accepts `--allow-insecure-nonloopback`.
+  the default and creates a protected token file when none is supplied. Keep the plaintext listener
+  on loopback unless the user explicitly accepts `--allow-insecure-nonloopback` and supplies an
+  encrypted private-network or tunnel boundary.
   The broker state path is stored in the configuration; use `--state` only during setup when the
   default path beside the configuration is unsuitable.
 - Use `setup controller` for a device that hosts root tasks. Supply the broker URL, controller ID,
   and an existing token file when token authentication is enabled. Also supply the device ID that
-  the broker assigned when it issued that token.
+  the broker assigned when it issued that token. Prefer `wss://`; a non-loopback `ws://` URL
+  requires `--allow-insecure-nonloopback` and an encrypted private-network or tunnel boundary.
 - Use `setup device` for a worker-only device. Supply the same controller ID, the broker URL, and
   that device's token file. Token authentication requires the device ID that the broker assigned
-  when it issued the token; setup generates an ID only when authentication mode is `none`.
+  when it issued the token; setup generates an ID only when authentication mode is `none`. Apply
+  the same `wss://` or explicitly acknowledged protected `ws://` rule as for controllers.
 
 Never pass token material as a command-line argument. Configuration stores only the absolute token
 file path and refuses to overwrite an existing configuration.
 
-Schema v1 broker configuration requires an explicit migration. Back it up and move it aside, then
-rerun `setup broker` with every existing setting: controller ID, listener, authentication mode,
-master token path when used, actual state database, and insecure non-loopback acknowledgement when
-previously required. Do not infer old values from new defaults or create a fresh database.
+Schema v3 makes plaintext non-loopback acknowledgement consistent for every authentication mode
+and role. Schema v1 and v2 require explicit migration. Back up and move an old broker configuration
+aside, then rerun `setup broker` with every existing setting: controller ID, listener,
+authentication mode, master token path when used, actual state database, and
+`--allow-insecure-nonloopback` for any non-loopback listener. For an old controller or device,
+preserve its identity, name, broker URL, authentication mode, and token path; add the acknowledgement
+only for a non-loopback `ws://` URL. Do not infer old values from new defaults or create a fresh
+database.
 
 After configuration succeeds, run the launcher with `service install --config <path>` to prepare
 the current platform's user-service definition. M0 leaves it inactive and refuses to replace an

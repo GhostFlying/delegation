@@ -16,7 +16,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/identity"
 )
 
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 type Role string
 
@@ -108,19 +108,13 @@ func (c Config) Validate() error {
 	if c.SchemaVersion != CurrentSchemaVersion {
 		if c.SchemaVersion < CurrentSchemaVersion {
 			if c.Role == RoleBroker {
-				if c.Broker.Auth.Mode != AuthModeToken {
-					return fmt.Errorf(
-						"config schema version %d is obsolete; back up and move the config aside, then rerun setup broker with all existing settings, including --controller-id, --listen, --auth-mode, --state, and --allow-insecure-nonloopback when previously required",
-						c.SchemaVersion,
-					)
-				}
 				return fmt.Errorf(
-					"config schema version %d is obsolete; back up and move the config aside, then rerun setup broker with all existing settings, including --controller-id, --listen, --auth-mode, --token-file, and --state",
+					"config schema version %d is obsolete; back up and move the config aside, then rerun setup broker with all existing settings, including --controller-id, --listen, --auth-mode, --token-file when token authentication is used, --state, and --allow-insecure-nonloopback for any non-loopback listener",
 					c.SchemaVersion,
 				)
 			}
 			return fmt.Errorf(
-				"config schema version %d is obsolete; back up and move the config aside, then rerun setup with the existing identity, broker URL, authentication mode, and token path when used",
+				"config schema version %d is obsolete; back up and move the config aside, then rerun setup for the same role with the existing --controller-id, --device-id, --device-name, --broker-url, --auth-mode, --token-file when token authentication is used, and --allow-insecure-nonloopback when the broker URL is non-loopback ws://",
 				c.SchemaVersion,
 			)
 		}
@@ -138,7 +132,7 @@ func (c Config) Validate() error {
 		if !filepath.IsAbs(c.Broker.StateFile) {
 			return errors.New("broker stateFile must be an absolute path")
 		}
-		if err := validateListen(c.Broker.Listen, c.Broker.Auth.Mode, c.Broker.AllowInsecureNonLoopback); err != nil {
+		if err := validateListen(c.Broker.Listen, c.Broker.AllowInsecureNonLoopback); err != nil {
 			return err
 		}
 	case RoleController, RoleDevice:
@@ -148,10 +142,10 @@ func (c Config) Validate() error {
 		if strings.TrimSpace(c.DeviceName) == "" {
 			return errors.New("deviceName must not be empty")
 		}
-		if c.Broker.Listen != "" || c.Broker.StateFile != "" || c.Broker.AllowInsecureNonLoopback {
+		if c.Broker.Listen != "" || c.Broker.StateFile != "" {
 			return errors.New("controller and device config must not contain broker listener or state fields")
 		}
-		if err := validateBrokerURL(c.Broker.URL, c.Broker.Auth.Mode); err != nil {
+		if err := validateBrokerURL(c.Broker.URL, c.Broker.AllowInsecureNonLoopback); err != nil {
 			return err
 		}
 	default:
@@ -177,7 +171,7 @@ func (a AuthConfig) validate() error {
 	return nil
 }
 
-func validateBrokerURL(raw string, mode AuthMode) error {
+func validateBrokerURL(raw string, allowInsecureNonLoopback bool) error {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
 		return errors.New("broker URL must be an absolute ws:// or wss:// URL")
@@ -185,11 +179,8 @@ func validateBrokerURL(raw string, mode AuthMode) error {
 	if parsed.Scheme != "ws" && parsed.Scheme != "wss" {
 		return errors.New("broker URL must use ws:// or wss://")
 	}
-	if mode == AuthModeToken && parsed.Scheme != "wss" {
-		return errors.New("token authentication requires a wss:// broker URL")
-	}
-	if parsed.Scheme == "ws" && !loopbackHost(parsed.Hostname()) {
-		return errors.New("plaintext ws:// broker URLs are allowed only for loopback hosts")
+	if parsed.Scheme == "ws" && !loopbackHost(parsed.Hostname()) && !allowInsecureNonLoopback {
+		return errors.New("plaintext non-loopback broker URL requires explicit acknowledgement")
 	}
 	if port := parsed.Port(); port != "" {
 		portNumber, err := strconv.Atoi(port)
@@ -215,7 +206,7 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 	return errors.New("config must contain exactly one JSON value")
 }
 
-func validateListen(address string, mode AuthMode, allowInsecure bool) error {
+func validateListen(address string, allowInsecureNonLoopback bool) error {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("broker listen address must be host:port: %w", err)
@@ -224,16 +215,28 @@ func validateListen(address string, mode AuthMode, allowInsecure bool) error {
 	if err != nil || portNumber < 1 || portNumber > 65535 {
 		return errors.New("broker listen port must be an integer from 1 through 65535")
 	}
-	if allowInsecure && mode != AuthModeNone {
-		return errors.New("non-loopback acknowledgement is valid only when auth mode is none")
-	}
-	if mode != AuthModeNone || loopbackHost(host) {
+	if loopbackHost(host) {
 		return nil
 	}
-	if !allowInsecure {
-		return errors.New("unauthenticated non-loopback listener requires explicit acknowledgement")
+	if !allowInsecureNonLoopback {
+		return errors.New("plaintext non-loopback listener requires explicit acknowledgement")
 	}
 	return nil
+}
+
+// UsesInsecureNonLoopbackTransport reports whether the configured network hop
+// relies on an external encrypted network or tunnel for transport security.
+func (c Config) UsesInsecureNonLoopbackTransport() bool {
+	switch c.Role {
+	case RoleBroker:
+		host, _, err := net.SplitHostPort(c.Broker.Listen)
+		return err == nil && !loopbackHost(host)
+	case RoleController, RoleDevice:
+		parsed, err := url.Parse(c.Broker.URL)
+		return err == nil && parsed.Scheme == "ws" && !loopbackHost(parsed.Hostname())
+	default:
+		return false
+	}
 }
 
 func loopbackHost(host string) bool {

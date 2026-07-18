@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,7 +55,7 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	statePath := flags.String("state", "", "broker state database path; defaults beside the config")
 	authMode := flags.String("auth-mode", string(delegationconfig.AuthModeToken), "authentication mode: token or none")
 	tokenFile := flags.String("token-file", "", "token file path; generated when omitted in token mode")
-	allowInsecure := flags.Bool("allow-insecure-nonloopback", false, "acknowledge unauthenticated non-loopback listener")
+	allowInsecure := flags.Bool("allow-insecure-nonloopback", false, "acknowledge plaintext non-loopback transport")
 	jsonOutput := flags.Bool("json", false, "print setup result as JSON")
 	if code := parseFlags(flags, args); code >= 0 {
 		return code
@@ -105,6 +104,9 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	if err := rejectCredentialAuthorityPathCollisions(resolvedConfig, resolvedState, auth.TokenFile); err != nil {
 		return writeError(stderr, err)
 	}
+	if err := writeInsecureTransportWarning(stderr, cfg); err != nil {
+		return writeError(stderr, err)
+	}
 	if auth.Mode == delegationconfig.AuthModeToken {
 		equivalent, err := pathsEquivalent(resolvedConfig, auth.TokenFile)
 		if err != nil {
@@ -115,20 +117,6 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 		}
 		if _, err := tokenfile.Ensure(auth.TokenFile); err != nil {
 			return writeError(stderr, err)
-		}
-	}
-	listenerHost, _, _ := net.SplitHostPort(cfg.Broker.Listen)
-	listenerIP := net.ParseIP(listenerHost)
-	insecureNonLoopback := cfg.Broker.Auth.Mode == delegationconfig.AuthModeNone &&
-		!strings.EqualFold(listenerHost, "localhost") &&
-		(listenerIP == nil || !listenerIP.IsLoopback())
-	if insecureNonLoopback {
-		if _, err := fmt.Fprintf(
-			stderr,
-			"delegation: warning: broker %s accepts unauthenticated non-loopback connections; enforce an external trusted network boundary\n",
-			cfg.Broker.Listen,
-		); err != nil {
-			return writeError(stderr, fmt.Errorf("write security warning: %w", err))
 		}
 	}
 	if err := delegationconfig.WriteNew(resolvedConfig, cfg); err != nil {
@@ -157,6 +145,7 @@ func runSetupDevice(role delegationconfig.Role, args []string, stdout, stderr io
 	brokerURL := flags.String("broker-url", "", "broker ws:// or wss:// URL")
 	authMode := flags.String("auth-mode", string(delegationconfig.AuthModeToken), "authentication mode: token or none")
 	tokenFile := flags.String("token-file", "", "existing device token file path")
+	allowInsecure := flags.Bool("allow-insecure-nonloopback", false, "acknowledge plaintext non-loopback transport")
 	jsonOutput := flags.Bool("json", false, "print setup result as JSON")
 	if code := parseFlags(flags, args); code >= 0 {
 		return code
@@ -197,8 +186,9 @@ func runSetupDevice(role delegationconfig.Role, args []string, stdout, stderr io
 		DeviceID:      *deviceID,
 		DeviceName:    *deviceName,
 		Broker: delegationconfig.BrokerConfig{
-			URL:  *brokerURL,
-			Auth: auth,
+			URL:                      *brokerURL,
+			Auth:                     auth,
+			AllowInsecureNonLoopback: *allowInsecure,
 		},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -212,6 +202,9 @@ func runSetupDevice(role delegationconfig.Role, args []string, stdout, stderr io
 			return writeError(stderr, err)
 		}
 	}
+	if err := writeInsecureTransportWarning(stderr, cfg); err != nil {
+		return writeError(stderr, err)
+	}
 	if err := delegationconfig.WriteNew(resolvedConfig, cfg); err != nil {
 		return writeError(stderr, err)
 	}
@@ -222,6 +215,26 @@ func runSetupDevice(role delegationconfig.Role, args []string, stdout, stderr io
 		DeviceID:     cfg.DeviceID,
 		TokenFile:    auth.TokenFile,
 	}, *jsonOutput)
+}
+
+func writeInsecureTransportWarning(stderr io.Writer, cfg delegationconfig.Config) error {
+	if !cfg.UsesInsecureNonLoopbackTransport() {
+		return nil
+	}
+	var endpoint string
+	if cfg.Role == delegationconfig.RoleBroker {
+		endpoint = "listener " + cfg.Broker.Listen
+	} else {
+		endpoint = "broker URL " + cfg.Broker.URL
+	}
+	if _, err := fmt.Fprintf(
+		stderr,
+		"delegation: warning: %s uses plaintext non-loopback transport; restrict this endpoint to a trusted encrypted private network such as Tailscale or an encrypted tunnel\n",
+		endpoint,
+	); err != nil {
+		return fmt.Errorf("write security warning: %w", err)
+	}
+	return nil
 }
 
 func resolveAuth(rawMode, rawTokenFile, defaultTokenFile string) (delegationconfig.AuthConfig, error) {
