@@ -68,6 +68,34 @@ func TestWriteNewAndReadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncodeAndParseRoundTrip(t *testing.T) {
+	token := Token{1, 2, 3, 4}
+	encoded := Encode(token)
+	parsed, err := Parse(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed != token {
+		t.Fatalf("Parse(Encode(token)) = %#v, want %#v", parsed, token)
+	}
+	nonCanonical := encoded[:len(encoded)-1] + "B"
+	decoded, err := base64.RawURLEncoding.DecodeString(nonCanonical)
+	if err != nil || !bytes.Equal(decoded, token[:]) {
+		t.Fatalf("non-canonical fixture did not decode to the same token: %x, %v", decoded, err)
+	}
+	for _, malformed := range []string{
+		encoded + "\n",
+		encoded + "=",
+		" " + encoded,
+		"+" + encoded[1:],
+		nonCanonical,
+	} {
+		if _, err := Parse(malformed); err == nil {
+			t.Fatalf("Parse accepted %q", malformed)
+		}
+	}
+}
+
 func TestValidateRejectsMalformedToken(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
 	overwriteProtectedToken(t, path, []byte("not-a-256-bit-token\n"))

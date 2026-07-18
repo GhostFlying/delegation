@@ -123,6 +123,50 @@ func TestMarshalAndReadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDecodePayloadRejectsUnknownAndTrailingData(t *testing.T) {
+	for _, payload := range []json.RawMessage{
+		json.RawMessage(`{"deviceId":"123e4567-e89b-42d3-a456-426614174003","unknown":true}`),
+		json.RawMessage(`{"deviceId":"123e4567-e89b-42d3-a456-426614174003"} {}`),
+	} {
+		if _, err := DecodePayload[DescribeDeviceParams](payload); err == nil {
+			t.Fatalf("DecodePayload accepted %s", payload)
+		}
+	}
+}
+
+func TestHelloDescriptorExcludesBrokerPresence(t *testing.T) {
+	hello := Hello{
+		ControllerID:   testControllerID,
+		DeviceID:       testDeviceID,
+		DeviceName:     "builder",
+		Role:           control.DeviceRoleWorker,
+		OS:             "windows",
+		Arch:           "amd64",
+		RuntimeVersion: "0.1.0-alpha.0",
+		Features:       []string{FeatureDeviceRegistry},
+	}
+	if err := hello.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := hello.Descriptor()
+	descriptor.Features[0] = "modified"
+	if hello.Features[0] == descriptor.Features[0] {
+		t.Fatal("hello descriptor shares feature storage")
+	}
+}
+
+func TestListDeviceParamsRequireRevisionBoundCursor(t *testing.T) {
+	params := ListDevicesParams{AfterDeviceID: testDeviceID, Limit: 10}
+	if err := params.Validate(100); err == nil {
+		t.Fatal("ListDevicesParams accepted an unbound cursor")
+	}
+	revision := uint64(4)
+	params.ExpectedRevision = &revision
+	if err := params.Validate(100); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func ptr[T any](value T) *T {
 	return &value
 }

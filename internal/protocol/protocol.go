@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -213,6 +214,23 @@ func Read(reader io.Reader) (Envelope, error) {
 	return envelope, nil
 }
 
+func DecodePayload[T any](payload json.RawMessage) (T, error) {
+	var value T
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return value, fmt.Errorf("decode protocol payload: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return value, errors.New("protocol payload must contain exactly one JSON value")
+		}
+		return value, fmt.Errorf("decode trailing protocol payload: %w", err)
+	}
+	return value, nil
+}
+
 func validateRequestID(value string) error {
 	if len(value) != 38 || value[1] != '_' {
 		return errors.New("must contain a direction prefix and UUID")
@@ -237,6 +255,24 @@ type Hello struct {
 	Cursor         uint64             `json:"cursor"`
 }
 
+func (h Hello) Descriptor() control.DeviceDescriptor {
+	return control.DeviceDescriptor{
+		ControllerID:    h.ControllerID,
+		DeviceID:        h.DeviceID,
+		Name:            h.DeviceName,
+		Role:            h.Role,
+		OS:              h.OS,
+		Arch:            h.Arch,
+		RuntimeVersion:  h.RuntimeVersion,
+		ProtocolVersion: Version,
+		Features:        append([]string(nil), h.Features...),
+	}
+}
+
+func (h Hello) Validate() error {
+	return h.Descriptor().Validate()
+}
+
 type HelloResult struct {
 	ConnectionID        string   `json:"connectionId"`
 	Features            []string `json:"features"`
@@ -244,8 +280,22 @@ type HelloResult struct {
 	Revision            uint64   `json:"revision"`
 }
 
+type Heartbeat struct{}
+
+type HeartbeatResult struct {
+	Revision   uint64 `json:"revision"`
+	ServerTime int64  `json:"serverTime"`
+}
+
 type EnsureRootTreeParams struct {
 	ExternalThreadID string `json:"externalThreadId"`
+}
+
+func (p EnsureRootTreeParams) Validate() error {
+	if err := identity.ValidateID(p.ExternalThreadID); err != nil {
+		return fmt.Errorf("externalThreadId %w", err)
+	}
+	return nil
 }
 
 type EnsureRootTreeResult struct {
@@ -253,13 +303,42 @@ type EnsureRootTreeResult struct {
 	Principal control.Principal `json:"principal"`
 }
 
+type ListDevicesParams struct {
+	AfterDeviceID    string  `json:"afterDeviceId,omitempty"`
+	Limit            int     `json:"limit"`
+	ExpectedRevision *uint64 `json:"expectedRevision,omitempty"`
+}
+
+func (p ListDevicesParams) Validate(maximumLimit int) error {
+	if p.AfterDeviceID != "" {
+		if err := identity.ValidateID(p.AfterDeviceID); err != nil {
+			return fmt.Errorf("afterDeviceId %w", err)
+		}
+		if p.ExpectedRevision == nil {
+			return errors.New("afterDeviceId requires expectedRevision")
+		}
+	}
+	if p.Limit < 1 || p.Limit > maximumLimit {
+		return fmt.Errorf("limit must be from 1 through %d", maximumLimit)
+	}
+	return nil
+}
+
 type ListDevicesResult struct {
-	Revision uint64           `json:"revision"`
-	Devices  []control.Device `json:"devices"`
+	Revision   uint64           `json:"revision"`
+	Devices    []control.Device `json:"devices"`
+	NextCursor string           `json:"nextCursor,omitempty"`
 }
 
 type DescribeDeviceParams struct {
 	DeviceID string `json:"deviceId"`
+}
+
+func (p DescribeDeviceParams) Validate() error {
+	if err := identity.ValidateID(p.DeviceID); err != nil {
+		return fmt.Errorf("deviceId %w", err)
+	}
+	return nil
 }
 
 type DescribeDeviceResult struct {

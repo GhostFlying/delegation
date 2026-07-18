@@ -14,6 +14,7 @@ import (
 
 const (
 	tokenBytes       = 32
+	tokenEncodedSize = 43
 	maxTokenFileSize = 128
 )
 
@@ -23,6 +24,26 @@ func Generate() (Token, error) {
 	var token Token
 	if _, err := rand.Read(token[:]); err != nil {
 		return Token{}, fmt.Errorf("generate token: %w", err)
+	}
+	return token, nil
+}
+
+func Encode(token Token) string {
+	return base64.RawURLEncoding.EncodeToString(token[:])
+}
+
+func Parse(value string) (Token, error) {
+	if len(value) != tokenEncodedSize {
+		return Token{}, errors.New("token must be one 256-bit base64url value")
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(decoded) != tokenBytes {
+		return Token{}, errors.New("token must be one 256-bit base64url value")
+	}
+	var token Token
+	copy(token[:], decoded)
+	if Encode(token) != value {
+		return Token{}, errors.New("token must use canonical base64url encoding")
 	}
 	return token, nil
 }
@@ -63,7 +84,7 @@ func WriteNew(path string, token Token) (bool, error) {
 	if err := validateTokenDirectory(filepath.Dir(path)); err != nil {
 		return false, err
 	}
-	encoded := base64.RawURLEncoding.EncodeToString(token[:]) + "\n"
+	encoded := Encode(token) + "\n"
 
 	tempPath, file, err := createSecureTemp(filepath.Dir(path))
 	if err != nil {
@@ -160,12 +181,10 @@ func openAndRead(path string) (Token, *os.File, os.FileInfo, error) {
 		return fail(errors.New("token file is too large"))
 	}
 	data = bytes.TrimSuffix(data, []byte("\n"))
-	decoded, err := base64.RawURLEncoding.DecodeString(string(data))
-	if err != nil || len(decoded) != tokenBytes {
+	token, err := Parse(string(data))
+	if err != nil {
 		return fail(errors.New("token file must contain one 256-bit base64url token"))
 	}
-	var token Token
-	copy(token[:], decoded)
 	return token, file, openedInfo, nil
 }
 
