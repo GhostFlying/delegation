@@ -84,7 +84,18 @@ INSERT INTO credentials(
 }
 
 func (s *Store) AuthenticateCredential(ctx context.Context, mac CredentialMAC) (Credential, error) {
-	credential, err := scanCredential(s.db.QueryRowContext(ctx, `
+	credential, err := queryCredentialByMAC(ctx, s.db, mac)
+	if err != nil {
+		return Credential{}, err
+	}
+	if credential.Disabled || credential.Pending {
+		return Credential{}, ErrCredentialDisabled
+	}
+	return credential, nil
+}
+
+func queryCredentialByMAC(ctx context.Context, queryer rowQueryer, mac CredentialMAC) (Credential, error) {
+	credential, err := scanCredential(queryer.QueryRowContext(ctx, `
 SELECT controller_id, device_id, role, token_mac, disabled, issued_at, pending
 FROM credentials
 WHERE token_mac = ?
@@ -95,9 +106,6 @@ WHERE token_mac = ?
 	if subtle.ConstantTimeCompare(credential.MAC[:], mac[:]) != 1 {
 		return Credential{}, ErrNotFound
 	}
-	if credential.Disabled || credential.Pending {
-		return Credential{}, ErrCredentialDisabled
-	}
 	return credential, nil
 }
 
@@ -105,7 +113,11 @@ func (s *Store) Credential(ctx context.Context, controllerID, deviceID string) (
 	if err := validateCredentialIdentity(controllerID, deviceID); err != nil {
 		return Credential{}, err
 	}
-	return scanCredential(s.db.QueryRowContext(ctx, `
+	return queryCredential(ctx, s.db, controllerID, deviceID)
+}
+
+func queryCredential(ctx context.Context, queryer rowQueryer, controllerID, deviceID string) (Credential, error) {
+	return scanCredential(queryer.QueryRowContext(ctx, `
 SELECT controller_id, device_id, role, token_mac, disabled, issued_at, pending
 FROM credentials
 WHERE controller_id = ? AND device_id = ?
@@ -156,14 +168,45 @@ func (s *Store) DisableCredential(ctx context.Context, controllerID, deviceID st
 	if err := validateCredentialIdentity(controllerID, deviceID); err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `
+	return s.withImmediateTransaction(ctx, func(connection *sql.Conn) error {
+		if _, err := queryCredential(ctx, connection, controllerID, deviceID); err != nil {
+			return err
+		}
+		if _, err := connection.ExecContext(ctx, `
 UPDATE credentials SET disabled = 1, pending = 0
 WHERE controller_id = ? AND device_id = ?
-`, controllerID, deviceID)
-	if err != nil {
-		return fmt.Errorf("disable device credential: %w", err)
-	}
-	return requireAffectedRow(result, "disable device credential")
+`, controllerID, deviceID); err != nil {
+			return fmt.Errorf("disable device credential: %w", err)
+		}
+		var online bool
+		err := connection.QueryRowContext(ctx, `
+SELECT online FROM devices WHERE controller_id = ? AND device_id = ?
+`, controllerID, deviceID).Scan(&online)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("load revoked device presence: %w", err)
+		}
+		if !online {
+			return nil
+		}
+		revision, err := nextControllerRevision(ctx, connection, controllerID)
+		if err != nil {
+			return err
+		}
+		if _, err := connection.ExecContext(ctx, `
+UPDATE devices SET online = 0, revision = ?
+WHERE controller_id = ? AND device_id = ?
+`, revision, controllerID, deviceID); err != nil {
+			return fmt.Errorf("mark revoked device offline: %w", err)
+		}
+		return nil
+	})
+}
+
+type rowQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 func scanCredential(row rowScanner) (Credential, error) {
