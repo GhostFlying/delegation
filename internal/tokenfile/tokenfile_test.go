@@ -43,6 +43,31 @@ func TestEnsureCreatesAndReusesProtectedToken(t *testing.T) {
 	}
 }
 
+func TestWriteNewAndReadRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets", "device.token")
+	token := Token{1, 2, 3}
+	created, err := WriteNew(path, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("WriteNew did not report creating the token")
+	}
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != token {
+		t.Fatalf("Read() = %#v, want %#v", got, token)
+	}
+	if _, err := WriteNew(path, Token{9}); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("second WriteNew error = %v, want os.ErrExist", err)
+	}
+	if got, err := Read(path); err != nil || got != token {
+		t.Fatalf("token after rejected replacement = %#v, %v", got, err)
+	}
+}
+
 func TestValidateRejectsMalformedToken(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
 	overwriteProtectedToken(t, path, []byte("not-a-256-bit-token\n"))
@@ -71,6 +96,55 @@ func TestValidateRejectsOversizedTokenFile(t *testing.T) {
 func TestEnsureRequiresAbsolutePath(t *testing.T) {
 	if _, err := Ensure("relative.token"); err == nil {
 		t.Fatal("Ensure() accepted a relative token path")
+	}
+}
+
+func TestReadRequiresAbsolutePath(t *testing.T) {
+	if _, err := Read("relative.token"); err == nil {
+		t.Fatal("Read accepted a relative token path")
+	}
+}
+
+func TestWriteNewPublishesOneCompleteTokenUnderContention(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "secrets")
+	path := filepath.Join(directory, "device.token")
+	tokens := []Token{{1}, {2}}
+	start := make(chan struct{})
+	results := make(chan error, len(tokens))
+	for _, token := range tokens {
+		go func() {
+			<-start
+			_, err := WriteNew(path, token)
+			results <- err
+		}()
+	}
+	close(start)
+
+	successes := 0
+	for range tokens {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if !errors.Is(err, os.ErrExist) {
+			t.Fatalf("WriteNew contention error = %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful WriteNew calls = %d, want 1", successes)
+	}
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != tokens[0] && got != tokens[1] {
+		t.Fatalf("published token = %#v, want one complete input token", got)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "device.token" {
+		t.Fatalf("token directory entries = %v, want only device.token", entries)
 	}
 }
 
