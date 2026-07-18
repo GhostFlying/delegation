@@ -248,7 +248,18 @@ func pathsEquivalent(first, second string) (bool, error) {
 	// A conservative folded comparison also covers case-insensitive macOS and
 	// removable filesystems. Distinct config and token names should not rely on
 	// case alone even when the current filesystem permits it.
-	return strings.EqualFold(firstCanonical, secondCanonical), nil
+	if strings.EqualFold(firstCanonical, secondCanonical) {
+		return true, nil
+	}
+	firstInfo, firstErr := os.Stat(firstCanonical)
+	if firstErr != nil && !errors.Is(firstErr, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect path identity for %s: %w", firstCanonical, firstErr)
+	}
+	secondInfo, secondErr := os.Stat(secondCanonical)
+	if secondErr != nil && !errors.Is(secondErr, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect path identity for %s: %w", secondCanonical, secondErr)
+	}
+	return firstErr == nil && secondErr == nil && os.SameFile(firstInfo, secondInfo), nil
 }
 
 func canonicalFuturePath(path string) (string, error) {
