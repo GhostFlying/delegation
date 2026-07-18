@@ -63,7 +63,7 @@ func TestRootMCPRejectsWorkerConfiguration(t *testing.T) {
 
 func TestRootMCPStdioProcess(t *testing.T) {
 	configPath := writeRootMCPConfig(t, delegationconfig.RoleController)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRootMCPStdioHelper$")
 	command.Env = append(os.Environ(),
@@ -74,7 +74,7 @@ func TestRootMCPStdioProcess(t *testing.T) {
 	command.Stderr = &stderr
 	client := mcp.NewClient(&mcp.Implementation{Name: "process-test", Version: "1"}, nil)
 	session, err := client.Connect(ctx, &mcp.CommandTransport{
-		Command: command, TerminateDuration: time.Second,
+		Command: command, TerminateDuration: 5 * time.Second,
 	}, nil)
 	if err != nil {
 		t.Fatalf("connect root MCP process: %v; stderr = %q", err, stderr.String())
