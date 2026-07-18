@@ -63,9 +63,16 @@ only for a non-loopback `ws://` URL. Do not infer old values from new defaults o
 database.
 
 After configuration succeeds, a broker can run in the foreground with `service run --config
-<path>`. Run `service install --config <path>` to prepare the current platform's user-service
-definition. It remains inactive and refuses to replace an existing definition. Do not load, enable,
-or start it manually; service activation and managed updates require a later M1 setup step.
+<path>`. Run `service install --config <path>` to write, enable, start, and verify the current
+platform's user service. It refuses foreign definitions and managed definitions whose executable or
+configuration path differs. Treat an `indeterminate` result as a partial activation that requires
+native service-manager inspection; do not delete or overwrite the definition blindly.
+
+Linux requires a systemd user manager. macOS activation requires the current user's GUI launchd
+domain, and the Windows task requires an interactive login. A versioned runtime-path change is not
+migrated in place in M1: verify that the old definition is Delegation-owned, remove it explicitly
+with the native service manager, and rerun installation. Do not claim Windows restart-on-failure
+until the reliability milestone implements it.
 
 ## Verify And Hand Off
 

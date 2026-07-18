@@ -26,5 +26,5 @@
 ## Phase Boundaries
 
 - Complete, review, and report the active milestone before starting the next milestone.
-- Do not add M1 broker or device-control behavior while working on the M0 plugin and release
-  scaffold.
+- Do not add M2 managed-worker behavior until the M1 broker and device-control checkpoint has been
+  independently reviewed and accepted.

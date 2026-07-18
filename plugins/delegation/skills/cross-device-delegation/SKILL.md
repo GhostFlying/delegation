@@ -10,15 +10,18 @@ different registered environment; do not fork the root conversation onto the tar
 
 ## Select A Device
 
-Use the bounded device summary in the Delegation MCP instructions only as an initial hint. Call
-`list_devices` for current availability, then `describe_device` when toolchains, hardware, tags, or
-capacity affect the choice. Match the task's explicit platform and environment requirements before
-preferring proximity or idle capacity.
+Delegation MCP instructions contain no device roster. Call `list_devices` for current availability,
+then `describe_device` when toolchains, hardware, tags, or capacity affect the choice. Match the
+task's explicit platform and environment requirements before preferring proximity or idle capacity.
 
 If Delegation tools are unavailable, use `$delegation-setup`; do not replace cross-device
 delegation with an unrelated remote environment without telling the user.
 
 ## Prepare And Spawn
+
+Proceed only when the installed runtime exposes the tools below. M1 exposes device discovery but
+does not yet expose worker or workspace tools; report that milestone boundary instead of pretending
+to delegate.
 
 1. Use `sync_workspace` from the trusted root workspace when the task needs repository content.
    Confirm the selected device, explicit Git URL, HEAD, transfer strategy, and warnings before
