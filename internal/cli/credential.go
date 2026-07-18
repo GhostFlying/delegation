@@ -54,14 +54,13 @@ func runCredential(args []string, stdout, stderr io.Writer) int {
 }
 
 func runCredentialIssue(args []string, stdout, stderr io.Writer) int {
-	defaultConfig, defaultState, err := credentialDefaultPaths()
+	defaultConfig, err := delegationconfig.DefaultPath()
 	if err != nil {
 		return writeError(stderr, err)
 	}
 	flags := flag.NewFlagSet("delegation credential issue", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", defaultConfig, "broker configuration file path")
-	statePath := flags.String("state", defaultState, "broker state database path")
 	roleName := flags.String("role", "", "credential role: controller or device")
 	deviceID := flags.String("device-id", "", "stable device UUID")
 	tokenPath := flags.String("out", "", "new device token file path")
@@ -79,7 +78,11 @@ func runCredentialIssue(args []string, stdout, stderr io.Writer) int {
 	if *tokenPath == "" {
 		return writeError(stderr, errors.New("--out is required"))
 	}
-	resolvedConfig, resolvedState, resolvedToken, err := resolveCredentialPaths(*configPath, *statePath, *tokenPath)
+	resolvedConfig, err := absolutePath(*configPath)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	resolvedToken, err := absolutePath(*tokenPath)
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -87,6 +90,7 @@ func runCredentialIssue(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
+	resolvedState := cfg.Broker.StateFile
 	if err := rejectCredentialAuthorityPathCollisions(resolvedConfig, resolvedState, cfg.Broker.Auth.TokenFile); err != nil {
 		return writeError(stderr, err)
 	}
@@ -201,37 +205,6 @@ func issueCredential(
 	return issuedCredentialResult(controllerID, deviceID, role, tokenPath, false), true, nil
 }
 
-func credentialDefaultPaths() (string, string, error) {
-	configPath, err := delegationconfig.DefaultPath()
-	if err != nil {
-		return "", "", err
-	}
-	statePath, err := delegationconfig.DefaultStatePath()
-	if err != nil {
-		return "", "", err
-	}
-	return configPath, statePath, nil
-}
-
-func resolveCredentialPaths(configPath, statePath, tokenPath string) (string, string, string, error) {
-	resolvedConfig, err := absolutePath(configPath)
-	if err != nil {
-		return "", "", "", err
-	}
-	resolvedState, err := absolutePath(statePath)
-	if err != nil {
-		return "", "", "", err
-	}
-	if tokenPath == "" {
-		return resolvedConfig, resolvedState, "", nil
-	}
-	resolvedToken, err := absolutePath(tokenPath)
-	if err != nil {
-		return "", "", "", err
-	}
-	return resolvedConfig, resolvedState, resolvedToken, nil
-}
-
 func loadBrokerCredentialAuthority(path string) (delegationconfig.Config, tokenfile.Token, error) {
 	cfg, err := delegationconfig.Read(path)
 	if err != nil {
@@ -286,6 +259,9 @@ func rejectCredentialAuthorityPathCollisions(configPath, statePath, masterPath s
 	}
 	for _, stateFile := range sqliteStateFiles(statePath) {
 		for _, protected := range protectedFiles {
+			if protected.path == "" {
+				continue
+			}
 			equivalent, err := pathsEquivalent(stateFile, protected.path)
 			if err != nil {
 				return err

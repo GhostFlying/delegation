@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
 	delegationcredential "github.com/GhostFlying/delegation/internal/credential"
 	"github.com/GhostFlying/delegation/internal/store"
@@ -268,7 +269,6 @@ func TestCredentialIssueRequiresExplicitDeviceID(t *testing.T) {
 	_, stderr, code := runCredentialTestCommand([]string{
 		"credential", "issue",
 		"--config", environment.configPath,
-		"--state", environment.statePath,
 		"--role", "device",
 		"--out", filepath.Join(t.TempDir(), "device.token"),
 	})
@@ -319,6 +319,7 @@ func setupCredentialTestBroker(t *testing.T, authMode string) credentialTestEnvi
 		"--config", environment.configPath,
 		"--controller-id", credentialTestControllerID,
 		"--listen", "127.0.0.1:8787",
+		"--state", environment.statePath,
 		"--auth-mode", authMode,
 		"--json",
 	}
@@ -336,11 +337,109 @@ func credentialIssueArgs(environment credentialTestEnvironment, deviceID, tokenP
 	return []string{
 		"credential", "issue",
 		"--config", environment.configPath,
-		"--state", environment.statePath,
 		"--role", "device",
 		"--device-id", deviceID,
 		"--out", tokenPath,
 		"--json",
+	}
+}
+
+func TestCredentialUsesBrokerConfiguredState(t *testing.T) {
+	environment := setupCredentialTestBroker(t, "token")
+	otherHome := t.TempDir()
+	t.Setenv("DELEGATION_HOME", otherHome)
+	stdout, stderr, code := runCredentialTestCommand(credentialIssueArgs(
+		environment,
+		credentialTestDeviceID,
+		filepath.Join(t.TempDir(), "device.token"),
+	))
+	if code != 0 {
+		t.Fatalf("issue code = %d, stderr = %q", code, stderr)
+	}
+	if result := decodeCredentialResult(t, stdout); result.StatePath != environment.statePath {
+		t.Fatalf("credential state path = %q, want %q", result.StatePath, environment.statePath)
+	}
+	if _, err := os.Stat(filepath.Join(otherHome, "state", "broker.sqlite3")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("credential opened environment-derived state: %v", err)
+	}
+}
+
+func TestCredentialRejectsSchemaOneWithoutMutatingOldAuthority(t *testing.T) {
+	oldHome := t.TempDir()
+	t.Setenv("DELEGATION_HOME", oldHome)
+	statePath := filepath.Join(oldHome, "state", "broker.sqlite3")
+	registry := openCredentialTestStore(t, statePath)
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "custom", "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	masterPath := filepath.Join(oldHome, "secrets", "broker.token")
+	if _, err := tokenfile.Ensure(masterPath); err != nil {
+		t.Fatal(err)
+	}
+	oldConfig := delegationconfig.Config{
+		SchemaVersion: 1,
+		Role:          delegationconfig.RoleBroker,
+		ControllerID:  credentialTestControllerID,
+		Broker: delegationconfig.BrokerConfig{
+			Listen: "0.0.0.0:9876",
+			Auth: delegationconfig.AuthConfig{
+				Mode:      delegationconfig.AuthModeToken,
+				TokenFile: masterPath,
+			},
+		},
+	}
+	configData, err := json.Marshal(oldConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateBefore, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	masterBefore, err := os.ReadFile(masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputToken := filepath.Join(t.TempDir(), "device.token")
+	_, stderr, code := runCredentialTestCommand([]string{
+		"credential", "issue",
+		"--config", configPath,
+		"--role", "device",
+		"--device-id", credentialTestDeviceID,
+		"--out", outputToken,
+	})
+	if code == 0 {
+		t.Fatal("credential issue accepted a schema 1 broker config")
+	}
+	for _, text := range []string{"move the config aside", "--controller-id", "--listen", "--auth-mode", "--token-file", "--state"} {
+		if !strings.Contains(stderr, text) {
+			t.Fatalf("schema 1 credential error = %q, want %q", stderr, text)
+		}
+	}
+	stateAfter, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	masterAfter, err := os.ReadFile(masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stateAfter, stateBefore) || !bytes.Equal(masterAfter, masterBefore) {
+		t.Fatal("schema 1 rejection mutated the existing broker authority")
+	}
+	if _, err := os.Lstat(outputToken); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("schema 1 rejection created an output token: %v", err)
+	}
+	newDefaultState := filepath.Join(filepath.Dir(configPath), "state", "broker.sqlite3")
+	if _, err := os.Lstat(newDefaultState); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("schema 1 rejection created a state database beside the custom config: %v", err)
 	}
 }
 

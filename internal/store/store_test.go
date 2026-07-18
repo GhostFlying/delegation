@@ -59,6 +59,28 @@ func TestOpenCreatesAndReopensSchema(t *testing.T) {
 	}
 }
 
+func TestValidatePathRejectsDirectoryAndSymlink(t *testing.T) {
+	root := t.TempDir()
+	directoryPath := filepath.Join(root, "directory.sqlite3")
+	if err := os.Mkdir(directoryPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePath(directoryPath); err == nil {
+		t.Fatal("ValidatePath accepted a directory as broker state")
+	}
+	target := filepath.Join(root, "target.sqlite3")
+	if err := os.WriteFile(target, []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias.sqlite3")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("creating a state symlink is unavailable: %v", err)
+	}
+	if err := ValidatePath(alias); err == nil {
+		t.Fatal("ValidatePath accepted a symbolic link as broker state")
+	}
+}
+
 func TestConcurrentOpenSerializesInitialMigration(t *testing.T) {
 	const openers = 8
 	path := filepath.Join(t.TempDir(), "state", "broker.sqlite3")

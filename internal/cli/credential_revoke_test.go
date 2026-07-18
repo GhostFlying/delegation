@@ -138,7 +138,6 @@ func credentialRevokeArgs(environment credentialTestEnvironment) []string {
 	return []string{
 		"credential", "revoke",
 		"--config", environment.configPath,
-		"--state", environment.statePath,
 		"--device-id", credentialTestDeviceID,
 		"--json",
 	}

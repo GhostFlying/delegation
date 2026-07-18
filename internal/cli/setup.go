@@ -13,6 +13,7 @@ import (
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
 
@@ -21,6 +22,7 @@ type setupResult struct {
 	ConfigPath   string                `json:"configPath"`
 	ControllerID string                `json:"controllerId"`
 	DeviceID     string                `json:"deviceId,omitempty"`
+	StatePath    string                `json:"statePath,omitempty"`
 	TokenFile    string                `json:"tokenFile,omitempty"`
 }
 
@@ -51,6 +53,7 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	configPath := flags.String("config", defaultPath, "configuration file path")
 	controllerID := flags.String("controller-id", "", "stable controller UUID; generated when omitted")
 	listen := flags.String("listen", "127.0.0.1:8787", "broker listen address")
+	statePath := flags.String("state", "", "broker state database path; defaults beside the config")
 	authMode := flags.String("auth-mode", string(delegationconfig.AuthModeToken), "authentication mode: token or none")
 	tokenFile := flags.String("token-file", "", "token file path; generated when omitted in token mode")
 	allowInsecure := flags.Bool("allow-insecure-nonloopback", false, "acknowledge unauthenticated non-loopback listener")
@@ -59,6 +62,13 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	resolvedConfig, err := absolutePath(*configPath)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	if *statePath == "" {
+		*statePath = filepath.Join(filepath.Dir(resolvedConfig), "state", "broker.sqlite3")
+	}
+	resolvedState, err := absolutePath(*statePath)
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -78,6 +88,7 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 		ControllerID:  *controllerID,
 		Broker: delegationconfig.BrokerConfig{
 			Listen:                   *listen,
+			StateFile:                resolvedState,
 			Auth:                     auth,
 			AllowInsecureNonLoopback: *allowInsecure,
 		},
@@ -86,6 +97,12 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 		return writeError(stderr, err)
 	}
 	if err := ensureConfigAvailable(resolvedConfig); err != nil {
+		return writeError(stderr, err)
+	}
+	if err := store.ValidatePath(resolvedState); err != nil {
+		return writeError(stderr, err)
+	}
+	if err := rejectCredentialAuthorityPathCollisions(resolvedConfig, resolvedState, auth.TokenFile); err != nil {
 		return writeError(stderr, err)
 	}
 	if auth.Mode == delegationconfig.AuthModeToken {
@@ -121,6 +138,7 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 		Role:         cfg.Role,
 		ConfigPath:   resolvedConfig,
 		ControllerID: cfg.ControllerID,
+		StatePath:    cfg.Broker.StateFile,
 		TokenFile:    auth.TokenFile,
 	}, *jsonOutput)
 }
@@ -353,6 +371,9 @@ func writeSetupResult(stdout, stderr io.Writer, result setupResult, jsonOutput b
 	fmt.Fprintf(stdout, "controllerId: %s\n", result.ControllerID)
 	if result.DeviceID != "" {
 		fmt.Fprintf(stdout, "deviceId: %s\n", result.DeviceID)
+	}
+	if result.StatePath != "" {
+		fmt.Fprintf(stdout, "state: %s\n", result.StatePath)
 	}
 	if result.TokenFile != "" {
 		fmt.Fprintf(stdout, "tokenFile: %s\n", result.TokenFile)

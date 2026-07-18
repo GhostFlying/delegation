@@ -4,10 +4,16 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 const testID = "123e4567-e89b-42d3-a456-426614174000"
+
+func testStateFile(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "broker.sqlite3")
+}
 
 func TestConfigRoundTrip(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "device.token")
@@ -49,8 +55,9 @@ func TestUnauthenticatedNonLoopbackRequiresAcknowledgement(t *testing.T) {
 		Role:          RoleBroker,
 		ControllerID:  testID,
 		Broker: BrokerConfig{
-			Listen: "0.0.0.0:8787",
-			Auth:   AuthConfig{Mode: AuthModeNone},
+			Listen:    "0.0.0.0:8787",
+			StateFile: testStateFile(t),
+			Auth:      AuthConfig{Mode: AuthModeNone},
 		},
 	}
 
@@ -150,33 +157,43 @@ func TestBrokerURLPortMustBeUsable(t *testing.T) {
 }
 
 func TestReadRejectsUnknownAndTrailingFields(t *testing.T) {
-	tests := map[string]string{
-		"unknown":  `{"schemaVersion":1,"role":"broker","controllerId":"123e4567-e89b-42d3-a456-426614174000","broker":{"listen":"127.0.0.1:8787","auth":{"mode":"none"}},"token":"secret"}`,
-		"trailing": `{"schemaVersion":1,"role":"broker","controllerId":"123e4567-e89b-42d3-a456-426614174000","broker":{"listen":"127.0.0.1:8787","auth":{"mode":"none"}}} {}`,
+	valid := Config{
+		SchemaVersion: CurrentSchemaVersion,
+		Role:          RoleBroker,
+		ControllerID:  testID,
+		Broker: BrokerConfig{
+			Listen:    "127.0.0.1:8787",
+			StateFile: testStateFile(t),
+			Auth:      AuthConfig{Mode: AuthModeNone},
+		},
+	}
+	validData, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unknown map[string]any
+	if err := json.Unmarshal(validData, &unknown); err != nil {
+		t.Fatal(err)
+	}
+	unknown["token"] = "secret"
+	unknownData, err := json.Marshal(unknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string][]byte{
+		"unknown":  unknownData,
+		"trailing": append(validData, []byte(" {}")...),
 	}
 	for name, contents := range tests {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")
-			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			if err := os.WriteFile(path, contents, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := Read(path); err == nil {
 				t.Fatal("Read() accepted invalid config")
 			}
 		})
-	}
-}
-
-func TestDefaultStatePathUsesDelegationHome(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("DELEGATION_HOME", home)
-	path, err := DefaultStatePath()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(home, "state", "broker.sqlite3")
-	if path != want {
-		t.Fatalf("DefaultStatePath() = %q, want %q", path, want)
 	}
 }
 
@@ -187,6 +204,7 @@ func TestTokenAuthRejectsInsecureAcknowledgement(t *testing.T) {
 		ControllerID:  testID,
 		Broker: BrokerConfig{
 			Listen:                   "0.0.0.0:8787",
+			StateFile:                testStateFile(t),
 			Auth:                     AuthConfig{Mode: AuthModeToken, TokenFile: filepath.Join(t.TempDir(), "broker.token")},
 			AllowInsecureNonLoopback: true,
 		},
@@ -205,13 +223,58 @@ func TestListenPortMustBeUsable(t *testing.T) {
 				Role:          RoleBroker,
 				ControllerID:  testID,
 				Broker: BrokerConfig{
-					Listen: listen,
-					Auth:   AuthConfig{Mode: AuthModeNone},
+					Listen:    listen,
+					StateFile: testStateFile(t),
+					Auth:      AuthConfig{Mode: AuthModeNone},
 				},
 			}
 			if err := cfg.Validate(); err == nil {
 				t.Fatal("Validate() accepted unusable listen port")
 			}
 		})
+	}
+}
+
+func TestSchemaOneRequiresSetupAgain(t *testing.T) {
+	cfg := Config{
+		SchemaVersion: 1,
+		Role:          RoleBroker,
+		ControllerID:  testID,
+		Broker: BrokerConfig{
+			Listen: "0.0.0.0:9876",
+			Auth: AuthConfig{
+				Mode:      AuthModeToken,
+				TokenFile: filepath.Join(t.TempDir(), "broker.token"),
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("schema 1 config was accepted")
+	}
+	for _, text := range []string{"move the config aside", "--controller-id", "--listen", "--auth-mode", "--token-file", "--state"} {
+		if !strings.Contains(err.Error(), text) {
+			t.Fatalf("schema 1 validation error = %q, want %q", err, text)
+		}
+	}
+}
+
+func TestFutureSchemaRequiresNewerRuntime(t *testing.T) {
+	cfg := Config{SchemaVersion: CurrentSchemaVersion + 1}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "newer delegation runtime") || strings.Contains(err.Error(), "rerun setup") {
+		t.Fatalf("future schema validation error = %v", err)
+	}
+}
+
+func TestReadFutureSchemaWithUnknownFieldsRequiresNewerRuntime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "future.json")
+	data := `{"schemaVersion":3,"role":"broker","futureField":true}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Read(path)
+	if err == nil || !strings.Contains(err.Error(), "newer delegation runtime") || strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("future config read error = %v", err)
 	}
 }

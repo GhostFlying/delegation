@@ -81,6 +81,13 @@ Token authentication is the default. Controller and device setup accept only a t
 the token itself is never accepted as a command-line value. Pass the same `--device-id` used when
 the broker issued that token. Setup validates the complete role configuration before creating
 local credentials and never overwrites an existing configuration.
+Broker setup also stores an absolute `stateFile` in schema v2 configuration. Credential commands
+use that path directly instead of deriving a database location from their process environment.
+Schema v1 is not migrated in place. Before moving the old configuration aside, preserve every
+broker setting and identify the state database previously used by credential commands. Then rerun
+`setup broker` with the existing controller ID, listener, authentication mode, master token path
+when used, state path, and insecure non-loopback acknowledgement when previously required. Do not
+accept a new default unless it matches the existing setting or database.
 Run `doctor` through the launcher after setup to validate the local schema and protected token
 file. Broker connectivity starts in M1. Prepare the current platform's user-service definition
 through the launcher with:

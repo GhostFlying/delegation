@@ -16,8 +16,9 @@ func TestWriteNewRoundTrip(t *testing.T) {
 		Role:          RoleBroker,
 		ControllerID:  testID,
 		Broker: BrokerConfig{
-			Listen: "127.0.0.1:8787",
-			Auth:   AuthConfig{Mode: AuthModeNone},
+			Listen:    "127.0.0.1:8787",
+			StateFile: testStateFile(t),
+			Auth:      AuthConfig{Mode: AuthModeNone},
 		},
 	}
 	if err := WriteNew(path, cfg); err != nil {
@@ -48,8 +49,9 @@ func TestWriteNewDoesNotReplaceExistingConfig(t *testing.T) {
 		Role:          RoleBroker,
 		ControllerID:  testID,
 		Broker: BrokerConfig{
-			Listen: "127.0.0.1:8787",
-			Auth:   AuthConfig{Mode: AuthModeNone},
+			Listen:    "127.0.0.1:8787",
+			StateFile: testStateFile(t),
+			Auth:      AuthConfig{Mode: AuthModeNone},
 		},
 	}
 	second := first
@@ -78,8 +80,9 @@ func TestWriteNewReportsCommittedSyncFailure(t *testing.T) {
 		Role:          RoleBroker,
 		ControllerID:  testID,
 		Broker: BrokerConfig{
-			Listen: "127.0.0.1:8787",
-			Auth:   AuthConfig{Mode: AuthModeNone},
+			Listen:    "127.0.0.1:8787",
+			StateFile: testStateFile(t),
+			Auth:      AuthConfig{Mode: AuthModeNone},
 		},
 	}
 	originalSync := syncInstalledConfig
@@ -112,8 +115,9 @@ func TestWriteNewSyncsEveryNewDirectory(t *testing.T) {
 		Role:          RoleBroker,
 		ControllerID:  testID,
 		Broker: BrokerConfig{
-			Listen: "127.0.0.1:8787",
-			Auth:   AuthConfig{Mode: AuthModeNone},
+			Listen:    "127.0.0.1:8787",
+			StateFile: testStateFile(t),
+			Auth:      AuthConfig{Mode: AuthModeNone},
 		},
 	}
 	originalSync := syncInstalledConfig
@@ -142,8 +146,9 @@ func TestWriteNewRetrySyncsExistingDirectoryAnchor(t *testing.T) {
 		Role:          RoleBroker,
 		ControllerID:  testID,
 		Broker: BrokerConfig{
-			Listen: "127.0.0.1:8787",
-			Auth:   AuthConfig{Mode: AuthModeNone},
+			Listen:    "127.0.0.1:8787",
+			StateFile: testStateFile(t),
+			Auth:      AuthConfig{Mode: AuthModeNone},
 		},
 	}
 	originalSync := syncInstalledConfig

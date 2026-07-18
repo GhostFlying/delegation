@@ -38,6 +38,8 @@ configuration:
 - Use `setup broker` to create a trust domain and listener configuration. Token authentication is
   the default and creates a protected token file when none is supplied. For auth mode `none`, keep
   the listener on loopback unless the user explicitly accepts `--allow-insecure-nonloopback`.
+  The broker state path is stored in the configuration; use `--state` only during setup when the
+  default path beside the configuration is unsuitable.
 - Use `setup controller` for a device that hosts root tasks. Supply the broker URL, controller ID,
   and an existing token file when token authentication is enabled. Also supply the device ID that
   the broker assigned when it issued that token.
@@ -47,6 +49,11 @@ configuration:
 
 Never pass token material as a command-line argument. Configuration stores only the absolute token
 file path and refuses to overwrite an existing configuration.
+
+Schema v1 broker configuration requires an explicit migration. Back it up and move it aside, then
+rerun `setup broker` with every existing setting: controller ID, listener, authentication mode,
+master token path when used, actual state database, and insecure non-loopback acknowledgement when
+previously required. Do not infer old values from new defaults or create a fresh database.
 
 After configuration succeeds, run the launcher with `service install --config <path>` to prepare
 the current platform's user-service definition. M0 leaves it inactive and refuses to replace an

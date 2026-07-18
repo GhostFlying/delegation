@@ -22,3 +22,9 @@ func TestPreparePathRejectsWindowsNetworkPath(t *testing.T) {
 		t.Fatal("preparePath accepted a Windows network path")
 	}
 }
+
+func TestValidatePathRejectsWindowsNetworkPath(t *testing.T) {
+	if err := ValidatePath(`\\server\share\delegation\broker.sqlite3`); err == nil {
+		t.Fatal("ValidatePath accepted a Windows network path")
+	}
+}

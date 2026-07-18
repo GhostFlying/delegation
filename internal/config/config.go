@@ -16,7 +16,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/identity"
 )
 
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 type Role string
 
@@ -45,6 +45,7 @@ type Config struct {
 type BrokerConfig struct {
 	URL                      string     `json:"url,omitempty"`
 	Listen                   string     `json:"listen,omitempty"`
+	StateFile                string     `json:"stateFile,omitempty"`
 	Auth                     AuthConfig `json:"auth"`
 	AllowInsecureNonLoopback bool       `json:"allowInsecureNonLoopback,omitempty"`
 }
@@ -76,18 +77,17 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, "config.json"), nil
 }
 
-func DefaultStatePath() (string, error) {
-	home, err := DefaultHome()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, "state", "broker.sqlite3"), nil
-}
-
 func Read(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
+	}
+	var compatibility Config
+	if err := json.Unmarshal(data, &compatibility); err != nil {
+		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
+	if compatibility.SchemaVersion != CurrentSchemaVersion {
+		return Config{}, compatibility.Validate()
 	}
 	var cfg Config
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -106,7 +106,25 @@ func Read(path string) (Config, error) {
 
 func (c Config) Validate() error {
 	if c.SchemaVersion != CurrentSchemaVersion {
-		return fmt.Errorf("unsupported config schema version %d", c.SchemaVersion)
+		if c.SchemaVersion < CurrentSchemaVersion {
+			if c.Role == RoleBroker {
+				if c.Broker.Auth.Mode != AuthModeToken {
+					return fmt.Errorf(
+						"config schema version %d is obsolete; back up and move the config aside, then rerun setup broker with all existing settings, including --controller-id, --listen, --auth-mode, --state, and --allow-insecure-nonloopback when previously required",
+						c.SchemaVersion,
+					)
+				}
+				return fmt.Errorf(
+					"config schema version %d is obsolete; back up and move the config aside, then rerun setup broker with all existing settings, including --controller-id, --listen, --auth-mode, --token-file, and --state",
+					c.SchemaVersion,
+				)
+			}
+			return fmt.Errorf(
+				"config schema version %d is obsolete; back up and move the config aside, then rerun setup with the existing identity, broker URL, authentication mode, and token path when used",
+				c.SchemaVersion,
+			)
+		}
+		return fmt.Errorf("config schema version %d requires a newer delegation runtime", c.SchemaVersion)
 	}
 	if identity.ValidateID(c.ControllerID) != nil {
 		return errors.New("controllerId must be a UUID")
@@ -116,6 +134,9 @@ func (c Config) Validate() error {
 	case RoleBroker:
 		if c.DeviceID != "" || c.DeviceName != "" || c.Broker.URL != "" {
 			return errors.New("broker config must not contain device fields or broker URL")
+		}
+		if !filepath.IsAbs(c.Broker.StateFile) {
+			return errors.New("broker stateFile must be an absolute path")
 		}
 		if err := validateListen(c.Broker.Listen, c.Broker.Auth.Mode, c.Broker.AllowInsecureNonLoopback); err != nil {
 			return err
@@ -127,8 +148,8 @@ func (c Config) Validate() error {
 		if strings.TrimSpace(c.DeviceName) == "" {
 			return errors.New("deviceName must not be empty")
 		}
-		if c.Broker.Listen != "" || c.Broker.AllowInsecureNonLoopback {
-			return errors.New("controller and device config must not contain broker listener fields")
+		if c.Broker.Listen != "" || c.Broker.StateFile != "" || c.Broker.AllowInsecureNonLoopback {
+			return errors.New("controller and device config must not contain broker listener or state fields")
 		}
 		if err := validateBrokerURL(c.Broker.URL, c.Broker.Auth.Mode); err != nil {
 			return err

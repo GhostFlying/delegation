@@ -29,14 +29,17 @@ func TestSetupBroker(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Role != delegationconfig.RoleBroker || result.ConfigPath != configPath || result.ControllerID == "" || result.TokenFile == "" {
+	wantState := filepath.Join(dir, "state", "broker.sqlite3")
+	if result.Role != delegationconfig.RoleBroker || result.ConfigPath != configPath || result.ControllerID == "" ||
+		result.StatePath != wantState || result.TokenFile == "" {
 		t.Fatalf("setup result = %#v", result)
 	}
 	cfg, err := delegationconfig.Read(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Role != delegationconfig.RoleBroker || cfg.ControllerID != result.ControllerID || cfg.Broker.Auth.TokenFile != result.TokenFile {
+	if cfg.Role != delegationconfig.RoleBroker || cfg.ControllerID != result.ControllerID ||
+		cfg.Broker.StateFile != result.StatePath || cfg.Broker.Auth.TokenFile != result.TokenFile {
 		t.Fatalf("config = %#v, setup result = %#v", cfg, result)
 	}
 	token, err := os.ReadFile(result.TokenFile)
@@ -49,6 +52,99 @@ func TestSetupBroker(t *testing.T) {
 	}
 	if bytes.Contains(configData, bytes.TrimSpace(token)) {
 		t.Fatal("config contains token material")
+	}
+}
+
+func TestSetupBrokerPersistsExplicitStatePath(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	statePath := filepath.Join(t.TempDir(), "registry", "broker.sqlite3")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "broker",
+		"--config", configPath,
+		"--state", statePath,
+		"--auth-mode", "none",
+		"--json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	cfg, err := delegationconfig.Read(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Broker.StateFile != statePath {
+		t.Fatalf("broker stateFile = %q, want %q", cfg.Broker.StateFile, statePath)
+	}
+}
+
+func TestSetupBrokerRejectsConfigStatePathCollision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authority")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "broker",
+		"--config", path,
+		"--state", path,
+		"--auth-mode", "none",
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "broker configuration") {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("setup created colliding authority path: %v", err)
+	}
+}
+
+func TestSetupBrokerRejectsUnusableStateWithoutSideEffects(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		state func(*testing.T) string
+	}{
+		{
+			name: "directory",
+			state: func(t *testing.T) string {
+				return t.TempDir()
+			},
+		},
+		{
+			name: "symlink",
+			state: func(t *testing.T) string {
+				target := filepath.Join(t.TempDir(), "target.sqlite3")
+				if err := os.WriteFile(target, []byte("state"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				alias := filepath.Join(t.TempDir(), "alias.sqlite3")
+				if err := os.Symlink(target, alias); err != nil {
+					t.Skipf("creating a state symlink is unavailable: %v", err)
+				}
+				return alias
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.json")
+			tokenPath := filepath.Join(dir, "broker.token")
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Run([]string{
+				"setup", "broker",
+				"--config", configPath,
+				"--state", test.state(t),
+				"--token-file", tokenPath,
+			}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("setup accepted unusable state path; stderr = %q", stderr.String())
+			}
+			for _, path := range []string{configPath, tokenPath} {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("setup created %s after state preflight failure: %v", path, err)
+				}
+			}
+		})
 	}
 }
 

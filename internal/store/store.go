@@ -77,13 +77,10 @@ func dataSourceName(path string) string {
 }
 
 func preparePath(path string) (string, error) {
-	if !filepath.IsAbs(path) {
-		return "", errors.New("broker state path must be absolute")
-	}
-	path = filepath.Clean(path)
-	if err := validateLocalStatePath(path); err != nil {
+	if err := ValidatePath(path); err != nil {
 		return "", err
 	}
+	path = filepath.Clean(path)
 	directory := filepath.Dir(path)
 	createdDirectory := false
 	if _, err := os.Lstat(directory); errors.Is(err, os.ErrNotExist) {
@@ -94,28 +91,45 @@ func preparePath(path string) (string, error) {
 	} else if err != nil {
 		return "", fmt.Errorf("inspect broker state directory: %w", err)
 	}
-	info, err := os.Lstat(directory)
-	if err != nil {
-		return "", fmt.Errorf("inspect broker state directory: %w", err)
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return "", errors.New("broker state directory must not be a symbolic link")
-	}
 	if createdDirectory {
 		if err := os.Chmod(directory, 0o700); err != nil {
 			return "", fmt.Errorf("protect broker state directory: %w", err)
 		}
-	} else if err := validatePrivateDirectory(info); err != nil {
+	}
+	if err := ValidatePath(path); err != nil {
 		return "", err
+	}
+	return path, nil
+}
+
+// ValidatePath checks whether Open can safely use path without creating or changing files.
+func ValidatePath(path string) error {
+	if !filepath.IsAbs(path) {
+		return errors.New("broker state path must be absolute")
+	}
+	path = filepath.Clean(path)
+	if err := validateLocalStatePath(path); err != nil {
+		return err
+	}
+	directory := filepath.Dir(path)
+	if info, err := os.Lstat(directory); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("broker state directory must be a local directory, not a symbolic link")
+		}
+		if err := validatePrivateDirectory(info); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect broker state directory: %w", err)
 	}
 	if info, err := os.Lstat(path); err == nil {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return "", errors.New("broker state must be a regular file")
+			return errors.New("broker state must be a regular file, not a symbolic link")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("inspect broker state: %w", err)
+		return fmt.Errorf("inspect broker state: %w", err)
 	}
-	return path, nil
+	return nil
 }
 
 func (s *Store) enableWAL(ctx context.Context) error {

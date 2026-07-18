@@ -7,19 +7,19 @@ import (
 	"fmt"
 	"io"
 
+	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
 func runCredentialRevoke(args []string, stdout, stderr io.Writer) int {
-	defaultConfig, defaultState, err := credentialDefaultPaths()
+	defaultConfig, err := delegationconfig.DefaultPath()
 	if err != nil {
 		return writeError(stderr, err)
 	}
 	flags := flag.NewFlagSet("delegation credential revoke", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", defaultConfig, "broker configuration file path")
-	statePath := flags.String("state", defaultState, "broker state database path")
 	deviceID := flags.String("device-id", "", "device UUID")
 	jsonOutput := flags.Bool("json", false, "print credential result as JSON")
 	if code := parseFlags(flags, args); code >= 0 {
@@ -28,7 +28,7 @@ func runCredentialRevoke(args []string, stdout, stderr io.Writer) int {
 	if err := identity.ValidateID(*deviceID); err != nil {
 		return writeError(stderr, fmt.Errorf("deviceId %w", err))
 	}
-	resolvedConfig, resolvedState, _, err := resolveCredentialPaths(*configPath, *statePath, "")
+	resolvedConfig, err := absolutePath(*configPath)
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -36,6 +36,7 @@ func runCredentialRevoke(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
+	resolvedState := cfg.Broker.StateFile
 	if err := rejectCredentialAuthorityPathCollisions(resolvedConfig, resolvedState, cfg.Broker.Auth.TokenFile); err != nil {
 		return writeError(stderr, err)
 	}
