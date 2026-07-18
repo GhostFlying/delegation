@@ -2,12 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/userservice"
@@ -52,8 +55,14 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
-	if _, err := delegationconfig.Read(resolvedConfig); err != nil {
+	cfg, err := delegationconfig.Read(resolvedConfig)
+	if err != nil {
 		return writeError(stderr, err)
+	}
+	if cfg.Role == delegationconfig.RoleBroker {
+		if _, err := loadBrokerAuthority(resolvedConfig, cfg); err != nil {
+			return writeError(stderr, err)
+		}
 	}
 	binaryPath, err := os.Executable()
 	if err != nil {
@@ -91,7 +100,7 @@ func writeServiceInstallResult(output io.Writer, result serviceInstallResult, js
 		fmt.Fprintf(&rendered, "kind: %s\n", result.Kind)
 		fmt.Fprintf(&rendered, "artifact: %s\n", result.Artifact)
 		fmt.Fprintf(&rendered, "config: %s\n", result.ConfigPath)
-		fmt.Fprintln(&rendered, "activation: not attempted in M0")
+		fmt.Fprintln(&rendered, "activation: not attempted")
 	}
 	if _, err := io.Copy(output, &rendered); err != nil {
 		return fmt.Errorf("write service installation: %w", err)
@@ -131,6 +140,14 @@ func runServiceRuntime(args []string, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
-	fmt.Fprintf(stderr, "delegation: %s service runtime is not available in M0\n", cfg.Role)
-	return exitUnavailable
+	if cfg.Role != delegationconfig.RoleBroker {
+		fmt.Fprintf(stderr, "delegation: %s service runtime is not implemented\n", cfg.Role)
+		return exitUnavailable
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runBrokerService(ctx, resolvedConfig, cfg, stderr, brokerRuntimeOptions{}); err != nil {
+		return writeError(stderr, err)
+	}
+	return 0
 }

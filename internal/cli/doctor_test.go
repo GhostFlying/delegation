@@ -38,8 +38,8 @@ func TestDoctorValidatesBrokerConfiguration(t *testing.T) {
 		Role:       delegationconfig.RoleBroker,
 		Checks: []string{
 			"configuration schema and role are valid",
+			"broker state and authority paths are safe",
 			"token file exists and is protected",
-			"broker connectivity is deferred until M1",
 		},
 	}
 	if got.OK != want.OK || got.Version != want.Version || got.ConfigPath != want.ConfigPath || got.Role != want.Role || !slices.Equal(got.Checks, want.Checks) {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/userservice"
 )
 
@@ -64,6 +65,34 @@ func TestServiceInstallValidatesBeforeWritingArtifact(t *testing.T) {
 	artifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdUnitName)
 	if _, err := os.Lstat(artifact); !os.IsNotExist(err) {
 		t.Fatalf("service artifact exists after failed validation: %v", err)
+	}
+}
+
+func TestServiceInstallPreflightsBrokerAuthorityBeforeWritingArtifact(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	configHome := filepath.Join(root, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	var setupOutput bytes.Buffer
+	var setupError bytes.Buffer
+	if code := Run([]string{"setup", "broker", "--config", configPath}, &setupOutput, &setupError); code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, setupError.String())
+	}
+	cfg, err := delegationconfig.Read(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.Broker.Auth.TokenFile, []byte("invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := Run([]string{"service", "install", "--config", configPath}, &stdout, &stderr); code == 0 {
+		t.Fatal("service install accepted an invalid broker authority")
+	}
+	artifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdUnitName)
+	if _, err := os.Lstat(artifact); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("service artifact exists after authority preflight failure: %v", err)
 	}
 }
 

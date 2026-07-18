@@ -62,17 +62,17 @@ preserve its identity, name, broker URL, authentication mode, and token path; ad
 only for a non-loopback `ws://` URL. Do not infer old values from new defaults or create a fresh
 database.
 
-After configuration succeeds, run the launcher with `service install --config <path>` to prepare
-the current platform's user-service definition. M0 leaves it inactive and refuses to replace an
-existing definition. Do not load, enable, or start it manually; service activation and managed
-updates arrive with the M1 runtime.
+After configuration succeeds, a broker can run in the foreground with `service run --config
+<path>`. Run `service install --config <path>` to prepare the current platform's user-service
+definition. It remains inactive and refuses to replace an existing definition. Do not load, enable,
+or start it manually; service activation and managed updates require a later M1 setup step.
 
 ## Verify And Hand Off
 
 Run the launcher with `version --json` and confirm it exactly matches `VERSION`, then run the
 launcher with `doctor`. Report the installed version, configured role, configuration path, and
-checks without printing credentials. M0 validates configuration locally; broker connectivity is
-added in M1.
+checks without printing credentials. For a broker foreground run, verify its `/healthz` endpoint
+without printing or transmitting the master token.
 
 After a plugin or runtime update, tell the user to start a new Codex task so the updated skills and
 MCP configuration are loaded. Do not attempt to reload a managed worker in place.

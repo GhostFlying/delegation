@@ -5,8 +5,8 @@ systems, toolchains, or local capabilities. The root Codex task stays on its ori
 remote workers run in isolated, prepared workspaces.
 
 The project is being delivered in reviewed milestones. M0 provides the plugin, skills, native
-runtime bootstrap, and release foundation. Broker, connector, worker lifecycle, and Git workspace
-transport arrive in later milestones.
+runtime bootstrap, and release foundation. M1 is adding the broker and device control plane;
+connector, worker lifecycle, and Git workspace transport remain under development.
 
 ## Install The Plugin
 
@@ -74,7 +74,7 @@ plugins/delegation/scripts/delegation-mcp setup device --help
 plugins/delegation/scripts/delegation-mcp doctor --help
 ```
 
-On Windows, use `plugins\delegation\scripts\delegation-mcp.cmd` instead. The M0 runtime writes a
+On Windows, use `plugins\delegation\scripts\delegation-mcp.cmd` instead. The runtime writes a
 versioned local configuration without embedding token material.
 
 Token authentication is the default. Controller and device setup accept only a token file path;
@@ -91,17 +91,17 @@ master token path when used, state path, and `--allow-insecure-nonloopback` for 
 listener. For an old controller or device configuration, preserve its identity, name, broker URL,
 authentication mode, and token path; add the acknowledgement only for a non-loopback `ws://` URL.
 Do not accept a new default unless it matches the existing setting or database.
-Run `doctor` through the launcher after setup to validate the local schema and protected token
-file. Broker connectivity starts in M1. Prepare the current platform's user-service definition
-through the launcher with:
+Run `doctor` through the launcher after setup to validate the local schema, authority paths, state
+path, and protected token file. A broker can run in the foreground with `service run`; automatic
+user-service activation is planned for later in M1 and remains disabled. Prepare the current
+platform's inactive user-service definition through the launcher with:
 
 ```bash
 plugins/delegation/scripts/delegation-mcp service install
 ```
 
-M0 leaves the systemd user unit, LaunchAgent, or Windows Scheduled Task inactive. It does not load,
-enable, start, replace, or remove an existing service; the long-running service runtime starts in
-M1.
+Prepared systemd user units, LaunchAgents, and Windows Scheduled Tasks remain inactive. Installation
+does not load, enable, start, replace, or remove an existing service definition.
 
 ## License
 
