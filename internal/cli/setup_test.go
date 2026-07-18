@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
 
@@ -86,6 +87,59 @@ func TestSetupDeviceWithoutAuthentication(t *testing.T) {
 	}
 	if cfg != want {
 		t.Fatalf("config = %#v, want %#v", cfg, want)
+	}
+}
+
+func TestSetupDeviceWithoutAuthenticationGeneratesDeviceID(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "device.json")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "device",
+		"--config", configPath,
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-name", "local-worker",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	cfg, err := delegationconfig.Read(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := identity.ValidateID(cfg.DeviceID); err != nil {
+		t.Fatalf("generated deviceId = %q: %v", cfg.DeviceID, err)
+	}
+}
+
+func TestSetupTokenAuthenticationRequiresDeviceID(t *testing.T) {
+	for _, role := range []string{"controller", "device"} {
+		t.Run(role, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, role+".json")
+			tokenPath := filepath.Join(dir, role+".token")
+			if _, err := tokenfile.Ensure(tokenPath); err != nil {
+				t.Fatal(err)
+			}
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Run([]string{
+				"setup", role,
+				"--config", configPath,
+				"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+				"--device-name", "managed-device",
+				"--broker-url", "wss://broker.example.test",
+				"--token-file", tokenPath,
+			}, &stdout, &stderr)
+			if code == 0 || !strings.Contains(stderr.String(), "--device-id is required in token mode") {
+				t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+			}
+			if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+				t.Fatalf("config was created without a bound deviceId: %v", err)
+			}
+		})
 	}
 }
 

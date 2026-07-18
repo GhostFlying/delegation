@@ -134,7 +134,7 @@ func runSetupDevice(role delegationconfig.Role, args []string, stdout, stderr io
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", defaultPath, "configuration file path")
 	controllerID := flags.String("controller-id", "", "controller UUID")
-	deviceID := flags.String("device-id", "", "stable device UUID; generated when omitted")
+	deviceID := flags.String("device-id", "", "stable device UUID; required in token mode, generated in none mode")
 	deviceName := flags.String("device-name", "", "device display name; hostname when omitted")
 	brokerURL := flags.String("broker-url", "", "broker ws:// or wss:// URL")
 	authMode := flags.String("auth-mode", string(delegationconfig.AuthModeToken), "authentication mode: token or none")
@@ -149,7 +149,18 @@ func runSetupDevice(role delegationconfig.Role, args []string, stdout, stderr io
 	if *brokerURL == "" {
 		return writeError(stderr, errors.New("--broker-url is required"))
 	}
+	resolvedConfig, err := absolutePath(*configPath)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	auth, err := resolveAuth(*authMode, *tokenFile, "")
+	if err != nil {
+		return writeError(stderr, err)
+	}
 	if *deviceID == "" {
+		if auth.Mode == delegationconfig.AuthModeToken {
+			return writeError(stderr, errors.New("--device-id is required in token mode because the credential is bound to a device"))
+		}
 		*deviceID, err = identity.NewID()
 		if err != nil {
 			return writeError(stderr, err)
@@ -160,14 +171,6 @@ func runSetupDevice(role delegationconfig.Role, args []string, stdout, stderr io
 		if err != nil {
 			return writeError(stderr, fmt.Errorf("resolve hostname: %w", err))
 		}
-	}
-	resolvedConfig, err := absolutePath(*configPath)
-	if err != nil {
-		return writeError(stderr, err)
-	}
-	auth, err := resolveAuth(*authMode, *tokenFile, "")
-	if err != nil {
-		return writeError(stderr, err)
 	}
 	cfg := delegationconfig.Config{
 		SchemaVersion: delegationconfig.CurrentSchemaVersion,

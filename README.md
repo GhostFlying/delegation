@@ -78,8 +78,9 @@ On Windows, use `plugins\delegation\scripts\delegation-mcp.cmd` instead. The M0 
 versioned local configuration without embedding token material.
 
 Token authentication is the default. Controller and device setup accept only a token file path;
-the token itself is never accepted as a command-line value. Setup validates the complete role
-configuration before creating local credentials and never overwrites an existing configuration.
+the token itself is never accepted as a command-line value. Pass the same `--device-id` used when
+the broker issued that token. Setup validates the complete role configuration before creating
+local credentials and never overwrites an existing configuration.
 Run `doctor` through the launcher after setup to validate the local schema and protected token
 file. Broker connectivity starts in M1. Prepare the current platform's user-service definition
 through the launcher with:

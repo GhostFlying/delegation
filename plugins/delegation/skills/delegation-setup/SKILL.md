@@ -39,9 +39,11 @@ configuration:
   the default and creates a protected token file when none is supplied. For auth mode `none`, keep
   the listener on loopback unless the user explicitly accepts `--allow-insecure-nonloopback`.
 - Use `setup controller` for a device that hosts root tasks. Supply the broker URL, controller ID,
-  and an existing token file when token authentication is enabled.
+  and an existing token file when token authentication is enabled. Also supply the device ID that
+  the broker assigned when it issued that token.
 - Use `setup device` for a worker-only device. Supply the same controller ID, the broker URL, and
-  that device's token file. Let setup generate a stable device ID unless one is already assigned.
+  that device's token file. Token authentication requires the device ID that the broker assigned
+  when it issued the token; setup generates an ID only when authentication mode is `none`.
 
 Never pass token material as a command-line argument. Configuration stores only the absolute token
 file path and refuses to overwrite an existing configuration.
