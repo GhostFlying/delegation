@@ -73,21 +73,32 @@ CREATE INDEX principals_by_parent
 PRAGMA user_version = 1;
 `
 
+const schemaV2 = `
+ALTER TABLE credentials ADD COLUMN pending INTEGER NOT NULL DEFAULT 0
+    CHECK (pending IN (0, 1) AND (pending = 0 OR disabled = 1));
+
+PRAGMA user_version = 2;
+`
+
 func (s *Store) migrate(ctx context.Context) error {
 	return s.withImmediateTransaction(ctx, func(connection *sql.Conn) error {
 		var version int
 		if err := connection.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 			return fmt.Errorf("read broker state schema version: %w", err)
 		}
-		switch version {
-		case 0:
+		if version < 0 || version > schemaVersion {
+			return fmt.Errorf("unsupported broker state schema version %d", version)
+		}
+		if version == 0 {
 			if _, err := connection.ExecContext(ctx, schemaV1); err != nil {
 				return fmt.Errorf("create broker state schema: %w", err)
 			}
-		case schemaVersion:
-			return nil
-		default:
-			return fmt.Errorf("unsupported broker state schema version %d", version)
+			version = 1
+		}
+		if version == 1 {
+			if _, err := connection.ExecContext(ctx, schemaV2); err != nil {
+				return fmt.Errorf("migrate broker state schema to version 2: %w", err)
+			}
 		}
 		return nil
 	})

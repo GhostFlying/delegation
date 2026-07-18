@@ -29,7 +29,12 @@ type Credential struct {
 	Role         control.DeviceRole
 	MAC          CredentialMAC
 	Disabled     bool
+	Pending      bool
 	IssuedAt     int64
+}
+
+type rowScanner interface {
+	Scan(...any) error
 }
 
 func (c Credential) Validate() error {
@@ -45,6 +50,9 @@ func (c Credential) Validate() error {
 	if c.IssuedAt < 0 {
 		return errors.New("issuedAt must not be negative")
 	}
+	if c.Pending && !c.Disabled {
+		return errors.New("pending credentials must be disabled")
+	}
 	return nil
 }
 
@@ -54,8 +62,8 @@ func (s *Store) CreateCredential(ctx context.Context, credential Credential) err
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO credentials(
-    controller_id, device_id, role, token_mac, disabled, issued_at
-) VALUES (?, ?, ?, ?, ?, ?)
+    controller_id, device_id, role, token_mac, disabled, issued_at, pending
+) VALUES (?, ?, ?, ?, ?, ?, ?)
 `,
 		credential.ControllerID,
 		credential.DeviceID,
@@ -63,6 +71,7 @@ INSERT INTO credentials(
 		credential.MAC[:],
 		credential.Disabled,
 		credential.IssuedAt,
+		credential.Pending,
 	)
 	if err != nil {
 		var sqliteError *moderncsqlite.Error
@@ -75,19 +84,99 @@ INSERT INTO credentials(
 }
 
 func (s *Store) AuthenticateCredential(ctx context.Context, mac CredentialMAC) (Credential, error) {
-	var credential Credential
-	var storedMAC []byte
-	err := s.db.QueryRowContext(ctx, `
-SELECT controller_id, device_id, role, token_mac, disabled, issued_at
+	credential, err := scanCredential(s.db.QueryRowContext(ctx, `
+SELECT controller_id, device_id, role, token_mac, disabled, issued_at, pending
 FROM credentials
 WHERE token_mac = ?
-`, mac[:]).Scan(
+`, mac[:]))
+	if err != nil {
+		return Credential{}, err
+	}
+	if subtle.ConstantTimeCompare(credential.MAC[:], mac[:]) != 1 {
+		return Credential{}, ErrNotFound
+	}
+	if credential.Disabled || credential.Pending {
+		return Credential{}, ErrCredentialDisabled
+	}
+	return credential, nil
+}
+
+func (s *Store) Credential(ctx context.Context, controllerID, deviceID string) (Credential, error) {
+	if err := validateCredentialIdentity(controllerID, deviceID); err != nil {
+		return Credential{}, err
+	}
+	return scanCredential(s.db.QueryRowContext(ctx, `
+SELECT controller_id, device_id, role, token_mac, disabled, issued_at, pending
+FROM credentials
+WHERE controller_id = ? AND device_id = ?
+`, controllerID, deviceID))
+}
+
+func (s *Store) ActivateCredential(ctx context.Context, controllerID, deviceID string, mac CredentialMAC) error {
+	if err := validateCredentialIdentity(controllerID, deviceID); err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `
+UPDATE credentials SET disabled = 0, pending = 0
+WHERE controller_id = ? AND device_id = ? AND token_mac = ? AND pending = 1
+`, controllerID, deviceID, mac[:])
+	if err != nil {
+		return fmt.Errorf("activate device credential: %w", err)
+	}
+	if err := requireAffectedRow(result, "activate device credential"); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	credential, err := s.Credential(ctx, controllerID, deviceID)
+	if err != nil {
+		return err
+	}
+	if !credential.Disabled && !credential.Pending && subtle.ConstantTimeCompare(credential.MAC[:], mac[:]) == 1 {
+		return nil
+	}
+	return ErrNotFound
+}
+
+func (s *Store) DeletePendingCredential(ctx context.Context, controllerID, deviceID string, mac CredentialMAC) error {
+	if err := validateCredentialIdentity(controllerID, deviceID); err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `
+DELETE FROM credentials
+WHERE controller_id = ? AND device_id = ? AND token_mac = ? AND disabled = 1 AND pending = 1
+`, controllerID, deviceID, mac[:])
+	if err != nil {
+		return fmt.Errorf("delete pending device credential: %w", err)
+	}
+	return requireAffectedRow(result, "delete pending device credential")
+}
+
+func (s *Store) DisableCredential(ctx context.Context, controllerID, deviceID string) error {
+	if err := validateCredentialIdentity(controllerID, deviceID); err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `
+UPDATE credentials SET disabled = 1, pending = 0
+WHERE controller_id = ? AND device_id = ?
+`, controllerID, deviceID)
+	if err != nil {
+		return fmt.Errorf("disable device credential: %w", err)
+	}
+	return requireAffectedRow(result, "disable device credential")
+}
+
+func scanCredential(row rowScanner) (Credential, error) {
+	var credential Credential
+	var storedMAC []byte
+	err := row.Scan(
 		&credential.ControllerID,
 		&credential.DeviceID,
 		&credential.Role,
 		&storedMAC,
 		&credential.Disabled,
 		&credential.IssuedAt,
+		&credential.Pending,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Credential{}, ErrNotFound
@@ -95,36 +184,30 @@ WHERE token_mac = ?
 	if err != nil {
 		return Credential{}, fmt.Errorf("load device credential: %w", err)
 	}
-	if len(storedMAC) != CredentialMACSize || subtle.ConstantTimeCompare(storedMAC, mac[:]) != 1 {
-		return Credential{}, ErrNotFound
+	if len(storedMAC) != CredentialMACSize {
+		return Credential{}, errors.New("stored device credential MAC has invalid length")
 	}
 	copy(credential.MAC[:], storedMAC)
 	if err := credential.Validate(); err != nil {
 		return Credential{}, fmt.Errorf("stored device credential is invalid: %w", err)
 	}
-	if credential.Disabled {
-		return Credential{}, ErrCredentialDisabled
-	}
 	return credential, nil
 }
 
-func (s *Store) DisableCredential(ctx context.Context, controllerID, deviceID string) error {
+func validateCredentialIdentity(controllerID, deviceID string) error {
 	if err := identity.ValidateID(controllerID); err != nil {
 		return fmt.Errorf("controllerId %w", err)
 	}
 	if err := identity.ValidateID(deviceID); err != nil {
 		return fmt.Errorf("deviceId %w", err)
 	}
-	result, err := s.db.ExecContext(ctx, `
-UPDATE credentials SET disabled = 1
-WHERE controller_id = ? AND device_id = ?
-`, controllerID, deviceID)
-	if err != nil {
-		return fmt.Errorf("disable device credential: %w", err)
-	}
+	return nil
+}
+
+func requireAffectedRow(result sql.Result, action string) error {
 	count, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("inspect disabled device credential: %w", err)
+		return fmt.Errorf("inspect %s: %w", action, err)
 	}
 	if count == 0 {
 		return ErrNotFound
