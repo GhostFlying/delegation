@@ -16,6 +16,7 @@ import (
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
 	delegationcredential "github.com/GhostFlying/delegation/internal/credential"
+	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
@@ -295,13 +296,13 @@ func TestCredentialStateSidecarsCannotAliasAuthorityFiles(t *testing.T) {
 	if err := os.WriteFile(masterPath, []byte("authority"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectCredentialPathCollisions(statePath+"-journal", configPath, statePath, masterPath); err == nil {
+	if err := pathguard.ValidateCredentialOutput(statePath+"-journal", configPath, statePath, masterPath); err == nil {
 		t.Fatal("rollback journal output path was not rejected")
 	}
 	if err := os.Link(masterPath, statePath+"-wal"); err != nil {
 		t.Skipf("creating a hard link is unavailable: %v", err)
 	}
-	if err := rejectCredentialAuthorityPathCollisions(configPath, statePath, masterPath); err == nil {
+	if err := pathguard.ValidateBrokerAuthority(configPath, statePath, masterPath); err == nil {
 		t.Fatal("broker state WAL hard link was not rejected")
 	}
 }

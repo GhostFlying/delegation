@@ -8,10 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
@@ -101,20 +101,13 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	if err := store.ValidatePath(resolvedState); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := rejectCredentialAuthorityPathCollisions(resolvedConfig, resolvedState, auth.TokenFile); err != nil {
+	if err := pathguard.ValidateBrokerAuthority(resolvedConfig, resolvedState, auth.TokenFile); err != nil {
 		return writeError(stderr, err)
 	}
 	if err := writeInsecureTransportWarning(stderr, cfg); err != nil {
 		return writeError(stderr, err)
 	}
 	if auth.Mode == delegationconfig.AuthModeToken {
-		equivalent, err := pathsEquivalent(resolvedConfig, auth.TokenFile)
-		if err != nil {
-			return writeError(stderr, err)
-		}
-		if equivalent {
-			return writeError(stderr, errors.New("config and token file must use different paths"))
-		}
 		if _, err := tokenfile.Ensure(auth.TokenFile); err != nil {
 			return writeError(stderr, err)
 		}
@@ -268,86 +261,6 @@ func ensureConfigAvailable(path string) error {
 		return fmt.Errorf("inspect config: %w", err)
 	}
 	return nil
-}
-
-func pathsEquivalent(first, second string) (bool, error) {
-	firstCanonical, err := canonicalFuturePath(first)
-	if err != nil {
-		return false, err
-	}
-	secondCanonical, err := canonicalFuturePath(second)
-	if err != nil {
-		return false, err
-	}
-	// A conservative folded comparison also covers case-insensitive macOS and
-	// removable filesystems. Distinct config and token names should not rely on
-	// case alone even when the current filesystem permits it.
-	if strings.EqualFold(firstCanonical, secondCanonical) {
-		return true, nil
-	}
-	firstInfo, firstErr := os.Stat(firstCanonical)
-	if firstErr != nil && !errors.Is(firstErr, os.ErrNotExist) {
-		return false, fmt.Errorf("inspect path identity for %s: %w", firstCanonical, firstErr)
-	}
-	secondInfo, secondErr := os.Stat(secondCanonical)
-	if secondErr != nil && !errors.Is(secondErr, os.ErrNotExist) {
-		return false, fmt.Errorf("inspect path identity for %s: %w", secondCanonical, secondErr)
-	}
-	return firstErr == nil && secondErr == nil && os.SameFile(firstInfo, secondInfo), nil
-}
-
-func canonicalFuturePath(path string) (string, error) {
-	return resolveFuturePath(filepath.Clean(path), 0)
-}
-
-func resolveFuturePath(path string, followedLinks int) (string, error) {
-	root, components := splitAbsolutePath(path)
-	resolved := root
-	for index, component := range components {
-		candidate := filepath.Join(resolved, component)
-		info, err := os.Lstat(candidate)
-		if errors.Is(err, os.ErrNotExist) {
-			return filepath.Join(append([]string{resolved}, components[index:]...)...), nil
-		}
-		if err != nil {
-			return "", fmt.Errorf("resolve path aliases for %s: %w", path, err)
-		}
-		if info.Mode()&os.ModeSymlink == 0 {
-			resolved = candidate
-			continue
-		}
-		if followedLinks >= 255 {
-			return "", fmt.Errorf("resolve path aliases for %s: too many symbolic links", path)
-		}
-		target, err := os.Readlink(candidate)
-		if err != nil {
-			return "", fmt.Errorf("read path alias %s: %w", candidate, err)
-		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(resolved, target)
-		}
-		remaining := append([]string{target}, components[index+1:]...)
-		return resolveFuturePath(filepath.Join(remaining...), followedLinks+1)
-	}
-	return filepath.Clean(resolved), nil
-}
-
-func splitAbsolutePath(path string) (string, []string) {
-	current := filepath.Clean(path)
-	var reversed []string
-	for {
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		reversed = append(reversed, filepath.Base(current))
-		current = parent
-	}
-	components := make([]string, len(reversed))
-	for i := range reversed {
-		components[len(reversed)-1-i] = reversed[i]
-	}
-	return current, components
 }
 
 func absolutePath(path string) (string, error) {

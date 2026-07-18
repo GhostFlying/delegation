@@ -598,36 +598,6 @@ func TestSetupBrokerRejectsDanglingConfigTokenParentAlias(t *testing.T) {
 	}
 }
 
-func TestPathsEquivalentConservativelyFoldsCase(t *testing.T) {
-	root := t.TempDir()
-	equivalent, err := pathsEquivalent(filepath.Join(root, "Config"), filepath.Join(root, "config"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !equivalent {
-		t.Fatal("pathsEquivalent() did not conservatively fold case")
-	}
-}
-
-func TestPathsEquivalentDetectsHardLinks(t *testing.T) {
-	root := t.TempDir()
-	first := filepath.Join(root, "first")
-	second := filepath.Join(root, "second")
-	if err := os.WriteFile(first, []byte("authority"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Link(first, second); err != nil {
-		t.Skipf("creating a hard link is unavailable: %v", err)
-	}
-	equivalent, err := pathsEquivalent(first, second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !equivalent {
-		t.Fatal("pathsEquivalent() did not detect a shared file identity")
-	}
-}
-
 func TestConcurrentBrokerSetupKeepsWinningToken(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")

@@ -9,6 +9,7 @@ import (
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -37,7 +38,7 @@ func runCredentialRevoke(args []string, stdout, stderr io.Writer) int {
 		return writeError(stderr, err)
 	}
 	resolvedState := cfg.Broker.StateFile
-	if err := rejectCredentialAuthorityPathCollisions(resolvedConfig, resolvedState, cfg.Broker.Auth.TokenFile); err != nil {
+	if err := pathguard.ValidateBrokerAuthority(resolvedConfig, resolvedState, cfg.Broker.Auth.TokenFile); err != nil {
 		return writeError(stderr, err)
 	}
 	registry, err := store.Open(context.Background(), resolvedState)

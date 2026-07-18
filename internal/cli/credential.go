@@ -16,6 +16,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/control"
 	delegationcredential "github.com/GhostFlying/delegation/internal/credential"
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
@@ -91,10 +92,10 @@ func runCredentialIssue(args []string, stdout, stderr io.Writer) int {
 		return writeError(stderr, err)
 	}
 	resolvedState := cfg.Broker.StateFile
-	if err := rejectCredentialAuthorityPathCollisions(resolvedConfig, resolvedState, cfg.Broker.Auth.TokenFile); err != nil {
+	if err := pathguard.ValidateBrokerAuthority(resolvedConfig, resolvedState, cfg.Broker.Auth.TokenFile); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := rejectCredentialPathCollisions(resolvedToken, resolvedConfig, resolvedState, cfg.Broker.Auth.TokenFile); err != nil {
+	if err := pathguard.ValidateCredentialOutput(resolvedToken, resolvedConfig, resolvedState, cfg.Broker.Auth.TokenFile); err != nil {
 		return writeError(stderr, err)
 	}
 	registry, err := store.Open(context.Background(), resolvedState)
@@ -221,61 +222,6 @@ func loadBrokerCredentialAuthority(path string) (delegationconfig.Config, tokenf
 		return delegationconfig.Config{}, tokenfile.Token{}, fmt.Errorf("read broker master token: %w", err)
 	}
 	return cfg, master, nil
-}
-
-func rejectCredentialPathCollisions(tokenPath, configPath, statePath, masterPath string) error {
-	reserved := []struct {
-		name string
-		path string
-	}{
-		{name: "broker configuration", path: configPath},
-		{name: "broker master token", path: masterPath},
-	}
-	for _, path := range sqliteStateFiles(statePath) {
-		reserved = append(reserved, struct {
-			name string
-			path string
-		}{name: "broker state or sidecar", path: path})
-	}
-	for _, candidate := range reserved {
-		equivalent, err := pathsEquivalent(tokenPath, candidate.path)
-		if err != nil {
-			return err
-		}
-		if equivalent {
-			return fmt.Errorf("output token path conflicts with %s", candidate.name)
-		}
-	}
-	return nil
-}
-
-func rejectCredentialAuthorityPathCollisions(configPath, statePath, masterPath string) error {
-	protectedFiles := []struct {
-		name string
-		path string
-	}{
-		{name: "broker configuration", path: configPath},
-		{name: "broker master token", path: masterPath},
-	}
-	for _, stateFile := range sqliteStateFiles(statePath) {
-		for _, protected := range protectedFiles {
-			if protected.path == "" {
-				continue
-			}
-			equivalent, err := pathsEquivalent(stateFile, protected.path)
-			if err != nil {
-				return err
-			}
-			if equivalent {
-				return fmt.Errorf("broker state path conflicts with %s", protected.name)
-			}
-		}
-	}
-	return nil
-}
-
-func sqliteStateFiles(statePath string) []string {
-	return []string{statePath, statePath + "-journal", statePath + "-wal", statePath + "-shm"}
 }
 
 func readOptionalToken(path string) (tokenfile.Token, bool, error) {
