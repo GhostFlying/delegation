@@ -8,14 +8,16 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/userservice"
 )
 
-func TestServiceInstallPreparesInactiveSystemdUnit(t *testing.T) {
+func TestServiceInstallActivatesSystemdUnit(t *testing.T) {
 	root := t.TempDir()
+	installNoopSystemctl(t, root)
 	configPath := filepath.Join(root, "config.json")
 	configHome := filepath.Join(root, "xdg")
 	t.Setenv("XDG_CONFIG_HOME", configHome)
@@ -37,12 +39,62 @@ func TestServiceInstallPreparesInactiveSystemdUnit(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantArtifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdUnitName)
-	if result.State != userservice.StatePrepared || result.Kind != userservice.KindSystemd ||
+	if result.State != userservice.StateActive || result.Kind != userservice.KindSystemd ||
 		result.Artifact != wantArtifact || result.ConfigPath != configPath {
 		t.Fatalf("service install result = %#v", result)
 	}
 	if _, err := os.Stat(wantArtifact); err != nil {
 		t.Fatalf("prepared unit is missing: %v", err)
+	}
+}
+
+func TestServiceInstallActivatesSystemdUnitByDefault(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	configHome := filepath.Join(root, "xdg")
+	commandLog := filepath.Join(root, "systemctl.log")
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	systemctl := filepath.Join(bin, "systemctl")
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$DELEGATION_TEST_SYSTEMCTL_LOG\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("DELEGATION_TEST_SYSTEMCTL_LOG", commandLog)
+	var setupOutput bytes.Buffer
+	var setupError bytes.Buffer
+	if code := Run([]string{"setup", "broker", "--config", configPath}, &setupOutput, &setupError); code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, setupError.String())
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"service", "install", "--config", configPath, "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("service install code = %d, stderr = %q", code, stderr.String())
+	}
+	var result serviceInstallResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.State != userservice.StateActive {
+		t.Fatalf("service install result = %#v", result)
+	}
+	log, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"--user --no-ask-password daemon-reload",
+		"--user --no-ask-password enable --now " + userservice.SystemdUnitName,
+		"--user --no-ask-password is-enabled --quiet " + userservice.SystemdUnitName,
+		"--user --no-ask-password is-active --quiet " + userservice.SystemdUnitName,
+		"",
+	}, "\n")
+	if string(log) != want {
+		t.Fatalf("systemctl log = %q, want %q", log, want)
 	}
 }
 
@@ -136,6 +188,7 @@ func TestServiceInstallReportsForeignConflictAsJSON(t *testing.T) {
 
 func TestServiceInstallReportsManagedDrift(t *testing.T) {
 	root := t.TempDir()
+	installNoopSystemctl(t, root)
 	configHome := filepath.Join(root, "xdg")
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	firstConfig := filepath.Join(root, "first.json")
@@ -168,6 +221,7 @@ func TestServiceInstallReportsManagedDrift(t *testing.T) {
 
 func TestServiceInstallReportsCommittedStateWhenOutputFails(t *testing.T) {
 	root := t.TempDir()
+	installNoopSystemctl(t, root)
 	configPath := filepath.Join(root, "config.json")
 	configHome := filepath.Join(root, "xdg")
 	t.Setenv("XDG_CONFIG_HOME", configHome)
@@ -184,7 +238,7 @@ func TestServiceInstallReportsCommittedStateWhenOutputFails(t *testing.T) {
 		t.Fatal("service install ignored an output failure")
 	}
 	artifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdUnitName)
-	for _, expected := range []string{"state prepared", artifact, configPath, "write service installation"} {
+	for _, expected := range []string{"state active", artifact, configPath, "write service installation"} {
 		if !bytes.Contains(stderr.Bytes(), []byte(expected)) {
 			t.Fatalf("service install stderr = %q, want %q", stderr.String(), expected)
 		}
@@ -192,6 +246,19 @@ func TestServiceInstallReportsCommittedStateWhenOutputFails(t *testing.T) {
 }
 
 type failingWriter struct{}
+
+func installNoopSystemctl(t *testing.T, root string) {
+	t.Helper()
+	bin := filepath.Join(root, "fake-systemctl")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(bin, "systemctl")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
 
 func (failingWriter) Write([]byte) (int, error) {
 	return 0, errors.New("closed output")

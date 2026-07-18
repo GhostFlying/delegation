@@ -7,5 +7,13 @@ type Result struct {
 }
 
 func Install(binaryPath, configPath string) (Result, error) {
-	return platformInstall(binaryPath, configPath)
+	result, err := platformPrepare(binaryPath, configPath)
+	if err != nil {
+		return result, err
+	}
+	return platformActivate(result, binaryPath, configPath)
+}
+
+func Prepare(binaryPath, configPath string) (Result, error) {
+	return platformPrepare(binaryPath, configPath)
 }

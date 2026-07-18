@@ -10,6 +10,7 @@ type State string
 const (
 	StateAbsent          State = "absent"
 	StatePrepared        State = "prepared"
+	StateActive          State = "active"
 	StateForeignConflict State = "foreignConflict"
 	StateIndeterminate   State = "indeterminate"
 )

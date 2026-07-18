@@ -34,13 +34,125 @@ func TestWindowsInstallCreatesTaskWithoutForce(t *testing.T) {
 		return taskCommandResult{}, nil
 	}
 
-	result, err := platformInstall(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := platformPrepare(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
 	if err != nil || result.State != StatePrepared {
 		t.Fatalf("platformInstall() = %#v, %v", result, err)
 	}
 	if len(calls) != 1 || len(calls[0]) != 5 || calls[0][0] != "/Create" ||
 		calls[0][2] != ScheduledTask || slices.Contains(calls[0], "/F") {
 		t.Fatalf("schtasks calls = %q", calls)
+	}
+}
+
+func TestWindowsInstallEnablesAndRunsTask(t *testing.T) {
+	originalRunner := runTaskCommand
+	t.Cleanup(func() { runTaskCommand = originalRunner })
+	var calls [][]string
+	var active []byte
+	runTaskCommand = func(args ...string) (taskCommandResult, error) {
+		calls = append(calls, slices.Clone(args))
+		if args[0] == "/Create" {
+			data, err := os.ReadFile(args[4])
+			if err != nil {
+				t.Fatal(err)
+			}
+			active, err = encodeTaskXMLUTF16LE(strings.Replace(
+				taskXMLText(t, data), "<Enabled>false</Enabled>", "<Enabled>true</Enabled>", 1,
+			))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if args[0] == "/Query" {
+			return taskCommandResult{Output: active}, nil
+		}
+		return taskCommandResult{}, nil
+	}
+	result, err := Install(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	if err != nil || result.State != StateActive {
+		t.Fatalf("Install() = %#v, %v", result, err)
+	}
+	if len(calls) != 5 || calls[0][0] != "/Create" || calls[1][0] != "/Change" ||
+		!slices.Contains(calls[1], "/ENABLE") || calls[2][0] != "/Query" ||
+		calls[3][0] != "/Run" || calls[4][0] != "/Query" {
+		t.Fatalf("scheduled task activation calls = %q", calls)
+	}
+}
+
+func TestWindowsInstallReconcilesLostEnableResponse(t *testing.T) {
+	originalRunner := runTaskCommand
+	t.Cleanup(func() { runTaskCommand = originalRunner })
+	var active []byte
+	runTaskCommand = func(args ...string) (taskCommandResult, error) {
+		switch args[0] {
+		case "/Create":
+			data, err := os.ReadFile(args[4])
+			if err != nil {
+				t.Fatal(err)
+			}
+			active, err = encodeTaskXMLUTF16LE(strings.Replace(
+				taskXMLText(t, data), "<Enabled>false</Enabled>", "<Enabled>true</Enabled>", 1,
+			))
+			if err != nil {
+				t.Fatal(err)
+			}
+		case "/Change":
+			return taskCommandResult{}, errors.New("connection lost")
+		case "/Query":
+			return taskCommandResult{Output: active}, nil
+		}
+		return taskCommandResult{}, nil
+	}
+	result, err := Install(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	if err != nil || result.State != StateActive {
+		t.Fatalf("Install() = %#v, %v", result, err)
+	}
+}
+
+func TestWindowsPrepareAcceptsAnOtherwiseEquivalentEnabledTask(t *testing.T) {
+	originalRunner := runTaskCommand
+	t.Cleanup(func() { runTaskCommand = originalRunner })
+	sid, err := windowsUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := RenderScheduledTask(
+		`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+		sid, ScheduledTask, windows.EscapeArg,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := encodeTaskXMLUTF16LE(strings.Replace(
+		taskXMLText(t, descriptor.Content), "<Enabled>false</Enabled>", "<Enabled>true</Enabled>", 1,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runTaskCommand = func(args ...string) (taskCommandResult, error) {
+		if args[0] == "/Create" {
+			return taskCommandResult{ExitCode: 1}, nil
+		}
+		return taskCommandResult{Output: active}, nil
+	}
+	result, err := platformPrepare(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	if err != nil || result.State != StateActive {
+		t.Fatalf("platformPrepare() = %#v, %v", result, err)
+	}
+}
+
+func TestWindowsInstallReportsPartialActivation(t *testing.T) {
+	originalRunner := runTaskCommand
+	t.Cleanup(func() { runTaskCommand = originalRunner })
+	runTaskCommand = func(args ...string) (taskCommandResult, error) {
+		if args[0] == "/Change" {
+			return taskCommandResult{Output: []byte("denied"), ExitCode: 5}, nil
+		}
+		return taskCommandResult{}, nil
+	}
+	result, err := Install(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	if err == nil || result.State != StateIndeterminate {
+		t.Fatalf("Install() = %#v, %v", result, err)
 	}
 }
 
@@ -60,7 +172,7 @@ func TestWindowsInstallRecognizesExactUTF16Task(t *testing.T) {
 		return taskCommandResult{Output: desired}, nil
 	}
 
-	result, err := platformInstall(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := platformPrepare(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
 	if err != nil || result.State != StatePrepared {
 		t.Fatalf("platformInstall() = %#v, %v", result, err)
 	}
@@ -82,7 +194,7 @@ func TestWindowsInstallReconcilesCreateTransportError(t *testing.T) {
 		return taskCommandResult{Output: desired}, nil
 	}
 
-	result, err := platformInstall(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := platformPrepare(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
 	if err != nil || result.State != StatePrepared {
 		t.Fatalf("platformInstall() = %#v, %v", result, err)
 	}
@@ -106,11 +218,11 @@ func TestWindowsInstallRejectsManagedDriftAndForeignSubstring(t *testing.T) {
 		return taskCommandResult{Output: descriptor.Content}, nil
 	}
 
-	if result, err := platformInstall(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`); err == nil || result.State != StatePrepared {
+	if result, err := platformPrepare(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`); err == nil || result.State != StatePrepared {
 		t.Fatalf("managed drift = %#v, %v", result, err)
 	}
 	foreign = true
-	if result, err := platformInstall(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`); err == nil || result.State != StateForeignConflict {
+	if result, err := platformPrepare(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`); err == nil || result.State != StateForeignConflict {
 		t.Fatalf("foreign substring = %#v, %v", result, err)
 	}
 }
@@ -121,7 +233,7 @@ func TestWindowsInstallFailsClosedWhenCreateAndQueryFail(t *testing.T) {
 	runTaskCommand = func(args ...string) (taskCommandResult, error) {
 		return taskCommandResult{Output: []byte("denied"), ExitCode: 5}, nil
 	}
-	result, err := platformInstall(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := platformPrepare(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
 	if err == nil || !strings.Contains(err.Error(), "exit 5") || result.State != StateIndeterminate {
 		t.Fatalf("platformInstall() = %#v, %v", result, err)
 	}
@@ -137,7 +249,7 @@ func TestWindowsInstallTreatsUnparseableQueryAsIndeterminate(t *testing.T) {
 		return taskCommandResult{Output: []byte("<Task")}, nil
 	}
 
-	result, err := platformInstall(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := platformPrepare(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
 	if err == nil || result.State != StateIndeterminate {
 		t.Fatalf("platformInstall() = %#v, %v", result, err)
 	}
@@ -213,6 +325,27 @@ func TestWindowsTaskSchedulerRoundTrip(t *testing.T) {
 	equivalent, err := taskDefinitionsEquivalent(desired, existing, windowsTaskUserIDsEqual)
 	if err != nil || !equivalent {
 		t.Fatalf("round-trip task = %#v, %v; want %#v", existing, err, desired)
+	}
+	changed, err := executeTaskCommand("/Change", "/TN", taskName, "/ENABLE")
+	if err != nil || changed.ExitCode != 0 {
+		t.Fatalf("enable task = %#v, %v", changed, err)
+	}
+	query, err = executeTaskCommand("/Query", "/TN", taskName, "/XML")
+	if err != nil || query.ExitCode != 0 {
+		t.Fatalf("query enabled task = %#v, %v", query, err)
+	}
+	enabled, err := parseTaskDefinition(query.Output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired.Enabled = true
+	equivalent, err = taskDefinitionsEquivalent(desired, enabled, windowsTaskUserIDsEqual)
+	if err != nil || !equivalent || !enabled.Enabled {
+		t.Fatalf("enabled task = %#v, %v; want %#v", enabled, err, desired)
+	}
+	started, err := executeTaskCommand("/Run", "/TN", taskName)
+	if err != nil || started.ExitCode != 0 {
+		t.Fatalf("run task = %#v, %v", started, err)
 	}
 	second, err := executeTaskCommand("/Create", "/TN", taskName, "/XML", tempPath)
 	if err != nil || second.ExitCode == 0 {

@@ -73,10 +73,17 @@ func parseTaskDefinition(data []byte) (taskDefinition, error) {
 	canonical := make(map[string]string, 4)
 	var triggerUserID string
 	var principalUserID string
+	enabled := true
 	for _, name := range []string{"Triggers", "Principals", "Settings", "Actions"} {
 		child, err := uniqueTaskChild(root, name)
 		if err != nil {
 			return taskDefinition{}, err
+		}
+		if name == "Settings" {
+			enabled, err = taskSettingsEnabled(child)
+			if err != nil {
+				return taskDefinition{}, err
+			}
 		}
 		encoded, userID, err := canonicalizeTaskComponent(name, child)
 		if err != nil {
@@ -94,6 +101,7 @@ func parseTaskDefinition(data []byte) (taskDefinition, error) {
 	return taskDefinition{
 		Description:     description,
 		URI:             uri,
+		Enabled:         enabled,
 		TriggerUserID:   triggerUserID,
 		PrincipalUserID: principalUserID,
 		Triggers:        canonical["Triggers"],
@@ -101,6 +109,27 @@ func parseTaskDefinition(data []byte) (taskDefinition, error) {
 		Settings:        canonical["Settings"],
 		Actions:         canonical["Actions"],
 	}, nil
+}
+
+func taskSettingsEnabled(settings taskXMLNode) (bool, error) {
+	enabled, err := optionalUniqueTaskChild(&settings, "Enabled")
+	if err != nil {
+		return false, err
+	}
+	if enabled == nil {
+		return true, nil
+	}
+	if len(enabled.Attributes) != 0 || len(enabled.Children) != 0 {
+		return false, errors.New("scheduled task XML Enabled is not a scalar")
+	}
+	switch enabled.Text {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, errors.New("scheduled task XML Enabled must be true or false")
+	}
 }
 
 func validateTaskEnvelope(root taskXMLNode) error {

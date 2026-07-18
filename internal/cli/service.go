@@ -102,7 +102,11 @@ func writeServiceInstallResult(output io.Writer, result serviceInstallResult, js
 		fmt.Fprintf(&rendered, "kind: %s\n", result.Kind)
 		fmt.Fprintf(&rendered, "artifact: %s\n", result.Artifact)
 		fmt.Fprintf(&rendered, "config: %s\n", result.ConfigPath)
-		fmt.Fprintln(&rendered, "activation: not attempted")
+		if result.State == userservice.StateActive {
+			fmt.Fprintln(&rendered, "activation: enabled and started")
+		} else {
+			fmt.Fprintln(&rendered, "activation: not completed")
+		}
 	}
 	if _, err := io.Copy(output, &rendered); err != nil {
 		return fmt.Errorf("write service installation: %w", err)

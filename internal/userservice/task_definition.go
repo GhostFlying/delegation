@@ -10,6 +10,7 @@ import (
 type taskDefinition struct {
 	Description     string
 	URI             string
+	Enabled         bool
 	TriggerUserID   string
 	PrincipalUserID string
 	Triggers        string
@@ -28,6 +29,7 @@ func taskDefinitionsEquivalent(
 	userIDsEqual func(string, string) (bool, error),
 ) (bool, error) {
 	if desired.Description != existing.Description || desired.URI != existing.URI ||
+		desired.Enabled != existing.Enabled ||
 		desired.Triggers != existing.Triggers || desired.Principals != existing.Principals ||
 		desired.Settings != existing.Settings || desired.Actions != existing.Actions {
 		return false, nil
@@ -114,7 +116,6 @@ func normalizeTaskSettings(settings *taskXMLNode) error {
 		{"StartWhenAvailable", "false"},
 		{"RunOnlyIfNetworkAvailable", "false"},
 		{"WakeToRun", "false"},
-		{"Enabled", "true"},
 		{"Hidden", "false"},
 		{"DeleteExpiredTaskAfter", "PT0S"},
 		{"ExecutionTimeLimit", "PT72H"},
@@ -126,6 +127,9 @@ func normalizeTaskSettings(settings *taskXMLNode) error {
 		if err := omitDefaultTaskLeaf(settings, taskDefault[0], taskDefault[1]); err != nil {
 			return err
 		}
+	}
+	if err := omitTaskLeaf(settings, "Enabled"); err != nil {
+		return err
 	}
 	idleSettings, err := optionalUniqueTaskChild(settings, "IdleSettings")
 	if err != nil {
@@ -146,6 +150,23 @@ func normalizeTaskSettings(settings *taskXMLNode) error {
 	}
 	sortTaskChildren(settings)
 	return nil
+}
+
+func omitTaskLeaf(parent *taskXMLNode, name string) error {
+	child, err := optionalUniqueTaskChild(parent, name)
+	if err != nil || child == nil {
+		return err
+	}
+	if len(child.Attributes) != 0 || len(child.Children) != 0 {
+		return fmt.Errorf("scheduled task XML %s is not a scalar", name)
+	}
+	for index := range parent.Children {
+		if &parent.Children[index] == child {
+			parent.Children = append(parent.Children[:index], parent.Children[index+1:]...)
+			return nil
+		}
+	}
+	return errors.New("scheduled task XML field disappeared during normalization")
 }
 
 func redactOptionalTaskLeaf(parent *taskXMLNode, name string) (string, error) {

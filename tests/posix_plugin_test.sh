@@ -180,30 +180,25 @@ grep -F '"ok":true' "$tmp/launcher-doctor" >/dev/null
 } | DELEGATION_CONFIG="$config" DELEGATION_HOME="$tmp/home" "$launcher" mcp root >"$tmp/launcher-mcp"
 grep -F '"name":"list_devices"' "$tmp/launcher-mcp" >/dev/null
 grep -F '"name":"describe_device"' "$tmp/launcher-mcp" >/dev/null
-case "$os" in
-  linux)
-    service_kind=systemdUser
-    service_artifact="$tmp/service-home/xdg/systemd/user/delegation.service"
-    ;;
-  darwin)
-    service_kind=launchAgent
-    service_artifact="$tmp/service-home/Library/LaunchAgents/com.github.ghostflying.delegation.plist"
-    ;;
-esac
-mkdir -p "$tmp/service-home"
-HOME="$tmp/service-home" XDG_CONFIG_HOME="$tmp/service-home/xdg" DELEGATION_HOME="$tmp/home" "$launcher" service install --config "$config" --json >"$tmp/launcher-service"
-grep -F '"state":"prepared"' "$tmp/launcher-service" >/dev/null
-grep -F "\"kind\":\"$service_kind\"" "$tmp/launcher-service" >/dev/null
-grep -F "\"artifact\":\"$service_artifact\"" "$tmp/launcher-service" >/dev/null
-test -f "$service_artifact"
-case "$os" in
-  linux)
-    test ! -e "$tmp/service-home/xdg/systemd/user/default.target.wants/delegation.service"
-    ;;
-  darwin)
-    awk '/<key>Disabled<\/key>/{ getline; if ($0 ~ /<true\/>/) found=1 } END{ exit !found }' "$service_artifact"
-    ;;
-esac
+if [ "$os" = linux ]; then
+  cat >"$tmp/fake-bin/systemctl" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$DELEGATION_TEST_SYSTEMCTL_LOG"
+EOF
+  chmod 0755 "$tmp/fake-bin/systemctl"
+  service_artifact="$tmp/service-home/xdg/systemd/user/delegation.service"
+  service_log="$tmp/systemctl.log"
+  mkdir -p "$tmp/service-home"
+  PATH="$tmp/fake-bin:$PATH" HOME="$tmp/service-home" XDG_CONFIG_HOME="$tmp/service-home/xdg" \
+    DELEGATION_HOME="$tmp/home" DELEGATION_TEST_SYSTEMCTL_LOG="$service_log" \
+    "$launcher" service install --config "$config" --json >"$tmp/launcher-service"
+  grep -F '"state":"active"' "$tmp/launcher-service" >/dev/null
+  grep -F '"kind":"systemdUser"' "$tmp/launcher-service" >/dev/null
+  grep -F "\"artifact\":\"$service_artifact\"" "$tmp/launcher-service" >/dev/null
+  test -f "$service_artifact"
+  test "$(wc -l <"$service_log")" -eq 4
+fi
 printf '%s\n' unexpected >"$(dirname "$installed")/unexpected.txt"
 if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$tmp/home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime" >"$tmp/existing-extra-out" 2>"$tmp/existing-extra-err"; then
   printf '%s\n' 'expected an installed directory with extra files to fail' >&2

@@ -24,7 +24,7 @@ type taskCommandResult struct {
 
 var runTaskCommand = executeTaskCommand
 
-func platformInstall(binaryPath, configPath string) (Result, error) {
+func platformPrepare(binaryPath, configPath string) (Result, error) {
 	sid, err := windowsUserSID()
 	if err != nil {
 		return Result{}, err
@@ -85,9 +85,92 @@ func platformInstall(binaryPath, configPath string) (Result, error) {
 		return indeterminate, errors.Join(createFailure, fmt.Errorf("compare existing scheduled task identity: %w", err))
 	}
 	if !equivalent {
-		return result, errors.New("managed scheduled task differs; remove it explicitly before reinstalling")
+		desired.Enabled = existing.Enabled
+		equivalent, err = taskDefinitionsEquivalent(desired, existing, windowsTaskUserIDsEqual)
+		if err != nil {
+			return indeterminate, errors.Join(createFailure, fmt.Errorf("compare existing scheduled task activation: %w", err))
+		}
+		if !equivalent || !existing.Enabled {
+			return result, errors.New("managed scheduled task differs; remove it explicitly before reinstalling")
+		}
+		result.State = StateActive
 	}
 	return result, nil
+}
+
+func platformActivate(result Result, binaryPath, configPath string) (Result, error) {
+	if result.State != StatePrepared && result.State != StateActive {
+		return result, fmt.Errorf("cannot activate scheduled task from state %s", result.State)
+	}
+	changed, changeErr := runTaskCommand("/Change", "/TN", ScheduledTask, "/ENABLE")
+	enabled, verifyErr := scheduledTaskEnabled(binaryPath, configPath)
+	if !enabled || verifyErr != nil {
+		result.State = StateIndeterminate
+		return result, errors.Join(
+			changeErr,
+			taskCommandFailure("enable scheduled task", changed),
+			verifyErr,
+		)
+	}
+	run, runErr := runTaskCommand("/Run", "/TN", ScheduledTask)
+	if runErr != nil || run.ExitCode != 0 {
+		result.State = StateIndeterminate
+		return result, errors.Join(runErr, taskCommandFailure("start scheduled task", run))
+	}
+	enabled, verifyErr = scheduledTaskEnabled(binaryPath, configPath)
+	if !enabled || verifyErr != nil {
+		result.State = StateIndeterminate
+		return result, errors.Join(verifyErr, errors.New("scheduled task changed after it was started"))
+	}
+	result.State = StateActive
+	return result, nil
+}
+
+func scheduledTaskEnabled(binaryPath, configPath string) (bool, error) {
+	sid, err := windowsUserSID()
+	if err != nil {
+		return false, err
+	}
+	descriptor, err := RenderScheduledTask(
+		binaryPath, configPath, sid, ScheduledTask, windows.EscapeArg,
+	)
+	if err != nil {
+		return false, err
+	}
+	desired, err := parseTaskDefinition(descriptor.Content)
+	if err != nil {
+		return false, err
+	}
+	desired.Enabled = true
+	query, err := runTaskCommand("/Query", "/TN", ScheduledTask, "/XML")
+	if err != nil {
+		return false, err
+	}
+	if query.ExitCode != 0 {
+		return false, taskCommandError("query scheduled task activation", query)
+	}
+	existing, err := parseTaskDefinition(query.Output)
+	if err != nil {
+		return false, fmt.Errorf("parse activated scheduled task: %w", err)
+	}
+	if !taskOwned(existing) {
+		return false, errors.New("scheduled task changed ownership during activation")
+	}
+	equivalent, err := taskDefinitionsEquivalent(desired, existing, windowsTaskUserIDsEqual)
+	if err != nil {
+		return false, err
+	}
+	if !equivalent {
+		return false, errors.New("scheduled task activation changed its managed definition")
+	}
+	return true, nil
+}
+
+func taskCommandFailure(action string, result taskCommandResult) error {
+	if result.ExitCode == 0 {
+		return nil
+	}
+	return taskCommandError(action, result)
 }
 
 func taskCommandError(action string, result taskCommandResult) error {
