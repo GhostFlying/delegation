@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
@@ -78,11 +77,6 @@ func runCredentialIssue(args []string, stdout, stderr io.Writer) int {
 	deviceID := flags.String("device-id", "", "stable device UUID")
 	tokenPath := flags.String("out", "", "new peer token file path")
 	jsonOutput := flags.Bool("json", false, "print credential result as JSON")
-	for _, arg := range args {
-		if arg == "--role" || strings.HasPrefix(arg, "--role=") {
-			return writeError(stderr, errors.New("--role is obsolete; credential issue now creates a peer credential"))
-		}
-	}
 	if code := parseFlags(flags, args); code >= 0 {
 		return code
 	}

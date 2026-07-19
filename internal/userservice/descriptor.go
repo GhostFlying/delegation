@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	markerPrefix = "delegation-managed:v2:"
+	markerPrefix = "delegation-managed:v1:"
 
 	MarkerBroker = markerPrefix + "broker"
 	MarkerPeer   = markerPrefix + "peer"

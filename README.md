@@ -84,7 +84,7 @@ the broker issued that token. Setup validates the complete peer configuration be
 local credentials and never overwrites an existing configuration.
 
 Enroll each peer from the broker installation before running peer setup. Choose a new stable UUID
-for the peer, initialize the broker once so its schema-v4 state exists, then run:
+for the peer and start the broker once so its state is initialized, then run:
 
 ```bash
 plugins/delegation/scripts/delegation-mcp credential issue \
@@ -107,21 +107,13 @@ plugins/delegation/scripts/delegation-mcp credential revoke \
 ```
 
 Revocation closes access on the next broker frame and marks the peer offline. Revoked IDs remain
-tombstoned and require a new device UUID. Incomplete legacy enrollments are treated the same way.
+tombstoned and require a new device UUID.
 
-Schema v4 and protocol v2 are coordinated, fail-closed upgrades. Stop legacy services and back up
-the config, broker state, and token files first. Use `migrate config --from <v3-config> --to
-<broker.json-or-peer.json>`. A legacy broker retains its master token and state path. A legacy
-controller retains its already root-capable credential. A legacy active device credential is
-target-only and is deleted by the broker migration; issue a fresh peer token for the same device ID
-to a new file, then pass that file with `--token-file` while migrating the device config. Do not run
-credential administration against a v3 state file: start the v2 broker first so it can migrate the
-store while holding the broker instance lease. This is not a rolling upgrade.
-
-Schema v1 and v2 upgrades should first follow their version-specific safety guidance and reach a
-protected v3 installation. Never reuse a schema-v1 shared token as a broker master or peer token.
-M0 Windows homes still require an offline re-home because inherited profile-directory ACLs are not
-modified in place.
+Delegation has not published a runtime release yet. Config, broker state, wire protocol, local
+bridge, and native service definitions therefore start at peer-native format version 1 and have no
+upgrade support. Discard configuration and state created by earlier development checkouts, then run
+`setup broker` and `setup peer` again; the current runtime never converts or deletes them
+automatically.
 
 Run `doctor --config <path>` after setup. Broker and peer may coexist on one device through
 `broker.json` and `peer.json`; commands that could be ambiguous require an explicit config. Install
@@ -142,10 +134,8 @@ whose effect cannot be reconciled returns
 
 Linux requires a working systemd user manager. macOS uses the current GUI launchd domain and thus
 requires that user to have a GUI login. The Windows task uses an interactive user token and likewise
-requires a logged-in user. Stop and remove the old single `delegation.service`,
-`com.github.ghostflying.delegation`, or `Delegation Connector` definition before starting migrated
-peers. Verify ownership before removal. Runtime-path updates also require explicit native service
-replacement. Windows restart-on-failure hardening is deferred to M4.
+requires a logged-in user. Runtime-path updates require explicit native service replacement.
+Windows restart-on-failure hardening is deferred to M4.
 
 ## Discover Peers
 

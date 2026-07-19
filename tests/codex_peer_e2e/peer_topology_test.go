@@ -80,7 +80,7 @@ func TestCodexPeerTopology(t *testing.T) {
 			"setup", "peer", "--config", current.configPath,
 			"--controller-id", networkID, "--device-id", deviceIDs[current.label],
 			"--device-name", "peer-"+strings.ToLower(current.label),
-			"--broker-url", "ws://"+brokerAddress+"/v2/connect",
+			"--broker-url", "ws://"+brokerAddress+"/v1/connect",
 			"--auth-mode", "token", "--token-file", tokenPath, "--json",
 		)
 		startService(t, commandEnv(current), delegationBinary, current.configPath)

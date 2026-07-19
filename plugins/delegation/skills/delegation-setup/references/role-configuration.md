@@ -16,7 +16,7 @@ separate.
 For token authentication, enroll every peer from the configured broker:
 
 1. Choose a stable device UUID.
-2. Ensure the v2 broker has started once so its schema-v4 state migration is complete.
+2. Start the broker once so its state is initialized, then verify it with `doctor`.
 3. On the broker, run `credential issue --config <broker.json> --device-id <device-uuid> --out
    <protected-staging-token-file>`.
 4. Transfer the token file over an authenticated encrypted channel and preserve or restore

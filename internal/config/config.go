@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	CurrentSchemaVersion = 4
-	brokerConnectPath    = "/v2/connect"
+	CurrentSchemaVersion = 1
+	brokerConnectPath    = "/v1/connect"
 	maximumConfigSize    = 1024 * 1024
 )
 
@@ -105,12 +105,14 @@ func Read(path string) (Config, error) {
 	if len(data) > maximumConfigSize {
 		return Config{}, fmt.Errorf("config exceeds %d-byte limit", maximumConfigSize)
 	}
-	var compatibility Config
-	if err := json.Unmarshal(data, &compatibility); err != nil {
+	var header struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
-	if compatibility.SchemaVersion != CurrentSchemaVersion {
-		return Config{}, compatibility.Validate()
+	if header.SchemaVersion != CurrentSchemaVersion {
+		return Config{}, unsupportedSchemaVersion(header.SchemaVersion)
 	}
 	var cfg Config
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -129,22 +131,7 @@ func Read(path string) (Config, error) {
 
 func (c Config) Validate() error {
 	if c.SchemaVersion != CurrentSchemaVersion {
-		if c.SchemaVersion < CurrentSchemaVersion {
-			if c.SchemaVersion < LegacySchemaVersion {
-				return fmt.Errorf("config schema version %d requires its version-specific secure migration to protected schema version %d before the v4 migration; do not run delegation migrate config directly", c.SchemaVersion, LegacySchemaVersion)
-			}
-			switch c.Role {
-			case RoleBroker:
-				return fmt.Errorf("config schema version %d is obsolete; stop the legacy service, back up config, state, and token files, then run delegation migrate config --from <legacy-config> --to <broker.json>", c.SchemaVersion)
-			case "controller":
-				return fmt.Errorf("config schema version %d uses the obsolete controller role; stop the legacy service, then run delegation migrate config --from <legacy-config> --to <peer.json>; the existing controller credential may be retained", c.SchemaVersion)
-			case "device":
-				return fmt.Errorf("config schema version %d uses the obsolete device role; stop the legacy service, migrate the broker first, issue a fresh peer credential for the same deviceId, then run delegation migrate config --from <legacy-config> --to <peer.json> --token-file <fresh-peer-token>", c.SchemaVersion)
-			default:
-				return fmt.Errorf("config schema version %d is obsolete; use delegation migrate config with a supported legacy broker, controller, or device configuration", c.SchemaVersion)
-			}
-		}
-		return fmt.Errorf("config schema version %d requires a newer delegation runtime", c.SchemaVersion)
+		return unsupportedSchemaVersion(c.SchemaVersion)
 	}
 	if identity.ValidateID(c.ControllerID) != nil {
 		return errors.New("controllerId must be a UUID")
@@ -179,6 +166,14 @@ func (c Config) Validate() error {
 	}
 
 	return c.Broker.Auth.validate()
+}
+
+func unsupportedSchemaVersion(version int) error {
+	return fmt.Errorf(
+		"unsupported config schema version %d; this runtime supports only version %d; create a new configuration with setup broker or setup peer",
+		version,
+		CurrentSchemaVersion,
+	)
 }
 
 func (a AuthConfig) validate() error {
@@ -218,7 +213,7 @@ func NormalizeBrokerURL(raw string, allowInsecureNonLoopback bool) (string, erro
 		return "", errors.New("broker URL must not contain credentials, query, fragment, or an escaped path")
 	}
 	if parsed.Path != "" && parsed.Path != "/" && parsed.Path != brokerConnectPath {
-		return "", errors.New("broker URL path must be empty or /v2/connect")
+		return "", errors.New("broker URL path must be empty or /v1/connect")
 	}
 	if parsed.Scheme == "ws" && !loopbackHost(parsed.Hostname()) && !allowInsecureNonLoopback {
 		return "", errors.New("plaintext non-loopback broker URL requires explicit acknowledgement")

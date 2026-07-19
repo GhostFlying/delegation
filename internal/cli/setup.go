@@ -36,10 +36,6 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		return runSetupBroker(args[1:], stdout, stderr)
 	case delegationconfig.RolePeer:
 		return runSetupPeer(args[1:], stdout, stderr)
-	case "controller":
-		return writeError(stderr, errors.New("setup controller is obsolete; use delegation migrate config --from <legacy-config> --to <peer.json>"))
-	case "device":
-		return writeError(stderr, errors.New("setup device is obsolete; migrate the broker, issue a fresh peer credential for the same deviceId, then use delegation migrate config --from <legacy-config> --to <peer.json> --token-file <fresh-peer-token>"))
 	default:
 		fmt.Fprintf(stderr, "delegation: unsupported setup role %q\n", args[0])
 		return exitUsage

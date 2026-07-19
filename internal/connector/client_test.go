@@ -554,7 +554,7 @@ func TestConnectorDoesNotFollowRedirectWithBearerToken(t *testing.T) {
 
 func TestConnectorValidatesStaticOptionsAndOfflineCalls(t *testing.T) {
 	base := Options{
-		BrokerURL:       "wss://broker.example.test/v2/connect",
+		BrokerURL:       "wss://broker.example.test/v1/connect",
 		ControllerID:    connectorTestControllerID,
 		DeviceID:        connectorTestDeviceID,
 		DeviceName:      "builder",

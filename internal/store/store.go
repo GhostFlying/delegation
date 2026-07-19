@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	schemaVersion = 4
+	schemaVersion = 1
 	busyTimeoutMS = 5000
 	walRetryLimit = 8
 	sqliteBusy    = 5
@@ -28,9 +28,8 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	return open(ctx, path, true)
 }
 
-// OpenCurrent opens an existing current-schema store without running migrations.
-// Administrative commands use it so destructive upgrades remain owned by a
-// broker process that already holds the instance lease.
+// OpenCurrent opens an existing current-schema store without initializing one.
+// Administrative commands use it so they cannot create a new broker authority.
 func OpenCurrent(ctx context.Context, path string) (*Store, error) {
 	if _, err := os.Lstat(path); err != nil {
 		return nil, fmt.Errorf("inspect existing broker state: %w", err)
@@ -38,7 +37,7 @@ func OpenCurrent(ctx context.Context, path string) (*Store, error) {
 	return open(ctx, path, false)
 }
 
-func open(ctx context.Context, path string, migrate bool) (*Store, error) {
+func open(ctx context.Context, path string, initialize bool) (*Store, error) {
 	resolved, err := preparePath(path)
 	if err != nil {
 		return nil, err
@@ -73,17 +72,13 @@ func open(ctx context.Context, path string, migrate bool) (*Store, error) {
 	if err := protectDatabaseFile(resolved); err != nil {
 		return closeOnError(err)
 	}
-	if migrate {
-		if err := store.migrate(ctx); err != nil {
+	if initialize {
+		if err := store.initializeSchema(ctx); err != nil {
 			return closeOnError(err)
 		}
 	} else {
-		var version int
-		if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-			return closeOnError(fmt.Errorf("read broker state schema version: %w", err))
-		}
-		if version != schemaVersion {
-			return closeOnError(fmt.Errorf("broker state schema version %d requires the v2 broker to run its coordinated migration to version %d first", version, schemaVersion))
+		if err := store.requireCurrentSchema(ctx); err != nil {
+			return closeOnError(err)
 		}
 	}
 	if err := store.enableWAL(ctx); err != nil {

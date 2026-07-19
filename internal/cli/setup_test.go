@@ -212,26 +212,6 @@ func TestSetupPeerNoneAuthExplainsTrustDomain(t *testing.T) {
 	}
 }
 
-func TestLegacySetupRolesReturnMigrationGuidanceWithoutWriting(t *testing.T) {
-	for _, role := range []string{"controller", "device"} {
-		t.Run(role, func(t *testing.T) {
-			configPath := privateTestPath(t, role+".json")
-			var stdout bytes.Buffer
-			var stderr bytes.Buffer
-			code := Run([]string{"setup", role, "--config", configPath}, &stdout, &stderr)
-			if code == 0 || !strings.Contains(stderr.String(), "migrate config") {
-				t.Fatalf("legacy setup code = %d, stderr = %q", code, stderr.String())
-			}
-			if role == "device" && !strings.Contains(stderr.String(), "fresh peer credential") {
-				t.Fatalf("device migration guidance = %q", stderr.String())
-			}
-			if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("legacy setup wrote config: %v", err)
-			}
-		})
-	}
-}
-
 func TestSetupPeerWithoutAuthenticationGeneratesDeviceID(t *testing.T) {
 	configPath := privateTestPath(t, "peer.json")
 	var stdout bytes.Buffer

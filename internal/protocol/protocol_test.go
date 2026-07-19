@@ -34,6 +34,20 @@ func TestEnvelopeAcceptsBoundRootRequest(t *testing.T) {
 	}
 }
 
+func TestEnvelopeRejectsUnsupportedProtocolVersion(t *testing.T) {
+	envelope := Envelope{
+		ProtocolVersion: Version + 1,
+		Kind:            KindRequest,
+		RequestID:       requestID,
+		Method:          MethodHeartbeat,
+		ControllerID:    testControllerID,
+		Payload:         json.RawMessage(`{}`),
+	}
+	if err := envelope.Validate(); err == nil {
+		t.Fatal("Validate accepted an unsupported protocol version")
+	}
+}
+
 func TestEnvelopeRejectsCrossTreePrincipal(t *testing.T) {
 	principal := control.NewRootPrincipal(testControllerID, testTreeID, testAgentID, testDeviceID)
 	envelope := Envelope{

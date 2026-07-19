@@ -663,7 +663,7 @@ func windowsIntegrationPeerConfig(brokerConfig delegationconfig.Config) delegati
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174702",
 		DeviceName:    "windows-peer",
 		Broker: delegationconfig.BrokerConfig{
-			URL:  "ws://" + brokerConfig.Broker.Listen + "/v2/connect",
+			URL:  "ws://" + brokerConfig.Broker.Listen + "/v1/connect",
 			Auth: delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
 		},
 	}

@@ -571,21 +571,21 @@ func TestCredentialUsesBrokerConfiguredState(t *testing.T) {
 	}
 }
 
-func TestCredentialRejectsSchemaOneWithoutMutatingOldAuthority(t *testing.T) {
-	oldHome := t.TempDir()
-	t.Setenv("DELEGATION_HOME", oldHome)
-	statePath := filepath.Join(oldHome, "state", "broker.sqlite3")
+func TestCredentialRejectsUnsupportedSchemaWithoutMutatingAuthority(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DELEGATION_HOME", home)
+	statePath := filepath.Join(home, "state", "broker.sqlite3")
 	registry := openCredentialTestStore(t, statePath)
 	if err := registry.Close(); err != nil {
 		t.Fatal(err)
 	}
 	configPath := privateTestPath(t, "config.json")
-	masterPath := filepath.Join(oldHome, "secrets", "broker.token")
+	masterPath := filepath.Join(home, "secrets", "broker.token")
 	if _, err := tokenfile.Ensure(masterPath); err != nil {
 		t.Fatal(err)
 	}
-	oldConfig := delegationconfig.Config{
-		SchemaVersion: 1,
+	unsupportedConfig := delegationconfig.Config{
+		SchemaVersion: delegationconfig.CurrentSchemaVersion + 1,
 		Role:          delegationconfig.RoleBroker,
 		ControllerID:  credentialTestControllerID,
 		Broker: delegationconfig.BrokerConfig{
@@ -596,11 +596,11 @@ func TestCredentialRejectsSchemaOneWithoutMutatingOldAuthority(t *testing.T) {
 			},
 		},
 	}
-	configData, err := json.Marshal(oldConfig)
+	configData, err := json.Marshal(unsupportedConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	protectedFixture := oldConfig
+	protectedFixture := unsupportedConfig
 	protectedFixture.SchemaVersion = delegationconfig.CurrentSchemaVersion
 	protectedFixture.Broker.Listen = "127.0.0.1:9876"
 	protectedFixture.Broker.StateFile = statePath
@@ -626,14 +626,11 @@ func TestCredentialRejectsSchemaOneWithoutMutatingOldAuthority(t *testing.T) {
 		"--out", outputToken,
 	})
 	if code == 0 {
-		t.Fatal("credential issue accepted a schema 1 broker config")
+		t.Fatal("credential issue accepted an unsupported broker config")
 	}
-	for _, text := range []string{
-		"schema version 1", "version-specific secure migration", "schema version 3",
-		"do not run delegation migrate config directly",
-	} {
+	for _, text := range []string{"unsupported config schema version 2", "supports only version 1"} {
 		if !strings.Contains(stderr, text) {
-			t.Fatalf("schema 1 credential error = %q, want %q", stderr, text)
+			t.Fatalf("unsupported schema credential error = %q, want %q", stderr, text)
 		}
 	}
 	stateAfter, err := os.ReadFile(statePath)
@@ -645,14 +642,14 @@ func TestCredentialRejectsSchemaOneWithoutMutatingOldAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(stateAfter, stateBefore) || !bytes.Equal(masterAfter, masterBefore) {
-		t.Fatal("schema 1 rejection mutated the existing broker authority")
+		t.Fatal("unsupported schema rejection mutated the existing broker authority")
 	}
 	if _, err := os.Lstat(outputToken); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("schema 1 rejection created an output token: %v", err)
+		t.Fatalf("unsupported schema rejection created an output token: %v", err)
 	}
 	newDefaultState := filepath.Join(filepath.Dir(configPath), "state", "broker.sqlite3")
 	if _, err := os.Lstat(newDefaultState); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("schema 1 rejection created a state database beside the custom config: %v", err)
+		t.Fatalf("unsupported schema rejection created a state database beside the custom config: %v", err)
 	}
 }
 

@@ -143,9 +143,10 @@ func TestBrokerURLValidationMatchesConnectorEndpoint(t *testing.T) {
 	}
 	for _, brokerURL := range []string{
 		"wss://broker.example.test/other",
-		"wss://broker.example.test/%76%32/connect",
+		"wss://broker.example.test/v2/connect",
+		"wss://broker.example.test/%76%31/connect",
 		"wss://broker.example.test?",
-		"wss://broker.example.test/v2/connect#fragment",
+		"wss://broker.example.test/v1/connect#fragment",
 	} {
 		t.Run(brokerURL, func(t *testing.T) {
 			cfg := valid
@@ -158,7 +159,7 @@ func TestBrokerURLValidationMatchesConnectorEndpoint(t *testing.T) {
 	for _, brokerURL := range []string{
 		"wss://broker.example.test",
 		"wss://broker.example.test/",
-		"wss://broker.example.test/v2/connect",
+		"wss://broker.example.test/v1/connect",
 	} {
 		t.Run("valid "+brokerURL, func(t *testing.T) {
 			cfg := valid
@@ -167,7 +168,7 @@ func TestBrokerURLValidationMatchesConnectorEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			got, err := NormalizeBrokerURL(brokerURL, false)
-			if err != nil || got != "wss://broker.example.test/v2/connect" {
+			if err != nil || got != "wss://broker.example.test/v1/connect" {
 				t.Fatalf("NormalizeBrokerURL() = %q, %v", got, err)
 			}
 		})
@@ -338,147 +339,37 @@ func TestListenPortMustBeUsable(t *testing.T) {
 	}
 }
 
-func TestSchemaOneRequiresVersionSpecificMigration(t *testing.T) {
-	cfg := Config{
-		SchemaVersion: 1,
-		Role:          RoleBroker,
-		ControllerID:  testID,
-		Broker: BrokerConfig{
-			Listen: "0.0.0.0:9876",
-			Auth: AuthConfig{
-				Mode:      AuthModeToken,
-				TokenFile: filepath.Join(t.TempDir(), "broker.token"),
-			},
-		},
-	}
-	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("schema 1 config was accepted")
-	}
-	for _, text := range []string{
-		"schema version 1", "version-specific secure migration", "schema version 3",
-		"do not run delegation migrate config directly",
-	} {
-		if !strings.Contains(err.Error(), text) {
-			t.Fatalf("schema 1 validation error = %q, want %q", err, text)
+func TestConfigRejectsUnsupportedSchemaVersions(t *testing.T) {
+	for _, version := range []int{0, CurrentSchemaVersion + 1} {
+		cfg := protectedTestConfig(t)
+		cfg.SchemaVersion = version
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatalf("Validate accepted schema version %d", version)
+		}
+		for _, text := range []string{"unsupported config schema version", "supports only version 1", "setup broker or setup peer"} {
+			if !strings.Contains(err.Error(), text) {
+				t.Fatalf("schema version %d error = %q, want %q", version, err, text)
+			}
 		}
 	}
 }
 
-func TestSchemaThreeDeviceRequiresFreshPeerCredential(t *testing.T) {
-	cfg := Config{
-		SchemaVersion: LegacySchemaVersion,
-		Role:          LegacyRoleDevice,
-		ControllerID:  testID,
-		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
-		DeviceName:    "device",
-		Broker: BrokerConfig{
-			URL: "wss://broker.example.test",
-			Auth: AuthConfig{
-				Mode:      AuthModeToken,
-				TokenFile: filepath.Join(t.TempDir(), "obsolete-target.token"),
-			},
-		},
-	}
-	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("schema 3 target config was accepted")
-	}
-	for _, text := range []string{"obsolete device role", "issue a fresh peer credential", "same deviceId", "--token-file"} {
-		if !strings.Contains(err.Error(), text) {
-			t.Fatalf("schema 3 target validation error = %q, want %q", err, text)
-		}
-	}
-}
-
-func TestReadSchemaTwoRequiresTransportAwareSetup(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  Config
-		want []string
-	}{
-		{
-			name: "token broker",
-			cfg: Config{
-				SchemaVersion: 2,
-				Role:          RoleBroker,
-				ControllerID:  testID,
-				Broker: BrokerConfig{
-					Listen:    "0.0.0.0:8787",
-					StateFile: testStateFile(t),
-					Auth: AuthConfig{
-						Mode:      AuthModeToken,
-						TokenFile: filepath.Join(t.TempDir(), "broker.token"),
-					},
-				},
-			},
-			want: []string{
-				"schema version 2", "version-specific secure migration", "schema version 3",
-				"do not run delegation migrate config directly",
-			},
-		},
-		{
-			name: "device",
-			cfg: Config{
-				SchemaVersion: 2,
-				Role:          LegacyRoleDevice,
-				ControllerID:  testID,
-				DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
-				DeviceName:    "device",
-				Broker: BrokerConfig{
-					URL:  "wss://broker.example.test",
-					Auth: AuthConfig{Mode: AuthModeNone},
-				},
-			},
-			want: []string{
-				"schema version 2", "version-specific secure migration", "schema version 3",
-				"do not run delegation migrate config directly",
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "private", "config.json")
-			data, err := json.Marshal(test.cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			writeProtectedConfigFixture(t, path, data)
-			_, err = Read(path)
-			if err == nil {
-				t.Fatal("Read() accepted schema 2 config")
-			}
-			for _, text := range test.want {
-				if !strings.Contains(err.Error(), text) {
-					t.Fatalf("schema 2 read error = %q, want %q", err, text)
-				}
-			}
-		})
-	}
-}
-
-func TestFutureSchemaRequiresNewerRuntime(t *testing.T) {
-	cfg := Config{SchemaVersion: CurrentSchemaVersion + 1}
-	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "newer delegation runtime") || strings.Contains(err.Error(), "rerun setup") {
-		t.Fatalf("future schema validation error = %v", err)
-	}
-}
-
-func TestReadFutureSchemaWithUnknownFieldsRequiresNewerRuntime(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "private", "future.json")
+func TestReadReportsUnsupportedSchemaBeforeUnknownFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "unsupported.json")
 	data, err := json.Marshal(map[string]any{
 		"schemaVersion": CurrentSchemaVersion + 1,
 		"role":          "broker",
-		"futureField":   true,
+		"unknown":       true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	writeProtectedConfigFixture(t, path, data)
 	_, err = Read(path)
-	if err == nil || !strings.Contains(err.Error(), "newer delegation runtime") || strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("future config read error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "unsupported config schema version 2") ||
+		strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unsupported config read error = %v", err)
 	}
 }
 

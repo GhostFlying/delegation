@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	ConnectPath              = "/v2/connect"
+	ConnectPath              = "/v1/connect"
 	HealthServiceHeader      = "X-Delegation-Service"
 	HealthControllerHeader   = "X-Delegation-Controller-Id"
 	defaultHeartbeatInterval = 15 * time.Second

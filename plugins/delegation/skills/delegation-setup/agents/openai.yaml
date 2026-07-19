@@ -1,4 +1,4 @@
 interface:
   display_name: "Delegation Setup"
-  short_description: "Install or migrate a Delegation peer"
+  short_description: "Install and configure a Delegation peer"
   default_prompt: "Use $delegation-setup to install and configure this device as a Delegation peer, with an optional cohosted broker."

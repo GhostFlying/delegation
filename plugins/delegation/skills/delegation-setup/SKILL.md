@@ -1,6 +1,6 @@
 ---
 name: delegation-setup
-description: Install, update, migrate, or diagnose the Delegation native runtime on Linux, macOS, or Windows. Use when Delegation reports a missing runtime, when joining a device to a Delegation peer network, when configuring a cohosted broker, or after updating the plugin or runtime.
+description: Install, update, configure, or diagnose the Delegation native runtime on Linux, macOS, or Windows. Use when Delegation reports a missing runtime, when joining a device to a Delegation peer network, when configuring a cohosted broker, or after updating the plugin or runtime.
 ---
 
 # Delegation Setup
@@ -34,16 +34,14 @@ launcher for every runtime command below.
 
 An installation may host a broker, a peer, or both. Run `setup broker --help` or `setup peer --help`
 before writing configuration. The defaults are separate `broker.json` and `peer.json` files. Before
-setup, migration, or issuing/revoking a credential, read
+setup or issuing/revoking a credential, read
 [role configuration](references/role-configuration.md) and follow its enrollment and transport
 rules. Token authentication is the default. Never pass token material as a command-line value;
 configuration stores only an absolute token file path and refuses to overwrite an existing config.
 
-Before migrating an older installation, changing a versioned runtime, or installing a user service,
-read [migration and services](references/migration-and-services.md). Schema v4 migration is explicit
-and coordinated: stop legacy services, back up state, and let the v2 broker migrate its store while
-holding the instance lease. Do not infer old settings from new defaults, elevate a legacy device
-token into a peer token, or modify an unsafe inherited Windows home in place.
+Before installing or replacing a user service, read
+[native services](references/native-services.md). Install broker and peer processes independently,
+and stop when the native service manager reports a foreign, drifted, or indeterminate definition.
 
 ## Verify And Hand Off
 

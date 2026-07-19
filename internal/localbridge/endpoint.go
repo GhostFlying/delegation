@@ -15,7 +15,7 @@ func Endpoint(controllerID, deviceID string) (string, error) {
 	if err := identity.ValidateID(deviceID); err != nil {
 		return "", fmt.Errorf("deviceId %w", err)
 	}
-	digest := sha256.Sum256([]byte("delegation-localbridge-v2\x00" + controllerID + "\x00" + deviceID))
+	digest := sha256.Sum256([]byte("delegation-localbridge-v1\x00" + controllerID + "\x00" + deviceID))
 	name := hex.EncodeToString(digest[:16])
 	return platformEndpoint(name)
 }

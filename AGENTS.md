@@ -30,5 +30,5 @@
 ## Phase Boundaries
 
 - Complete, review, and report the active milestone before starting the next milestone.
-- Do not add M2 managed-worker behavior until the M1.1 peer-topology amendment has been independently
-  reviewed and accepted.
+- Do not add M2 managed-worker behavior until the M1.1 peer topology and its pre-release v1 cleanup
+  have been independently reviewed and accepted.

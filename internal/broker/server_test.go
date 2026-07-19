@@ -204,31 +204,15 @@ func TestTokenAuthenticationAndCredentialIdentityAreEnforced(t *testing.T) {
 	}
 }
 
-func TestProtocolV1HelloFailsBeforeRegistryMutation(t *testing.T) {
+func TestUnsupportedProtocolHelloFailsBeforeRegistryMutation(t *testing.T) {
 	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
 	connection, _, err := dialBroker(harness, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy := map[string]any{
-		"protocolVersion": 1,
-		"kind":            "request",
-		"requestId":       newRequestID(t),
-		"method":          protocol.MethodHello,
-		"controllerId":    brokerTestControllerID,
-		"payload": map[string]any{
-			"controllerId":   brokerTestControllerID,
-			"deviceId":       brokerTestDeviceID,
-			"deviceName":     "legacy",
-			"role":           "controller",
-			"os":             "linux",
-			"arch":           "amd64",
-			"runtimeVersion": "0.1.0-alpha.0.m1.1",
-			"features":       []string{protocol.FeatureDeviceRegistry},
-			"cursor":         0,
-		},
-	}
-	data, err := json.Marshal(legacy)
+	unsupported := helloRequest(t)
+	unsupported.ProtocolVersion = protocol.Version + 1
+	data, err := json.Marshal(unsupported)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,12 +222,12 @@ func TestProtocolV1HelloFailsBeforeRegistryMutation(t *testing.T) {
 	readContext, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if _, _, err := connection.Read(readContext); err == nil {
-		t.Fatal("protocol v1 connection remained open")
+		t.Fatal("unsupported protocol connection remained open")
 	}
 	if _, err := harness.registry.DescribeDevice(
 		context.Background(), brokerTestControllerID, brokerTestDeviceID,
 	); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("protocol v1 hello changed registry: %v", err)
+		t.Fatalf("unsupported protocol hello changed registry: %v", err)
 	}
 }
 

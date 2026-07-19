@@ -110,7 +110,7 @@ func TestBrokerServiceUsesConfiguredMasterToken(t *testing.T) {
 				header.Set("Authorization", "Bearer "+test.token)
 			}
 			connection, response, err := websocket.Dial(
-				context.Background(), "ws://"+address+"/v2/connect", &websocket.DialOptions{HTTPHeader: header},
+				context.Background(), "ws://"+address+"/v1/connect", &websocket.DialOptions{HTTPHeader: header},
 			)
 			if connection != nil {
 				connection.CloseNow()
@@ -123,7 +123,7 @@ func TestBrokerServiceUsesConfiguredMasterToken(t *testing.T) {
 	}
 	header := http.Header{"Authorization": []string{"Bearer " + tokenfile.Encode(deviceToken)}}
 	connection, _, err := websocket.Dial(
-		context.Background(), "ws://"+address+"/v2/connect", &websocket.DialOptions{HTTPHeader: header},
+		context.Background(), "ws://"+address+"/v1/connect", &websocket.DialOptions{HTTPHeader: header},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestBrokerServiceClosesManagedWebSocketAndMarksDeviceOffline(t *testing.T) 
 	}()
 	address := waitForBrokerAddress(t, ready, done)
 	waitForBrokerHealth(t, address)
-	connection, _, err := websocket.Dial(context.Background(), "ws://"+address+"/v2/connect", nil)
+	connection, _, err := websocket.Dial(context.Background(), "ws://"+address+"/v1/connect", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestBrokerServiceRejectsSecondProcessWithoutInvalidatingLiveLease(t *testin
 	}()
 	address := waitForBrokerAddress(t, ready, done)
 	waitForBrokerHealth(t, address)
-	connection, _, err := websocket.Dial(context.Background(), "ws://"+address+"/v2/connect", nil)
+	connection, _, err := websocket.Dial(context.Background(), "ws://"+address+"/v1/connect", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

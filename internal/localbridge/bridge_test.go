@@ -291,13 +291,13 @@ func TestServerCloseReturnsListenerCleanupFailure(t *testing.T) {
 	}
 }
 
-func TestLocalBridgeV1RequestFailsClosed(t *testing.T) {
+func TestUnsupportedLocalBridgeRequestFailsClosed(t *testing.T) {
 	request := request{
-		Version: 1, RequestID: "l_123e4567-e89b-42d3-a456-426614174399",
+		Version: Version + 1, RequestID: "l_123e4567-e89b-42d3-a456-426614174399",
 		Method: protocol.MethodEnsureRootTree, Payload: json.RawMessage(`{}`),
 	}
-	if err := request.validate(); err == nil || !strings.Contains(err.Error(), "unsupported local bridge version 1") {
-		t.Fatalf("legacy local bridge validation error = %v", err)
+	if err := request.validate(); err == nil || !strings.Contains(err.Error(), "unsupported local bridge version 2") {
+		t.Fatalf("unsupported local bridge validation error = %v", err)
 	}
 }
 
