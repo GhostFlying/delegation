@@ -12,22 +12,6 @@ import (
 	"github.com/GhostFlying/delegation/internal/identity"
 )
 
-type DeviceRole string
-
-const (
-	DeviceRoleController DeviceRole = "controller"
-	DeviceRoleWorker     DeviceRole = "device"
-)
-
-func (r DeviceRole) Validate() error {
-	switch r {
-	case DeviceRoleController, DeviceRoleWorker:
-		return nil
-	default:
-		return fmt.Errorf("unsupported device role %q", r)
-	}
-}
-
 type Capability string
 
 const (
@@ -184,30 +168,28 @@ func Require(p Principal, capability Capability) error {
 }
 
 type Device struct {
-	ControllerID    string     `json:"controllerId"`
-	DeviceID        string     `json:"deviceId"`
-	Name            string     `json:"name"`
-	Role            DeviceRole `json:"role"`
-	OS              string     `json:"os"`
-	Arch            string     `json:"arch"`
-	RuntimeVersion  string     `json:"runtimeVersion"`
-	ProtocolVersion int        `json:"protocolVersion"`
-	Features        []string   `json:"features"`
-	Online          bool       `json:"online"`
-	LastSeenAt      int64      `json:"lastSeenAt"`
-	Revision        uint64     `json:"revision"`
+	ControllerID    string   `json:"controllerId"`
+	DeviceID        string   `json:"deviceId"`
+	Name            string   `json:"name"`
+	OS              string   `json:"os"`
+	Arch            string   `json:"arch"`
+	RuntimeVersion  string   `json:"runtimeVersion"`
+	ProtocolVersion int      `json:"protocolVersion"`
+	Features        []string `json:"features"`
+	Online          bool     `json:"online"`
+	LastSeenAt      int64    `json:"lastSeenAt"`
+	Revision        uint64   `json:"revision"`
 }
 
 type DeviceDescriptor struct {
-	ControllerID    string     `json:"controllerId"`
-	DeviceID        string     `json:"deviceId"`
-	Name            string     `json:"name"`
-	Role            DeviceRole `json:"role"`
-	OS              string     `json:"os"`
-	Arch            string     `json:"arch"`
-	RuntimeVersion  string     `json:"runtimeVersion"`
-	ProtocolVersion int        `json:"protocolVersion"`
-	Features        []string   `json:"features"`
+	ControllerID    string   `json:"controllerId"`
+	DeviceID        string   `json:"deviceId"`
+	Name            string   `json:"name"`
+	OS              string   `json:"os"`
+	Arch            string   `json:"arch"`
+	RuntimeVersion  string   `json:"runtimeVersion"`
+	ProtocolVersion int      `json:"protocolVersion"`
+	Features        []string `json:"features"`
 }
 
 var featurePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]{0,63}$`)
@@ -230,7 +212,6 @@ func (d Device) Descriptor() DeviceDescriptor {
 		ControllerID:    d.ControllerID,
 		DeviceID:        d.DeviceID,
 		Name:            d.Name,
-		Role:            d.Role,
 		OS:              d.OS,
 		Arch:            d.Arch,
 		RuntimeVersion:  d.RuntimeVersion,
@@ -245,9 +226,6 @@ func (d DeviceDescriptor) Validate() error {
 	}
 	if err := identity.ValidateID(d.DeviceID); err != nil {
 		return fmt.Errorf("deviceId %w", err)
-	}
-	if err := d.Role.Validate(); err != nil {
-		return err
 	}
 	fields := []struct {
 		name  string

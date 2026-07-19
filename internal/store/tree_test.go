@@ -30,7 +30,7 @@ func TestRootTreeBindingPersistsAndAuthorizesFromStore(t *testing.T) {
 	ctx := context.Background()
 	if _, err := registry.RegisterTrustedDevice(
 		ctx,
-		deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleController),
+		deviceDescriptor(testControllerID, testDeviceID),
 		time.Unix(1, 0),
 	); err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestRootTreeBindingPersistsAndAuthorizesFromStore(t *testing.T) {
 	}
 	if _, err := registry.RegisterTrustedDevice(
 		ctx,
-		deviceDescriptor(testControllerID, deviceSecondID, control.DeviceRoleController),
+		deviceDescriptor(testControllerID, deviceSecondID),
 		time.Unix(3, 0),
 	); err != nil {
 		t.Fatal(err)
@@ -93,15 +93,16 @@ func TestRootTreeBindingPersistsAndAuthorizesFromStore(t *testing.T) {
 	}
 	if _, err := registry.RegisterTrustedDevice(
 		ctx,
-		deviceDescriptor(testControllerID, deviceThirdID, control.DeviceRoleWorker),
+		deviceDescriptor(testControllerID, deviceThirdID),
 		time.Unix(3, 0),
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := registry.EnsureRootTree(
+	peerTree, peerPrincipal, err := registry.EnsureRootTree(
 		ctx, testControllerID, treeSecondThreadID, deviceThirdID, time.Unix(3, 0),
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("worker root creation error = %v, want ErrConflict", err)
+	)
+	if err != nil || peerTree.RootDeviceID != deviceThirdID || peerPrincipal.DeviceID != deviceThirdID {
+		t.Fatalf("peer root creation = %#v, %#v, error %v", peerTree, peerPrincipal, err)
 	}
 	if _, err := registry.MarkDeviceOffline(
 		ctx, testControllerID, testDeviceID, 1, time.Unix(4, 0),
@@ -109,7 +110,7 @@ func TestRootTreeBindingPersistsAndAuthorizesFromStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, _, err := registry.EnsureRootTree(
-		ctx, testControllerID, treeSecondThreadID, testDeviceID, time.Unix(4, 0),
+		ctx, testControllerID, treeThirdThreadID, testDeviceID, time.Unix(4, 0),
 	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("offline root creation error = %v, want ErrConflict", err)
 	}
@@ -138,7 +139,7 @@ func TestConcurrentRootTreeCreationIsIdempotent(t *testing.T) {
 	registry := openTestStore(t)
 	if _, err := registry.RegisterTrustedDevice(
 		context.Background(),
-		deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleController),
+		deviceDescriptor(testControllerID, testDeviceID),
 		time.Unix(1, 0),
 	); err != nil {
 		t.Fatal(err)
@@ -185,7 +186,7 @@ func TestRootTreeCreationRollsBackAndStoredCapabilitiesFailClosed(t *testing.T) 
 	ctx := context.Background()
 	if _, err := registry.RegisterTrustedDevice(
 		ctx,
-		deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleController),
+		deviceDescriptor(testControllerID, testDeviceID),
 		time.Unix(1, 0),
 	); err != nil {
 		t.Fatal(err)
@@ -300,7 +301,7 @@ func TestWorkerAuthorizationRequiresParentInSameControllerTree(t *testing.T) {
 	ctx := context.Background()
 	if _, err := registry.RegisterTrustedDevice(
 		ctx,
-		deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleController),
+		deviceDescriptor(testControllerID, testDeviceID),
 		time.Unix(1, 0),
 	); err != nil {
 		t.Fatal(err)
@@ -319,7 +320,7 @@ func TestWorkerAuthorizationRequiresParentInSameControllerTree(t *testing.T) {
 	}
 	if _, err := registry.RegisterTrustedDevice(
 		ctx,
-		deviceDescriptor(deviceSecondControllerID, testDeviceID, control.DeviceRoleController),
+		deviceDescriptor(deviceSecondControllerID, testDeviceID),
 		time.Unix(1, 0),
 	); err != nil {
 		t.Fatal(err)

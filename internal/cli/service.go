@@ -40,16 +40,15 @@ func runService(args []string, stdout, stderr io.Writer) int {
 }
 
 func runServiceInstall(args []string, stdout, stderr io.Writer) int {
-	defaultPath, err := delegationconfig.DefaultPath()
-	if err != nil {
-		return writeError(stderr, err)
-	}
 	flags := flag.NewFlagSet("delegation service install", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", defaultPath, "configuration file path")
+	configPath := flags.String("config", "", "broker or peer configuration file path (required)")
 	jsonOutput := flags.Bool("json", false, "print installation result as JSON")
 	if code := parseFlags(flags, args); code >= 0 {
 		return code
+	}
+	if *configPath == "" {
+		return writeError(stderr, errors.New("--config is required because broker and peer services may coexist"))
 	}
 	resolvedConfig, err := absolutePath(*configPath)
 	if err != nil {
@@ -66,6 +65,10 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 	} else if _, err := loadConnectorAuthority(resolvedConfig, cfg); err != nil {
 		return writeError(stderr, err)
 	}
+	serviceRole, err := configuredServiceRole(cfg.Role)
+	if err != nil {
+		return writeError(stderr, err)
+	}
 	binaryPath, err := os.Executable()
 	if err != nil {
 		return writeError(stderr, fmt.Errorf("resolve runtime executable: %w", err))
@@ -74,7 +77,7 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
-	installed, err := userservice.Install(binaryPath, resolvedConfig)
+	installed, err := userservice.Install(serviceRole, binaryPath, resolvedConfig)
 	if err != nil && installed.State == "" {
 		return writeError(stderr, err)
 	}
@@ -89,6 +92,17 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 		return writeServiceInstallFailure(stderr, result, errors.Join(err, outputErr))
 	}
 	return 0
+}
+
+func configuredServiceRole(role delegationconfig.Role) (userservice.ServiceRole, error) {
+	switch role {
+	case delegationconfig.RoleBroker:
+		return userservice.ServiceRoleBroker, nil
+	case delegationconfig.RolePeer:
+		return userservice.ServiceRolePeer, nil
+	default:
+		return "", fmt.Errorf("unsupported service role %q", role)
+	}
 }
 
 func writeServiceInstallResult(output io.Writer, result serviceInstallResult, jsonOutput bool) error {
@@ -128,15 +142,14 @@ func writeServiceInstallFailure(stderr io.Writer, result serviceInstallResult, e
 }
 
 func runServiceRuntime(args []string, stderr io.Writer) int {
-	defaultPath, err := delegationconfig.DefaultPath()
-	if err != nil {
-		return writeError(stderr, err)
-	}
 	flags := flag.NewFlagSet("delegation service run", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", defaultPath, "configuration file path")
+	configPath := flags.String("config", "", "broker or peer configuration file path (required)")
 	if code := parseFlags(flags, args); code >= 0 {
 		return code
+	}
+	if *configPath == "" {
+		return writeError(stderr, errors.New("--config is required because broker and peer services may coexist"))
 	}
 	resolvedConfig, err := absolutePath(*configPath)
 	if err != nil {
@@ -152,7 +165,7 @@ func runServiceRuntime(args []string, stderr io.Writer) int {
 	switch cfg.Role {
 	case delegationconfig.RoleBroker:
 		runErr = runBrokerService(ctx, resolvedConfig, cfg, stderr, brokerRuntimeOptions{})
-	case delegationconfig.RoleController, delegationconfig.RoleDevice:
+	case delegationconfig.RolePeer:
 		runErr = runConnectorService(ctx, resolvedConfig, cfg, stderr)
 	default:
 		runErr = fmt.Errorf("unsupported service role %q", cfg.Role)

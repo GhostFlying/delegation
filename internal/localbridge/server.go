@@ -200,9 +200,6 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		}
 		return result, nil
 	}
-	if s.identity.Role != control.DeviceRoleController {
-		return nil, &protocol.Error{Code: protocol.ErrorForbidden, Message: "controller bridge required"}
-	}
 	switch request.Method {
 	case protocol.MethodEnsureRootTree:
 		if request.TreeID != "" || request.Source != nil {

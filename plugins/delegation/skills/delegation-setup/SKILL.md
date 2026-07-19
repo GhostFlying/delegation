@@ -1,6 +1,6 @@
 ---
 name: delegation-setup
-description: Install, update, or diagnose the Delegation native runtime on Linux, macOS, or Windows. Use when Delegation reports a missing runtime, when preparing a device for later controller or connector configuration, or after updating the plugin or runtime.
+description: Install, update, migrate, or diagnose the Delegation native runtime on Linux, macOS, or Windows. Use when Delegation reports a missing runtime, when joining a device to a Delegation peer network, when configuring a cohosted broker, or after updating the plugin or runtime.
 ---
 
 # Delegation Setup
@@ -30,25 +30,27 @@ launcher for every runtime command below.
 4. Run the launcher with `version --json` after installation. Do not invoke a bare `delegation`
    command or assume setup created a `PATH` shim; the runtime remains in its versioned directory.
 
-## Configure The Role
+## Configure The Installation
 
-Choose exactly one role and run the launcher with `setup <role> --help` before writing configuration.
-Before broker, controller, or device setup, or before issuing/revoking a credential, read
+An installation may host a broker, a peer, or both. Run `setup broker --help` or `setup peer --help`
+before writing configuration. The defaults are separate `broker.json` and `peer.json` files. Before
+setup, migration, or issuing/revoking a credential, read
 [role configuration](references/role-configuration.md) and follow its enrollment and transport
 rules. Token authentication is the default. Never pass token material as a command-line value;
 configuration stores only an absolute token file path and refuses to overwrite an existing config.
 
 Before migrating an older installation, changing a versioned runtime, or installing a user service,
-read [migration and services](references/migration-and-services.md). Do not infer old settings from
-new defaults, reuse any schema v1 broker or target token, or modify an unsafe inherited Windows home
-in place.
+read [migration and services](references/migration-and-services.md). Schema v4 migration is explicit
+and coordinated: stop legacy services, back up state, and let the v2 broker migrate its store while
+holding the instance lease. Do not infer old settings from new defaults, elevate a legacy device
+token into a peer token, or modify an unsafe inherited Windows home in place.
 
 ## Verify And Hand Off
 
 Run the launcher with `version --json` and confirm it exactly matches `VERSION`, then run the
-launcher with `doctor`. Report the installed version, configured role, configuration path, and
-checks without printing credentials. For a broker foreground run, verify its `/healthz` endpoint
-without printing or transmitting the master token.
+launcher with `doctor --config <path>` for each broker and peer config. Report the installed version,
+configured processes, configuration paths, and checks without printing credentials. For a broker
+foreground run, verify its `/healthz` endpoint without printing or transmitting the master token.
 
 After a plugin or runtime update, tell the user to start a new Codex task so the updated skills and
 MCP configuration are loaded. Do not attempt to reload a managed worker in place.

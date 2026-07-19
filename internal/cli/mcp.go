@@ -22,13 +22,13 @@ func runMCP(args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: delegation mcp root [--config path]")
 		return exitUsage
 	}
-	defaultPath, err := delegationconfig.DefaultPath()
+	defaultPath, err := delegationconfig.DefaultPeerPath()
 	if err != nil {
 		return writeError(stderr, err)
 	}
 	flags := flag.NewFlagSet("delegation mcp root", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", defaultPath, "controller configuration file path")
+	configPath := flags.String("config", defaultPath, "peer configuration file path")
 	if code := parseFlags(flags, args[1:]); code >= 0 {
 		return code
 	}
@@ -64,8 +64,8 @@ func loadRootMCPServer(configPath string) (*mcp.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Role != delegationconfig.RoleController {
-		return nil, errors.New("root MCP requires a controller configuration")
+	if cfg.Role != delegationconfig.RolePeer {
+		return nil, errors.New("root MCP requires a peer configuration")
 	}
 	if err := pathguard.ValidateConnectorAuthority(configPath, cfg.Broker.Auth.TokenFile); err != nil {
 		return nil, err

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,7 +131,7 @@ func TestTokenConnectionHeartbeatUnknownMethodsAndDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial broker: %v; response = %#v", err, response)
 	}
-	result := sendHello(t, connection, control.DeviceRoleWorker)
+	result := sendHello(t, connection)
 	if result.Revision != 1 || result.HeartbeatIntervalMS != 1000 {
 		t.Fatalf("hello result = %#v", result)
 	}
@@ -167,7 +168,7 @@ func TestTokenConnectionHeartbeatUnknownMethodsAndDisconnect(t *testing.T) {
 	waitForDevice(t, harness.registry, false, 2)
 }
 
-func TestTokenAuthenticationAndCredentialRoleAreEnforced(t *testing.T) {
+func TestTokenAuthenticationAndCredentialIdentityAreEnforced(t *testing.T) {
 	harness := newBrokerHarness(t, config.AuthModeToken, time.Second)
 	for name, token := range map[string]*tokenfile.Token{
 		"missing": nil,
@@ -189,16 +190,91 @@ func TestTokenAuthenticationAndCredentialRoleAreEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hello := helloRequest(t, control.DeviceRoleController)
-	response := writeAndRead(t, connection, hello)
+	forged := hello()
+	forged.DeviceID = brokerTestSecondDeviceID
+	response := writeAndRead(t, connection, request(t, protocol.MethodHello, forged))
 	if response.Error == nil || response.Error.Code != protocol.ErrorForbidden {
-		t.Fatalf("role escalation response = %#v", response)
+		t.Fatalf("credential identity mismatch response = %#v", response)
 	}
 	connection.CloseNow()
 	if _, err := harness.registry.DescribeDevice(
 		context.Background(), brokerTestControllerID, brokerTestDeviceID,
 	); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("rejected hello created a device: %v", err)
+	}
+}
+
+func TestProtocolV1HelloFailsBeforeRegistryMutation(t *testing.T) {
+	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	connection, _, err := dialBroker(harness, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := map[string]any{
+		"protocolVersion": 1,
+		"kind":            "request",
+		"requestId":       newRequestID(t),
+		"method":          protocol.MethodHello,
+		"controllerId":    brokerTestControllerID,
+		"payload": map[string]any{
+			"controllerId":   brokerTestControllerID,
+			"deviceId":       brokerTestDeviceID,
+			"deviceName":     "legacy",
+			"role":           "controller",
+			"os":             "linux",
+			"arch":           "amd64",
+			"runtimeVersion": "0.1.0-alpha.0.m1.1",
+			"features":       []string{protocol.FeatureDeviceRegistry},
+			"cursor":         0,
+		},
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.Write(context.Background(), websocket.MessageText, data); err != nil {
+		t.Fatal(err)
+	}
+	readContext, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, _, err := connection.Read(readContext); err == nil {
+		t.Fatal("protocol v1 connection remained open")
+	}
+	if _, err := harness.registry.DescribeDevice(
+		context.Background(), brokerTestControllerID, brokerTestDeviceID,
+	); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("protocol v1 hello changed registry: %v", err)
+	}
+}
+
+func TestHelloRequiresEveryPeerFeatureBeforeRegistryMutation(t *testing.T) {
+	required := []string{
+		protocol.FeatureDeviceRegistry,
+		protocol.FeatureFullDuplexRPC,
+		protocol.FeaturePeerRoot,
+	}
+	for _, missing := range required {
+		t.Run(missing, func(t *testing.T) {
+			harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+			connection, _, err := dialBroker(harness, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.CloseNow()
+			payload := hello()
+			payload.Features = slices.DeleteFunc(slices.Clone(required), func(feature string) bool {
+				return feature == missing
+			})
+			response := writeAndRead(t, connection, request(t, protocol.MethodHello, payload))
+			if response.Error == nil || response.Error.Code != protocol.ErrorInvalidParams {
+				t.Fatalf("hello without %s response = %#v", missing, response)
+			}
+			if _, err := harness.registry.DescribeDevice(
+				context.Background(), brokerTestControllerID, brokerTestDeviceID,
+			); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("hello without %s changed registry: %v", missing, err)
+			}
+		})
 	}
 }
 
@@ -263,7 +339,7 @@ func TestConnectionIDFailureDoesNotRegisterDevice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response := writeAndRead(t, connection, helloRequest(t, control.DeviceRoleWorker))
+	response := writeAndRead(t, connection, helloRequest(t))
 	if response.Error == nil || response.Error.Code != protocol.ErrorInternal {
 		t.Fatalf("connection ID failure response = %#v", response)
 	}
@@ -289,7 +365,7 @@ func TestOfflineRetryCannotReleaseReplacementLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result := sendHello(t, first, control.DeviceRoleWorker); result.Revision != 1 {
+	if result := sendHello(t, first); result.Revision != 1 {
 		t.Fatalf("first hello = %#v", result)
 	}
 	first.CloseNow()
@@ -307,7 +383,7 @@ func TestOfflineRetryCannotReleaseReplacementLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result := sendHello(t, second, control.DeviceRoleWorker); result.Revision != 2 {
+	if result := sendHello(t, second); result.Revision != 2 {
 		t.Fatalf("replacement hello = %#v", result)
 	}
 	select {
@@ -336,14 +412,14 @@ func TestDuplicateConnectionCannotOfflineReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result := sendHello(t, first, control.DeviceRoleController); result.Revision != 1 {
+	if result := sendHello(t, first); result.Revision != 1 {
 		t.Fatalf("first hello = %#v", result)
 	}
 	second, _, err := dialBroker(harness, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result := sendHello(t, second, control.DeviceRoleController); result.Revision != 2 {
+	if result := sendHello(t, second); result.Revision != 2 {
 		t.Fatalf("replacement hello = %#v", result)
 	}
 	readContext, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -391,7 +467,7 @@ func TestNonHeartbeatTrafficDoesNotExtendLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sendHello(t, connection, control.DeviceRoleWorker)
+	sendHello(t, connection)
 	spamDeadline := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(spamDeadline) {
 		notification := request(t, "future.notice", struct{}{})
@@ -418,7 +494,7 @@ func TestPeerRequestDirectionsAreEnforced(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		hello := helloRequest(t, control.DeviceRoleWorker)
+		hello := helloRequest(t)
 		hello.RequestID = requestID(t, protocol.DirectionBroker)
 		writeEnvelope(t, connection, hello)
 		expectConnectionClosed(t, connection)
@@ -435,7 +511,7 @@ func TestPeerRequestDirectionsAreEnforced(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sendHello(t, connection, control.DeviceRoleWorker)
+		sendHello(t, connection)
 		heartbeat := request(t, protocol.MethodHeartbeat, protocol.Heartbeat{})
 		heartbeat.RequestID = requestID(t, protocol.DirectionLocal)
 		writeEnvelope(t, connection, heartbeat)
@@ -449,7 +525,7 @@ func TestPeerRequestDirectionsAreEnforced(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sendHello(t, connection, control.DeviceRoleWorker)
+		sendHello(t, connection)
 		response := protocol.Envelope{
 			ProtocolVersion: protocol.Version,
 			Kind:            protocol.KindResponse,
@@ -470,7 +546,7 @@ func TestCloseForcesPeersAndPersistsOfflineState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sendHello(t, connection, control.DeviceRoleWorker)
+	sendHello(t, connection)
 	started := time.Now()
 	closeContext, cancel := context.WithTimeout(context.Background(), time.Second)
 	err = harness.server.Close(closeContext)
@@ -495,7 +571,7 @@ func TestCloseIgnoresConcurrentPeerClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sendHello(t, connection, control.DeviceRoleWorker)
+	sendHello(t, connection)
 	harness.server.mu.Lock()
 	var peer *websocket.Conn
 	for current := range harness.server.peers {
@@ -640,7 +716,7 @@ func TestUnexpectedRegistryFailuresAreUnavailableAndReported(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sendHello(t, connection, control.DeviceRoleWorker)
+		sendHello(t, connection)
 		failure := errors.New("session authentication database failed")
 		harness.server.registry = &faultRegistry{Store: harness.registry, authenticateErr: failure}
 		response := writeAndRead(t, connection, request(t, protocol.MethodHeartbeat, protocol.Heartbeat{}))
@@ -658,7 +734,7 @@ func TestUnexpectedRegistryFailuresAreUnavailableAndReported(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		response := writeAndRead(t, connection, helloRequest(t, control.DeviceRoleWorker))
+		response := writeAndRead(t, connection, helloRequest(t))
 		if response.Error == nil || response.Error.Code != protocol.ErrorUnavailable {
 			t.Fatalf("registration failure response = %#v", response)
 		}
@@ -673,7 +749,7 @@ func TestUnexpectedRegistryFailuresAreUnavailableAndReported(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sendHello(t, connection, control.DeviceRoleWorker)
+		sendHello(t, connection)
 		response := writeAndRead(t, connection, request(t, protocol.MethodHeartbeat, protocol.Heartbeat{}))
 		if response.Error == nil || response.Error.Code != protocol.ErrorUnavailable {
 			t.Fatalf("heartbeat failure response = %#v", response)
@@ -690,7 +766,7 @@ func TestUnexpectedRegistryFailuresAreUnavailableAndReported(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sendHello(t, connection, control.DeviceRoleWorker)
+		sendHello(t, connection)
 		connection.CloseNow()
 		expectReported(t, harness.reported, failure)
 	})
@@ -702,13 +778,13 @@ func TestHeartbeatTimeoutAndBrokerEpochMarkDevicesOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result := sendHello(t, connection, control.DeviceRoleWorker); result.Revision != 1 {
+	if result := sendHello(t, connection); result.Revision != 1 {
 		t.Fatalf("hello = %#v", result)
 	}
 	waitForDevice(t, harness.registry, false, 2)
 	connection.CloseNow()
 	if _, err := harness.registry.RegisterTrustedDevice(
-		context.Background(), hello(control.DeviceRoleWorker).Descriptor(), time.Unix(10, 0),
+		context.Background(), hello().Descriptor(), time.Unix(10, 0),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -725,15 +801,6 @@ func TestHeartbeatTimeoutAndBrokerEpochMarkDevicesOffline(t *testing.T) {
 }
 
 func newBrokerHarness(t *testing.T, authMode config.AuthMode, interval time.Duration) brokerHarness {
-	return newBrokerHarnessForRole(t, authMode, interval, control.DeviceRoleWorker)
-}
-
-func newBrokerHarnessForRole(
-	t *testing.T,
-	authMode config.AuthMode,
-	interval time.Duration,
-	credentialRole control.DeviceRole,
-) brokerHarness {
 	t.Helper()
 	registry, err := store.Open(
 		context.Background(), filepath.Join(t.TempDir(), "state", "broker.sqlite3"),
@@ -758,7 +825,6 @@ func newBrokerHarnessForRole(
 		if err := registry.CreateCredential(context.Background(), store.NewCredential(
 			brokerTestControllerID,
 			brokerTestDeviceID,
-			credentialRole,
 			mac,
 			time.Unix(1, 0),
 		)); err != nil {
@@ -813,30 +879,33 @@ func dialBroker(harness brokerHarness, token *tokenfile.Token) (*websocket.Conn,
 	)
 }
 
-func sendHello(t *testing.T, connection *websocket.Conn, role control.DeviceRole) protocol.HelloResult {
+func sendHello(t *testing.T, connection *websocket.Conn) protocol.HelloResult {
 	t.Helper()
-	response := writeAndRead(t, connection, helloRequest(t, role))
+	response := writeAndRead(t, connection, helloRequest(t))
 	if response.Error != nil {
 		t.Fatalf("hello error = %#v", response.Error)
 	}
 	return decodeResult[protocol.HelloResult](t, response)
 }
 
-func helloRequest(t *testing.T, role control.DeviceRole) protocol.Envelope {
+func helloRequest(t *testing.T) protocol.Envelope {
 	t.Helper()
-	return request(t, protocol.MethodHello, hello(role))
+	return request(t, protocol.MethodHello, hello())
 }
 
-func hello(role control.DeviceRole) protocol.Hello {
+func hello() protocol.Hello {
 	return protocol.Hello{
 		ControllerID:   brokerTestControllerID,
 		DeviceID:       brokerTestDeviceID,
 		DeviceName:     "builder",
-		Role:           role,
 		OS:             "linux",
 		Arch:           "amd64",
-		RuntimeVersion: "0.1.0-alpha.0.m1",
-		Features:       []string{protocol.FeatureDeviceRegistry},
+		RuntimeVersion: "0.1.0-alpha.0.m1.1",
+		Features: []string{
+			protocol.FeatureDeviceRegistry,
+			protocol.FeatureFullDuplexRPC,
+			protocol.FeaturePeerRoot,
+		},
 	}
 }
 

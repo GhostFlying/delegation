@@ -14,7 +14,7 @@ import (
 )
 
 func runCredentialRevoke(args []string, stdout, stderr io.Writer) int {
-	defaultConfig, err := delegationconfig.DefaultPath()
+	defaultConfig, err := delegationconfig.DefaultBrokerPath()
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -41,7 +41,7 @@ func runCredentialRevoke(args []string, stdout, stderr io.Writer) int {
 	if err := pathguard.ValidateBrokerAuthority(resolvedConfig, resolvedState, cfg.Broker.Auth.TokenFile); err != nil {
 		return writeError(stderr, err)
 	}
-	registry, err := store.Open(context.Background(), resolvedState)
+	registry, err := store.OpenCurrent(context.Background(), resolvedState)
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -61,7 +61,6 @@ func runCredentialRevoke(args []string, stdout, stderr io.Writer) int {
 	}
 	return writeCredentialResult(stdout, stderr, credentialResult{
 		Action:       "revoked",
-		Role:         stored.Role,
 		ConfigPath:   resolvedConfig,
 		StatePath:    resolvedState,
 		ControllerID: cfg.ControllerID,

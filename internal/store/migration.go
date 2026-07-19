@@ -113,6 +113,69 @@ FROM controllers;
 PRAGMA user_version = 3;
 `
 
+const schemaV4 = `
+CREATE TABLE credentials_v4 (
+    controller_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    token_mac BLOB NOT NULL UNIQUE CHECK (length(token_mac) = 32),
+    disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    issued_at INTEGER NOT NULL CHECK (issued_at >= 0),
+    pending INTEGER NOT NULL DEFAULT 0
+        CHECK (pending IN (0, 1) AND (pending = 0 OR disabled = 1)),
+    PRIMARY KEY (controller_id, device_id)
+) STRICT;
+
+INSERT INTO credentials_v4(
+    controller_id, device_id, token_mac, disabled, issued_at, pending
+)
+SELECT
+    controller_id,
+    device_id,
+    token_mac,
+    disabled,
+    issued_at,
+    0
+FROM credentials
+WHERE role = 'controller' OR (role = 'device' AND disabled = 1);
+
+DROP TABLE credentials;
+ALTER TABLE credentials_v4 RENAME TO credentials;
+
+DROP INDEX devices_by_controller_name;
+
+CREATE TABLE devices_v4 (
+    controller_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    os TEXT NOT NULL,
+    arch TEXT NOT NULL,
+    runtime_version TEXT NOT NULL,
+    protocol_version INTEGER NOT NULL CHECK (protocol_version > 0),
+    features_json TEXT NOT NULL,
+    online INTEGER NOT NULL CHECK (online IN (0, 1)),
+    last_seen_at INTEGER NOT NULL CHECK (last_seen_at >= 0),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    PRIMARY KEY (controller_id, device_id)
+) STRICT;
+
+INSERT INTO devices_v4(
+    controller_id, device_id, name, os, arch, runtime_version,
+    protocol_version, features_json, online, last_seen_at, revision
+)
+SELECT
+    controller_id, device_id, name, os, arch, runtime_version,
+    protocol_version, features_json, online, last_seen_at, revision
+FROM devices;
+
+DROP TABLE devices;
+ALTER TABLE devices_v4 RENAME TO devices;
+
+CREATE INDEX devices_by_controller_name
+    ON devices(controller_id, name, device_id);
+
+PRAGMA user_version = 4;
+`
+
 func (s *Store) migrate(ctx context.Context) error {
 	return s.withImmediateTransaction(ctx, func(connection *sql.Conn) error {
 		var version int
@@ -137,6 +200,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		if version == 2 {
 			if _, err := connection.ExecContext(ctx, schemaV3); err != nil {
 				return fmt.Errorf("migrate broker state schema to version 3: %w", err)
+			}
+			version = 3
+		}
+		if version == 3 {
+			if _, err := connection.ExecContext(ctx, schemaV4); err != nil {
+				return fmt.Errorf("migrate broker state schema to version 4: %w", err)
 			}
 		}
 		return nil

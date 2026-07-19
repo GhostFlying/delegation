@@ -49,7 +49,7 @@ func TestConnectorReadinessRejectsWrongBridgeIdentity(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(home) })
 	t.Setenv("HOME", home)
 	cfg := delegationconfig.Config{
-		Role:         delegationconfig.RoleController,
+		Role:         delegationconfig.RolePeer,
 		ControllerID: readinessControllerID,
 		DeviceID:     readinessDeviceID,
 	}
@@ -60,7 +60,6 @@ func TestConnectorReadinessRejectsWrongBridgeIdentity(t *testing.T) {
 	server, err := localbridge.Listen(endpoint, localbridge.ServiceIdentity{
 		ControllerID: "123e4567-e89b-42d3-a456-426614174799",
 		DeviceID:     cfg.DeviceID,
-		Role:         control.DeviceRoleController,
 	}, &readinessBackend{})
 	if err != nil {
 		t.Fatal(err)

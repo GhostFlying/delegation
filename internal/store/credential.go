@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/identity"
 	moderncsqlite "modernc.org/sqlite"
 )
@@ -26,7 +25,6 @@ type CredentialMAC [CredentialMACSize]byte
 type Credential struct {
 	ControllerID string
 	DeviceID     string
-	Role         control.DeviceRole
 	MAC          CredentialMAC
 	Disabled     bool
 	Pending      bool
@@ -44,9 +42,6 @@ func (c Credential) Validate() error {
 	if err := identity.ValidateID(c.DeviceID); err != nil {
 		return fmt.Errorf("deviceId %w", err)
 	}
-	if err := c.Role.Validate(); err != nil {
-		return err
-	}
 	if c.IssuedAt < 0 {
 		return errors.New("issuedAt must not be negative")
 	}
@@ -62,12 +57,11 @@ func (s *Store) CreateCredential(ctx context.Context, credential Credential) err
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO credentials(
-    controller_id, device_id, role, token_mac, disabled, issued_at, pending
-) VALUES (?, ?, ?, ?, ?, ?, ?)
+    controller_id, device_id, token_mac, disabled, issued_at, pending
+) VALUES (?, ?, ?, ?, ?, ?)
 `,
 		credential.ControllerID,
 		credential.DeviceID,
-		credential.Role,
 		credential.MAC[:],
 		credential.Disabled,
 		credential.IssuedAt,
@@ -76,9 +70,9 @@ INSERT INTO credentials(
 	if err != nil {
 		var sqliteError *moderncsqlite.Error
 		if errors.As(err, &sqliteError) && sqliteError.Code()&0xff == 19 {
-			return fmt.Errorf("%w: device credential already exists", ErrConflict)
+			return fmt.Errorf("%w: peer credential already exists", ErrConflict)
 		}
-		return fmt.Errorf("create device credential: %w", err)
+		return fmt.Errorf("create peer credential: %w", err)
 	}
 	return nil
 }
@@ -96,7 +90,7 @@ func (s *Store) AuthenticateCredential(ctx context.Context, mac CredentialMAC) (
 
 func queryCredentialByMAC(ctx context.Context, queryer rowQueryer, mac CredentialMAC) (Credential, error) {
 	credential, err := scanCredential(queryer.QueryRowContext(ctx, `
-SELECT controller_id, device_id, role, token_mac, disabled, issued_at, pending
+SELECT controller_id, device_id, token_mac, disabled, issued_at, pending
 FROM credentials
 WHERE token_mac = ?
 `, mac[:]))
@@ -118,7 +112,7 @@ func (s *Store) Credential(ctx context.Context, controllerID, deviceID string) (
 
 func queryCredential(ctx context.Context, queryer rowQueryer, controllerID, deviceID string) (Credential, error) {
 	return scanCredential(queryer.QueryRowContext(ctx, `
-SELECT controller_id, device_id, role, token_mac, disabled, issued_at, pending
+SELECT controller_id, device_id, token_mac, disabled, issued_at, pending
 FROM credentials
 WHERE controller_id = ? AND device_id = ?
 `, controllerID, deviceID))
@@ -133,9 +127,9 @@ UPDATE credentials SET disabled = 0, pending = 0
 WHERE controller_id = ? AND device_id = ? AND token_mac = ? AND pending = 1
 `, controllerID, deviceID, mac[:])
 	if err != nil {
-		return fmt.Errorf("activate device credential: %w", err)
+		return fmt.Errorf("activate peer credential: %w", err)
 	}
-	if err := requireAffectedRow(result, "activate device credential"); err == nil {
+	if err := requireAffectedRow(result, "activate peer credential"); err == nil {
 		return nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return err
@@ -184,9 +178,9 @@ UPDATE credentials SET disabled = 0, pending = 0
 WHERE controller_id = ? AND device_id = ? AND token_mac = ? AND disabled = 1 AND pending = 1
 `, controllerID, deviceID, mac[:])
 		if err != nil {
-			return fmt.Errorf("activate published device credential: %w", err)
+			return fmt.Errorf("activate published peer credential: %w", err)
 		}
-		return requireAffectedRow(result, "activate published device credential")
+		return requireAffectedRow(result, "activate published peer credential")
 	})
 	return committed, err
 }
@@ -200,9 +194,9 @@ DELETE FROM credentials
 WHERE controller_id = ? AND device_id = ? AND token_mac = ? AND disabled = 1 AND pending = 1
 `, controllerID, deviceID, mac[:])
 	if err != nil {
-		return fmt.Errorf("delete pending device credential: %w", err)
+		return fmt.Errorf("delete pending peer credential: %w", err)
 	}
-	return requireAffectedRow(result, "delete pending device credential")
+	return requireAffectedRow(result, "delete pending peer credential")
 }
 
 func (s *Store) DisableCredential(ctx context.Context, controllerID, deviceID string) error {
@@ -217,7 +211,7 @@ func (s *Store) DisableCredential(ctx context.Context, controllerID, deviceID st
 UPDATE credentials SET disabled = 1, pending = 0
 WHERE controller_id = ? AND device_id = ?
 `, controllerID, deviceID); err != nil {
-			return fmt.Errorf("disable device credential: %w", err)
+			return fmt.Errorf("disable peer credential: %w", err)
 		}
 		var online bool
 		err := connection.QueryRowContext(ctx, `
@@ -256,7 +250,6 @@ func scanCredential(row rowScanner) (Credential, error) {
 	err := row.Scan(
 		&credential.ControllerID,
 		&credential.DeviceID,
-		&credential.Role,
 		&storedMAC,
 		&credential.Disabled,
 		&credential.IssuedAt,
@@ -266,14 +259,14 @@ func scanCredential(row rowScanner) (Credential, error) {
 		return Credential{}, ErrNotFound
 	}
 	if err != nil {
-		return Credential{}, fmt.Errorf("load device credential: %w", err)
+		return Credential{}, fmt.Errorf("load peer credential: %w", err)
 	}
 	if len(storedMAC) != CredentialMACSize {
-		return Credential{}, errors.New("stored device credential MAC has invalid length")
+		return Credential{}, errors.New("stored peer credential MAC has invalid length")
 	}
 	copy(credential.MAC[:], storedMAC)
 	if err := credential.Validate(); err != nil {
-		return Credential{}, fmt.Errorf("stored device credential is invalid: %w", err)
+		return Credential{}, fmt.Errorf("stored peer credential is invalid: %w", err)
 	}
 	return credential, nil
 }
@@ -299,11 +292,10 @@ func requireAffectedRow(result sql.Result, action string) error {
 	return nil
 }
 
-func NewCredential(controllerID, deviceID string, role control.DeviceRole, mac CredentialMAC, now time.Time) Credential {
+func NewCredential(controllerID, deviceID string, mac CredentialMAC, now time.Time) Credential {
 	return Credential{
 		ControllerID: controllerID,
 		DeviceID:     deviceID,
-		Role:         role,
 		MAC:          mac,
 		IssuedAt:     now.UTC().Unix(),
 	}

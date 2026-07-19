@@ -21,7 +21,7 @@ const (
 )
 
 func TestRootMCPInitializesOfflineWithoutReadingDeviceToken(t *testing.T) {
-	configPath := writeRootMCPConfig(t, delegationconfig.RoleController)
+	configPath := writeRootMCPConfig(t, delegationconfig.RolePeer)
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	runDone := make(chan error, 1)
 	go func() {
@@ -60,15 +60,15 @@ func TestRootMCPInitializesOfflineWithoutReadingDeviceToken(t *testing.T) {
 	}
 }
 
-func TestRootMCPRejectsWorkerConfiguration(t *testing.T) {
-	_, err := loadRootMCPServer(writeRootMCPConfig(t, delegationconfig.RoleDevice))
-	if err == nil || !strings.Contains(err.Error(), "controller configuration") {
+func TestRootMCPRejectsBrokerConfiguration(t *testing.T) {
+	_, err := loadRootMCPServer(writeRootMCPConfig(t, delegationconfig.RoleBroker))
+	if err == nil || !strings.Contains(err.Error(), "peer configuration") {
 		t.Fatalf("loadRootMCPServer() error = %v", err)
 	}
 }
 
 func TestRootMCPStdioProcess(t *testing.T) {
-	configPath := writeRootMCPConfig(t, delegationconfig.RoleController)
+	configPath := writeRootMCPConfig(t, delegationconfig.RolePeer)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRootMCPStdioHelper$")
@@ -122,8 +122,14 @@ func writeRootMCPConfig(t *testing.T, role delegationconfig.Role) string {
 			},
 		},
 	}
-	if role == delegationconfig.RoleDevice {
-		cfg.DeviceName = "worker"
+	if role == delegationconfig.RoleBroker {
+		cfg.DeviceID = ""
+		cfg.DeviceName = ""
+		cfg.Broker = delegationconfig.BrokerConfig{
+			Listen:    "127.0.0.1:8787",
+			StateFile: filepath.Join(directory, "state", "broker.sqlite3"),
+			Auth:      delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
+		}
 	}
 	if err := delegationconfig.WriteNew(configPath, cfg); err != nil {
 		t.Fatal(err)

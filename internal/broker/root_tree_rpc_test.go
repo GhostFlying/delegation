@@ -35,14 +35,14 @@ func (r *rootTreeFaultRegistry) EnsureRootTree(
 }
 
 func TestControllerEnsuresIdempotentRootTree(t *testing.T) {
-	harness := newBrokerHarnessForRole(t, config.AuthModeToken, time.Second, control.DeviceRoleController)
+	harness := newBrokerHarness(t, config.AuthModeToken, time.Second)
 	connection, _, err := dialBroker(harness, &harness.deviceToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer connection.Close(websocket.StatusNormalClosure, "done")
-	helloResult := sendHello(t, connection, control.DeviceRoleController)
-	if !slices.Contains(helloResult.Features, protocol.FeatureRootTree) {
+	helloResult := sendHello(t, connection)
+	if !slices.Contains(helloResult.Features, protocol.FeaturePeerRoot) {
 		t.Fatalf("broker features = %v", helloResult.Features)
 	}
 
@@ -80,23 +80,7 @@ func TestControllerEnsuresIdempotentRootTree(t *testing.T) {
 	}
 }
 
-func TestRootTreeRPCRejectsWorkerInvalidShapeAndRebind(t *testing.T) {
-	t.Run("worker", func(t *testing.T) {
-		harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
-		connection, _, err := dialBroker(harness, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer connection.Close(websocket.StatusNormalClosure, "done")
-		sendHello(t, connection, control.DeviceRoleWorker)
-		response := writeAndRead(t, connection, request(
-			t, protocol.MethodEnsureRootTree, protocol.EnsureRootTreeParams{ExternalThreadID: brokerTestThreadID},
-		))
-		if response.Error == nil || response.Error.Code != protocol.ErrorForbidden {
-			t.Fatalf("worker root tree response = %#v", response)
-		}
-	})
-
+func TestRootTreeRPCRejectsInvalidShapeAndRebind(t *testing.T) {
 	t.Run("shape and payload", func(t *testing.T) {
 		harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
 		connection, _, err := dialBroker(harness, nil)
@@ -104,7 +88,7 @@ func TestRootTreeRPCRejectsWorkerInvalidShapeAndRebind(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer connection.Close(websocket.StatusNormalClosure, "done")
-		sendHello(t, connection, control.DeviceRoleController)
+		sendHello(t, connection)
 		invalidShape := request(
 			t, protocol.MethodEnsureRootTree, protocol.EnsureRootTreeParams{ExternalThreadID: brokerTestThreadID},
 		)
@@ -128,7 +112,7 @@ func TestRootTreeRPCRejectsWorkerInvalidShapeAndRebind(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer first.Close(websocket.StatusNormalClosure, "done")
-		sendHello(t, first, control.DeviceRoleController)
+		sendHello(t, first)
 		rootRequest := request(
 			t, protocol.MethodEnsureRootTree, protocol.EnsureRootTreeParams{ExternalThreadID: brokerTestThreadID},
 		)
@@ -141,8 +125,8 @@ func TestRootTreeRPCRejectsWorkerInvalidShapeAndRebind(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer second.Close(websocket.StatusNormalClosure, "done")
-		secondHello := helloRequest(t, control.DeviceRoleController)
-		secondPayload := hello(control.DeviceRoleController)
+		secondHello := helloRequest(t)
+		secondPayload := hello()
 		secondPayload.DeviceID = brokerTestSecondDeviceID
 		secondHello.Payload = marshalPayload(t, secondPayload)
 		if response := writeAndRead(t, second, secondHello); response.Error != nil {
@@ -161,7 +145,7 @@ func TestRootTreeRPCReportsUnexpectedStoreFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sendHello(t, connection, control.DeviceRoleController)
+	sendHello(t, connection)
 	failure := errors.New("root tree database failed")
 	harness.server.registry = &rootTreeFaultRegistry{Registry: harness.registry, err: failure}
 	response := writeAndRead(t, connection, request(

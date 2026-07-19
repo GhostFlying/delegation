@@ -9,7 +9,6 @@ import (
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
-	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
@@ -31,10 +30,6 @@ func runConnectorService(
 	if ctx.Err() != nil {
 		return nil
 	}
-	role, err := connectorRole(cfg.Role)
-	if err != nil {
-		return err
-	}
 	var stderrMu sync.Mutex
 	writeStderr := func(format string, args ...any) error {
 		stderrMu.Lock()
@@ -48,7 +43,6 @@ func runConnectorService(
 		ControllerID:             cfg.ControllerID,
 		DeviceID:                 cfg.DeviceID,
 		DeviceName:               cfg.DeviceName,
-		Role:                     role,
 		AuthMode:                 cfg.Broker.Auth.Mode,
 		Token:                    token,
 		ReportError: func(err error) {
@@ -65,7 +59,6 @@ func runConnectorService(
 	bridge, err := localbridge.Listen(endpoint, localbridge.ServiceIdentity{
 		ControllerID: cfg.ControllerID,
 		DeviceID:     cfg.DeviceID,
-		Role:         role,
 	}, client)
 	if err != nil {
 		return err
@@ -123,8 +116,8 @@ func loadConnectorAuthority(
 	configPath string,
 	cfg delegationconfig.Config,
 ) (*tokenfile.Token, error) {
-	if cfg.Role != delegationconfig.RoleController && cfg.Role != delegationconfig.RoleDevice {
-		return nil, errors.New("connector runtime requires a controller or device configuration")
+	if cfg.Role != delegationconfig.RolePeer {
+		return nil, errors.New("connector runtime requires a peer configuration")
 	}
 	if err := pathguard.ValidateConnectorAuthority(configPath, cfg.Broker.Auth.TokenFile); err != nil {
 		return nil, err
@@ -134,18 +127,7 @@ func loadConnectorAuthority(
 	}
 	token, err := tokenfile.Read(cfg.Broker.Auth.TokenFile)
 	if err != nil {
-		return nil, fmt.Errorf("read connector device token: %w", err)
+		return nil, fmt.Errorf("read peer token: %w", err)
 	}
 	return &token, nil
-}
-
-func connectorRole(role delegationconfig.Role) (control.DeviceRole, error) {
-	switch role {
-	case delegationconfig.RoleController:
-		return control.DeviceRoleController, nil
-	case delegationconfig.RoleDevice:
-		return control.DeviceRoleWorker, nil
-	default:
-		return "", fmt.Errorf("unsupported connector role %q", role)
-	}
 }

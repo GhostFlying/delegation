@@ -161,7 +161,8 @@ func createManagedDirectoriesDurably(path string) error {
 func ownsDescriptor(kind Kind, data []byte) bool {
 	switch kind {
 	case KindSystemd:
-		return bytes.HasPrefix(data, []byte("# "+Marker+"\n"))
+		return bytes.HasPrefix(data, []byte("# "+MarkerBroker+"\n")) ||
+			bytes.HasPrefix(data, []byte("# "+MarkerPeer+"\n"))
 	case KindLaunchAgent:
 		return ownsLaunchAgent(data)
 	case KindScheduledTask:
@@ -275,9 +276,17 @@ func ownsLaunchAgent(data []byte) bool {
 			}
 		}
 	}
-	return rootSeen && rootClosed && dictSeen && dictClosed && depth == 0 && pendingKey == "" &&
-		seen["Label"] && seen["Description"] &&
-		values["Label"] == LaunchAgentName && values["Description"] == Marker
+	if !rootSeen || !rootClosed || !dictSeen || !dictClosed || depth != 0 || pendingKey != "" ||
+		!seen["Label"] || !seen["Description"] {
+		return false
+	}
+	for _, role := range []ServiceRole{ServiceRoleBroker, ServiceRolePeer} {
+		spec, _ := specFor(role)
+		if values["Label"] == spec.launchAgent && values["Description"] == spec.marker {
+			return true
+		}
+	}
+	return false
 }
 
 func readPlistScalar(decoder *xml.Decoder, start xml.StartElement) (string, bool) {

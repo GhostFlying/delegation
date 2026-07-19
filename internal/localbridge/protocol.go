@@ -15,7 +15,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
-const Version = 1
+const Version = 2
 
 var methodPattern = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,63}$`)
 

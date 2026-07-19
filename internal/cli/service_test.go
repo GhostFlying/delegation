@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
@@ -14,7 +15,7 @@ func TestConnectorServiceStopsBeforeBindingWhenPreCanceled(t *testing.T) {
 	var setupOutput bytes.Buffer
 	var setupError bytes.Buffer
 	if code := Run([]string{
-		"setup", "device",
+		"setup", "peer",
 		"--config", configPath,
 		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
 		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
@@ -34,8 +35,8 @@ func TestConnectorServiceStopsBeforeBindingWhenPreCanceled(t *testing.T) {
 	if err := runConnectorService(ctx, configPath, cfg, &stderr); err != nil {
 		t.Fatal(err)
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("pre-canceled connector stderr = %q", stderr.String())
+	if !strings.Contains(stderr.String(), "authentication is disabled") {
+		t.Fatalf("pre-canceled connector warning = %q", stderr.String())
 	}
 }
 

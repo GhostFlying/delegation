@@ -62,9 +62,6 @@ func (s *session) handleDescribeDevice(ctx context.Context, request protocol.Env
 }
 
 func (s *session) authorizeDeviceRead(ctx context.Context, request protocol.Envelope) (bool, error) {
-	if s.role != control.DeviceRoleController {
-		return false, s.server.writeError(ctx, s.connection, request, protocol.ErrorForbidden, "device registry access denied")
-	}
 	if request.TreeID == "" || request.Source == nil {
 		return false, s.server.writeError(ctx, s.connection, request, protocol.ErrorInvalidRequest, "device registry request requires a principal")
 	}

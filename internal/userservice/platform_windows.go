@@ -32,12 +32,16 @@ var (
 	scheduledTaskRunning      = queryScheduledTaskRunning
 )
 
-func platformPrepare(binaryPath, configPath string) (Result, error) {
+func platformPrepare(role ServiceRole, binaryPath, configPath string) (Result, error) {
+	spec, err := specFor(role)
+	if err != nil {
+		return Result{}, err
+	}
 	sid, err := windowsUserSID()
 	if err != nil {
 		return Result{}, err
 	}
-	descriptor, err := RenderScheduledTask(binaryPath, configPath, sid, ScheduledTask, windows.EscapeArg)
+	descriptor, err := RenderScheduledTask(role, binaryPath, configPath, sid, windows.EscapeArg)
 	if err != nil {
 		return Result{}, err
 	}
@@ -59,19 +63,19 @@ func platformPrepare(binaryPath, configPath string) (Result, error) {
 		return Result{}, fmt.Errorf("close task definition: %w", err)
 	}
 
-	created, err := runTaskCommand("/Create", "/TN", ScheduledTask, "/XML", tempPath)
-	result := Result{State: StatePrepared, Kind: descriptor.Kind, Artifact: ScheduledTask}
+	created, err := runTaskCommand("/Create", "/TN", spec.scheduled, "/XML", tempPath)
+	result := Result{State: StatePrepared, Kind: descriptor.Kind, Artifact: spec.scheduled, Role: role}
 	if err == nil && created.ExitCode == 0 {
 		return result, nil
 	}
-	indeterminate := Result{State: StateIndeterminate, Kind: descriptor.Kind, Artifact: ScheduledTask}
+	indeterminate := Result{State: StateIndeterminate, Kind: descriptor.Kind, Artifact: spec.scheduled, Role: role}
 	var createFailure error
 	if err != nil {
 		createFailure = fmt.Errorf("register scheduled task: %w", err)
 	} else {
 		createFailure = taskCommandError("register scheduled task", created)
 	}
-	query, err := runTaskCommand("/Query", "/TN", ScheduledTask, "/XML")
+	query, err := runTaskCommand("/Query", "/TN", spec.scheduled, "/XML")
 	if err != nil {
 		return indeterminate, errors.Join(createFailure, fmt.Errorf("query scheduled task after failed registration: %w", err))
 	}
@@ -85,8 +89,8 @@ func platformPrepare(binaryPath, configPath string) (Result, error) {
 	if err != nil {
 		return indeterminate, errors.Join(createFailure, fmt.Errorf("parse existing scheduled task: %w", err))
 	}
-	if !taskOwned(existing) {
-		return Result{State: StateForeignConflict, Kind: descriptor.Kind, Artifact: ScheduledTask}, errors.New("scheduled task name is occupied by an unmanaged task")
+	if !taskOwned(existing, role) {
+		return Result{State: StateForeignConflict, Kind: descriptor.Kind, Artifact: spec.scheduled, Role: role}, errors.New("scheduled task name is occupied by an unmanaged task")
 	}
 	equivalent, err := taskDefinitionsEquivalent(desired, existing, windowsTaskUserIDsEqual)
 	if err != nil {
@@ -110,8 +114,12 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 	if result.State != StatePrepared && result.State != StateActive {
 		return result, fmt.Errorf("cannot activate scheduled task from state %s", result.State)
 	}
-	changed, changeErr := runTaskCommand("/Change", "/TN", ScheduledTask, "/ENABLE")
-	enabled, verifyErr := scheduledTaskEnabled(binaryPath, configPath)
+	spec, err := specFor(result.Role)
+	if err != nil {
+		return result, err
+	}
+	changed, changeErr := runTaskCommand("/Change", "/TN", spec.scheduled, "/ENABLE")
+	enabled, verifyErr := scheduledTaskEnabled(result.Role, binaryPath, configPath)
 	if !enabled || verifyErr != nil {
 		result.State = StateIndeterminate
 		return result, errors.Join(
@@ -120,7 +128,7 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 			verifyErr,
 		)
 	}
-	run, runErr := runTaskCommand("/Run", "/TN", ScheduledTask)
+	run, runErr := runTaskCommand("/Run", "/TN", spec.scheduled)
 	if runErr != nil || run.ExitCode != 0 {
 		result.State = StateIndeterminate
 		return result, errors.Join(runErr, taskCommandFailure("start scheduled task", run))
@@ -129,12 +137,12 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 		result.State = StateIndeterminate
 		return result, fmt.Errorf("scheduled task did not become ready: %w", err)
 	}
-	enabled, verifyErr = scheduledTaskEnabled(binaryPath, configPath)
+	enabled, verifyErr = scheduledTaskEnabled(result.Role, binaryPath, configPath)
 	if !enabled || verifyErr != nil {
 		result.State = StateIndeterminate
 		return result, errors.Join(verifyErr, errors.New("scheduled task changed after it was started"))
 	}
-	running, runningErr := scheduledTaskRunning()
+	running, runningErr := scheduledTaskRunning(result.Role)
 	if runningErr != nil || !running {
 		result.State = StateIndeterminate
 		return result, errors.Join(runningErr, errors.New("scheduled task has no running managed instance"))
@@ -143,13 +151,17 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 	return result, nil
 }
 
-func queryScheduledTaskRunning() (bool, error) {
+func queryScheduledTaskRunning(role ServiceRole) (bool, error) {
+	spec, err := specFor(role)
+	if err != nil {
+		return false, err
+	}
 	directory, err := windows.GetSystemDirectory()
 	if err != nil {
 		return false, fmt.Errorf("resolve Windows system directory: %w", err)
 	}
 	executable := filepath.Join(directory, "WindowsPowerShell", "v1.0", "powershell.exe")
-	const script = `$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$t=$s.GetFolder('\').GetTask('Delegation Connector');[Console]::Out.Write($t.GetInstances(0).Count)`
+	script := fmt.Sprintf(`$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$t=$s.GetFolder('\').GetTask('%s');[Console]::Out.Write($t.GetInstances(0).Count)`, strings.TrimPrefix(spec.scheduled, `\`))
 	ctx, cancel := context.WithTimeout(context.Background(), taskCommandTimeout)
 	defer cancel()
 	output, err := exec.CommandContext(
@@ -168,13 +180,17 @@ func queryScheduledTaskRunning() (bool, error) {
 	return count > 0, nil
 }
 
-func scheduledTaskEnabled(binaryPath, configPath string) (bool, error) {
+func scheduledTaskEnabled(role ServiceRole, binaryPath, configPath string) (bool, error) {
+	spec, err := specFor(role)
+	if err != nil {
+		return false, err
+	}
 	sid, err := windowsUserSID()
 	if err != nil {
 		return false, err
 	}
 	descriptor, err := RenderScheduledTask(
-		binaryPath, configPath, sid, ScheduledTask, windows.EscapeArg,
+		role, binaryPath, configPath, sid, windows.EscapeArg,
 	)
 	if err != nil {
 		return false, err
@@ -184,7 +200,7 @@ func scheduledTaskEnabled(binaryPath, configPath string) (bool, error) {
 		return false, err
 	}
 	desired.Enabled = true
-	query, err := runTaskCommand("/Query", "/TN", ScheduledTask, "/XML")
+	query, err := runTaskCommand("/Query", "/TN", spec.scheduled, "/XML")
 	if err != nil {
 		return false, err
 	}
@@ -195,7 +211,7 @@ func scheduledTaskEnabled(binaryPath, configPath string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("parse activated scheduled task: %w", err)
 	}
-	if !taskOwned(existing) {
+	if !taskOwned(existing, role) {
 		return false, errors.New("scheduled task changed ownership during activation")
 	}
 	equivalent, err := taskDefinitionsEquivalent(desired, existing, windowsTaskUserIDsEqual)

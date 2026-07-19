@@ -1,29 +1,37 @@
-# Role Configuration
+# Network Configuration
 
-Run the plugin launcher with `setup <role> --help` before writing configuration.
+Run the plugin launcher with `setup broker --help` or `setup peer --help` before writing
+configuration. One device may host both processes. Their default configs and native services are
+separate.
 
-- `setup broker` creates a trust domain and listener. Token authentication is the default and
-  creates a protected token file when none is supplied. Keep plaintext listeners on loopback unless
-  the user explicitly accepts `--allow-insecure-nonloopback` behind an encrypted private network or
-  tunnel. Use `--state` during setup only when the default state path is unsuitable.
-- `setup controller` configures a device that hosts root tasks. Supply its broker URL, controller
-  ID, broker-assigned device ID, and protected token file. Prefer `wss://`; non-loopback `ws://`
-  needs the same explicit protected-network acknowledgement.
-- `setup device` configures a worker-only device with the same identity, token, and transport rules.
-  Setup generates a device ID only when authentication mode is `none`.
+- `setup broker` creates or joins the authority for one Delegation network. The wire field
+  `controllerId` is the stable network or trust-domain ID, not a controller device role. Token
+  authentication is the default. Keep plaintext listeners on loopback unless the user explicitly
+  accepts `--allow-insecure-nonloopback` behind an encrypted private network or tunnel.
+- `setup peer` joins a physical device to that network. Every peer can host user-created root tasks
+  and can later receive managed workers. Supply the broker URL, network `controllerId`, broker-bound
+  `deviceId`, display name, and protected peer-token path. Setup generates a device ID only in
+  `none` auth mode.
 
-For token authentication, enroll every target from the configured broker before target setup:
+For token authentication, enroll every peer from the configured broker:
 
-1. Choose a new stable device UUID and credential role, `controller` or `device`.
-2. On the broker, run `credential issue --config <broker-config> --role <role> --device-id
-   <device-uuid> --out <protected-staging-token-file>`.
-3. Transfer the token file over an authenticated encrypted channel and preserve or restore
+1. Choose a stable device UUID.
+2. Ensure the v2 broker has started once so its schema-v4 state migration is complete.
+3. On the broker, run `credential issue --config <broker.json> --device-id <device-uuid> --out
+   <protected-staging-token-file>`.
+4. Transfer the token file over an authenticated encrypted channel and preserve or restore
    current-user-only protection at its final absolute path. Never paste token contents into chat,
    shell arguments, configuration, or a URL.
-4. On the target, run `setup controller` or `setup device` with the broker controller ID, exact
-   issued device ID, and `--token-file <protected-target-token-file>`. Run `doctor`; remove transfer
+5. On the peer, run `setup peer` with the network ID, exact issued device ID, and
+   `--token-file <protected-peer-token-file>`. Run `doctor --config <peer.json>` and remove transfer
    copies only after verification succeeds.
-5. Revoke a lost or retired credential with `credential revoke --config <broker-config> --device-id
-   <device-uuid>`. A revoked ID cannot be reissued; replacement needs a new identity.
+6. Revoke a lost or retired credential with `credential revoke --config <broker.json> --device-id
+   <device-uuid>`. A revoked ID remains tombstoned; replacement needs a new identity.
 
-After setup, `service run --config <path>` runs the configured role in the foreground.
+`none` authentication trusts every client that can reach the broker. Such a client can join,
+enumerate, dispatch, impersonate, or fence a same-ID peer. Tailscale narrows reachability but still
+means trusting the entire tailnet. This authentication warning is separate from the plaintext
+transport warning.
+
+After setup, use `service run --config <path>` for a foreground process or `service install
+--config <path>` for its role-specific current-user service.

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/GhostFlying/delegation/internal/control"
 	moderncsqlite "modernc.org/sqlite"
 )
 
@@ -19,7 +18,7 @@ func TestCredentialBindingAndDisable(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 	firstMAC := CredentialMAC{1}
-	first := NewCredential(testControllerID, testDeviceID, control.DeviceRoleWorker, firstMAC, testTime())
+	first := NewCredential(testControllerID, testDeviceID, firstMAC, testTime())
 	if err := store.CreateCredential(ctx, first); err != nil {
 		t.Fatal(err)
 	}
@@ -31,12 +30,12 @@ func TestCredentialBindingAndDisable(t *testing.T) {
 		t.Fatalf("AuthenticateCredential() = %#v, want %#v", got, first)
 	}
 
-	controller := NewCredential(testControllerID, testDeviceID, control.DeviceRoleController, CredentialMAC{2}, testTime())
-	if err := store.CreateCredential(ctx, controller); !errors.Is(err, ErrConflict) {
-		t.Fatalf("role-changing duplicate error = %v, want ErrConflict", err)
+	duplicate := NewCredential(testControllerID, testDeviceID, CredentialMAC{2}, testTime())
+	if err := store.CreateCredential(ctx, duplicate); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate credential error = %v, want ErrConflict", err)
 	}
 	if got, err := store.AuthenticateCredential(ctx, firstMAC); err != nil || got != first {
-		t.Fatalf("credential after rejected role change = %#v, %v; want %#v", got, err, first)
+		t.Fatalf("credential after rejected duplicate = %#v, %v; want %#v", got, err, first)
 	}
 	if err := store.DisableCredential(ctx, testControllerID, testDeviceID); err != nil {
 		t.Fatal(err)
@@ -49,14 +48,13 @@ func TestCredentialBindingAndDisable(t *testing.T) {
 func TestCredentialMACIsUniqueAcrossDevices(t *testing.T) {
 	store := openTestStore(t)
 	mac := CredentialMAC{7}
-	first := NewCredential(testControllerID, testDeviceID, control.DeviceRoleWorker, mac, testTime())
+	first := NewCredential(testControllerID, testDeviceID, mac, testTime())
 	if err := store.CreateCredential(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
 	second := NewCredential(
 		testControllerID,
 		"123e4567-e89b-42d3-a456-426614174002",
-		control.DeviceRoleWorker,
 		mac,
 		testTime(),
 	)
@@ -69,7 +67,7 @@ func TestPendingCredentialCanBeActivatedOrRemovedExactly(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 	mac := CredentialMAC{3}
-	pending := NewCredential(testControllerID, testDeviceID, control.DeviceRoleWorker, mac, testTime())
+	pending := NewCredential(testControllerID, testDeviceID, mac, testTime())
 	pending.Disabled = true
 	pending.Pending = true
 	if err := store.CreateCredential(ctx, pending); err != nil {
@@ -102,7 +100,7 @@ func TestPendingCredentialCanBeActivatedOrRemovedExactly(t *testing.T) {
 
 	otherDevice := "123e4567-e89b-42d3-a456-426614174003"
 	otherMAC := CredentialMAC{4}
-	other := NewCredential(testControllerID, otherDevice, control.DeviceRoleWorker, otherMAC, testTime())
+	other := NewCredential(testControllerID, otherDevice, otherMAC, testTime())
 	other.Disabled = true
 	other.Pending = true
 	if err := store.CreateCredential(ctx, other); err != nil {
@@ -120,9 +118,7 @@ func TestPublishPendingCredentialRejectsReplacedWriterBeforePublishing(t *testin
 	registry := openTestStore(t)
 	ctx := context.Background()
 	oldMAC := CredentialMAC{5}
-	oldPending := NewCredential(
-		testControllerID, testDeviceID, control.DeviceRoleWorker, oldMAC, testTime(),
-	)
+	oldPending := NewCredential(testControllerID, testDeviceID, oldMAC, testTime())
 	oldPending.Disabled = true
 	oldPending.Pending = true
 	if err := registry.CreateCredential(ctx, oldPending); err != nil {
@@ -133,9 +129,7 @@ func TestPublishPendingCredentialRejectsReplacedWriterBeforePublishing(t *testin
 	}
 
 	replacementMAC := CredentialMAC{6}
-	replacement := NewCredential(
-		testControllerID, testDeviceID, control.DeviceRoleWorker, replacementMAC, testTime(),
-	)
+	replacement := NewCredential(testControllerID, testDeviceID, replacementMAC, testTime())
 	replacement.Disabled = true
 	replacement.Pending = true
 	if err := registry.CreateCredential(ctx, replacement); err != nil {
@@ -182,7 +176,7 @@ func TestPublishPendingCredentialHoldsWriteFenceDuringPublication(t *testing.T) 
 	}
 
 	mac := CredentialMAC{8}
-	pending := NewCredential(testControllerID, testDeviceID, control.DeviceRoleWorker, mac, testTime())
+	pending := NewCredential(testControllerID, testDeviceID, mac, testTime())
 	pending.Disabled = true
 	pending.Pending = true
 	if err := registry.CreateCredential(ctx, pending); err != nil {
@@ -217,7 +211,7 @@ func TestPublishPendingCredentialPreservesPendingAfterCommittedPublishError(t *t
 	registry := openTestStore(t)
 	ctx := context.Background()
 	mac := CredentialMAC{7}
-	pending := NewCredential(testControllerID, testDeviceID, control.DeviceRoleWorker, mac, testTime())
+	pending := NewCredential(testControllerID, testDeviceID, mac, testTime())
 	pending.Disabled = true
 	pending.Pending = true
 	if err := registry.CreateCredential(ctx, pending); err != nil {
@@ -246,7 +240,7 @@ func TestRevokedCredentialCannotBeActivatedOrDeletedAsPending(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
 	mac := CredentialMAC{8}
-	credential := NewCredential(testControllerID, testDeviceID, control.DeviceRoleWorker, mac, testTime())
+	credential := NewCredential(testControllerID, testDeviceID, mac, testTime())
 	if err := store.CreateCredential(ctx, credential); err != nil {
 		t.Fatal(err)
 	}

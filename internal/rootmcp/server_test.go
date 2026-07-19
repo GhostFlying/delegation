@@ -1,6 +1,7 @@
 package rootmcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -99,8 +100,8 @@ func (b *fakeRootBackend) Call(
 		page := protocol.ListDevicesResult{
 			Revision: 7,
 			Devices: []control.Device{
-				testDevice(rootMCPDeviceID, control.DeviceRoleController, 24),
-				testDevice(rootMCPWorkerID, control.DeviceRoleWorker, 2),
+				testDevice(rootMCPDeviceID, 24),
+				testDevice(rootMCPWorkerID, 2),
 			},
 			NextCursor: rootMCPWorkerID,
 		}
@@ -116,7 +117,7 @@ func (b *fakeRootBackend) Call(
 		}
 		*result.(*protocol.DescribeDeviceResult) = protocol.DescribeDeviceResult{
 			Revision: 8,
-			Device:   testDevice(params.(protocol.DescribeDeviceParams).DeviceID, control.DeviceRoleWorker, 24),
+			Device:   testDevice(params.(protocol.DescribeDeviceParams).DeviceID, 24),
 		}
 	default:
 		return fmt.Errorf("unexpected method %q", method)
@@ -157,10 +158,18 @@ func TestRootMCPListsStaticReadOnlyToolsAndBindsThread(t *testing.T) {
 	}
 	var firstPage ListDevicesOutput
 	decodeStructured(t, first.StructuredContent, &firstPage)
+	firstJSON, err := json.Marshal(first.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(firstJSON, []byte(`"role"`)) || !bytes.Contains(firstJSON, []byte(`"isCurrentDevice"`)) {
+		t.Fatalf("peer summary wire shape = %s", firstJSON)
+	}
 	if firstPage.Revision != 7 || len(firstPage.Devices) != 2 || firstPage.NextCursor == "" ||
 		len(firstPage.Devices[0].Features) != 0 ||
 		!firstPage.Devices[0].FeaturesTruncated || !firstPage.Devices[1].FeaturesTruncated ||
-		firstPage.Devices[0].ProtocolVersion != protocol.Version {
+		firstPage.Devices[0].ProtocolVersion != protocol.Version ||
+		!firstPage.Devices[0].IsCurrentDevice || firstPage.Devices[1].IsCurrentDevice {
 		t.Fatalf("first MCP device page = %#v", firstPage)
 	}
 	second := callTool(t, ctx, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{
@@ -179,7 +188,8 @@ func TestRootMCPListsStaticReadOnlyToolsAndBindsThread(t *testing.T) {
 	decodeStructured(t, described.StructuredContent, &description)
 	if description.Revision != 8 || description.Device.DeviceID != rootMCPWorkerID ||
 		description.Device.ProtocolVersion != protocol.Version ||
-		len(description.Device.Features) != 24 || description.Device.FeaturesTruncated {
+		len(description.Device.Features) != 24 || description.Device.FeaturesTruncated ||
+		description.Device.IsCurrentDevice {
 		t.Fatalf("MCP device description = %#v", description)
 	}
 
@@ -360,7 +370,7 @@ func TestRootMCPCancellationReachesBackend(t *testing.T) {
 }
 
 func TestRootMCPRejectsInvalidRegistryResults(t *testing.T) {
-	device := testDevice(rootMCPWorkerID, control.DeviceRoleWorker, 2)
+	device := testDevice(rootMCPWorkerID, 2)
 	device.Name = strings.Repeat("n", 129)
 	backend := &fakeRootBackend{listResult: &protocol.ListDevicesResult{
 		Revision: 7,
@@ -374,7 +384,7 @@ func TestRootMCPRejectsInvalidRegistryResults(t *testing.T) {
 	}
 
 	backend.mu.Lock()
-	valid := testDevice(rootMCPWorkerID, control.DeviceRoleWorker, 2)
+	valid := testDevice(rootMCPWorkerID, 2)
 	backend.listResult = nil
 	backend.describeResult = &protocol.DescribeDeviceResult{Revision: 8, Device: valid}
 	backend.describeResult.Device.ControllerID = "123e4567-e89b-42d3-a456-426614174499"
@@ -389,7 +399,7 @@ func TestRootMCPRejectsInvalidRegistryResults(t *testing.T) {
 
 func TestValidateListResultRejectsRevisionSkew(t *testing.T) {
 	expected := uint64(7)
-	device := testDevice(rootMCPWorkerID, control.DeviceRoleWorker, 2)
+	device := testDevice(rootMCPWorkerID, 2)
 	for _, test := range []struct {
 		name   string
 		result protocol.ListDevicesResult
@@ -436,7 +446,6 @@ func TestRootMCPOutputIsBounded(t *testing.T) {
 			ControllerID:    rootMCPControllerID,
 			DeviceID:        fmt.Sprintf("123e4567-e89b-42d3-a456-%012x", index+1),
 			Name:            strings.Repeat(`"`, 128),
-			Role:            control.DeviceRoleWorker,
 			OS:              strings.Repeat(`\`, 32),
 			Arch:            strings.Repeat(`"`, 32),
 			RuntimeVersion:  strings.Repeat(`\`, 64),
@@ -473,14 +482,13 @@ func TestRootMCPOutputIsBounded(t *testing.T) {
 	summary := summarizeDevice(control.Device{
 		DeviceID:       rootMCPWorkerID,
 		Name:           strings.Repeat("n", 128),
-		Role:           control.DeviceRoleWorker,
 		OS:             strings.Repeat("o", 32),
 		Arch:           strings.Repeat("a", 32),
 		RuntimeVersion: strings.Repeat("v", 64),
 		Features:       features,
 		Online:         true,
 		LastSeenAt:     int64(^uint64(0) >> 1),
-	}, listFeatureLimit)
+	}, listFeatureLimit, rootMCPDeviceID)
 	if len(summary.Features) != 0 || !summary.FeaturesTruncated {
 		t.Fatalf("bounded summary = %#v", summary)
 	}
@@ -609,7 +617,7 @@ func rootResult(threadID string) protocol.EnsureRootTreeResult {
 	}
 }
 
-func testDevice(deviceID string, role control.DeviceRole, featureCount int) control.Device {
+func testDevice(deviceID string, featureCount int) control.Device {
 	features := make([]string, featureCount)
 	for index := range features {
 		features[index] = fmt.Sprintf("feature%02d", index)
@@ -618,10 +626,9 @@ func testDevice(deviceID string, role control.DeviceRole, featureCount int) cont
 		ControllerID:    rootMCPControllerID,
 		DeviceID:        deviceID,
 		Name:            "builder",
-		Role:            role,
 		OS:              "windows",
 		Arch:            "amd64",
-		RuntimeVersion:  "0.1.0-alpha.0.m1",
+		RuntimeVersion:  "0.1.0-alpha.0.m1.1",
 		ProtocolVersion: protocol.Version,
 		Features:        features,
 		Online:          true,

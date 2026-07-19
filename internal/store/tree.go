@@ -68,8 +68,8 @@ func (s *Store) EnsureRootTree(
 		if err != nil {
 			return err
 		}
-		if !device.Online || device.Role != control.DeviceRoleController {
-			return fmt.Errorf("%w: root device must be an online controller", ErrConflict)
+		if !device.Online {
+			return fmt.Errorf("%w: root device must be an online peer", ErrConflict)
 		}
 		tree = control.Tree{
 			ControllerID:     controllerID,

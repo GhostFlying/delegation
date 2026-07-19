@@ -18,13 +18,39 @@ import (
 func TestDarwinServiceLifecycleUsesLaunchAgents(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	result, err := Prepare("/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Prepare(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
 	if err != nil || result.State != StatePrepared || result.Kind != KindLaunchAgent {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
-	wantPath := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentName+".plist")
+	wantPath := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
 	if result.Artifact != wantPath {
 		t.Fatalf("artifact = %q, want %q", result.Artifact, wantPath)
+	}
+}
+
+func TestDarwinBrokerAndPeerDefinitionsCoexist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	broker, err := Prepare(
+		ServiceRoleBroker, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "broker.json"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := Prepare(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "peer.json"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if broker.Artifact == peer.Artifact || broker.Role != ServiceRoleBroker || peer.Role != ServiceRolePeer {
+		t.Fatalf("cohost results = %#v / %#v", broker, peer)
+	}
+	for path, marker := range map[string]string{broker.Artifact: MarkerBroker, peer.Artifact: MarkerPeer} {
+		content, err := os.ReadFile(path)
+		if err != nil || !strings.Contains(string(content), marker) {
+			t.Fatalf("cohost definition %s = %q, error %v", path, content, err)
+		}
 	}
 }
 
@@ -44,19 +70,19 @@ func TestDarwinInstallBootstrapsEnablesAndStartsService(t *testing.T) {
 		if args[0] == "print" {
 			targetPrints++
 			if targetPrints > 1 {
-				path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentName+".plist")
+				path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
 				return launchctlTestStatus(path, "running"), nil
 			}
 			return userServiceCommandResult{ExitCode: 113}, nil
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install("/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
 	domain := fmt.Sprintf("gui/%d", os.Geteuid())
-	target := domain + "/" + LaunchAgentName
+	target := domain + "/" + LaunchAgentPeerName
 	want := [][]string{
 		{"print", domain},
 		{"print", target},
@@ -91,19 +117,19 @@ func TestDarwinInstallAcceptsOnlyManagedLoadedPath(t *testing.T) {
 			bootstrapped = true
 			return userServiceCommandResult{}, nil
 		}
-		if args[0] != "print" || len(args) != 2 || !strings.Contains(args[1], LaunchAgentName) {
+		if args[0] != "print" || len(args) != 2 || !strings.Contains(args[1], LaunchAgentPeerName) {
 			return userServiceCommandResult{}, nil
 		}
 		if !loaded {
 			return userServiceCommandResult{ExitCode: 113}, nil
 		}
-		path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentName+".plist")
+		path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
 		if foreign {
 			path = "/tmp/foreign.plist"
 		}
 		return launchctlTestStatus(path, "running"), nil
 	}
-	result, err := Install("/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() loaded managed path = %#v, %v", result, err)
 	}
@@ -112,7 +138,7 @@ func TestDarwinInstallAcceptsOnlyManagedLoadedPath(t *testing.T) {
 	}
 	foreign = true
 	loaded = true
-	result, err = Install("/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err = Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
 	if err == nil || result.State != StateForeignConflict {
 		t.Fatalf("Install() loaded foreign path = %#v, %v", result, err)
 	}
@@ -125,7 +151,7 @@ func TestDarwinInstallReportsPartialActivation(t *testing.T) {
 	originalRunner := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = originalRunner })
 	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
-		if args[0] == "print" && len(args) == 2 && strings.Contains(args[1], LaunchAgentName) {
+		if args[0] == "print" && len(args) == 2 && strings.Contains(args[1], LaunchAgentPeerName) {
 			return userServiceCommandResult{ExitCode: 113}, nil
 		}
 		if args[0] == "enable" {
@@ -133,7 +159,7 @@ func TestDarwinInstallReportsPartialActivation(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install("/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
 	if err == nil || result.State != StateIndeterminate {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -147,7 +173,7 @@ func TestDarwinInstallReportsIdentityChangeAfterKickstart(t *testing.T) {
 	t.Cleanup(func() { runLaunchctl = originalRunner })
 	targetPrints := 0
 	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
-		if args[0] == "print" && len(args) == 2 && strings.Contains(args[1], LaunchAgentName) {
+		if args[0] == "print" && len(args) == 2 && strings.Contains(args[1], LaunchAgentPeerName) {
 			targetPrints++
 			if targetPrints == 1 {
 				return userServiceCommandResult{ExitCode: 113}, nil
@@ -156,7 +182,7 @@ func TestDarwinInstallReportsIdentityChangeAfterKickstart(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install("/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
 	if err == nil || result.State != StateForeignConflict {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -170,7 +196,7 @@ func TestDarwinInstallReconcilesLostBootstrapResponse(t *testing.T) {
 	t.Cleanup(func() { runLaunchctl = originalRunner })
 	targetPrints := 0
 	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
-		if args[0] == "print" && len(args) == 2 && strings.Contains(args[1], LaunchAgentName) {
+		if args[0] == "print" && len(args) == 2 && strings.Contains(args[1], LaunchAgentPeerName) {
 			targetPrints++
 			if targetPrints == 1 {
 				return userServiceCommandResult{ExitCode: 113}, nil
@@ -179,7 +205,7 @@ func TestDarwinInstallReconcilesLostBootstrapResponse(t *testing.T) {
 			if targetPrints > 2 {
 				state = "running"
 			}
-			path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentName+".plist")
+			path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
 			return launchctlTestStatus(path, state), nil
 		}
 		if args[0] == "bootstrap" {
@@ -187,7 +213,7 @@ func TestDarwinInstallReconcilesLostBootstrapResponse(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install("/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -202,17 +228,17 @@ func TestDarwinInstallRejectsServiceThatNeverBecomesReady(t *testing.T) {
 	t.Cleanup(func() { runLaunchctl = originalRunner })
 	targetPrints := 0
 	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
-		if args[0] == "print" && len(args) == 2 && strings.Contains(args[1], LaunchAgentName) {
+		if args[0] == "print" && len(args) == 2 && strings.Contains(args[1], LaunchAgentPeerName) {
 			targetPrints++
 			if targetPrints == 1 {
 				return userServiceCommandResult{ExitCode: 113}, nil
 			}
-			path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentName+".plist")
+			path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
 			return launchctlTestStatus(path, "running"), nil
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install("/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
 	if !errors.Is(err, readinessErr) || result.State != StateIndeterminate {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -225,13 +251,13 @@ func TestDarwinInstallRejectsLoadedJobThatCannotBeUnloaded(t *testing.T) {
 	originalRunner := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = originalRunner })
 	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
-		if args[0] == "print" && len(args) == 2 && strings.Contains(args[1], LaunchAgentName) {
-			path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentName+".plist")
+		if args[0] == "print" && len(args) == 2 && strings.Contains(args[1], LaunchAgentPeerName) {
+			path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
 			return launchctlTestStatus(path, "running"), nil
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install("/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
 	if err == nil || result.State != StateIndeterminate || !strings.Contains(err.Error(), "remained loaded") {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -250,7 +276,7 @@ func launchctlTestStatus(path, state string) userServiceCommandResult {
 
 func TestParseLaunchAgentStatusUsesTopLevelFields(t *testing.T) {
 	result := userServiceCommandResult{Output: []byte(
-		"gui/501/" + LaunchAgentName + " = {\n" +
+		"gui/501/" + LaunchAgentPeerName + " = {\n" +
 			"\tpath = /tmp/delegation.plist\n" +
 			"\tstate = running\n" +
 			"\tendpoints = {\n" +
@@ -279,7 +305,7 @@ func TestParseLaunchAgentStatusRejectsDuplicateTopLevelState(t *testing.T) {
 
 func TestDarwinServiceRejectsRelativeHome(t *testing.T) {
 	t.Setenv("HOME", "relative")
-	if _, err := Prepare("/opt/delegation", "/Users/test/config.json"); err == nil {
+	if _, err := Prepare(ServiceRolePeer, "/opt/delegation", "/Users/test/config.json"); err == nil {
 		t.Fatal("Prepare() accepted relative HOME")
 	}
 }
@@ -296,8 +322,8 @@ func TestDarwinLaunchAgentRoundTrip(t *testing.T) {
 		t.Fatalf("integration binary is unavailable: %v", err)
 	}
 	domain := fmt.Sprintf("gui/%d", os.Geteuid())
-	target := domain + "/" + LaunchAgentName
-	artifact, err := darwinServicePath()
+	target := domain + "/" + LaunchAgentPeerName
+	artifact, err := darwinServicePath(ServiceRolePeer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,10 +346,10 @@ func TestDarwinLaunchAgentRoundTrip(t *testing.T) {
 		}
 	})
 
-	configPath := filepath.Join(t.TempDir(), "config.json")
+	configPath := filepath.Join(t.TempDir(), "peer.json")
 	cfg := delegationconfig.Config{
 		SchemaVersion: delegationconfig.CurrentSchemaVersion,
-		Role:          delegationconfig.RoleController,
+		Role:          delegationconfig.RolePeer,
 		ControllerID:  "123e4567-e89b-42d3-a456-426614174780",
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174781",
 		DeviceName:    "darwin-launchagent-integration",
@@ -337,7 +363,7 @@ func TestDarwinLaunchAgentRoundTrip(t *testing.T) {
 	}
 	cleanupNeeded = true
 	for attempt := 1; attempt <= 2; attempt++ {
-		result, err := Install(binaryPath, configPath)
+		result, err := Install(ServiceRolePeer, binaryPath, configPath)
 		if err != nil || result.State != StateActive || result.Artifact != artifact {
 			t.Fatalf("Install() attempt %d = %#v, %v", attempt, result, err)
 		}

@@ -19,8 +19,9 @@ type taskDefinition struct {
 	Actions         string
 }
 
-func taskOwned(task taskDefinition) bool {
-	return task.Description == Marker && task.URI == ScheduledTask
+func taskOwned(task taskDefinition, role ServiceRole) bool {
+	spec, err := specFor(role)
+	return err == nil && task.Description == spec.marker && task.URI == spec.scheduled
 }
 
 func taskDefinitionsEquivalent(

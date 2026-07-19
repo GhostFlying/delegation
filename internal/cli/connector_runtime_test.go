@@ -14,7 +14,6 @@ import (
 
 	"github.com/GhostFlying/delegation/internal/broker"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
-	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/rootmcp"
@@ -28,7 +27,7 @@ const (
 	runtimeThreadID = "123e4567-e89b-42d3-a456-426614174203"
 )
 
-func TestConnectorServicesRegisterDevicesAndServeControllerBridge(t *testing.T) {
+func TestPeerServicesRegisterDevicesAndServeRootBridge(t *testing.T) {
 	registry, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "state", "broker.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
@@ -58,11 +57,11 @@ func TestConnectorServicesRegisterDevicesAndServeControllerBridge(t *testing.T) 
 		}
 	})
 	brokerURL := "ws" + strings.TrimPrefix(httpServer.URL, "http")
-	controllerPath, controllerConfig := setupConnectorRuntimeTest(
-		t, delegationconfig.RoleController, runtimeDeviceID, brokerURL,
+	firstPath, firstConfig := setupConnectorRuntimeTest(
+		t, runtimeDeviceID, "peer-a", brokerURL,
 	)
-	devicePath, deviceConfig := setupConnectorRuntimeTest(
-		t, delegationconfig.RoleDevice, runtimeWorkerID, brokerURL,
+	secondPath, secondConfig := setupConnectorRuntimeTest(
+		t, runtimeWorkerID, "peer-c", brokerURL,
 	)
 
 	controllerContext, cancelController := context.WithCancel(context.Background())
@@ -73,11 +72,11 @@ func TestConnectorServicesRegisterDevicesAndServeControllerBridge(t *testing.T) 
 	var deviceLog bytes.Buffer
 	go func() {
 		controllerDone <- runConnectorService(
-			controllerContext, controllerPath, controllerConfig, &controllerLog,
+			controllerContext, firstPath, firstConfig, &controllerLog,
 		)
 	}()
 	go func() {
-		deviceDone <- runConnectorService(deviceContext, devicePath, deviceConfig, &deviceLog)
+		deviceDone <- runConnectorService(deviceContext, secondPath, secondConfig, &deviceLog)
 	}()
 	stopped := false
 	t.Cleanup(func() {
@@ -131,15 +130,13 @@ func TestConnectorServicesRegisterDevicesAndServeControllerBridge(t *testing.T) 
 	}
 	if len(devices.Devices) != 2 ||
 		devices.Devices[0].DeviceID != runtimeDeviceID ||
-		devices.Devices[0].Role != control.DeviceRoleController ||
-		devices.Devices[1].DeviceID != runtimeWorkerID ||
-		devices.Devices[1].Role != control.DeviceRoleWorker {
+		devices.Devices[1].DeviceID != runtimeWorkerID {
 		t.Fatalf("devices through controller bridge = %#v", devices.Devices)
 	}
-	assertRootMCPDevices(t, controllerPath)
+	assertRootMCPDevices(t, firstPath)
 
 	duplicateContext, cancelDuplicate := context.WithTimeout(context.Background(), time.Second)
-	err = runConnectorService(duplicateContext, controllerPath, controllerConfig, &bytes.Buffer{})
+	err = runConnectorService(duplicateContext, firstPath, firstConfig, &bytes.Buffer{})
 	cancelDuplicate()
 	if err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("duplicate connector service error = %v", err)
@@ -156,8 +153,8 @@ func TestConnectorServicesRegisterDevicesAndServeControllerBridge(t *testing.T) 
 	stopped = true
 	waitForRuntimeDevice(t, registry, runtimeDeviceID, false)
 	waitForRuntimeDevice(t, registry, runtimeWorkerID, false)
-	if !strings.Contains(controllerLog.String(), "controller connector service started") ||
-		!strings.Contains(deviceLog.String(), "device connector service started") {
+	if !strings.Contains(controllerLog.String(), "peer connector service started") ||
+		!strings.Contains(deviceLog.String(), "peer connector service started") {
 		t.Fatalf("connector logs = %q / %q", controllerLog.String(), deviceLog.String())
 	}
 }
@@ -224,7 +221,7 @@ func TestConnectorAuthorityIsReadBeforeRuntimeSideEffects(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if code := Run([]string{
-		"setup", "controller",
+		"setup", "peer",
 		"--config", configPath,
 		"--controller-id", runtimeControllerID,
 		"--device-id", runtimeDeviceID,
@@ -248,30 +245,29 @@ func TestConnectorAuthorityIsReadBeforeRuntimeSideEffects(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	err = runConnectorService(ctx, configPath, cfg, &stderr)
-	if err == nil || !strings.Contains(err.Error(), "read connector device token") {
+	if err == nil || !strings.Contains(err.Error(), "read peer token") {
 		t.Fatalf("missing connector authority error = %v", err)
 	}
 }
 
 func setupConnectorRuntimeTest(
 	t *testing.T,
-	role delegationconfig.Role,
-	deviceID, brokerURL string,
+	deviceID, deviceName, brokerURL string,
 ) (string, delegationconfig.Config) {
 	t.Helper()
-	configPath := privateTestPath(t, string(role)+".json")
+	configPath := privateTestPath(t, deviceName+".json")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if code := Run([]string{
-		"setup", string(role),
+		"setup", "peer",
 		"--config", configPath,
 		"--controller-id", runtimeControllerID,
 		"--device-id", deviceID,
-		"--device-name", string(role),
+		"--device-name", deviceName,
 		"--broker-url", brokerURL,
 		"--auth-mode", "none",
 	}, &stdout, &stderr); code != 0 {
-		t.Fatalf("setup %s code = %d, stderr = %q", role, code, stderr.String())
+		t.Fatalf("setup peer code = %d, stderr = %q", code, stderr.String())
 	}
 	cfg, err := delegationconfig.Read(configPath)
 	if err != nil {

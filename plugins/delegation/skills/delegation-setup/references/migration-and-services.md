@@ -1,32 +1,46 @@
 # Migration And Services
 
-Schema v3 makes plaintext non-loopback acknowledgement consistent for every auth mode and role.
-Schema v1 and v2 are not migrated in place. Back up and move an old broker config aside, then rerun
-`setup broker` with its controller ID, listener, auth mode, actual state database, and non-loopback
-acknowledgement. Do not accept changed defaults or create a fresh state database accidentally.
+Schema v4, broker-store v4, wire protocol v2, and local-bridge v2 form one coordinated, fail-closed
+upgrade. It is not rolling-compatible with M1. Before migration, stop the legacy service and back up
+the config, broker state, token files, and persistent service definition.
 
-Schema v1 used a shared bearer token. Never reuse it as the private M1 broker master. Move
-the old config and token file to an offline backup, then verify the selected new master-token path
-does not exist. Omit `--token-file` only when the default path is confirmed absent, or pass a
-different nonexistent path so setup creates a fresh protected master. Then issue fresh per-device
-credentials. Schema v2 brokers may retain their existing protected M1 master-token path.
+Use `migrate config --from <schema-v3-config> --to <broker.json-or-peer.json>`; the source remains
+unchanged and the destination is never replaced.
 
-For a schema v1 controller or device, preserve only non-secret identity, name, endpoint, and auth
-mode. Its old shared token is not a device-bound M1 credential: enroll a fresh credential at the M1
-broker, transfer the new protected token file, and pass that path to target setup. Never reuse or
-print the old token. Schema v2 targets may retain their protected token path while rerunning setup
-with all explicit settings.
+- A legacy broker becomes a v4 broker with the same network `controllerId`, state path, listener,
+  auth mode, and master-token path. Do not generate a new master token: retained controller
+  credential MACs depend on it. Start this v2 broker before running credential administration. It
+  migrates the state store while holding the broker instance lease.
+- A legacy controller becomes a peer with the same device identity and credential. That credential
+  was already root-capable.
+- A legacy active device credential was target-only and must never be promoted. After the broker
+  migration deletes it, issue a fresh peer credential for the same `deviceId` to a different token
+  file. Run config migration with `--token-file <fresh-peer-token>`. Revoked or incomplete legacy
+  enrollments remain tombstoned and need a new device ID.
 
-M0 Windows homes used inherited profile-directory ACLs and need an offline re-home. Stop the service,
-rename the entire old home outside the new home, then install and configure an empty protected home.
-Do not point new config, token, state, or service paths into the backup. Recreate broker trust state
-and per-device credentials. Remove the backup only after `doctor` and every device pass.
+Do not run `credential issue` or `credential revoke` against a v3 state file. Administrative opens
+refuse to migrate it without the broker lease. Do not reuse a legacy device token path or token
+value. The legacy source files remain available for rollback only while the old services are
+stopped.
 
-Run `service install --config <path>` to write, enable, start, and verify the current platform user
-service. It refuses foreign definitions and managed definitions with a different executable or config
-path. Treat `indeterminate` as partial activation requiring native service-manager inspection.
+Schema v1 and v2 installations should first follow their version-specific secure migration rules to
+reach a protected v3 installation. Never reuse a schema-v1 shared bearer token as a v4 broker master
+or peer credential. M0 Windows homes used inherited profile-directory ACLs and need an offline
+re-home; do not modify them in place.
+
+Run `service install --config <broker.json>` and `service install --config <peer.json>` separately.
+The native identities are:
+
+- Linux: `delegation-broker.service` and `delegation-peer.service`.
+- macOS: `com.github.ghostflying.delegation.broker` and
+  `com.github.ghostflying.delegation.peer`.
+- Windows: `Delegation Broker` and `Delegation Peer` Scheduled Tasks.
+
+Stop and remove the legacy single `delegation.service`, `com.github.ghostflying.delegation`, or
+`Delegation Connector` definition through the native service manager before starting the migrated
+peer. Verify its Delegation ownership marker and config path first. Service installation refuses
+foreign definitions and managed definitions with a different executable or config path. Treat
+`indeterminate` as partial activation requiring native service-manager inspection.
 
 Linux requires a systemd user manager. macOS needs the current user's GUI launchd domain. Windows
-needs an interactive login. M1 does not migrate versioned runtime paths in place: verify that the old
-definition is Delegation-owned, remove it through the native service manager, and reinstall. Windows
-restart-on-failure remains deferred to the reliability milestone.
+needs an interactive login. Runtime-path changes require explicit native service replacement.

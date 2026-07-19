@@ -33,7 +33,7 @@ func TestValidateConnectorAuthorityRejectsAliases(t *testing.T) {
 		t.Skipf("creating a hard link is unavailable: %v", err)
 	}
 	if err := ValidateConnectorAuthority(configPath, tokenPath); err == nil ||
-		!strings.Contains(err.Error(), "device token") {
+		!strings.Contains(err.Error(), "peer token") {
 		t.Fatalf("ValidateConnectorAuthority() error = %v", err)
 	}
 }

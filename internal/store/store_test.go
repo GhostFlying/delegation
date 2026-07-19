@@ -3,14 +3,17 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GhostFlying/delegation/internal/control"
 )
@@ -168,8 +171,8 @@ func TestOpenMigratesVersionOneCredentialState(t *testing.T) {
 INSERT INTO credentials(controller_id, device_id, role, token_mac, disabled, issued_at)
 VALUES (?, ?, ?, ?, 0, 1700000000), (?, ?, ?, ?, 1, 1700000001)
 `,
-		controllerID, activeDeviceID, control.DeviceRoleWorker, activeMAC[:],
-		controllerID, disabledDeviceID, control.DeviceRoleController, disabledMAC[:],
+		controllerID, activeDeviceID, "device", activeMAC[:],
+		controllerID, disabledDeviceID, "controller", disabledMAC[:],
 	); err != nil {
 		db.Close()
 		t.Fatal(err)
@@ -195,20 +198,16 @@ VALUES (?, ?, ?, ?, 0, 1700000000), (?, ?, ?, ?, 1, 1700000001)
 		t.Fatalf("query migrated pending column: %v", err)
 	}
 	rows.Close()
-	activeWant := Credential{
-		ControllerID: controllerID,
-		DeviceID:     activeDeviceID,
-		Role:         control.DeviceRoleWorker,
-		MAC:          activeMAC,
-		IssuedAt:     1_700_000_000,
+	if _, err := store.AuthenticateCredential(context.Background(), activeMAC); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("legacy device credential error = %v, want ErrNotFound", err)
 	}
-	if got, err := store.AuthenticateCredential(context.Background(), activeMAC); err != nil || got != activeWant {
-		t.Fatalf("migrated active credential = %#v, %v; want %#v", got, err, activeWant)
+	replacement := NewCredential(controllerID, activeDeviceID, CredentialMAC{3}, time.Unix(1_700_000_002, 0))
+	if err := store.CreateCredential(context.Background(), replacement); err != nil {
+		t.Fatalf("reissue legacy device identity: %v", err)
 	}
 	disabledWant := Credential{
 		ControllerID: controllerID,
 		DeviceID:     disabledDeviceID,
-		Role:         control.DeviceRoleController,
 		MAC:          disabledMAC,
 		Disabled:     true,
 		IssuedAt:     1_700_000_001,
@@ -218,6 +217,209 @@ VALUES (?, ?, ?, ?, 0, 1700000000), (?, ?, ?, ?, 1, 1700000001)
 	}
 	if _, err := store.AuthenticateCredential(context.Background(), disabledMAC); !errors.Is(err, ErrCredentialDisabled) {
 		t.Fatalf("migrated disabled authentication error = %v, want ErrCredentialDisabled", err)
+	}
+}
+
+func TestOpenMigratesVersionThreePeerTopology(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if err := createPrivateDirectory(directory); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "broker.sqlite3")
+	db, err := sql.Open("sqlite", dataSourceName(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, schema := range []string{schemaV1, schemaV2, schemaV3} {
+		if _, err := db.Exec(schema); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+	}
+	const (
+		controllerID         = "123e4567-e89b-42d3-a456-426614174020"
+		controllerDeviceID   = "123e4567-e89b-42d3-a456-426614174021"
+		disabledControllerID = "123e4567-e89b-42d3-a456-426614174022"
+		pendingControllerID  = "123e4567-e89b-42d3-a456-426614174023"
+		activeLegacyDeviceID = "123e4567-e89b-42d3-a456-426614174024"
+		revokedLegacyID      = "123e4567-e89b-42d3-a456-426614174025"
+		pendingLegacyID      = "123e4567-e89b-42d3-a456-426614174026"
+		treeID               = "123e4567-e89b-42d3-a456-426614174027"
+		threadID             = "123e4567-e89b-42d3-a456-426614174028"
+		agentID              = "123e4567-e89b-42d3-a456-426614174029"
+	)
+	macs := []CredentialMAC{{1}, {2}, {3}, {4}, {5}, {6}}
+	if _, err := db.Exec(`
+INSERT INTO credentials(controller_id, device_id, role, token_mac, disabled, issued_at, pending)
+VALUES
+    (?, ?, 'controller', ?, 0, 10, 0),
+    (?, ?, 'controller', ?, 1, 11, 0),
+    (?, ?, 'controller', ?, 1, 12, 1),
+    (?, ?, 'device', ?, 0, 13, 0),
+    (?, ?, 'device', ?, 1, 14, 0),
+    (?, ?, 'device', ?, 1, 15, 1)
+`,
+		controllerID, controllerDeviceID, macs[0][:],
+		controllerID, disabledControllerID, macs[1][:],
+		controllerID, pendingControllerID, macs[2][:],
+		controllerID, activeLegacyDeviceID, macs[3][:],
+		controllerID, revokedLegacyID, macs[4][:],
+		controllerID, pendingLegacyID, macs[5][:],
+	); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	for index, fixture := range []struct {
+		deviceID string
+		role     string
+	}{
+		{controllerDeviceID, "controller"},
+		{activeLegacyDeviceID, "device"},
+	} {
+		if _, err := db.Exec(`
+INSERT INTO devices(
+    controller_id, device_id, name, role, os, arch, runtime_version,
+    protocol_version, features_json, online, last_seen_at, revision
+) VALUES (?, ?, ?, ?, 'linux', 'amd64', '0.1.0-alpha.0.m1.1', 1, '["deviceRegistryV1"]', 1, ?, ?)
+`, controllerID, fixture.deviceID, "peer", fixture.role, index+20, index+1); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+	}
+	root := control.NewRootPrincipal(controllerID, treeID, agentID, controllerDeviceID)
+	capabilities, err := json.Marshal(root.Capabilities)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+INSERT INTO trees(controller_id, external_thread_id, tree_id, root_agent_id, root_device_id, created_at)
+VALUES (?, ?, ?, ?, ?, 30)
+`, controllerID, threadID, treeID, agentID, controllerDeviceID); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+INSERT INTO principals(
+    controller_id, tree_id, agent_id, parent_agent_id, device_id, capabilities_json, created_at
+) VALUES (?, ?, ?, '', ?, ?, 30)
+`,
+		controllerID, treeID, agentID, controllerDeviceID, string(capabilities),
+	); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		"INSERT OR REPLACE INTO controller_registries(controller_id, revision) VALUES (?, 2)", controllerID,
+	); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	registry, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registry.Close()
+	if got, err := registry.AuthenticateCredential(context.Background(), macs[0]); err != nil ||
+		got.ControllerID != controllerID || got.DeviceID != controllerDeviceID {
+		t.Fatalf("migrated controller credential = %#v, error %v", got, err)
+	}
+	for index, deviceID := range []string{disabledControllerID, pendingControllerID} {
+		got, err := registry.Credential(context.Background(), controllerID, deviceID)
+		if err != nil || !got.Disabled || got.Pending {
+			t.Fatalf("migrated controller state %s = %#v, error %v", deviceID, got, err)
+		}
+		if err := registry.CreateCredential(
+			context.Background(), NewCredential(
+				controllerID, deviceID, CredentialMAC{byte(index + 20)}, time.Unix(41, 0),
+			),
+		); !errors.Is(err, ErrConflict) {
+			t.Fatalf("controller tombstone reissue error = %v, want ErrConflict", err)
+		}
+	}
+	if _, err := registry.Credential(context.Background(), controllerID, activeLegacyDeviceID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("active legacy device credential error = %v, want ErrNotFound", err)
+	}
+	replacement := NewCredential(controllerID, activeLegacyDeviceID, CredentialMAC{7}, time.Unix(40, 0))
+	if err := registry.CreateCredential(context.Background(), replacement); err != nil {
+		t.Fatalf("reissue active legacy device identity: %v", err)
+	}
+	for _, deviceID := range []string{revokedLegacyID, pendingLegacyID} {
+		got, err := registry.Credential(context.Background(), controllerID, deviceID)
+		if err != nil || !got.Disabled || got.Pending {
+			t.Fatalf("legacy device tombstone %s = %#v, error %v", deviceID, got, err)
+		}
+		if err := registry.CreateCredential(
+			context.Background(), NewCredential(controllerID, deviceID, CredentialMAC{8}, time.Unix(41, 0)),
+		); !errors.Is(err, ErrConflict) {
+			t.Fatalf("legacy device tombstone reissue error = %v, want ErrConflict", err)
+		}
+	}
+	page, err := registry.ListDevices(context.Background(), controllerID, DevicePageRequest{Limit: 10})
+	if err != nil || len(page.Devices) != 2 {
+		t.Fatalf("migrated devices = %#v, error %v", page, err)
+	}
+	tree, principal, err := registry.EnsureRootTree(
+		context.Background(), controllerID, threadID, controllerDeviceID, time.Unix(50, 0),
+	)
+	if err != nil || tree.TreeID != treeID || !reflect.DeepEqual(principal, root) {
+		t.Fatalf("migrated root binding = %#v, %#v, error %v", tree, principal, err)
+	}
+	var roleColumns int
+	if err := registry.db.QueryRow(`
+SELECT count(*) FROM pragma_table_info('credentials') WHERE name = 'role'
+`).Scan(&roleColumns); err != nil || roleColumns != 0 {
+		t.Fatalf("credential role columns = %d, error %v", roleColumns, err)
+	}
+	if err := registry.db.QueryRow(`
+SELECT count(*) FROM pragma_table_info('devices') WHERE name = 'role'
+`).Scan(&roleColumns); err != nil || roleColumns != 0 {
+		t.Fatalf("device role columns = %d, error %v", roleColumns, err)
+	}
+	rows, err := registry.db.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Fatal("v4 migration left a foreign-key violation")
+	}
+}
+
+func TestOpenCurrentDoesNotMigrateLegacyState(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if err := createPrivateDirectory(directory); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "broker.sqlite3")
+	db, err := sql.Open("sqlite", dataSourceName(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, schema := range []string{schemaV1, schemaV2, schemaV3} {
+		if _, err := db.Exec(schema); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenCurrent(context.Background(), path); err == nil || !strings.Contains(err.Error(), "coordinated migration") {
+		t.Fatalf("OpenCurrent legacy error = %v", err)
+	}
+	db, err = sql.Open("sqlite", dataSourceName(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
+		t.Fatalf("legacy schema version = %d, error %v", version, err)
 	}
 }
 

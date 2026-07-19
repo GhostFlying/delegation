@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	Version        = 1
+	Version        = 2
 	MaxMessageSize = 256 * 1024
 )
 
@@ -80,7 +80,7 @@ const (
 const (
 	FeatureDeviceRegistry = "deviceRegistryV1"
 	FeatureFullDuplexRPC  = "fullDuplexRpcV1"
-	FeatureRootTree       = "rootTreeV1"
+	FeaturePeerRoot       = "peerRootV1"
 )
 
 var methodPattern = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,63}$`)
@@ -246,15 +246,14 @@ func validateRequestID(value string) error {
 }
 
 type Hello struct {
-	ControllerID   string             `json:"controllerId"`
-	DeviceID       string             `json:"deviceId"`
-	DeviceName     string             `json:"deviceName"`
-	Role           control.DeviceRole `json:"role"`
-	OS             string             `json:"os"`
-	Arch           string             `json:"arch"`
-	RuntimeVersion string             `json:"runtimeVersion"`
-	Features       []string           `json:"features"`
-	Cursor         uint64             `json:"cursor"`
+	ControllerID   string   `json:"controllerId"`
+	DeviceID       string   `json:"deviceId"`
+	DeviceName     string   `json:"deviceName"`
+	OS             string   `json:"os"`
+	Arch           string   `json:"arch"`
+	RuntimeVersion string   `json:"runtimeVersion"`
+	Features       []string `json:"features"`
+	Cursor         uint64   `json:"cursor"`
 }
 
 func (h Hello) Descriptor() control.DeviceDescriptor {
@@ -262,7 +261,6 @@ func (h Hello) Descriptor() control.DeviceDescriptor {
 		ControllerID:    h.ControllerID,
 		DeviceID:        h.DeviceID,
 		Name:            h.DeviceName,
-		Role:            h.Role,
 		OS:              h.OS,
 		Arch:            h.Arch,
 		RuntimeVersion:  h.RuntimeVersion,

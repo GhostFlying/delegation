@@ -17,22 +17,26 @@ var runSystemctl = func(args ...string) (userServiceCommandResult, error) {
 
 var waitForLinuxServiceReady = waitForServiceReady
 
-func platformPrepare(binaryPath, configPath string) (Result, error) {
-	descriptor, err := RenderSystemd(binaryPath, configPath)
+func platformPrepare(role ServiceRole, binaryPath, configPath string) (Result, error) {
+	descriptor, err := RenderSystemd(role, binaryPath, configPath)
 	if err != nil {
 		return Result{}, err
 	}
-	path, err := linuxServicePath()
+	path, err := linuxServicePath(role)
 	if err != nil {
 		return Result{}, err
 	}
 	state, err := installManagedFile(path, descriptor)
-	return Result{State: state, Kind: descriptor.Kind, Artifact: path}, err
+	return Result{State: state, Kind: descriptor.Kind, Artifact: path, Role: role}, err
 }
 
 func platformActivate(result Result, binaryPath, configPath string) (Result, error) {
 	if result.State != StatePrepared && result.State != StateActive {
 		return result, fmt.Errorf("cannot activate systemd user service from state %s", result.State)
+	}
+	spec, err := specFor(result.Role)
+	if err != nil {
+		return result, err
 	}
 	reloaded, err := runSystemctl("--user", "--no-ask-password", "daemon-reload")
 	if err != nil || reloaded.ExitCode != 0 {
@@ -51,7 +55,7 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 		return result, errors.New("loaded systemd unit is shadowed or has drop-in overrides")
 	}
 	enabled, err := runSystemctl(
-		"--user", "--no-ask-password", "enable", "--now", SystemdUnitName,
+		"--user", "--no-ask-password", "enable", "--now", spec.systemdUnit,
 	)
 	if err != nil || enabled.ExitCode != 0 {
 		return reconcileSystemdFailure(
@@ -59,7 +63,7 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 			errors.Join(err, commandFailure("enable systemd user service", enabled)),
 		)
 	}
-	isEnabled, isActive, err := querySystemdState()
+	isEnabled, isActive, err := querySystemdState(result.Role)
 	if err != nil || !isEnabled || !isActive {
 		result.State = StateIndeterminate
 		return result, errors.Join(err, errors.New("systemd user service did not become enabled and active"))
@@ -95,7 +99,7 @@ func reconcileSystemdFailure(
 		result.State = StateForeignConflict
 		return result, errors.Join(activationErr, errors.New("loaded systemd unit is shadowed or has drop-in overrides"))
 	}
-	enabled, active, queryErr := querySystemdState()
+	enabled, active, queryErr := querySystemdState(result.Role)
 	if queryErr != nil {
 		result.State = StateIndeterminate
 		return result, errors.Join(activationErr, queryErr)
@@ -115,7 +119,7 @@ func reconcileSystemdFailure(
 }
 
 func querySystemdIdentity(result Result, binaryPath, configPath string) (bool, error) {
-	descriptor, err := RenderSystemd(binaryPath, configPath)
+	descriptor, err := RenderSystemd(result.Role, binaryPath, configPath)
 	if err != nil {
 		return false, err
 	}
@@ -126,8 +130,12 @@ func querySystemdIdentity(result Result, binaryPath, configPath string) (bool, e
 	if !bytes.Equal(content, descriptor.Content) {
 		return false, nil
 	}
+	spec, err := specFor(result.Role)
+	if err != nil {
+		return false, err
+	}
 	show, err := runSystemctl(
-		"--user", "--no-ask-password", "show", SystemdUnitName,
+		"--user", "--no-ask-password", "show", spec.systemdUnit,
 		"--property=FragmentPath", "--property=DropInPaths",
 	)
 	if err != nil || show.ExitCode != 0 {
@@ -152,15 +160,19 @@ func querySystemdIdentity(result Result, binaryPath, configPath string) (bool, e
 	return filepath.Clean(fragment) == filepath.Clean(result.Artifact) && strings.TrimSpace(dropIns) == "", nil
 }
 
-func querySystemdState() (bool, bool, error) {
+func querySystemdState(role ServiceRole) (bool, bool, error) {
+	spec, err := specFor(role)
+	if err != nil {
+		return false, false, err
+	}
 	enabled, err := runSystemctl(
-		"--user", "--no-ask-password", "is-enabled", "--quiet", SystemdUnitName,
+		"--user", "--no-ask-password", "is-enabled", "--quiet", spec.systemdUnit,
 	)
 	if err != nil {
 		return false, false, err
 	}
 	active, err := runSystemctl(
-		"--user", "--no-ask-password", "is-active", "--quiet", SystemdUnitName,
+		"--user", "--no-ask-password", "is-active", "--quiet", spec.systemdUnit,
 	)
 	if err != nil {
 		return enabled.ExitCode == 0, false, err
@@ -168,7 +180,11 @@ func querySystemdState() (bool, bool, error) {
 	return enabled.ExitCode == 0, active.ExitCode == 0, nil
 }
 
-func linuxServicePath() (string, error) {
+func linuxServicePath(role ServiceRole) (string, error) {
+	spec, err := specFor(role)
+	if err != nil {
+		return "", err
+	}
 	configHome := os.Getenv("XDG_CONFIG_HOME")
 	if configHome == "" {
 		home, err := os.UserHomeDir()
@@ -180,5 +196,5 @@ func linuxServicePath() (string, error) {
 	if !filepath.IsAbs(configHome) {
 		return "", errors.New("XDG_CONFIG_HOME must be absolute")
 	}
-	return filepath.Join(configHome, "systemd", "user", SystemdUnitName), nil
+	return filepath.Join(configHome, "systemd", "user", spec.systemdUnit), nil
 }

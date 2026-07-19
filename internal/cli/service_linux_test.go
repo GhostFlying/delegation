@@ -47,7 +47,7 @@ func TestServiceInstallActivatesSystemdUnit(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	wantArtifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdUnitName)
+	wantArtifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdBrokerUnitName)
 	if result.State != userservice.StateActive || result.Kind != userservice.KindSystemd ||
 		result.Artifact != wantArtifact || result.ConfigPath != configPath {
 		t.Fatalf("service install result = %#v", result)
@@ -72,7 +72,7 @@ func TestServiceInstallActivatesSystemdUnitByDefault(t *testing.T) {
 printf '%s\n' "$*" >>"$DELEGATION_TEST_SYSTEMCTL_LOG"
 case " $* " in
   *" show "*)
-    printf 'FragmentPath=%s/systemd/user/delegation.service\nDropInPaths=\n' "$XDG_CONFIG_HOME"
+    printf 'FragmentPath=%s/systemd/user/delegation-broker.service\nDropInPaths=\n' "$XDG_CONFIG_HOME"
     ;;
 esac
 `), 0o700); err != nil {
@@ -108,11 +108,11 @@ esac
 	}
 	want := strings.Join([]string{
 		"--user --no-ask-password daemon-reload",
-		"--user --no-ask-password show " + userservice.SystemdUnitName + " --property=FragmentPath --property=DropInPaths",
-		"--user --no-ask-password enable --now " + userservice.SystemdUnitName,
-		"--user --no-ask-password is-enabled --quiet " + userservice.SystemdUnitName,
-		"--user --no-ask-password is-active --quiet " + userservice.SystemdUnitName,
-		"--user --no-ask-password show " + userservice.SystemdUnitName + " --property=FragmentPath --property=DropInPaths",
+		"--user --no-ask-password show " + userservice.SystemdBrokerUnitName + " --property=FragmentPath --property=DropInPaths",
+		"--user --no-ask-password enable --now " + userservice.SystemdBrokerUnitName,
+		"--user --no-ask-password is-enabled --quiet " + userservice.SystemdBrokerUnitName,
+		"--user --no-ask-password is-active --quiet " + userservice.SystemdBrokerUnitName,
+		"--user --no-ask-password show " + userservice.SystemdBrokerUnitName + " --property=FragmentPath --property=DropInPaths",
 		"",
 	}, "\n")
 	if string(log) != want {
@@ -136,7 +136,7 @@ func TestServiceInstallValidatesBeforeWritingArtifact(t *testing.T) {
 	if code == 0 {
 		t.Fatal("service install accepted invalid configuration")
 	}
-	artifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdUnitName)
+	artifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdBrokerUnitName)
 	if _, err := os.Lstat(artifact); !os.IsNotExist(err) {
 		t.Fatalf("service artifact exists after failed validation: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestServiceInstallPreflightsBrokerAuthorityBeforeWritingArtifact(t *testing
 	if code := Run([]string{"service", "install", "--config", configPath}, &stdout, &stderr); code == 0 {
 		t.Fatal("service install accepted an invalid broker authority")
 	}
-	artifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdUnitName)
+	artifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdBrokerUnitName)
 	if _, err := os.Lstat(artifact); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("service artifact exists after authority preflight failure: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestServiceInstallReportsForeignConflictAsJSON(t *testing.T) {
 	if code := Run([]string{"setup", "broker", "--config", configPath}, &setupOutput, &setupError); code != 0 {
 		t.Fatalf("setup code = %d, want 0; stderr = %q", code, setupError.String())
 	}
-	artifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdUnitName)
+	artifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdBrokerUnitName)
 	if err := os.MkdirAll(filepath.Dir(artifact), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestServiceInstallReportsCommittedStateWhenOutputFails(t *testing.T) {
 	if code == 0 {
 		t.Fatal("service install ignored an output failure")
 	}
-	artifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdUnitName)
+	artifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdBrokerUnitName)
 	for _, expected := range []string{"state active", artifact, configPath, "write service installation"} {
 		if !bytes.Contains(stderr.Bytes(), []byte(expected)) {
 			t.Fatalf("service install stderr = %q, want %q", stderr.String(), expected)
@@ -287,7 +287,7 @@ func installNoopSystemctl(t *testing.T, root string) {
 	if err := os.WriteFile(path, []byte(`#!/bin/sh
 case " $* " in
   *" show "*)
-    printf 'FragmentPath=%s/systemd/user/delegation.service\nDropInPaths=\n' "$XDG_CONFIG_HOME"
+    printf 'FragmentPath=%s/systemd/user/delegation-broker.service\nDropInPaths=\n' "$XDG_CONFIG_HOME"
     ;;
 esac
 exit 0

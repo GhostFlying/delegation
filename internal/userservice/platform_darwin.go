@@ -18,22 +18,26 @@ var runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
 
 var waitForDarwinServiceReady = waitForServiceReady
 
-func platformPrepare(binaryPath, configPath string) (Result, error) {
-	descriptor, err := RenderLaunchAgent(binaryPath, configPath)
+func platformPrepare(role ServiceRole, binaryPath, configPath string) (Result, error) {
+	descriptor, err := RenderLaunchAgent(role, binaryPath, configPath)
 	if err != nil {
 		return Result{}, err
 	}
-	path, err := darwinServicePath()
+	path, err := darwinServicePath(role)
 	if err != nil {
 		return Result{}, err
 	}
 	state, err := installManagedFile(path, descriptor)
-	return Result{State: state, Kind: descriptor.Kind, Artifact: path}, err
+	return Result{State: state, Kind: descriptor.Kind, Artifact: path, Role: role}, err
 }
 
 func platformActivate(result Result, binaryPath, configPath string) (Result, error) {
 	if result.State != StatePrepared && result.State != StateActive {
 		return result, fmt.Errorf("cannot activate LaunchAgent from state %s", result.State)
+	}
+	spec, err := specFor(result.Role)
+	if err != nil {
+		return result, err
 	}
 	matched, err := launchAgentDefinitionMatches(result, binaryPath, configPath)
 	if err != nil {
@@ -45,7 +49,7 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 		return result, errors.New("prepared LaunchAgent definition changed before activation")
 	}
 	domain := fmt.Sprintf("gui/%d", os.Geteuid())
-	target := domain + "/" + LaunchAgentName
+	target := domain + "/" + spec.launchAgent
 	domainStatus, err := runLaunchctl("print", domain)
 	if err != nil || domainStatus.ExitCode != 0 {
 		return result, errors.Join(err, commandFailure("inspect LaunchAgent domain", domainStatus))
@@ -135,7 +139,7 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 }
 
 func launchAgentDefinitionMatches(result Result, binaryPath, configPath string) (bool, error) {
-	descriptor, err := RenderLaunchAgent(binaryPath, configPath)
+	descriptor, err := RenderLaunchAgent(result.Role, binaryPath, configPath)
 	if err != nil {
 		return false, err
 	}
@@ -227,7 +231,11 @@ func parseLaunchAgentStatus(result userServiceCommandResult) (launchAgentStatus,
 	return status, nil
 }
 
-func darwinServicePath() (string, error) {
+func darwinServicePath(role ServiceRole) (string, error) {
+	spec, err := specFor(role)
+	if err != nil {
+		return "", err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -235,5 +243,5 @@ func darwinServicePath() (string, error) {
 	if !filepath.IsAbs(home) {
 		return "", errors.New("user home must be absolute")
 	}
-	return filepath.Join(home, "Library", "LaunchAgents", LaunchAgentName+".plist"), nil
+	return filepath.Join(home, "Library", "LaunchAgents", spec.launchAgent+".plist"), nil
 }

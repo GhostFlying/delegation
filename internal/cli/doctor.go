@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -19,16 +20,15 @@ type doctorResult struct {
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer) int {
-	defaultPath, err := delegationconfig.DefaultPath()
-	if err != nil {
-		return writeError(stderr, err)
-	}
 	flags := flag.NewFlagSet("delegation doctor", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", defaultPath, "configuration file path")
+	configPath := flags.String("config", "", "broker or peer configuration file path (required)")
 	jsonOutput := flags.Bool("json", false, "print diagnostics as JSON")
 	if code := parseFlags(flags, args); code >= 0 {
 		return code
+	}
+	if *configPath == "" {
+		return writeError(stderr, errors.New("--config is required because broker and peer may coexist"))
 	}
 	resolvedConfig, err := absolutePath(*configPath)
 	if err != nil {
@@ -48,7 +48,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		if _, err := loadConnectorAuthority(resolvedConfig, cfg); err != nil {
 			return writeError(stderr, err)
 		}
-		checks = append(checks, "connector authority paths are safe")
+		checks = append(checks, "peer authority paths are safe")
 	}
 	if cfg.Broker.Auth.Mode == delegationconfig.AuthModeToken {
 		checks = append(checks, "token file exists and is protected")

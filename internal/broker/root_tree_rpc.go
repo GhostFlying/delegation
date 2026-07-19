@@ -4,15 +4,11 @@ import (
 	"context"
 	"errors"
 
-	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
 func (s *session) handleEnsureRootTree(ctx context.Context, request protocol.Envelope) error {
-	if s.role != control.DeviceRoleController {
-		return s.server.writeError(ctx, s.connection, request, protocol.ErrorForbidden, "controller role required")
-	}
 	if request.TreeID != "" || request.Source != nil {
 		return s.server.writeError(ctx, s.connection, request, protocol.ErrorInvalidRequest, "invalid root tree request")
 	}

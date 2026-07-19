@@ -33,6 +33,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runCredential(args[1:], stdout, stderr)
 	case "service":
 		return runService(args[1:], stdout, stderr)
+	case "migrate":
+		return runMigrate(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stderr)
 	default:
@@ -67,9 +69,10 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "commands:")
 	fmt.Fprintln(w, "  version [--json]  print runtime version")
-	fmt.Fprintln(w, "  setup <role>      configure a broker, controller, or device")
+	fmt.Fprintln(w, "  setup <role>      configure a broker or peer")
 	fmt.Fprintln(w, "  doctor [--json]   validate the local configuration")
-	fmt.Fprintln(w, "  credential <action>  issue or revoke a device credential")
+	fmt.Fprintln(w, "  credential <action>  issue or revoke a peer credential")
 	fmt.Fprintln(w, "  service <action>  prepare or run the user service")
+	fmt.Fprintln(w, "  migrate config    migrate an explicit legacy configuration")
 	fmt.Fprintln(w, "  mcp root          start the root MCP server")
 }

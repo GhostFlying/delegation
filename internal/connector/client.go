@@ -48,7 +48,6 @@ type Options struct {
 	ControllerID             string
 	DeviceID                 string
 	DeviceName               string
-	Role                     control.DeviceRole
 	AuthMode                 config.AuthMode
 	Token                    *tokenfile.Token
 	RuntimeVersion           string
@@ -108,15 +107,11 @@ func New(options Options) (*Client, error) {
 	if options.Architecture == "" {
 		options.Architecture = runtime.GOARCH
 	}
-	features := []string{protocol.FeatureDeviceRegistry, protocol.FeatureFullDuplexRPC}
-	if options.Role == control.DeviceRoleController {
-		features = append(features, protocol.FeatureRootTree)
-	}
+	features := []string{protocol.FeatureDeviceRegistry, protocol.FeatureFullDuplexRPC, protocol.FeaturePeerRoot}
 	hello := protocol.Hello{
 		ControllerID:   options.ControllerID,
 		DeviceID:       options.DeviceID,
 		DeviceName:     options.DeviceName,
-		Role:           options.Role,
 		OS:             options.OperatingSystem,
 		Arch:           options.Architecture,
 		RuntimeVersion: options.RuntimeVersion,
@@ -379,9 +374,10 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 	if err := descriptor.Validate(); err != nil {
 		return fmt.Errorf("broker features: %w", err)
 	}
-	required := []string{protocol.FeatureDeviceRegistry}
-	if hello.Role == control.DeviceRoleController {
-		required = append(required, protocol.FeatureRootTree)
+	required := []string{
+		protocol.FeatureDeviceRegistry,
+		protocol.FeatureFullDuplexRPC,
+		protocol.FeaturePeerRoot,
 	}
 	for _, feature := range required {
 		if !slices.Contains(result.Features, feature) {

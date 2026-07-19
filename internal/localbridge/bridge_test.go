@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -81,7 +82,7 @@ func (b *fakeBackend) snapshot() []recordedCall {
 
 func TestControllerBridgeForwardsAllowedCalls(t *testing.T) {
 	backend := &fakeBackend{result: json.RawMessage(`{"ok":true}`)}
-	client, stop := startTestBridge(t, control.DeviceRoleController, backend)
+	client, stop := startTestBridge(t, backend)
 	defer stop()
 	type result struct {
 		OK bool `json:"ok"`
@@ -126,9 +127,9 @@ func TestControllerBridgeForwardsAllowedCalls(t *testing.T) {
 
 func TestBridgeProbeRequiresExactServiceIdentity(t *testing.T) {
 	backend := &fakeBackend{result: json.RawMessage(`{}`)}
-	client, stop := startTestBridge(t, control.DeviceRoleController, backend)
+	client, stop := startTestBridge(t, backend)
 	defer stop()
-	expected := testServiceIdentity(control.DeviceRoleController)
+	expected := testServiceIdentity()
 	if err := Probe(context.Background(), client.endpoint, expected); err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +145,7 @@ func TestBridgeProbeRequiresExactServiceIdentity(t *testing.T) {
 
 func TestBridgeEnforcesRoleShapeAllowlistAndErrorMapping(t *testing.T) {
 	backend := &fakeBackend{result: json.RawMessage(`{}`)}
-	client, stop := startTestBridge(t, control.DeviceRoleController, backend)
+	client, stop := startTestBridge(t, backend)
 	defer stop()
 	for _, test := range []struct {
 		name   string
@@ -184,28 +185,13 @@ func TestBridgeEnforcesRoleShapeAllowlistAndErrorMapping(t *testing.T) {
 	if calls := backend.snapshot(); len(calls) != before {
 		t.Fatalf("rejected local methods reached backend: %d calls, want %d", len(calls), before)
 	}
-
-	workerBackend := &fakeBackend{result: json.RawMessage(`{}`)}
-	worker, stopWorker := startTestBridge(t, control.DeviceRoleWorker, workerBackend)
-	defer stopWorker()
-	assertRPCCode(t, worker.Call(
-		context.Background(),
-		protocol.MethodEnsureRootTree,
-		"",
-		nil,
-		protocol.EnsureRootTreeParams{ExternalThreadID: bridgeTestTreeID},
-		nil,
-	), protocol.ErrorForbidden)
-	if len(workerBackend.snapshot()) != 0 {
-		t.Fatal("worker bridge forwarded a controller call")
-	}
 }
 
 func TestClientCancellationReachesBridgeBackend(t *testing.T) {
 	backend := &fakeBackend{
 		result: json.RawMessage(`{}`), block: true, started: make(chan struct{}), finished: make(chan struct{}),
 	}
-	client, stop := startTestBridge(t, control.DeviceRoleController, backend)
+	client, stop := startTestBridge(t, backend)
 	defer stop()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -305,10 +291,20 @@ func TestServerCloseReturnsListenerCleanupFailure(t *testing.T) {
 	}
 }
 
-func startTestBridge(t *testing.T, role control.DeviceRole, backend Backend) (*Client, func()) {
+func TestLocalBridgeV1RequestFailsClosed(t *testing.T) {
+	request := request{
+		Version: 1, RequestID: "l_123e4567-e89b-42d3-a456-426614174399",
+		Method: protocol.MethodEnsureRootTree, Payload: json.RawMessage(`{}`),
+	}
+	if err := request.validate(); err == nil || !strings.Contains(err.Error(), "unsupported local bridge version 1") {
+		t.Fatalf("legacy local bridge validation error = %v", err)
+	}
+}
+
+func startTestBridge(t *testing.T, backend Backend) (*Client, func()) {
 	t.Helper()
 	endpoint := testEndpoint(t)
-	server, err := Listen(endpoint, testServiceIdentity(role), backend)
+	server, err := Listen(endpoint, testServiceIdentity(), backend)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,11 +355,10 @@ func testEndpoint(t *testing.T) string {
 	return endpoint
 }
 
-func testServiceIdentity(role control.DeviceRole) ServiceIdentity {
+func testServiceIdentity() ServiceIdentity {
 	return ServiceIdentity{
 		ControllerID: bridgeTestControllerID,
 		DeviceID:     bridgeTestDeviceID,
-		Role:         role,
 	}
 }
 

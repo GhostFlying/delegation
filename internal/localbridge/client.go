@@ -38,10 +38,9 @@ func Probe(ctx context.Context, endpoint string, expected ServiceIdentity) error
 	}
 	if actual != expected {
 		return fmt.Errorf(
-			"local bridge identity mismatch: got controller %s device %s role %s",
+			"local bridge identity mismatch: got controller %s device %s",
 			actual.ControllerID,
 			actual.DeviceID,
-			actual.Role,
 		)
 	}
 	return nil

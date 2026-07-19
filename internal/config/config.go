@@ -18,17 +18,16 @@ import (
 )
 
 const (
-	CurrentSchemaVersion = 3
-	brokerConnectPath    = "/v1/connect"
+	CurrentSchemaVersion = 4
+	brokerConnectPath    = "/v2/connect"
 	maximumConfigSize    = 1024 * 1024
 )
 
 type Role string
 
 const (
-	RoleBroker     Role = "broker"
-	RoleController Role = "controller"
-	RoleDevice     Role = "device"
+	RoleBroker Role = "broker"
+	RolePeer   Role = "peer"
 )
 
 type AuthMode string
@@ -71,7 +70,15 @@ func DefaultHome() (string, error) {
 	return filepath.Join(userHome, ".delegation"), nil
 }
 
-func DefaultPath() (string, error) {
+func DefaultBrokerPath() (string, error) {
+	return defaultPath("broker.json")
+}
+
+func DefaultPeerPath() (string, error) {
+	return defaultPath("peer.json")
+}
+
+func defaultPath(name string) (string, error) {
 	if path := os.Getenv("DELEGATION_CONFIG"); path != "" {
 		return filepath.Abs(path)
 	}
@@ -79,7 +86,7 @@ func DefaultPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "config.json"), nil
+	return filepath.Join(home, name), nil
 }
 
 func Read(path string) (Config, error) {
@@ -123,28 +130,19 @@ func Read(path string) (Config, error) {
 func (c Config) Validate() error {
 	if c.SchemaVersion != CurrentSchemaVersion {
 		if c.SchemaVersion < CurrentSchemaVersion {
-			if c.Role == RoleBroker {
-				if c.SchemaVersion == 1 {
-					return fmt.Errorf(
-						"config schema version %d is obsolete; back up and move the config aside, move the shared broker token aside, verify the selected new master-token path does not exist, then rerun setup broker with the existing --controller-id, --listen, --auth-mode, --state, and --allow-insecure-nonloopback for any non-loopback listener; omit --token-file only after verifying the default token path is absent, or pass a different nonexistent path so setup creates a fresh private M1 master; do not reuse the schema version 1 broker token, then issue fresh per-device credentials",
-						c.SchemaVersion,
-					)
-				}
-				return fmt.Errorf(
-					"config schema version %d is obsolete; back up and move the config aside, then rerun setup broker with all existing settings, including --controller-id, --listen, --auth-mode, --token-file when token authentication is used, --state, and --allow-insecure-nonloopback for any non-loopback listener",
-					c.SchemaVersion,
-				)
+			if c.SchemaVersion < LegacySchemaVersion {
+				return fmt.Errorf("config schema version %d requires its version-specific secure migration to protected schema version %d before the v4 migration; do not run delegation migrate config directly", c.SchemaVersion, LegacySchemaVersion)
 			}
-			if c.SchemaVersion == 1 {
-				return fmt.Errorf(
-					"config schema version %d is obsolete; back up and move the config aside, enroll a fresh device-bound credential at the broker, then rerun setup for the same role with the existing --controller-id, --device-id, --device-name, --broker-url, and --auth-mode, the newly transferred credential path in --token-file when token authentication is used, and --allow-insecure-nonloopback when the broker URL is non-loopback ws://; do not reuse the schema version 1 target token",
-					c.SchemaVersion,
-				)
+			switch c.Role {
+			case RoleBroker:
+				return fmt.Errorf("config schema version %d is obsolete; stop the legacy service, back up config, state, and token files, then run delegation migrate config --from <legacy-config> --to <broker.json>", c.SchemaVersion)
+			case "controller":
+				return fmt.Errorf("config schema version %d uses the obsolete controller role; stop the legacy service, then run delegation migrate config --from <legacy-config> --to <peer.json>; the existing controller credential may be retained", c.SchemaVersion)
+			case "device":
+				return fmt.Errorf("config schema version %d uses the obsolete device role; stop the legacy service, migrate the broker first, issue a fresh peer credential for the same deviceId, then run delegation migrate config --from <legacy-config> --to <peer.json> --token-file <fresh-peer-token>", c.SchemaVersion)
+			default:
+				return fmt.Errorf("config schema version %d is obsolete; use delegation migrate config with a supported legacy broker, controller, or device configuration", c.SchemaVersion)
 			}
-			return fmt.Errorf(
-				"config schema version %d is obsolete; back up and move the config aside, then rerun setup for the same role with the existing --controller-id, --device-id, --device-name, --broker-url, --auth-mode, --token-file when token authentication is used, and --allow-insecure-nonloopback when the broker URL is non-loopback ws://",
-				c.SchemaVersion,
-			)
 		}
 		return fmt.Errorf("config schema version %d requires a newer delegation runtime", c.SchemaVersion)
 	}
@@ -163,7 +161,7 @@ func (c Config) Validate() error {
 		if err := validateListen(c.Broker.Listen, c.Broker.AllowInsecureNonLoopback); err != nil {
 			return err
 		}
-	case RoleController, RoleDevice:
+	case RolePeer:
 		if identity.ValidateID(c.DeviceID) != nil {
 			return errors.New("deviceId must be a UUID")
 		}
@@ -171,7 +169,7 @@ func (c Config) Validate() error {
 			return fmt.Errorf("deviceName: %w", err)
 		}
 		if c.Broker.Listen != "" || c.Broker.StateFile != "" {
-			return errors.New("controller and device config must not contain broker listener or state fields")
+			return errors.New("peer config must not contain broker listener or state fields")
 		}
 		if _, err := NormalizeBrokerURL(c.Broker.URL, c.Broker.AllowInsecureNonLoopback); err != nil {
 			return err
@@ -220,7 +218,7 @@ func NormalizeBrokerURL(raw string, allowInsecureNonLoopback bool) (string, erro
 		return "", errors.New("broker URL must not contain credentials, query, fragment, or an escaped path")
 	}
 	if parsed.Path != "" && parsed.Path != "/" && parsed.Path != brokerConnectPath {
-		return "", errors.New("broker URL path must be empty or /v1/connect")
+		return "", errors.New("broker URL path must be empty or /v2/connect")
 	}
 	if parsed.Scheme == "ws" && !loopbackHost(parsed.Hostname()) && !allowInsecureNonLoopback {
 		return "", errors.New("plaintext non-loopback broker URL requires explicit acknowledgement")
@@ -266,7 +264,7 @@ func (c Config) UsesInsecureNonLoopbackTransport() bool {
 	case RoleBroker:
 		host, _, err := net.SplitHostPort(c.Broker.Listen)
 		return err == nil && !loopbackHost(host)
-	case RoleController, RoleDevice:
+	case RolePeer:
 		parsed, err := url.Parse(c.Broker.URL)
 		return err == nil && parsed.Scheme == "ws" && !loopbackHost(parsed.Hostname())
 	default:

@@ -62,13 +62,19 @@ func TestBrokerServiceRunsConfiguredAuthModes(t *testing.T) {
 
 func TestBrokerServiceUsesConfiguredMasterToken(t *testing.T) {
 	configPath, cfg := setupBrokerRuntimeTest(t, "token")
+	registry, err := store.Open(context.Background(), cfg.Broker.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
 	deviceTokenPath := privateTestPath(t, "device.token")
 	var issueOutput bytes.Buffer
 	var issueError bytes.Buffer
 	if code := Run([]string{
 		"credential", "issue",
 		"--config", configPath,
-		"--role", "device",
 		"--device-id", runtimeDeviceID,
 		"--out", deviceTokenPath,
 	}, &issueOutput, &issueError); code != 0 {
@@ -104,7 +110,7 @@ func TestBrokerServiceUsesConfiguredMasterToken(t *testing.T) {
 				header.Set("Authorization", "Bearer "+test.token)
 			}
 			connection, response, err := websocket.Dial(
-				context.Background(), "ws://"+address+"/v1/connect", &websocket.DialOptions{HTTPHeader: header},
+				context.Background(), "ws://"+address+"/v2/connect", &websocket.DialOptions{HTTPHeader: header},
 			)
 			if connection != nil {
 				connection.CloseNow()
@@ -117,7 +123,7 @@ func TestBrokerServiceUsesConfiguredMasterToken(t *testing.T) {
 	}
 	header := http.Header{"Authorization": []string{"Bearer " + tokenfile.Encode(deviceToken)}}
 	connection, _, err := websocket.Dial(
-		context.Background(), "ws://"+address+"/v1/connect", &websocket.DialOptions{HTTPHeader: header},
+		context.Background(), "ws://"+address+"/v2/connect", &websocket.DialOptions{HTTPHeader: header},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +144,7 @@ func TestBrokerServiceClosesManagedWebSocketAndMarksDeviceOffline(t *testing.T) 
 	}()
 	address := waitForBrokerAddress(t, ready, done)
 	waitForBrokerHealth(t, address)
-	connection, _, err := websocket.Dial(context.Background(), "ws://"+address+"/v1/connect", nil)
+	connection, _, err := websocket.Dial(context.Background(), "ws://"+address+"/v2/connect", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +208,7 @@ func TestBrokerServiceRejectsSecondProcessWithoutInvalidatingLiveLease(t *testin
 	}()
 	address := waitForBrokerAddress(t, ready, done)
 	waitForBrokerHealth(t, address)
-	connection, _, err := websocket.Dial(context.Background(), "ws://"+address+"/v1/connect", nil)
+	connection, _, err := websocket.Dial(context.Background(), "ws://"+address+"/v2/connect", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,10 +241,9 @@ func TestBrokerServiceBindFailurePreservesPresence(t *testing.T) {
 		ControllerID:    runtimeControllerID,
 		DeviceID:        runtimeDeviceID,
 		Name:            "existing-worker",
-		Role:            control.DeviceRoleWorker,
 		OS:              "linux",
 		Arch:            "amd64",
-		RuntimeVersion:  "0.1.0-alpha.0.m1",
+		RuntimeVersion:  "0.1.0-alpha.0.m1.1",
 		ProtocolVersion: protocol.Version,
 	}, time.Unix(10, 0))
 	if err != nil {
@@ -509,11 +514,14 @@ func sendRuntimeHello(t *testing.T, connection *websocket.Conn, deviceID string)
 		ControllerID:   runtimeControllerID,
 		DeviceID:       deviceID,
 		DeviceName:     "runtime-worker",
-		Role:           control.DeviceRoleWorker,
 		OS:             "linux",
 		Arch:           "amd64",
-		RuntimeVersion: "0.1.0-alpha.0.m1",
-		Features:       []string{protocol.FeatureDeviceRegistry},
+		RuntimeVersion: "0.1.0-alpha.0.m1.1",
+		Features: []string{
+			protocol.FeatureDeviceRegistry,
+			protocol.FeatureFullDuplexRPC,
+			protocol.FeaturePeerRoot,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

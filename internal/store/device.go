@@ -80,7 +80,6 @@ func (s *Store) registerDevice(
 			}
 			if credential.ControllerID != descriptor.ControllerID ||
 				credential.DeviceID != descriptor.DeviceID ||
-				credential.Role != descriptor.Role ||
 				subtle.ConstantTimeCompare(credential.MAC[:], mac[:]) != 1 {
 				return ErrAuthorizationDenied
 			}
@@ -92,12 +91,11 @@ func (s *Store) registerDevice(
 		registered = deviceFromDescriptor(descriptor, lastSeenAt, revision)
 		if _, err := connection.ExecContext(ctx, `
 INSERT INTO devices(
-    controller_id, device_id, name, role, os, arch, runtime_version,
+    controller_id, device_id, name, os, arch, runtime_version,
     protocol_version, features_json, online, last_seen_at, revision
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
 ON CONFLICT(controller_id, device_id) DO UPDATE SET
     name = excluded.name,
-    role = excluded.role,
     os = excluded.os,
     arch = excluded.arch,
     runtime_version = excluded.runtime_version,
@@ -110,7 +108,6 @@ ON CONFLICT(controller_id, device_id) DO UPDATE SET
 			registered.ControllerID,
 			registered.DeviceID,
 			registered.Name,
-			registered.Role,
 			registered.OS,
 			registered.Arch,
 			registered.RuntimeVersion,
@@ -269,7 +266,7 @@ WHERE controller_id = ? AND `+predicate,
 }
 
 var deviceSelect = fmt.Sprintf(`
-SELECT controller_id, device_id, name, role, os, arch, runtime_version,
+SELECT controller_id, device_id, name, os, arch, runtime_version,
        protocol_version,
        CASE WHEN length(CAST(features_json AS BLOB)) <= %d THEN features_json END,
        online, last_seen_at, revision
@@ -293,7 +290,6 @@ func scanDevice(scanner rowScanner) (control.Device, error) {
 		&device.ControllerID,
 		&device.DeviceID,
 		&device.Name,
-		&device.Role,
 		&device.OS,
 		&device.Arch,
 		&device.RuntimeVersion,
@@ -395,7 +391,6 @@ func deviceFromDescriptor(descriptor control.DeviceDescriptor, lastSeenAt int64,
 		ControllerID:    descriptor.ControllerID,
 		DeviceID:        descriptor.DeviceID,
 		Name:            descriptor.Name,
-		Role:            descriptor.Role,
 		OS:              descriptor.OS,
 		Arch:            descriptor.Arch,
 		RuntimeVersion:  descriptor.RuntimeVersion,

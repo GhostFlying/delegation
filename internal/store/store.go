@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	schemaVersion = 3
+	schemaVersion = 4
 	busyTimeoutMS = 5000
 	walRetryLimit = 8
 	sqliteBusy    = 5
@@ -25,6 +25,20 @@ type Store struct {
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
+	return open(ctx, path, true)
+}
+
+// OpenCurrent opens an existing current-schema store without running migrations.
+// Administrative commands use it so destructive upgrades remain owned by a
+// broker process that already holds the instance lease.
+func OpenCurrent(ctx context.Context, path string) (*Store, error) {
+	if _, err := os.Lstat(path); err != nil {
+		return nil, fmt.Errorf("inspect existing broker state: %w", err)
+	}
+	return open(ctx, path, false)
+}
+
+func open(ctx context.Context, path string, migrate bool) (*Store, error) {
 	resolved, err := preparePath(path)
 	if err != nil {
 		return nil, err
@@ -59,8 +73,18 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := protectDatabaseFile(resolved); err != nil {
 		return closeOnError(err)
 	}
-	if err := store.migrate(ctx); err != nil {
-		return closeOnError(err)
+	if migrate {
+		if err := store.migrate(ctx); err != nil {
+			return closeOnError(err)
+		}
+	} else {
+		var version int
+		if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+			return closeOnError(fmt.Errorf("read broker state schema version: %w", err))
+		}
+		if version != schemaVersion {
+			return closeOnError(fmt.Errorf("broker state schema version %d requires the v2 broker to run its coordinated migration to version %d first", version, schemaVersion))
+		}
 	}
 	if err := store.enableWAL(ctx); err != nil {
 		return closeOnError(err)

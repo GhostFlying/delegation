@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/GhostFlying/delegation/internal/control"
 )
 
 func TestMain(m *testing.M) {
@@ -39,7 +37,7 @@ func TestMain(m *testing.M) {
 func TestUnixBridgeUsesPrivateSocketAndRejectsSecondServer(t *testing.T) {
 	endpoint := testEndpoint(t)
 	backend := &fakeBackend{}
-	server, err := Listen(endpoint, testServiceIdentity(control.DeviceRoleController), backend)
+	server, err := Listen(endpoint, testServiceIdentity(), backend)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +49,7 @@ func TestUnixBridgeUsesPrivateSocketAndRejectsSecondServer(t *testing.T) {
 	if err != nil || socketInfo.Mode()&os.ModeSocket == 0 || socketInfo.Mode().Perm() != 0o600 {
 		t.Fatalf("socket = %#v, error %v", socketInfo, err)
 	}
-	if second, err := Listen(endpoint, testServiceIdentity(control.DeviceRoleController), backend); err == nil {
+	if second, err := Listen(endpoint, testServiceIdentity(), backend); err == nil {
 		second.Close()
 		t.Fatal("second local bridge server bound the same endpoint")
 	}
@@ -78,7 +76,7 @@ func TestUnixBridgeRejectsPreclaimableRuntimeNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	if server, err := Listen(
-		endpoint, testServiceIdentity(control.DeviceRoleController), &fakeBackend{},
+		endpoint, testServiceIdentity(), &fakeBackend{},
 	); err == nil {
 		server.Close()
 		t.Fatal("Listen accepted a user runtime namespace writable by another account")
@@ -127,7 +125,7 @@ func TestUnixBridgeReplacesOnlyPrivateStaleSockets(t *testing.T) {
 			}
 			test.stale(t, endpoint)
 			server, err := Listen(
-				endpoint, testServiceIdentity(control.DeviceRoleController), &fakeBackend{},
+				endpoint, testServiceIdentity(), &fakeBackend{},
 			)
 			if test.want {
 				if err != nil {
@@ -195,7 +193,7 @@ func TestUnixListenerDoesNotUnlinkReplacementSocket(t *testing.T) {
 func TestServerCancellationClosesIncompleteLocalCall(t *testing.T) {
 	endpoint := testEndpoint(t)
 	var err error
-	server, err := Listen(endpoint, testServiceIdentity(control.DeviceRoleController), &fakeBackend{})
+	server, err := Listen(endpoint, testServiceIdentity(), &fakeBackend{})
 	if err != nil {
 		t.Fatal(err)
 	}

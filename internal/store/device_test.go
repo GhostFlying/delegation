@@ -22,11 +22,11 @@ func TestAuthenticatedDeviceLeaseAndRevocation(t *testing.T) {
 	registry := openTestStore(t)
 	ctx := context.Background()
 	mac := CredentialMAC{1}
-	credential := NewCredential(testControllerID, testDeviceID, control.DeviceRoleWorker, mac, time.Unix(1, 0))
+	credential := NewCredential(testControllerID, testDeviceID, mac, time.Unix(1, 0))
 	if err := registry.CreateCredential(ctx, credential); err != nil {
 		t.Fatal(err)
 	}
-	descriptor := deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleWorker)
+	descriptor := deviceDescriptor(testControllerID, testDeviceID)
 	device, err := registry.RegisterAuthenticatedDevice(ctx, mac, descriptor, time.Unix(100, 0))
 	if err != nil {
 		t.Fatal(err)
@@ -87,23 +87,17 @@ func TestDeviceRegistrationEnforcesCredentialBinding(t *testing.T) {
 	registry := openTestStore(t)
 	ctx := context.Background()
 	mac := CredentialMAC{2}
-	credential := NewCredential(testControllerID, testDeviceID, control.DeviceRoleWorker, mac, time.Unix(1, 0))
+	credential := NewCredential(testControllerID, testDeviceID, mac, time.Unix(1, 0))
 	if err := registry.CreateCredential(ctx, credential); err != nil {
 		t.Fatal(err)
 	}
-	wrongRole := deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleController)
-	if _, err := registry.RegisterAuthenticatedDevice(
-		ctx, mac, wrongRole, time.Unix(1, 0),
-	); !errors.Is(err, ErrAuthorizationDenied) {
-		t.Fatalf("role escalation error = %v, want authorization denial", err)
-	}
-	wrongDevice := deviceDescriptor(testControllerID, deviceSecondID, control.DeviceRoleWorker)
+	wrongDevice := deviceDescriptor(testControllerID, deviceSecondID)
 	if _, err := registry.RegisterAuthenticatedDevice(
 		ctx, mac, wrongDevice, time.Unix(1, 0),
 	); !errors.Is(err, ErrAuthorizationDenied) {
 		t.Fatalf("device impersonation error = %v, want authorization denial", err)
 	}
-	trusted := deviceDescriptor(deviceSecondControllerID, deviceSecondID, control.DeviceRoleController)
+	trusted := deviceDescriptor(deviceSecondControllerID, deviceSecondID)
 	if device, err := registry.RegisterTrustedDevice(ctx, trusted, time.Unix(1, 0)); err != nil || device.Revision != 1 {
 		t.Fatalf("trusted registration = %#v, error %v", device, err)
 	}
@@ -111,7 +105,7 @@ func TestDeviceRegistrationEnforcesCredentialBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := registry.RegisterAuthenticatedDevice(
-		ctx, mac, deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleWorker), time.Unix(2, 0),
+		ctx, mac, deviceDescriptor(testControllerID, testDeviceID), time.Unix(2, 0),
 	); !errors.Is(err, ErrCredentialDisabled) {
 		t.Fatalf("revoked registration error = %v, want ErrCredentialDisabled", err)
 	}
@@ -124,9 +118,9 @@ func TestBrokerEpochExpiryAndControllerIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	first := deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleController)
-	second := deviceDescriptor(testControllerID, deviceSecondID, control.DeviceRoleWorker)
-	other := deviceDescriptor(deviceSecondControllerID, testDeviceID, control.DeviceRoleController)
+	first := deviceDescriptor(testControllerID, testDeviceID)
+	second := deviceDescriptor(testControllerID, deviceSecondID)
+	other := deviceDescriptor(deviceSecondControllerID, testDeviceID)
 	for index, descriptor := range []control.DeviceDescriptor{first, second, other} {
 		if _, err := registry.RegisterTrustedDevice(ctx, descriptor, time.Unix(int64(index+1)*10, 0)); err != nil {
 			t.Fatal(err)
@@ -183,7 +177,7 @@ func TestRegistrationAndRevocationAreSerialized(t *testing.T) {
 	ctx := context.Background()
 	mac := CredentialMAC{3}
 	if err := registry.CreateCredential(
-		ctx, NewCredential(testControllerID, testDeviceID, control.DeviceRoleWorker, mac, time.Unix(1, 0)),
+		ctx, NewCredential(testControllerID, testDeviceID, mac, time.Unix(1, 0)),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +190,7 @@ func TestRegistrationAndRevocationAreSerialized(t *testing.T) {
 		defer wait.Done()
 		<-start
 		_, registerErr = registry.RegisterAuthenticatedDevice(
-			ctx, mac, deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleWorker), time.Unix(1, 0),
+			ctx, mac, deviceDescriptor(testControllerID, testDeviceID), time.Unix(1, 0),
 		)
 	}()
 	go func() {
@@ -223,7 +217,7 @@ func TestDeviceRegistryRejectsOversizedStateAndRevisionExhaustion(t *testing.T) 
 	registry := openTestStore(t)
 	ctx := context.Background()
 	if _, err := registry.RegisterTrustedDevice(
-		ctx, deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleWorker), time.Unix(1, 0),
+		ctx, deviceDescriptor(testControllerID, testDeviceID), time.Unix(1, 0),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +242,7 @@ UPDATE controller_registries SET revision = ? WHERE controller_id = ?
 		t.Fatal(err)
 	}
 	if _, err := registry.RegisterTrustedDevice(
-		ctx, deviceDescriptor(testControllerID, deviceSecondID, control.DeviceRoleWorker), time.Unix(2, 0),
+		ctx, deviceDescriptor(testControllerID, deviceSecondID), time.Unix(2, 0),
 	); !errors.Is(err, ErrRevisionExhausted) {
 		t.Fatalf("exhausted registration error = %v, want ErrRevisionExhausted", err)
 	}
@@ -257,15 +251,14 @@ UPDATE controller_registries SET revision = ? WHERE controller_id = ?
 	}
 }
 
-func deviceDescriptor(controllerID, deviceID string, role control.DeviceRole) control.DeviceDescriptor {
+func deviceDescriptor(controllerID, deviceID string) control.DeviceDescriptor {
 	return control.DeviceDescriptor{
 		ControllerID:    controllerID,
 		DeviceID:        deviceID,
 		Name:            "builder",
-		Role:            role,
 		OS:              "linux",
 		Arch:            "amd64",
-		RuntimeVersion:  "0.1.0-alpha.0.m1",
+		RuntimeVersion:  "0.1.0-alpha.0.m1.1",
 		ProtocolVersion: 1,
 		Features:        []string{"deviceRegistryV1"},
 	}

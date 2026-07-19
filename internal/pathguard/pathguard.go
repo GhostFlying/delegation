@@ -14,7 +14,7 @@ type namedPath struct {
 }
 
 // ValidateConnectorAuthority rejects an alias between a connector's
-// configuration and device token.
+// configuration and peer token.
 func ValidateConnectorAuthority(configPath, tokenPath string) error {
 	if tokenPath == "" {
 		return nil
@@ -24,7 +24,7 @@ func ValidateConnectorAuthority(configPath, tokenPath string) error {
 		return err
 	}
 	if conflicts {
-		return errors.New("device token path conflicts with connector configuration")
+		return errors.New("peer token path conflicts with peer configuration")
 	}
 	return nil
 }

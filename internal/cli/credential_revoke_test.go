@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GhostFlying/delegation/internal/control"
 	delegationcredential "github.com/GhostFlying/delegation/internal/credential"
 	"github.com/GhostFlying/delegation/internal/store"
 )
@@ -78,7 +77,6 @@ func TestCredentialRevokeRejectsPendingEnrollment(t *testing.T) {
 	pending := store.NewCredential(
 		credentialTestControllerID,
 		credentialTestDeviceID,
-		control.DeviceRoleWorker,
 		store.CredentialMAC{1},
 		credentialNow(),
 	)

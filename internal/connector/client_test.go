@@ -43,8 +43,8 @@ type brokerFixture struct {
 }
 
 func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
-	fixture := newBrokerFixture(t, config.AuthModeToken, control.DeviceRoleController, 500*time.Millisecond)
-	client := newTestClient(t, fixture.url(), config.AuthModeToken, control.DeviceRoleController, &fixture.deviceToken)
+	fixture := newBrokerFixture(t, config.AuthModeToken, 500*time.Millisecond)
+	client := newTestClient(t, fixture.url(), config.AuthModeToken, &fixture.deviceToken)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runClient(client, ctx)
 	waitReady(t, client)
@@ -67,11 +67,14 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 		ControllerID:   connectorTestControllerID,
 		DeviceID:       connectorTestWorkerID,
 		DeviceName:     "windows-builder",
-		Role:           control.DeviceRoleWorker,
 		OS:             "windows",
 		Arch:           "amd64",
-		RuntimeVersion: "0.1.0-alpha.0.m1",
-		Features:       []string{protocol.FeatureDeviceRegistry},
+		RuntimeVersion: "0.1.0-alpha.0.m1.1",
+		Features: []string{
+			protocol.FeatureDeviceRegistry,
+			protocol.FeatureFullDuplexRPC,
+			protocol.FeaturePeerRoot,
+		},
 	}
 	if _, err := fixture.registry.RegisterTrustedDevice(
 		context.Background(), worker.Descriptor(), time.Unix(10, 0),
@@ -108,18 +111,52 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 	})
 }
 
-func TestNoneAuthWorkerConnectorRegisters(t *testing.T) {
-	fixture := newBrokerFixture(t, config.AuthModeNone, control.DeviceRoleWorker, 20*time.Millisecond)
-	client := newTestClient(t, fixture.url(), config.AuthModeNone, control.DeviceRoleWorker, nil)
+func TestNoneAuthPeerConnectorRegisters(t *testing.T) {
+	fixture := newBrokerFixture(t, config.AuthModeNone, 20*time.Millisecond)
+	client := newTestClient(t, fixture.url(), config.AuthModeNone, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runClient(client, ctx)
 	waitReady(t, client)
 	waitForDevice(t, fixture.registry, connectorTestDeviceID, func(device control.Device) bool {
-		return device.Online && device.Role == control.DeviceRoleWorker
+		return device.Online
 	})
 	cancel()
 	if err := waitClient(done); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConnectorRequiresEveryBrokerFeatureBeforePublishingReadiness(t *testing.T) {
+	required := []string{
+		protocol.FeatureDeviceRegistry,
+		protocol.FeatureFullDuplexRPC,
+		protocol.FeaturePeerRoot,
+	}
+	for _, missing := range required {
+		t.Run(missing, func(t *testing.T) {
+			features := make([]string, 0, len(required)-1)
+			for _, feature := range required {
+				if feature != missing {
+					features = append(features, feature)
+				}
+			}
+			server := newFakeBrokerWithFeatures(t, features, func(*websocket.Conn) {})
+			defer server.Close()
+			client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, nil)
+			heartbeat, err := client.runSession(context.Background())
+			if err == nil || !strings.Contains(err.Error(), missing) || heartbeat {
+				t.Fatalf("session without %s = heartbeat %v, error %v", missing, heartbeat, err)
+			}
+			if status := client.Status(); !reflect.DeepEqual(status, Status{}) {
+				t.Fatalf("session without %s published readiness: %#v", missing, status)
+			}
+			readyContext, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			err = client.WaitReady(readyContext)
+			cancel()
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("WaitReady() without %s = %v", missing, err)
+			}
+		})
 	}
 }
 
@@ -152,7 +189,7 @@ func TestConnectorCorrelatesConcurrentResponsesAndIgnoresCanceledLateResponse(t 
 		brokerRequestHandled <- readTestEnvelope(t, connection)
 	})
 	defer server.Close()
-	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, control.DeviceRoleController, nil)
+	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runClient(client, ctx)
 	waitReady(t, client)
@@ -224,7 +261,7 @@ func TestConnectorReconnectsAfterForcedDisconnect(t *testing.T) {
 		_, _, _ = connection.Read(context.Background())
 	})
 	defer server.Close()
-	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, control.DeviceRoleController, nil)
+	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runClient(client, ctx)
 	select {
@@ -252,7 +289,7 @@ func TestLocalRequestFailuresDoNotDisconnectSharedSession(t *testing.T) {
 		<-stop
 	})
 	defer server.Close()
-	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, control.DeviceRoleController, nil)
+	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runClient(client, ctx)
 	waitReady(t, client)
@@ -291,7 +328,7 @@ func TestBrokerResponseWinsImmediateSessionShutdown(t *testing.T) {
 		_ = connection.CloseNow()
 	})
 	defer server.Close()
-	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, control.DeviceRoleController, nil)
+	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runClient(client, ctx)
 	defer func() {
@@ -344,7 +381,7 @@ func TestMismatchedResponseClosesPendingCall(t *testing.T) {
 		})
 	})
 	defer server.Close()
-	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, control.DeviceRoleController, nil)
+	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runClient(client, ctx)
 	waitReady(t, client)
@@ -369,9 +406,7 @@ func TestMismatchedResponseClosesPendingCall(t *testing.T) {
 }
 
 func TestWaitReadyBroadcastsAndHonorsCancellation(t *testing.T) {
-	client := newTestClient(
-		t, "ws://127.0.0.1:8787", config.AuthModeNone, control.DeviceRoleController, nil,
-	)
+	client := newTestClient(t, "ws://127.0.0.1:8787", config.AuthModeNone, nil)
 	const waiterCount = 16
 	started := make(chan struct{}, waiterCount)
 	results := make(chan error, waiterCount)
@@ -399,9 +434,7 @@ func TestWaitReadyBroadcastsAndHonorsCancellation(t *testing.T) {
 		}
 	}
 
-	offline := newTestClient(
-		t, "ws://127.0.0.1:8787", config.AuthModeNone, control.DeviceRoleController, nil,
-	)
+	offline := newTestClient(t, "ws://127.0.0.1:8787", config.AuthModeNone, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	err := offline.WaitReady(ctx)
 	cancel()
@@ -432,7 +465,7 @@ func TestPendingCallsDrainAtCapacityAndRecoverAfterReconnect(t *testing.T) {
 		<-stopSecond
 	})
 	defer server.Close()
-	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, control.DeviceRoleController, nil)
+	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runClient(client, ctx)
 	waitReady(t, client)
@@ -507,7 +540,7 @@ func TestConnectorDoesNotFollowRedirectWithBearerToken(t *testing.T) {
 	}))
 	defer redirect.Close()
 	token := tokenfile.Token{9, 8, 7}
-	client := newTestClient(t, websocketURL(redirect.URL), config.AuthModeToken, control.DeviceRoleController, &token)
+	client := newTestClient(t, websocketURL(redirect.URL), config.AuthModeToken, &token)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	_, err := client.runSession(ctx)
 	cancel()
@@ -521,13 +554,12 @@ func TestConnectorDoesNotFollowRedirectWithBearerToken(t *testing.T) {
 
 func TestConnectorValidatesStaticOptionsAndOfflineCalls(t *testing.T) {
 	base := Options{
-		BrokerURL:       "wss://broker.example.test/v1/connect",
+		BrokerURL:       "wss://broker.example.test/v2/connect",
 		ControllerID:    connectorTestControllerID,
 		DeviceID:        connectorTestDeviceID,
 		DeviceName:      "builder",
-		Role:            control.DeviceRoleController,
 		AuthMode:        config.AuthModeNone,
-		RuntimeVersion:  "0.1.0-alpha.0.m1",
+		RuntimeVersion:  "0.1.0-alpha.0.m1.1",
 		OperatingSystem: "linux",
 		Architecture:    "amd64",
 	}
@@ -569,9 +601,8 @@ func TestConnectorAmbientProxyPolicy(t *testing.T) {
 			ControllerID:             connectorTestControllerID,
 			DeviceID:                 connectorTestDeviceID,
 			DeviceName:               "builder",
-			Role:                     control.DeviceRoleController,
 			AuthMode:                 config.AuthModeNone,
-			RuntimeVersion:           "0.1.0-alpha.0.m1",
+			RuntimeVersion:           "0.1.0-alpha.0.m1.1",
 			OperatingSystem:          "linux",
 			Architecture:             "amd64",
 		}
@@ -640,7 +671,6 @@ func TestConnectorAmbientProxyPolicy(t *testing.T) {
 func newBrokerFixture(
 	t *testing.T,
 	authMode config.AuthMode,
-	role control.DeviceRole,
 	heartbeat time.Duration,
 ) brokerFixture {
 	t.Helper()
@@ -656,7 +686,7 @@ func newBrokerFixture(
 		master = &fixture.masterToken
 		mac := credential.MAC(fixture.masterToken, fixture.deviceToken)
 		if err := registry.CreateCredential(context.Background(), store.NewCredential(
-			connectorTestControllerID, connectorTestDeviceID, role, mac, time.Unix(1, 0),
+			connectorTestControllerID, connectorTestDeviceID, mac, time.Unix(1, 0),
 		)); err != nil {
 			t.Fatal(err)
 		}
@@ -698,14 +728,13 @@ func newTestClient(
 	t *testing.T,
 	brokerURL string,
 	authMode config.AuthMode,
-	role control.DeviceRole,
 	token *tokenfile.Token,
 ) *Client {
 	t.Helper()
 	client, err := New(Options{
 		BrokerURL: brokerURL, ControllerID: connectorTestControllerID, DeviceID: connectorTestDeviceID,
-		DeviceName: "builder", Role: role, AuthMode: authMode, Token: token,
-		RuntimeVersion: "0.1.0-alpha.0.m1", OperatingSystem: "linux", Architecture: "amd64",
+		DeviceName: "builder", AuthMode: authMode, Token: token,
+		RuntimeVersion: "0.1.0-alpha.0.m1.1", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 	})
 	if err != nil {
@@ -759,6 +788,18 @@ func waitForDevice(
 }
 
 func newFakeBroker(t *testing.T, afterHello func(*websocket.Conn)) *httptest.Server {
+	return newFakeBrokerWithFeatures(t, []string{
+		protocol.FeatureDeviceRegistry,
+		protocol.FeatureFullDuplexRPC,
+		protocol.FeaturePeerRoot,
+	}, afterHello)
+}
+
+func newFakeBrokerWithFeatures(
+	t *testing.T,
+	features []string,
+	afterHello func(*websocket.Conn),
+) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		connection, err := websocket.Accept(writer, request, nil)
@@ -770,7 +811,7 @@ func newFakeBroker(t *testing.T, afterHello func(*websocket.Conn)) *httptest.Ser
 		hello := readTestEnvelope(t, connection)
 		writeTestResult(t, connection, hello, protocol.HelloResult{
 			ConnectionID:        connectorTestConnectionID,
-			Features:            []string{protocol.FeatureDeviceRegistry, protocol.FeatureRootTree},
+			Features:            append([]string(nil), features...),
 			HeartbeatIntervalMS: time.Hour.Milliseconds(),
 			Revision:            1,
 		})

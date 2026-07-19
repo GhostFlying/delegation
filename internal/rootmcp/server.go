@@ -26,7 +26,7 @@ const (
 	maximumDetailBytes = 8 * 1024
 	bridgeCallTimeout  = 15 * time.Second
 	uuidPattern        = `^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`
-	serverInstructions = "Delegation exposes the live device registry for this root task. Use list_devices for bounded summaries, then describe_device before selecting a candidate when advertised features matter. Choose an online device whose OS, architecture, and features fit the work. Registry cursors are revision-bound; restart listing without a cursor if the registry changed."
+	serverInstructions = "Delegation exposes the live peer registry for this root task. Use list_devices for bounded summaries, then describe_device before selecting a candidate when advertised features matter. Choose an online peer whose OS, architecture, and features fit the work. isCurrentDevice identifies this task's local peer. Registry cursors are revision-bound; restart listing without a cursor if the registry changed."
 )
 
 type Backend interface {
@@ -60,17 +60,17 @@ type DescribeDeviceOutput struct {
 }
 
 type DeviceSummary struct {
-	DeviceID          string             `json:"deviceId"`
-	Name              string             `json:"name"`
-	Role              control.DeviceRole `json:"role"`
-	OS                string             `json:"os"`
-	Arch              string             `json:"arch"`
-	RuntimeVersion    string             `json:"runtimeVersion"`
-	ProtocolVersion   int                `json:"protocolVersion"`
-	Features          []string           `json:"features,omitempty"`
-	FeaturesTruncated bool               `json:"featuresTruncated,omitempty"`
-	Online            bool               `json:"online"`
-	LastSeenAt        int64              `json:"lastSeenAt"`
+	DeviceID          string   `json:"deviceId"`
+	Name              string   `json:"name"`
+	IsCurrentDevice   bool     `json:"isCurrentDevice"`
+	OS                string   `json:"os"`
+	Arch              string   `json:"arch"`
+	RuntimeVersion    string   `json:"runtimeVersion"`
+	ProtocolVersion   int      `json:"protocolVersion"`
+	Features          []string `json:"features,omitempty"`
+	FeaturesTruncated bool     `json:"featuresTruncated,omitempty"`
+	Online            bool     `json:"online"`
+	LastSeenAt        int64    `json:"lastSeenAt"`
 }
 
 func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, error) {
@@ -100,7 +100,7 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        ToolListDevices,
 		Title:       "List delegation devices",
-		Description: "List bounded summaries of live controller-owned devices with revision-bound pagination. Use describe_device for features.",
+		Description: "List bounded summaries of live delegation peers with revision-bound pagination. Use describe_device for features.",
 		Annotations: readOnlyAnnotations(),
 		InputSchema: listInputSchema,
 	}, root.listDevices)
@@ -154,7 +154,7 @@ func (r *Root) listDevices(
 		Devices:  make([]DeviceSummary, 0, len(result.Devices)),
 	}
 	for _, device := range result.Devices {
-		output.Devices = append(output.Devices, summarizeDevice(device, listFeatureLimit))
+		output.Devices = append(output.Devices, summarizeDevice(device, listFeatureLimit, r.deviceID))
 	}
 	if result.NextCursor != "" {
 		output.NextCursor, err = encodeCursor(result.Revision, result.NextCursor)
@@ -201,7 +201,7 @@ func (r *Root) describeDevice(
 	}
 	output := DescribeDeviceOutput{
 		Revision: result.Revision,
-		Device:   summarizeDevice(result.Device, len(result.Device.Features)),
+		Device:   summarizeDevice(result.Device, len(result.Device.Features), r.deviceID),
 	}
 	if err := enforceOutputLimit(output, maximumDetailBytes); err != nil {
 		return nil, DescribeDeviceOutput{}, err
@@ -370,12 +370,12 @@ func threadID(request *mcp.CallToolRequest) (string, error) {
 	return threadID, nil
 }
 
-func summarizeDevice(device control.Device, featureLimit int) DeviceSummary {
+func summarizeDevice(device control.Device, featureLimit int, currentDeviceID string) DeviceSummary {
 	limit := min(len(device.Features), featureLimit)
 	return DeviceSummary{
 		DeviceID:          device.DeviceID,
 		Name:              device.Name,
-		Role:              device.Role,
+		IsCurrentDevice:   device.DeviceID == currentDeviceID,
 		OS:                device.OS,
 		Arch:              device.Arch,
 		RuntimeVersion:    device.RuntimeVersion,

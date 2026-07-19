@@ -14,7 +14,6 @@ import (
 	"time"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
-	"github.com/GhostFlying/delegation/internal/control"
 	delegationcredential "github.com/GhostFlying/delegation/internal/credential"
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/store"
@@ -116,7 +115,7 @@ func TestCredentialIssueAndRecover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if authenticated.DeviceID != credentialTestDeviceID || authenticated.Role != control.DeviceRoleWorker {
+	if authenticated.DeviceID != credentialTestDeviceID {
 		t.Fatalf("authenticated credential = %#v", authenticated)
 	}
 	if err := registry.Close(); err != nil {
@@ -159,7 +158,6 @@ func TestCredentialIssueRecoversCommittedPendingToken(t *testing.T) {
 	pending := store.NewCredential(
 		credentialTestControllerID,
 		credentialTestDeviceID,
-		control.DeviceRoleWorker,
 		delegationcredential.MAC(master, deviceToken),
 		credentialNow(),
 	)
@@ -272,7 +270,6 @@ func TestExpiredPendingReplacementFencesDelayedOldWriter(t *testing.T) {
 			master,
 			credentialTestControllerID,
 			credentialTestDeviceID,
-			control.DeviceRoleWorker,
 			tokenPath,
 		)
 		oldDone <- outcome{result: result, committed: committed, err: err}
@@ -304,7 +301,6 @@ func TestExpiredPendingReplacementFencesDelayedOldWriter(t *testing.T) {
 			master,
 			credentialTestControllerID,
 			credentialTestDeviceID,
-			control.DeviceRoleWorker,
 			tokenPath,
 		)
 		replacementDone <- outcome{result: result, committed: committed, err: err}
@@ -369,7 +365,6 @@ func TestCredentialIssueRetainsPendingWhenOutputAppearsDuringPublication(t *test
 		tokenfile.Token{1},
 		credentialTestControllerID,
 		credentialTestDeviceID,
-		control.DeviceRoleWorker,
 		tokenPath,
 	)
 	if committed || !errors.Is(err, os.ErrExist) {
@@ -406,7 +401,6 @@ func TestPendingCredentialRecoveryLease(t *testing.T) {
 			pending := store.NewCredential(
 				credentialTestControllerID,
 				credentialTestDeviceID,
-				control.DeviceRoleWorker,
 				store.CredentialMAC{byte(index + 1)},
 				fixedNow.Add(-testCase.age),
 			)
@@ -418,7 +412,7 @@ func TestPendingCredentialRecoveryLease(t *testing.T) {
 			tokenPath := privateTestPath(t, "device.token")
 			_, committed, err := issueCredential(
 				context.Background(), registry, master, credentialTestControllerID,
-				credentialTestDeviceID, control.DeviceRoleWorker, tokenPath,
+				credentialTestDeviceID, tokenPath,
 			)
 			if !testCase.wantSuccess {
 				if !errors.Is(err, store.ErrConflict) || committed {
@@ -474,7 +468,6 @@ func TestCredentialIssueRequiresExplicitDeviceID(t *testing.T) {
 	_, stderr, code := runCredentialTestCommand([]string{
 		"credential", "issue",
 		"--config", environment.configPath,
-		"--role", "device",
 		"--out", privateTestPath(t, "device.token"),
 	})
 	if code == 0 || !strings.Contains(stderr, "deviceId must be a UUID") {
@@ -538,6 +531,13 @@ func setupCredentialTestBroker(t *testing.T, authMode string) credentialTestEnvi
 	if code != 0 {
 		t.Fatalf("setup broker code = %d, want 0; stderr = %q", code, stderr)
 	}
+	registry, err := store.Open(context.Background(), environment.statePath)
+	if err != nil {
+		t.Fatalf("initialize broker state: %v", err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatalf("close initialized broker state: %v", err)
+	}
 	return environment
 }
 
@@ -545,7 +545,6 @@ func credentialIssueArgs(environment credentialTestEnvironment, deviceID, tokenP
 	return []string{
 		"credential", "issue",
 		"--config", environment.configPath,
-		"--role", "device",
 		"--device-id", deviceID,
 		"--out", tokenPath,
 		"--json",
@@ -623,14 +622,16 @@ func TestCredentialRejectsSchemaOneWithoutMutatingOldAuthority(t *testing.T) {
 	_, stderr, code := runCredentialTestCommand([]string{
 		"credential", "issue",
 		"--config", configPath,
-		"--role", "device",
 		"--device-id", credentialTestDeviceID,
 		"--out", outputToken,
 	})
 	if code == 0 {
 		t.Fatal("credential issue accepted a schema 1 broker config")
 	}
-	for _, text := range []string{"move the config aside", "--controller-id", "--listen", "--auth-mode", "--token-file", "--state"} {
+	for _, text := range []string{
+		"schema version 1", "version-specific secure migration", "schema version 3",
+		"do not run delegation migrate config directly",
+	} {
 		if !strings.Contains(stderr, text) {
 			t.Fatalf("schema 1 credential error = %q, want %q", stderr, text)
 		}

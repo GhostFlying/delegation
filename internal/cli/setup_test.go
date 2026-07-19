@@ -148,12 +148,12 @@ func TestSetupBrokerRejectsUnusableStateWithoutSideEffects(t *testing.T) {
 	}
 }
 
-func TestSetupDeviceWithoutAuthentication(t *testing.T) {
-	configPath := privateTestPath(t, "device.json")
+func TestSetupPeerWithoutAuthentication(t *testing.T) {
+	configPath := privateTestPath(t, "peer.json")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	args := []string{
-		"setup", "device",
+		"setup", "peer",
 		"--config", configPath,
 		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
 		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
@@ -172,7 +172,7 @@ func TestSetupDeviceWithoutAuthentication(t *testing.T) {
 	}
 	want := delegationconfig.Config{
 		SchemaVersion: delegationconfig.CurrentSchemaVersion,
-		Role:          delegationconfig.RoleDevice,
+		Role:          delegationconfig.RolePeer,
 		ControllerID:  "123e4567-e89b-42d3-a456-426614174000",
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
 		DeviceName:    "windows-builder",
@@ -186,12 +186,58 @@ func TestSetupDeviceWithoutAuthentication(t *testing.T) {
 	}
 }
 
-func TestSetupDeviceWithoutAuthenticationGeneratesDeviceID(t *testing.T) {
-	configPath := privateTestPath(t, "device.json")
+func TestSetupPeerNoneAuthExplainsTrustDomain(t *testing.T) {
+	configPath := privateTestPath(t, "peer.json")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run([]string{
-		"setup", "device",
+		"setup", "peer",
+		"--config", configPath,
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--device-name", "peer",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, text := range []string{"join", "enumerate", "dispatch", "impersonate", "fence", "same deviceId", "entire tailnet"} {
+		if !strings.Contains(stderr.String(), text) {
+			t.Fatalf("none-auth warning = %q, want %q", stderr.String(), text)
+		}
+	}
+	if strings.Contains(stderr.String(), "plaintext non-loopback") {
+		t.Fatalf("WSS peer emitted a plaintext warning: %q", stderr.String())
+	}
+}
+
+func TestLegacySetupRolesReturnMigrationGuidanceWithoutWriting(t *testing.T) {
+	for _, role := range []string{"controller", "device"} {
+		t.Run(role, func(t *testing.T) {
+			configPath := privateTestPath(t, role+".json")
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Run([]string{"setup", role, "--config", configPath}, &stdout, &stderr)
+			if code == 0 || !strings.Contains(stderr.String(), "migrate config") {
+				t.Fatalf("legacy setup code = %d, stderr = %q", code, stderr.String())
+			}
+			if role == "device" && !strings.Contains(stderr.String(), "fresh peer credential") {
+				t.Fatalf("device migration guidance = %q", stderr.String())
+			}
+			if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("legacy setup wrote config: %v", err)
+			}
+		})
+	}
+}
+
+func TestSetupPeerWithoutAuthenticationGeneratesDeviceID(t *testing.T) {
+	configPath := privateTestPath(t, "peer.json")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "peer",
 		"--config", configPath,
 		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
 		"--device-name", "local-worker",
@@ -211,7 +257,7 @@ func TestSetupDeviceWithoutAuthenticationGeneratesDeviceID(t *testing.T) {
 }
 
 func TestSetupTokenAuthenticationRequiresDeviceID(t *testing.T) {
-	for _, role := range []string{"controller", "device"} {
+	for _, role := range []string{"peer"} {
 		t.Run(role, func(t *testing.T) {
 			dir := privateTestDirectory(t)
 			configPath := filepath.Join(dir, role+".json")
@@ -239,17 +285,17 @@ func TestSetupTokenAuthenticationRequiresDeviceID(t *testing.T) {
 	}
 }
 
-func TestSetupControllerWithTokenAuthentication(t *testing.T) {
+func TestSetupPeerWithTokenAuthentication(t *testing.T) {
 	dir := privateTestDirectory(t)
-	configPath := filepath.Join(dir, "controller.json")
-	tokenPath := filepath.Join(dir, "controller.token")
+	configPath := filepath.Join(dir, "peer.json")
+	tokenPath := filepath.Join(dir, "peer.token")
 	if _, err := tokenfile.Ensure(tokenPath); err != nil {
 		t.Fatal(err)
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	args := []string{
-		"setup", "controller",
+		"setup", "peer",
 		"--config", configPath,
 		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
 		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
@@ -265,13 +311,13 @@ func TestSetupControllerWithTokenAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Role != delegationconfig.RoleController || cfg.Broker.Auth.TokenFile != tokenPath {
-		t.Fatalf("controller config = %#v", cfg)
+	if cfg.Role != delegationconfig.RolePeer || cfg.Broker.Auth.TokenFile != tokenPath {
+		t.Fatalf("peer config = %#v", cfg)
 	}
 }
 
 func TestSetupClientRequiresAcknowledgementForRemotePlaintext(t *testing.T) {
-	for _, role := range []string{"controller", "device"} {
+	for _, role := range []string{"peer"} {
 		for _, authMode := range []string{"none", "token"} {
 			t.Run(role+"/"+authMode, func(t *testing.T) {
 				dir := privateTestDirectory(t)
@@ -332,7 +378,7 @@ func TestSetupClientWarningFailureDoesNotCreateConfig(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "device.json")
 	var stdout bytes.Buffer
 	code := Run([]string{
-		"setup", "device",
+		"setup", "peer",
 		"--config", configPath,
 		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
 		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
@@ -424,16 +470,17 @@ func TestSetupBrokerWarnsForAcknowledgedNonLoopback(t *testing.T) {
 	}
 }
 
-func TestSetupBrokerDoesNotWarnForSafeListener(t *testing.T) {
+func TestSetupBrokerLoopbackWarningDependsOnAuthentication(t *testing.T) {
 	tests := []struct {
-		name     string
-		listen   string
-		authMode string
-		allow    bool
+		name        string
+		listen      string
+		authMode    string
+		allow       bool
+		wantWarning bool
 	}{
-		{name: "IPv4 loopback", listen: "127.0.0.1:8787", authMode: "none", allow: true},
-		{name: "IPv6 loopback", listen: "[::1]:8787", authMode: "none", allow: true},
-		{name: "localhost", listen: "LOCALHOST:8787", authMode: "none", allow: true},
+		{name: "IPv4 loopback none", listen: "127.0.0.1:8787", authMode: "none", allow: true, wantWarning: true},
+		{name: "IPv6 loopback none", listen: "[::1]:8787", authMode: "none", allow: true, wantWarning: true},
+		{name: "localhost none", listen: "LOCALHOST:8787", authMode: "none", allow: true, wantWarning: true},
 		{name: "token IPv4 loopback", listen: "127.0.0.1:8787", authMode: "token", allow: true},
 	}
 	for _, test := range tests {
@@ -456,8 +503,11 @@ func TestSetupBrokerDoesNotWarnForSafeListener(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("setup code = %d, want 0; stderr = %q", code, stderr.String())
 			}
-			if stderr.Len() != 0 {
-				t.Fatalf("safe setup emitted warning: %q", stderr.String())
+			if test.wantWarning != strings.Contains(stderr.String(), "authentication is disabled") {
+				t.Fatalf("authentication warning = %q, want %v", stderr.String(), test.wantWarning)
+			}
+			if strings.Contains(stderr.String(), "plaintext non-loopback") {
+				t.Fatalf("loopback setup emitted transport warning: %q", stderr.String())
 			}
 		})
 	}

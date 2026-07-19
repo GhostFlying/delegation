@@ -149,10 +149,9 @@ func TestHelloDescriptorExcludesBrokerPresence(t *testing.T) {
 		ControllerID:   testControllerID,
 		DeviceID:       testDeviceID,
 		DeviceName:     "builder",
-		Role:           control.DeviceRoleWorker,
 		OS:             "windows",
 		Arch:           "amd64",
-		RuntimeVersion: "0.1.0-alpha.0.m1",
+		RuntimeVersion: "0.1.0-alpha.0.m1.1",
 		Features:       []string{FeatureDeviceRegistry},
 	}
 	if err := hello.Validate(); err != nil {

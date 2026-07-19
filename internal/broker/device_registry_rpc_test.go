@@ -69,13 +69,13 @@ func (r *deviceRPCFaultRegistry) DescribeDevice(
 }
 
 func TestAuthorizedDeviceRegistryRPCs(t *testing.T) {
-	harness := newBrokerHarnessForRole(t, config.AuthModeToken, time.Second, control.DeviceRoleController)
+	harness := newBrokerHarness(t, config.AuthModeToken, time.Second)
 	connection, _, err := dialBroker(harness, &harness.deviceToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer connection.Close(websocket.StatusNormalClosure, "done")
-	sendHello(t, connection, control.DeviceRoleController)
+	sendHello(t, connection)
 	principal := ensureRootPrincipal(t, connection)
 	registerBrokerTestDevice(t, harness.registry, brokerTestSecondDeviceID)
 	registerBrokerTestDevice(t, harness.registry, brokerTestThirdDeviceID)
@@ -158,12 +158,12 @@ func TestAuthorizedDeviceRegistryRPCs(t *testing.T) {
 }
 
 func TestCredentialRevocationStopsEstablishedRegistrySession(t *testing.T) {
-	harness := newBrokerHarnessForRole(t, config.AuthModeToken, time.Second, control.DeviceRoleController)
+	harness := newBrokerHarness(t, config.AuthModeToken, time.Second)
 	connection, _, err := dialBroker(harness, &harness.deviceToken)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sendHello(t, connection, control.DeviceRoleController)
+	sendHello(t, connection)
 	principal := ensureRootPrincipal(t, connection)
 	if err := harness.registry.DisableCredential(
 		context.Background(), brokerTestControllerID, brokerTestDeviceID,
@@ -192,7 +192,7 @@ func TestDeviceRegistryRPCRejectsAuthorizationBypass(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer connection.Close(websocket.StatusNormalClosure, "done")
-	sendHello(t, connection, control.DeviceRoleController)
+	sendHello(t, connection)
 	principal := ensureRootPrincipal(t, connection)
 	wrapped := &deviceRPCFaultRegistry{Registry: harness.registry}
 	harness.server.registry = wrapped
@@ -246,7 +246,7 @@ func TestDeviceRegistryRPCRejectsAuthorizationBypass(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer worker.Close(websocket.StatusNormalClosure, "done")
-	sendHello(t, worker, control.DeviceRoleWorker)
+	sendHello(t, worker)
 	workerPrincipal := control.NewRootPrincipal(
 		brokerTestControllerID, brokerTestForgedTreeID, brokerTestForgedAgentID, brokerTestDeviceID,
 	)
@@ -280,7 +280,7 @@ func TestDeviceRegistryRPCReportsUnexpectedStoreFailures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			sendHello(t, connection, control.DeviceRoleController)
+			sendHello(t, connection)
 			principal := ensureRootPrincipal(t, connection)
 			failure := errors.New(test.name + " database failed")
 			wrapped := &deviceRPCFaultRegistry{Registry: harness.registry}
@@ -335,7 +335,7 @@ func identityRequest(
 
 func registerBrokerTestDevice(t *testing.T, registry *store.Store, deviceID string) {
 	t.Helper()
-	descriptor := hello(control.DeviceRoleWorker).Descriptor()
+	descriptor := hello().Descriptor()
 	descriptor.DeviceID = deviceID
 	descriptor.Name = deviceID
 	if _, err := registry.RegisterTrustedDevice(context.Background(), descriptor, time.Unix(20, 0)); err != nil {

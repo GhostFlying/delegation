@@ -12,11 +12,55 @@ import (
 )
 
 const (
-	Marker          = "delegation-managed:v1"
-	SystemdUnitName = "delegation.service"
-	LaunchAgentName = "com.github.ghostflying.delegation"
-	ScheduledTask   = `\Delegation Connector`
+	markerPrefix = "delegation-managed:v2:"
+
+	MarkerBroker = markerPrefix + "broker"
+	MarkerPeer   = markerPrefix + "peer"
+
+	SystemdBrokerUnitName = "delegation-broker.service"
+	SystemdPeerUnitName   = "delegation-peer.service"
+	LaunchAgentBrokerName = "com.github.ghostflying.delegation.broker"
+	LaunchAgentPeerName   = "com.github.ghostflying.delegation.peer"
+	ScheduledTaskBroker   = `\Delegation Broker`
+	ScheduledTaskPeer     = `\Delegation Peer`
 )
+
+type ServiceRole string
+
+const (
+	ServiceRoleBroker ServiceRole = "broker"
+	ServiceRolePeer   ServiceRole = "peer"
+)
+
+type serviceSpec struct {
+	role        ServiceRole
+	marker      string
+	systemdUnit string
+	launchAgent string
+	scheduled   string
+	description string
+}
+
+func specFor(role ServiceRole) (serviceSpec, error) {
+	switch role {
+	case ServiceRoleBroker:
+		return serviceSpec{
+			role: role, marker: MarkerBroker,
+			systemdUnit: SystemdBrokerUnitName,
+			launchAgent: LaunchAgentBrokerName,
+			scheduled:   ScheduledTaskBroker, description: "Delegation broker",
+		}, nil
+	case ServiceRolePeer:
+		return serviceSpec{
+			role: role, marker: MarkerPeer,
+			systemdUnit: SystemdPeerUnitName,
+			launchAgent: LaunchAgentPeerName,
+			scheduled:   ScheduledTaskPeer, description: "Delegation peer",
+		}, nil
+	default:
+		return serviceSpec{}, fmt.Errorf("unsupported service role %q", role)
+	}
+}
 
 type Kind string
 
@@ -32,14 +76,17 @@ type Descriptor struct {
 	Content []byte
 }
 
-func RenderSystemd(binaryPath, configPath string) (Descriptor, error) {
+func RenderSystemd(role ServiceRole, binaryPath, configPath string) (Descriptor, error) {
+	spec, err := specFor(role)
+	if err != nil {
+		return Descriptor{}, err
+	}
 	if err := validatePOSIXPaths(binaryPath, configPath); err != nil {
 		return Descriptor{}, err
 	}
 	content := fmt.Sprintf(`# %s
-# Prepared by Delegation M0; enablement starts in M1.
 [Unit]
-Description=Delegation connector
+Description=%s
 
 [Service]
 Type=exec
@@ -50,11 +97,15 @@ UMask=0077
 
 [Install]
 WantedBy=default.target
-`, Marker, systemdQuote(binaryPath), systemdQuote(configPath))
-	return Descriptor{Kind: KindSystemd, Name: SystemdUnitName, Content: []byte(content)}, nil
+`, spec.marker, spec.description, systemdQuote(binaryPath), systemdQuote(configPath))
+	return Descriptor{Kind: KindSystemd, Name: spec.systemdUnit, Content: []byte(content)}, nil
 }
 
-func RenderLaunchAgent(binaryPath, configPath string) (Descriptor, error) {
+func RenderLaunchAgent(role ServiceRole, binaryPath, configPath string) (Descriptor, error) {
+	spec, err := specFor(role)
+	if err != nil {
+		return Descriptor{}, err
+	}
 	if err := validatePOSIXPaths(binaryPath, configPath); err != nil {
 		return Descriptor{}, err
 	}
@@ -95,11 +146,20 @@ func RenderLaunchAgent(binaryPath, configPath string) (Descriptor, error) {
   <integer>5</integer>
 </dict>
 </plist>
-`, LaunchAgentName, Marker, binaryXML, configXML)
-	return Descriptor{Kind: KindLaunchAgent, Name: LaunchAgentName, Content: []byte(content)}, nil
+`, spec.launchAgent, spec.marker, binaryXML, configXML)
+	return Descriptor{Kind: KindLaunchAgent, Name: spec.launchAgent, Content: []byte(content)}, nil
 }
 
-func RenderScheduledTask(binaryPath, configPath, userSID, taskPath string, escapeArg func(string) string) (Descriptor, error) {
+func RenderScheduledTask(
+	role ServiceRole,
+	binaryPath, configPath, userSID string,
+	escapeArg func(string) string,
+) (Descriptor, error) {
+	spec, err := specFor(role)
+	if err != nil {
+		return Descriptor{}, err
+	}
+	taskPath := spec.scheduled
 	if !windowsAbsolute(binaryPath) || !windowsAbsolute(configPath) {
 		return Descriptor{}, errors.New("service binary and config paths must be absolute Windows paths")
 	}
@@ -171,7 +231,7 @@ func RenderScheduledTask(binaryPath, configPath, userSID, taskPath string, escap
     </Exec>
   </Actions>
 </Task>
-`, Marker, taskPathXML, sidXML, sidXML, binaryXML, argumentsXML)
+`, spec.marker, taskPathXML, sidXML, sidXML, binaryXML, argumentsXML)
 	encoded, err := encodeTaskXMLUTF16LE(content)
 	if err != nil {
 		return Descriptor{}, err

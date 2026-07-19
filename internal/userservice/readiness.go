@@ -12,7 +12,6 @@ import (
 
 	"github.com/GhostFlying/delegation/internal/broker"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
-	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 )
 
@@ -54,19 +53,14 @@ func waitForServiceReady(configPath string) error {
 
 func probeService(ctx context.Context, cfg delegationconfig.Config) error {
 	switch cfg.Role {
-	case delegationconfig.RoleController, delegationconfig.RoleDevice:
+	case delegationconfig.RolePeer:
 		endpoint, err := localbridge.Endpoint(cfg.ControllerID, cfg.DeviceID)
 		if err != nil {
 			return err
 		}
-		role := control.DeviceRoleController
-		if cfg.Role == delegationconfig.RoleDevice {
-			role = control.DeviceRoleWorker
-		}
 		return localbridge.Probe(ctx, endpoint, localbridge.ServiceIdentity{
 			ControllerID: cfg.ControllerID,
 			DeviceID:     cfg.DeviceID,
-			Role:         role,
 		})
 	case delegationconfig.RoleBroker:
 		host, port, err := net.SplitHostPort(cfg.Broker.Listen)

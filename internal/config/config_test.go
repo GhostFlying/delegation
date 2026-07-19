@@ -18,7 +18,7 @@ func TestConfigRoundTrip(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "device.token")
 	cfg := Config{
 		SchemaVersion: CurrentSchemaVersion,
-		Role:          RoleDevice,
+		Role:          RolePeer,
 		ControllerID:  testID,
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
 		DeviceName:    "windows-builder",
@@ -43,6 +43,37 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 	if got != cfg {
 		t.Fatalf("Read() = %#v, want %#v", got, cfg)
+	}
+}
+
+func TestRoleSpecificDefaultPathsAndExplicitOverride(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DELEGATION_HOME", home)
+	t.Setenv("DELEGATION_CONFIG", "")
+	brokerPath, err := DefaultBrokerPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerPath, err := DefaultPeerPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if brokerPath != filepath.Join(home, "broker.json") || peerPath != filepath.Join(home, "peer.json") ||
+		brokerPath == peerPath {
+		t.Fatalf("role-specific paths = %q / %q", brokerPath, peerPath)
+	}
+	override := filepath.Join(home, "explicit.json")
+	t.Setenv("DELEGATION_CONFIG", override)
+	brokerPath, err = DefaultBrokerPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerPath, err = DefaultPeerPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if brokerPath != override || peerPath != override {
+		t.Fatalf("explicit config override = %q / %q", brokerPath, peerPath)
 	}
 }
 
@@ -77,7 +108,7 @@ func TestBrokerNonLoopbackRequiresAcknowledgement(t *testing.T) {
 func TestBrokerURLRejectsEmbeddedCredentials(t *testing.T) {
 	cfg := Config{
 		SchemaVersion: CurrentSchemaVersion,
-		Role:          RoleController,
+		Role:          RolePeer,
 		ControllerID:  testID,
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
 		DeviceName:    "controller",
@@ -101,7 +132,7 @@ func TestBrokerURLRejectsEmptyHostname(t *testing.T) {
 func TestBrokerURLValidationMatchesConnectorEndpoint(t *testing.T) {
 	valid := Config{
 		SchemaVersion: CurrentSchemaVersion,
-		Role:          RoleController,
+		Role:          RolePeer,
 		ControllerID:  testID,
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
 		DeviceName:    "controller",
@@ -112,9 +143,9 @@ func TestBrokerURLValidationMatchesConnectorEndpoint(t *testing.T) {
 	}
 	for _, brokerURL := range []string{
 		"wss://broker.example.test/other",
-		"wss://broker.example.test/%76%31/connect",
+		"wss://broker.example.test/%76%32/connect",
 		"wss://broker.example.test?",
-		"wss://broker.example.test/v1/connect#fragment",
+		"wss://broker.example.test/v2/connect#fragment",
 	} {
 		t.Run(brokerURL, func(t *testing.T) {
 			cfg := valid
@@ -127,7 +158,7 @@ func TestBrokerURLValidationMatchesConnectorEndpoint(t *testing.T) {
 	for _, brokerURL := range []string{
 		"wss://broker.example.test",
 		"wss://broker.example.test/",
-		"wss://broker.example.test/v1/connect",
+		"wss://broker.example.test/v2/connect",
 	} {
 		t.Run("valid "+brokerURL, func(t *testing.T) {
 			cfg := valid
@@ -136,7 +167,7 @@ func TestBrokerURLValidationMatchesConnectorEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			got, err := NormalizeBrokerURL(brokerURL, false)
-			if err != nil || got != "wss://broker.example.test/v1/connect" {
+			if err != nil || got != "wss://broker.example.test/v2/connect" {
 				t.Fatalf("NormalizeBrokerURL() = %q, %v", got, err)
 			}
 		})
@@ -146,7 +177,7 @@ func TestBrokerURLValidationMatchesConnectorEndpoint(t *testing.T) {
 func TestDeviceNameUsesRuntimeDescriptorRules(t *testing.T) {
 	valid := Config{
 		SchemaVersion: CurrentSchemaVersion,
-		Role:          RoleDevice,
+		Role:          RolePeer,
 		ControllerID:  testID,
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
 		DeviceName:    "builder",
@@ -169,7 +200,7 @@ func TestDeviceNameUsesRuntimeDescriptorRules(t *testing.T) {
 func TestTokenAuthPlaintextRequiresAcknowledgement(t *testing.T) {
 	cfg := Config{
 		SchemaVersion: CurrentSchemaVersion,
-		Role:          RoleDevice,
+		Role:          RolePeer,
 		ControllerID:  testID,
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
 		DeviceName:    "device",
@@ -203,7 +234,7 @@ func TestTokenAuthPlaintextRequiresAcknowledgement(t *testing.T) {
 func TestPlaintextBrokerURLRequiresAcknowledgement(t *testing.T) {
 	cfg := Config{
 		SchemaVersion: CurrentSchemaVersion,
-		Role:          RoleDevice,
+		Role:          RolePeer,
 		ControllerID:  testID,
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
 		DeviceName:    "device",
@@ -232,7 +263,7 @@ func TestBrokerURLPortMustBeUsable(t *testing.T) {
 		t.Run(brokerURL, func(t *testing.T) {
 			cfg := Config{
 				SchemaVersion: CurrentSchemaVersion,
-				Role:          RoleDevice,
+				Role:          RolePeer,
 				ControllerID:  testID,
 				DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
 				DeviceName:    "device",
@@ -307,7 +338,7 @@ func TestListenPortMustBeUsable(t *testing.T) {
 	}
 }
 
-func TestSchemaOneRequiresSetupAgain(t *testing.T) {
+func TestSchemaOneRequiresVersionSpecificMigration(t *testing.T) {
 	cfg := Config{
 		SchemaVersion: 1,
 		Role:          RoleBroker,
@@ -325,17 +356,8 @@ func TestSchemaOneRequiresSetupAgain(t *testing.T) {
 		t.Fatal("schema 1 config was accepted")
 	}
 	for _, text := range []string{
-		"move the config aside",
-		"--controller-id",
-		"--listen",
-		"--auth-mode",
-		"--state",
-		"--allow-insecure-nonloopback",
-		"move the shared broker token aside",
-		"verify the selected new master-token path does not exist",
-		"omit --token-file only after verifying the default token path is absent",
-		"do not reuse the schema version 1 broker token",
-		"issue fresh per-device credentials",
+		"schema version 1", "version-specific secure migration", "schema version 3",
+		"do not run delegation migrate config directly",
 	} {
 		if !strings.Contains(err.Error(), text) {
 			t.Fatalf("schema 1 validation error = %q, want %q", err, text)
@@ -343,10 +365,10 @@ func TestSchemaOneRequiresSetupAgain(t *testing.T) {
 	}
 }
 
-func TestSchemaOneTargetRequiresFreshDeviceCredential(t *testing.T) {
+func TestSchemaThreeDeviceRequiresFreshPeerCredential(t *testing.T) {
 	cfg := Config{
-		SchemaVersion: 1,
-		Role:          RoleDevice,
+		SchemaVersion: LegacySchemaVersion,
+		Role:          LegacyRoleDevice,
 		ControllerID:  testID,
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
 		DeviceName:    "device",
@@ -360,15 +382,11 @@ func TestSchemaOneTargetRequiresFreshDeviceCredential(t *testing.T) {
 	}
 	err := cfg.Validate()
 	if err == nil {
-		t.Fatal("schema 1 target config was accepted")
+		t.Fatal("schema 3 target config was accepted")
 	}
-	for _, text := range []string{
-		"enroll a fresh device-bound credential",
-		"newly transferred credential path",
-		"do not reuse the schema version 1 target token",
-	} {
+	for _, text := range []string{"obsolete device role", "issue a fresh peer credential", "same deviceId", "--token-file"} {
 		if !strings.Contains(err.Error(), text) {
-			t.Fatalf("schema 1 target validation error = %q, want %q", err, text)
+			t.Fatalf("schema 3 target validation error = %q, want %q", err, text)
 		}
 	}
 }
@@ -394,13 +412,16 @@ func TestReadSchemaTwoRequiresTransportAwareSetup(t *testing.T) {
 					},
 				},
 			},
-			want: []string{"schema version 2", "--token-file", "--state", "--allow-insecure-nonloopback", "any non-loopback listener"},
+			want: []string{
+				"schema version 2", "version-specific secure migration", "schema version 3",
+				"do not run delegation migrate config directly",
+			},
 		},
 		{
 			name: "device",
 			cfg: Config{
 				SchemaVersion: 2,
-				Role:          RoleDevice,
+				Role:          LegacyRoleDevice,
 				ControllerID:  testID,
 				DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
 				DeviceName:    "device",
@@ -409,7 +430,10 @@ func TestReadSchemaTwoRequiresTransportAwareSetup(t *testing.T) {
 					Auth: AuthConfig{Mode: AuthModeNone},
 				},
 			},
-			want: []string{"schema version 2", "--controller-id", "--device-id", "--device-name", "--broker-url", "--auth-mode", "--token-file", "--allow-insecure-nonloopback", "non-loopback ws://"},
+			want: []string{
+				"schema version 2", "version-specific secure migration", "schema version 3",
+				"do not run delegation migrate config directly",
+			},
 		},
 	}
 	for _, test := range tests {

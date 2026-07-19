@@ -24,7 +24,7 @@ func TestListDevicesUsesRevisionBoundPages(t *testing.T) {
 	for index, deviceID := range []string{testDeviceID, deviceSecondID, deviceThirdID} {
 		if _, err := registry.RegisterTrustedDevice(
 			ctx,
-			deviceDescriptor(testControllerID, deviceID, control.DeviceRoleWorker),
+			deviceDescriptor(testControllerID, deviceID),
 			time.Unix(int64(index+1), 0),
 		); err != nil {
 			t.Fatal(err)
@@ -65,7 +65,7 @@ func TestListDevicesUsesRevisionBoundPages(t *testing.T) {
 	if err != nil || stable.Revision != first.Revision || len(stable.Devices) != 1 || stable.Devices[0].LastSeenAt != 4 {
 		t.Fatalf("heartbeat-stable page = %#v, error %v", stable, err)
 	}
-	register := deviceDescriptor(testControllerID, "123e4567-e89b-42d3-a456-426614174034", control.DeviceRoleWorker)
+	register := deviceDescriptor(testControllerID, "123e4567-e89b-42d3-a456-426614174034")
 	if _, err := registry.RegisterTrustedDevice(ctx, register, time.Unix(5, 0)); err != nil {
 		t.Fatal(err)
 	}
@@ -85,9 +85,7 @@ func TestHeartbeatsDoNotLivelockMaximumDevicePages(t *testing.T) {
 	for index := range MaximumDevicePage + 1 {
 		descriptor := deviceDescriptor(
 			testControllerID,
-			fmt.Sprintf("123e4567-e89b-42d3-a456-%012d", index+100),
-			control.DeviceRoleWorker,
-		)
+			fmt.Sprintf("123e4567-e89b-42d3-a456-%012d", index+100))
 		device, err := registry.RegisterTrustedDevice(ctx, descriptor, time.Unix(int64(index+1), 0))
 		if err != nil {
 			t.Fatal(err)
@@ -128,7 +126,6 @@ func TestMaximumDevicePageFitsProtocolEnvelope(t *testing.T) {
 			ControllerID:    testControllerID,
 			DeviceID:        fmt.Sprintf("123e4567-e89b-42d3-a456-%012d", index),
 			Name:            strings.Repeat("n", 128),
-			Role:            control.DeviceRoleWorker,
 			OS:              strings.Repeat("o", 32),
 			Arch:            strings.Repeat("a", 32),
 			RuntimeVersion:  strings.Repeat("v", 64),
@@ -169,7 +166,7 @@ func TestDescribeDeviceReturnsSameSnapshotRevision(t *testing.T) {
 	ctx := context.Background()
 	want, err := registry.RegisterTrustedDevice(
 		ctx,
-		deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleController),
+		deviceDescriptor(testControllerID, testDeviceID),
 		time.Unix(1, 0),
 	)
 	if err != nil {
@@ -207,7 +204,7 @@ func TestDeviceReadsHandleExactEmptyAndControllerIsolation(t *testing.T) {
 	ctx := context.Background()
 	for _, controllerID := range []string{testControllerID, deviceSecondControllerID} {
 		for _, deviceID := range []string{testDeviceID, deviceSecondID} {
-			descriptor := deviceDescriptor(controllerID, deviceID, control.DeviceRoleWorker)
+			descriptor := deviceDescriptor(controllerID, deviceID)
 			descriptor.Name = controllerID
 			if _, err := registry.RegisterTrustedDevice(ctx, descriptor, time.Unix(1, 0)); err != nil {
 				t.Fatal(err)
@@ -251,7 +248,7 @@ func TestDeviceReadsRecoverAfterCorruptStoredMetadata(t *testing.T) {
 	ctx := context.Background()
 	if _, err := registry.RegisterTrustedDevice(
 		ctx,
-		deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleWorker),
+		deviceDescriptor(testControllerID, testDeviceID),
 		time.Unix(1, 0),
 	); err != nil {
 		t.Fatal(err)
@@ -287,7 +284,7 @@ func TestConcurrentDeviceReadsUseSingleRevisionSnapshots(t *testing.T) {
 	ctx := context.Background()
 	device, err := registry.RegisterTrustedDevice(
 		ctx,
-		deviceDescriptor(testControllerID, testDeviceID, control.DeviceRoleWorker),
+		deviceDescriptor(testControllerID, testDeviceID),
 		time.Unix(1, 0),
 	)
 	if err != nil {

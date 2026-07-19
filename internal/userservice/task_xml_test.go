@@ -261,12 +261,12 @@ func TestTaskDefinitionRejectsUnpairedUTF16Surrogates(t *testing.T) {
 
 func TestTaskOwnershipRequiresExactDescriptionAndURI(t *testing.T) {
 	descriptor := testTaskDescriptor(t)
-	document := strings.Replace(taskXMLText(t, descriptor.Content), "<Description>"+Marker+"</Description>", "<Description>foreign "+Marker+"</Description>", 1)
+	document := strings.Replace(taskXMLText(t, descriptor.Content), "<Description>"+MarkerPeer+"</Description>", "<Description>foreign "+MarkerPeer+"</Description>", 1)
 	definition, err := parseTaskDefinition([]byte(document))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if taskOwned(definition) {
+	if taskOwned(definition, ServiceRolePeer) {
 		t.Fatal("taskOwned() accepted a marker substring")
 	}
 }
@@ -288,10 +288,10 @@ func replaceTaskFixture(t *testing.T, document, old, replacement string) string 
 func testTaskDescriptor(t *testing.T) Descriptor {
 	t.Helper()
 	descriptor, err := RenderScheduledTask(
+		ServiceRolePeer,
 		`C:\Delegation\delegation.exe`,
 		`C:\Users\test\config.json`,
 		"S-1-5-21-test",
-		ScheduledTask,
 		func(value string) string { return value },
 	)
 	if err != nil {

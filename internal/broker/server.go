@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,7 +26,7 @@ import (
 )
 
 const (
-	ConnectPath              = "/v1/connect"
+	ConnectPath              = "/v2/connect"
 	HealthServiceHeader      = "X-Delegation-Service"
 	HealthControllerHeader   = "X-Delegation-Controller-Id"
 	defaultHeartbeatInterval = 15 * time.Second
@@ -103,7 +104,6 @@ type session struct {
 	connection    *websocket.Conn
 	connectionID  string
 	deviceID      string
-	role          control.DeviceRole
 	credentialMAC *store.CredentialMAC
 	revision      atomic.Uint64
 }
@@ -453,6 +453,16 @@ func (s *Server) acceptHello(
 		_ = s.writeError(ctx, connection, envelope, protocol.ErrorInvalidParams, "invalid hello payload")
 		return nil, errors.New("invalid hello payload")
 	}
+	for _, feature := range []string{
+		protocol.FeatureDeviceRegistry,
+		protocol.FeatureFullDuplexRPC,
+		protocol.FeaturePeerRoot,
+	} {
+		if !slices.Contains(hello.Features, feature) {
+			_ = s.writeError(ctx, connection, envelope, protocol.ErrorInvalidParams, "peer does not support required protocol features")
+			return nil, errors.New("peer does not support required protocol features")
+		}
+	}
 	connectionID, err := s.newID()
 	if err != nil {
 		internal := &internalError{operation: "create connection ID", err: err}
@@ -477,13 +487,16 @@ func (s *Server) acceptHello(
 		connection:    connection,
 		connectionID:  connectionID,
 		deviceID:      device.DeviceID,
-		role:          device.Role,
 		credentialMAC: authority.credentialMAC,
 	}
 	current.revision.Store(device.Revision)
 	result := protocol.HelloResult{
-		ConnectionID:        connectionID,
-		Features:            []string{protocol.FeatureDeviceRegistry, protocol.FeatureRootTree},
+		ConnectionID: connectionID,
+		Features: []string{
+			protocol.FeatureDeviceRegistry,
+			protocol.FeatureFullDuplexRPC,
+			protocol.FeaturePeerRoot,
+		},
 		HeartbeatIntervalMS: s.heartbeatInterval.Milliseconds(),
 		Revision:            device.Revision,
 	}
@@ -708,7 +721,7 @@ func (s *session) validateAuthority(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if credential.ControllerID != s.server.controllerID || credential.DeviceID != s.deviceID || credential.Role != s.role {
+	if credential.ControllerID != s.server.controllerID || credential.DeviceID != s.deviceID {
 		return store.ErrAuthorizationDenied
 	}
 	return nil
