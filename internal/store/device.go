@@ -181,6 +181,17 @@ func (s *Store) updateDevicePresence(
 			updated = device
 			return nil
 		}
+		if !markOffline {
+			device.LastSeenAt = lastSeenAt
+			if _, err := connection.ExecContext(ctx, `
+UPDATE devices SET last_seen_at = ?
+WHERE controller_id = ? AND device_id = ?
+`, device.LastSeenAt, controllerID, deviceID); err != nil {
+				return fmt.Errorf("update device heartbeat: %w", err)
+			}
+			updated = device
+			return nil
+		}
 		if lastSeenAt > device.LastSeenAt {
 			device.LastSeenAt = lastSeenAt
 		}
@@ -188,7 +199,7 @@ func (s *Store) updateDevicePresence(
 		if err != nil {
 			return err
 		}
-		device.Online = !markOffline
+		device.Online = false
 		if _, err := connection.ExecContext(ctx, `
 UPDATE devices SET online = ?, last_seen_at = ?, revision = ?
 WHERE controller_id = ? AND device_id = ?

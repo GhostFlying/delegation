@@ -10,7 +10,7 @@ import (
 )
 
 func TestConnectorServiceStopsBeforeBindingWhenPreCanceled(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
+	configPath := privateTestPath(t, "config.json")
 	var setupOutput bytes.Buffer
 	var setupError bytes.Buffer
 	if code := Run([]string{

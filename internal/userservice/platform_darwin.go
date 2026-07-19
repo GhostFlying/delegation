@@ -16,6 +16,8 @@ var runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
 	return executeUserServiceCommand("/bin/launchctl", args...)
 }
 
+var waitForDarwinServiceReady = waitForServiceReady
+
 func platformPrepare(binaryPath, configPath string) (Result, error) {
 	descriptor, err := RenderLaunchAgent(binaryPath, configPath)
 	if err != nil {
@@ -29,9 +31,18 @@ func platformPrepare(binaryPath, configPath string) (Result, error) {
 	return Result{State: state, Kind: descriptor.Kind, Artifact: path}, err
 }
 
-func platformActivate(result Result, _, _ string) (Result, error) {
+func platformActivate(result Result, binaryPath, configPath string) (Result, error) {
 	if result.State != StatePrepared && result.State != StateActive {
 		return result, fmt.Errorf("cannot activate LaunchAgent from state %s", result.State)
+	}
+	matched, err := launchAgentDefinitionMatches(result, binaryPath, configPath)
+	if err != nil {
+		result.State = StateIndeterminate
+		return result, err
+	}
+	if !matched {
+		result.State = StateForeignConflict
+		return result, errors.New("prepared LaunchAgent definition changed before activation")
 	}
 	domain := fmt.Sprintf("gui/%d", os.Geteuid())
 	target := domain + "/" + LaunchAgentName
@@ -45,6 +56,7 @@ func platformActivate(result Result, _, _ string) (Result, error) {
 	}
 	if loaded {
 		if filepath.Clean(status.Path) != filepath.Clean(result.Artifact) {
+			result.State = StateForeignConflict
 			return result, errors.New("LaunchAgent label is loaded from an unmanaged path")
 		}
 	}
@@ -57,24 +69,59 @@ func platformActivate(result Result, _, _ string) (Result, error) {
 		result.State = StateIndeterminate
 		return result, userServiceCommandError("enable LaunchAgent", enabled)
 	}
-	if !loaded {
-		bootstrapped, err := runLaunchctl("bootstrap", domain, result.Artifact)
-		if err != nil || bootstrapped.ExitCode != 0 {
-			reconciled, nowLoaded, printErr := printLaunchAgent(target)
-			if printErr != nil || !nowLoaded || filepath.Clean(reconciled.Path) != filepath.Clean(result.Artifact) {
-				result.State = StateIndeterminate
-				return result, errors.Join(
-					err,
-					commandFailure("bootstrap LaunchAgent", bootstrapped),
-					printErr,
-				)
+	if loaded {
+		bootedOut, bootoutErr := runLaunchctl("bootout", target)
+		reconciled, stillLoaded, printErr := printLaunchAgent(target)
+		if printErr != nil {
+			result.State = StateIndeterminate
+			return result, errors.Join(bootoutErr, commandFailure("unload LaunchAgent", bootedOut), printErr)
+		}
+		if stillLoaded {
+			if filepath.Clean(reconciled.Path) != filepath.Clean(result.Artifact) {
+				result.State = StateForeignConflict
+				return result, errors.Join(bootoutErr, errors.New("LaunchAgent identity changed during unload"))
 			}
+			result.State = StateIndeterminate
+			return result, errors.Join(
+				bootoutErr,
+				commandFailure("unload LaunchAgent", bootedOut),
+				errors.New("managed LaunchAgent remained loaded after bootout"),
+			)
+		}
+	}
+	bootstrapped, err := runLaunchctl("bootstrap", domain, result.Artifact)
+	if err != nil || bootstrapped.ExitCode != 0 {
+		reconciled, nowLoaded, printErr := printLaunchAgent(target)
+		if printErr != nil || !nowLoaded || filepath.Clean(reconciled.Path) != filepath.Clean(result.Artifact) {
+			result.State = StateIndeterminate
+			return result, errors.Join(
+				err,
+				commandFailure("bootstrap LaunchAgent", bootstrapped),
+				printErr,
+			)
 		}
 	}
 	kicked, kickErr := runLaunchctl("kickstart", target)
 	status, loaded, printErr := printLaunchAgent(target)
+	if loaded && printErr == nil && filepath.Clean(status.Path) != filepath.Clean(result.Artifact) {
+		result.State = StateForeignConflict
+		return result, errors.Join(kickErr, errors.New("LaunchAgent identity changed during activation"))
+	}
 	if loaded && printErr == nil && filepath.Clean(status.Path) == filepath.Clean(result.Artifact) &&
 		status.State == "running" {
+		matched, definitionErr := launchAgentDefinitionMatches(result, binaryPath, configPath)
+		if definitionErr != nil {
+			result.State = StateIndeterminate
+			return result, definitionErr
+		}
+		if !matched {
+			result.State = StateForeignConflict
+			return result, errors.New("LaunchAgent definition changed during activation")
+		}
+		if err := waitForDarwinServiceReady(configPath); err != nil {
+			result.State = StateIndeterminate
+			return result, fmt.Errorf("LaunchAgent did not become ready: %w", err)
+		}
 		result.State = StateActive
 		return result, nil
 	}
@@ -85,6 +132,18 @@ func platformActivate(result Result, _, _ string) (Result, error) {
 		printErr,
 		errors.New("LaunchAgent did not reach the managed running state"),
 	)
+}
+
+func launchAgentDefinitionMatches(result Result, binaryPath, configPath string) (bool, error) {
+	descriptor, err := RenderLaunchAgent(binaryPath, configPath)
+	if err != nil {
+		return false, err
+	}
+	state, content, err := inspectManagedFile(result.Artifact, KindLaunchAgent)
+	if err != nil {
+		return false, fmt.Errorf("inspect prepared LaunchAgent definition: %w", err)
+	}
+	return state == StatePrepared && bytes.Equal(content, descriptor.Content), nil
 }
 
 type launchAgentStatus struct {
@@ -109,29 +168,58 @@ func parseLaunchAgentStatus(result userServiceCommandResult) (launchAgentStatus,
 		return launchAgentStatus{}, errors.New("launchctl service description exceeds the output limit")
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(result.Output))
-	var status launchAgentStatus
+	type field struct {
+		value  string
+		indent int
+	}
+	var paths []field
+	var states []field
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		raw := scanner.Text()
+		line := strings.TrimSpace(raw)
 		key, value, found := strings.Cut(line, " = ")
 		if !found || (key != "path" && key != "state") {
 			continue
 		}
-		value = strings.TrimSpace(value)
+		candidate := field{
+			value:  strings.TrimSpace(value),
+			indent: len(raw) - len(strings.TrimLeft(raw, " \t")),
+		}
 		switch key {
 		case "path":
-			if status.Path != "" {
-				return launchAgentStatus{}, errors.New("launchctl service description contains duplicate paths")
-			}
-			status.Path = value
+			paths = append(paths, candidate)
 		case "state":
-			if status.State != "" {
-				return launchAgentStatus{}, errors.New("launchctl service description contains duplicate states")
-			}
-			status.State = value
+			states = append(states, candidate)
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return launchAgentStatus{}, fmt.Errorf("parse launchctl service description: %w", err)
+	}
+	if len(paths) == 0 {
+		return launchAgentStatus{}, errors.New("launchctl service description has no absolute managed path")
+	}
+	topLevelIndent := paths[0].indent
+	for _, candidate := range paths[1:] {
+		topLevelIndent = min(topLevelIndent, candidate.indent)
+	}
+	var status launchAgentStatus
+	for _, candidate := range paths {
+		if candidate.indent != topLevelIndent {
+			continue
+		}
+		if status.Path != "" {
+			return launchAgentStatus{}, errors.New("launchctl service description contains duplicate top-level paths")
+		}
+		status.Path = candidate.value
+	}
+	for _, candidate := range states {
+		if candidate.indent != topLevelIndent {
+			continue
+		}
+		if status.State != "" {
+			return launchAgentStatus{}, errors.New("launchctl service description contains duplicate top-level states")
+		}
+		status.State = candidate.value
 	}
 	if status.Path == "" || !filepath.IsAbs(status.Path) {
 		return launchAgentStatus{}, errors.New("launchctl service description has no absolute managed path")

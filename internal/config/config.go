@@ -13,10 +13,15 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/identity"
 )
 
-const CurrentSchemaVersion = 3
+const (
+	CurrentSchemaVersion = 3
+	brokerConnectPath    = "/v1/connect"
+	maximumConfigSize    = 1024 * 1024
+)
 
 type Role string
 
@@ -78,9 +83,20 @@ func DefaultPath() (string, error) {
 }
 
 func Read(path string) (Config, error) {
-	data, err := os.ReadFile(path)
+	file, err := openProtectedConfig(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maximumConfigSize+1))
+	closeErr := file.Close()
+	if err != nil {
+		return Config{}, fmt.Errorf("read config: %w", err)
+	}
+	if closeErr != nil {
+		return Config{}, fmt.Errorf("close config: %w", closeErr)
+	}
+	if len(data) > maximumConfigSize {
+		return Config{}, fmt.Errorf("config exceeds %d-byte limit", maximumConfigSize)
 	}
 	var compatibility Config
 	if err := json.Unmarshal(data, &compatibility); err != nil {
@@ -108,8 +124,20 @@ func (c Config) Validate() error {
 	if c.SchemaVersion != CurrentSchemaVersion {
 		if c.SchemaVersion < CurrentSchemaVersion {
 			if c.Role == RoleBroker {
+				if c.SchemaVersion == 1 {
+					return fmt.Errorf(
+						"config schema version %d is obsolete; back up and move the config aside, move the shared broker token aside, verify the selected new master-token path does not exist, then rerun setup broker with the existing --controller-id, --listen, --auth-mode, --state, and --allow-insecure-nonloopback for any non-loopback listener; omit --token-file only after verifying the default token path is absent, or pass a different nonexistent path so setup creates a fresh private M1 master; do not reuse the schema version 1 broker token, then issue fresh per-device credentials",
+						c.SchemaVersion,
+					)
+				}
 				return fmt.Errorf(
 					"config schema version %d is obsolete; back up and move the config aside, then rerun setup broker with all existing settings, including --controller-id, --listen, --auth-mode, --token-file when token authentication is used, --state, and --allow-insecure-nonloopback for any non-loopback listener",
+					c.SchemaVersion,
+				)
+			}
+			if c.SchemaVersion == 1 {
+				return fmt.Errorf(
+					"config schema version %d is obsolete; back up and move the config aside, enroll a fresh device-bound credential at the broker, then rerun setup for the same role with the existing --controller-id, --device-id, --device-name, --broker-url, and --auth-mode, the newly transferred credential path in --token-file when token authentication is used, and --allow-insecure-nonloopback when the broker URL is non-loopback ws://; do not reuse the schema version 1 target token",
 					c.SchemaVersion,
 				)
 			}
@@ -139,13 +167,13 @@ func (c Config) Validate() error {
 		if identity.ValidateID(c.DeviceID) != nil {
 			return errors.New("deviceId must be a UUID")
 		}
-		if strings.TrimSpace(c.DeviceName) == "" {
-			return errors.New("deviceName must not be empty")
+		if err := control.ValidateDeviceName(c.DeviceName); err != nil {
+			return fmt.Errorf("deviceName: %w", err)
 		}
 		if c.Broker.Listen != "" || c.Broker.StateFile != "" {
 			return errors.New("controller and device config must not contain broker listener or state fields")
 		}
-		if err := validateBrokerURL(c.Broker.URL, c.Broker.AllowInsecureNonLoopback); err != nil {
+		if _, err := NormalizeBrokerURL(c.Broker.URL, c.Broker.AllowInsecureNonLoopback); err != nil {
 			return err
 		}
 	default:
@@ -171,27 +199,34 @@ func (a AuthConfig) validate() error {
 	return nil
 }
 
-func validateBrokerURL(raw string, allowInsecureNonLoopback bool) error {
+// NormalizeBrokerURL validates a configured broker endpoint and returns its
+// canonical connector URL.
+func NormalizeBrokerURL(raw string, allowInsecureNonLoopback bool) (string, error) {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" {
-		return errors.New("broker URL must be an absolute ws:// or wss:// URL")
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
+		return "", errors.New("broker URL must be an absolute ws:// or wss:// URL")
 	}
 	if parsed.Scheme != "ws" && parsed.Scheme != "wss" {
-		return errors.New("broker URL must use ws:// or wss://")
-	}
-	if parsed.Scheme == "ws" && !loopbackHost(parsed.Hostname()) && !allowInsecureNonLoopback {
-		return errors.New("plaintext non-loopback broker URL requires explicit acknowledgement")
+		return "", errors.New("broker URL must use ws:// or wss://")
 	}
 	if port := parsed.Port(); port != "" {
 		portNumber, err := strconv.Atoi(port)
 		if err != nil || portNumber < 1 || portNumber > 65535 {
-			return errors.New("broker URL port must be an integer from 1 through 65535")
+			return "", errors.New("broker URL port must be an integer from 1 through 65535")
 		}
 	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("broker URL must not contain credentials, query, or fragment")
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery ||
+		parsed.Fragment != "" || parsed.RawFragment != "" || parsed.RawPath != "" {
+		return "", errors.New("broker URL must not contain credentials, query, fragment, or an escaped path")
 	}
-	return nil
+	if parsed.Path != "" && parsed.Path != "/" && parsed.Path != brokerConnectPath {
+		return "", errors.New("broker URL path must be empty or /v1/connect")
+	}
+	if parsed.Scheme == "ws" && !loopbackHost(parsed.Hostname()) && !allowInsecureNonLoopback {
+		return "", errors.New("plaintext non-loopback broker URL requires explicit acknowledgement")
+	}
+	parsed.Path = brokerConnectPath
+	return parsed.String(), nil
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {

@@ -32,47 +32,16 @@ launcher for every runtime command below.
 
 ## Configure The Role
 
-Choose exactly one role and run the launcher with `setup <role> --help` before writing
-configuration:
+Choose exactly one role and run the launcher with `setup <role> --help` before writing configuration.
+Before broker, controller, or device setup, or before issuing/revoking a credential, read
+[role configuration](references/role-configuration.md) and follow its enrollment and transport
+rules. Token authentication is the default. Never pass token material as a command-line value;
+configuration stores only an absolute token file path and refuses to overwrite an existing config.
 
-- Use `setup broker` to create a trust domain and listener configuration. Token authentication is
-  the default and creates a protected token file when none is supplied. Keep the plaintext listener
-  on loopback unless the user explicitly accepts `--allow-insecure-nonloopback` and supplies an
-  encrypted private-network or tunnel boundary.
-  The broker state path is stored in the configuration; use `--state` only during setup when the
-  default path beside the configuration is unsuitable.
-- Use `setup controller` for a device that hosts root tasks. Supply the broker URL, controller ID,
-  and an existing token file when token authentication is enabled. Also supply the device ID that
-  the broker assigned when it issued that token. Prefer `wss://`; a non-loopback `ws://` URL
-  requires `--allow-insecure-nonloopback` and an encrypted private-network or tunnel boundary.
-- Use `setup device` for a worker-only device. Supply the same controller ID, the broker URL, and
-  that device's token file. Token authentication requires the device ID that the broker assigned
-  when it issued the token; setup generates an ID only when authentication mode is `none`. Apply
-  the same `wss://` or explicitly acknowledged protected `ws://` rule as for controllers.
-
-Never pass token material as a command-line argument. Configuration stores only the absolute token
-file path and refuses to overwrite an existing configuration.
-
-Schema v3 makes plaintext non-loopback acknowledgement consistent for every authentication mode
-and role. Schema v1 and v2 require explicit migration. Back up and move an old broker configuration
-aside, then rerun `setup broker` with every existing setting: controller ID, listener,
-authentication mode, master token path when used, actual state database, and
-`--allow-insecure-nonloopback` for any non-loopback listener. For an old controller or device,
-preserve its identity, name, broker URL, authentication mode, and token path; add the acknowledgement
-only for a non-loopback `ws://` URL. Do not infer old values from new defaults or create a fresh
-database.
-
-After configuration succeeds, a broker can run in the foreground with `service run --config
-<path>`. Run `service install --config <path>` to write, enable, start, and verify the current
-platform's user service. It refuses foreign definitions and managed definitions whose executable or
-configuration path differs. Treat an `indeterminate` result as a partial activation that requires
-native service-manager inspection; do not delete or overwrite the definition blindly.
-
-Linux requires a systemd user manager. macOS activation requires the current user's GUI launchd
-domain, and the Windows task requires an interactive login. A versioned runtime-path change is not
-migrated in place in M1: verify that the old definition is Delegation-owned, remove it explicitly
-with the native service manager, and rerun installation. Do not claim Windows restart-on-failure
-until the reliability milestone implements it.
+Before migrating an older installation, changing a versioned runtime, or installing a user service,
+read [migration and services](references/migration-and-services.md). Do not infer old settings from
+new defaults, reuse any schema v1 broker or target token, or modify an unsafe inherited Windows home
+in place.
 
 ## Verify And Hand Off
 

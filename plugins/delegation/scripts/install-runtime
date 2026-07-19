@@ -39,6 +39,31 @@ if [ "${#expected}" -ne 64 ]; then
 fi
 
 delegation_home=${DELEGATION_HOME:-"$HOME/.delegation"}
+if [ -L "$delegation_home" ] || { [ -e "$delegation_home" ] && [ ! -d "$delegation_home" ]; }; then
+  printf '%s\n' "delegation: delegation home must be a non-symlink directory: $delegation_home" >&2
+  exit 1
+fi
+if [ ! -e "$delegation_home" ]; then
+  if ! (umask 077 && mkdir -p "$delegation_home"); then
+    printf '%s\n' "delegation: failed to create a private delegation home: $delegation_home" >&2
+    exit 1
+  fi
+fi
+case "$os" in
+  linux)
+    home_mode=$(stat -c '%a' "$delegation_home")
+    home_owner=$(stat -c '%u' "$delegation_home")
+    ;;
+  darwin)
+    home_mode=$(stat -f '%Lp' "$delegation_home")
+    home_owner=$(stat -f '%u' "$delegation_home")
+    ;;
+esac
+current_uid=$(id -u)
+if [ "$home_mode" != 700 ] || [ "$home_owner" != "$current_uid" ]; then
+  printf '%s\n' "delegation: delegation home must be owned by uid $current_uid with mode 0700; refusing to modify existing permissions: $delegation_home" >&2
+  exit 1
+fi
 target_parent="$delegation_home/bin/$version"
 target="$target_parent/$os-$arch"
 binary="$target/delegation"

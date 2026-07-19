@@ -145,7 +145,7 @@ func TestOpenRejectsNegativeSchemaVersion(t *testing.T) {
 
 func TestOpenMigratesVersionOneCredentialState(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "state")
-	if err := os.Mkdir(directory, 0o700); err != nil {
+	if err := createPrivateDirectory(directory); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "broker.sqlite3")
@@ -223,7 +223,7 @@ VALUES (?, ?, ?, ?, 0, 1700000000), (?, ?, ?, ?, 1, 1700000001)
 
 func TestOpenMigratesVersionTwoControllerRevisions(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "state")
-	if err := os.Mkdir(directory, 0o700); err != nil {
+	if err := createPrivateDirectory(directory); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "broker.sqlite3")
@@ -337,7 +337,7 @@ func TestOpenMigratesVersionTwoRevisionBoundaries(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			directory := filepath.Join(t.TempDir(), "state")
-			if err := os.Mkdir(directory, 0o700); err != nil {
+			if err := createPrivateDirectory(directory); err != nil {
 				t.Fatal(err)
 			}
 			path := filepath.Join(directory, "broker.sqlite3")
@@ -418,7 +418,7 @@ func TestOpenRejectsRelativeSymlinkAndCorruptState(t *testing.T) {
 
 func TestOpenDoesNotChangeExistingDirectoryPermissions(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "existing")
-	if err := os.Mkdir(directory, 0o700); err != nil {
+	if err := createPrivateDirectory(directory); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.Stat(directory)

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -23,7 +22,7 @@ func TestCredentialUsageListsIssueAndRevoke(t *testing.T) {
 
 func TestCredentialRevokeIsDurableAndIdempotent(t *testing.T) {
 	environment := setupCredentialTestBroker(t, "token")
-	tokenPath := filepath.Join(t.TempDir(), "device.token")
+	tokenPath := privateTestPath(t, "device.token")
 	if _, stderr, code := runCredentialTestCommand(
 		credentialIssueArgs(environment, credentialTestDeviceID, tokenPath),
 	); code != 0 {
@@ -106,7 +105,7 @@ func TestCredentialRevokeRejectsPendingEnrollment(t *testing.T) {
 
 func TestCredentialRevokeReportsCommittedOutputFailure(t *testing.T) {
 	environment := setupCredentialTestBroker(t, "token")
-	tokenPath := filepath.Join(t.TempDir(), "device.token")
+	tokenPath := privateTestPath(t, "device.token")
 	if _, stderr, code := runCredentialTestCommand(
 		credentialIssueArgs(environment, credentialTestDeviceID, tokenPath),
 	); code != 0 {

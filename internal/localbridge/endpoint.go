@@ -4,21 +4,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"path/filepath"
 
 	"github.com/GhostFlying/delegation/internal/identity"
 )
 
-func Endpoint(configPath, deviceID string) (string, error) {
+func Endpoint(controllerID, deviceID string) (string, error) {
+	if err := identity.ValidateID(controllerID); err != nil {
+		return "", fmt.Errorf("controllerId %w", err)
+	}
 	if err := identity.ValidateID(deviceID); err != nil {
 		return "", fmt.Errorf("deviceId %w", err)
 	}
-	absolute, err := filepath.Abs(configPath)
-	if err != nil {
-		return "", fmt.Errorf("resolve local bridge config path: %w", err)
-	}
-	clean := normalizeConfigPath(filepath.Clean(absolute))
-	digest := sha256.Sum256([]byte(clean + "\x00" + deviceID))
+	digest := sha256.Sum256([]byte("delegation-localbridge-v2\x00" + controllerID + "\x00" + deviceID))
 	name := hex.EncodeToString(digest[:16])
-	return platformEndpoint(filepath.Dir(absolute), name)
+	return platformEndpoint(name)
 }

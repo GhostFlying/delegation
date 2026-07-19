@@ -9,7 +9,6 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
-	"net/url"
 	"runtime"
 	"slices"
 	"strings"
@@ -17,7 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GhostFlying/delegation/internal/broker"
 	"github.com/GhostFlying/delegation/internal/buildinfo"
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
@@ -45,20 +43,21 @@ var (
 type DialFunc func(context.Context, string, *websocket.DialOptions) (*websocket.Conn, *http.Response, error)
 
 type Options struct {
-	BrokerURL       string
-	ControllerID    string
-	DeviceID        string
-	DeviceName      string
-	Role            control.DeviceRole
-	AuthMode        config.AuthMode
-	Token           *tokenfile.Token
-	RuntimeVersion  string
-	OperatingSystem string
-	Architecture    string
-	ReconnectMin    time.Duration
-	ReconnectMax    time.Duration
-	Dial            DialFunc
-	ReportError     func(error)
+	BrokerURL                string
+	AllowInsecureNonLoopback bool
+	ControllerID             string
+	DeviceID                 string
+	DeviceName               string
+	Role                     control.DeviceRole
+	AuthMode                 config.AuthMode
+	Token                    *tokenfile.Token
+	RuntimeVersion           string
+	OperatingSystem          string
+	Architecture             string
+	ReconnectMin             time.Duration
+	ReconnectMax             time.Duration
+	Dial                     DialFunc
+	ReportError              func(error)
 }
 
 type Status struct {
@@ -96,7 +95,7 @@ type Client struct {
 }
 
 func New(options Options) (*Client, error) {
-	endpoint, err := brokerEndpoint(options.BrokerURL)
+	endpoint, err := config.NormalizeBrokerURL(options.BrokerURL, options.AllowInsecureNonLoopback)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +159,10 @@ func New(options Options) (*Client, error) {
 	if reportError == nil {
 		reportError = func(error) {}
 	}
+	httpTransport := http.DefaultTransport.(*http.Transport).Clone()
+	if strings.HasPrefix(endpoint, "ws://") {
+		httpTransport.Proxy = nil
+	}
 	return &Client{
 		endpoint:     endpoint,
 		hello:        hello,
@@ -167,11 +170,11 @@ func New(options Options) (*Client, error) {
 		reconnectMin: reconnectMin,
 		reconnectMax: reconnectMax,
 		dial:         dial,
-		httpClient: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		httpClient: &http.Client{Transport: httpTransport, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}},
 		reportError: reportError,
-		updates:     make(chan struct{}, 1),
+		updates:     make(chan struct{}),
 	}, nil
 }
 
@@ -236,13 +239,17 @@ func (c *Client) Status() Status {
 
 func (c *Client) WaitReady(ctx context.Context) error {
 	for {
-		if c.Status().Connected {
+		c.mu.RLock()
+		connected := c.status.Connected
+		updates := c.updates
+		c.mu.RUnlock()
+		if connected {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-c.updates:
+		case <-updates:
 		}
 	}
 }
@@ -294,8 +301,8 @@ func (c *Client) publish(current *session, result protocol.HelloResult) {
 		HeartbeatInterval: time.Duration(result.HeartbeatIntervalMS) * time.Millisecond,
 		Features:          slices.Clone(result.Features),
 	}
+	c.notifyLocked()
 	c.mu.Unlock()
-	c.notify()
 }
 
 func (c *Client) unpublish(current *session) {
@@ -304,9 +311,9 @@ func (c *Client) unpublish(current *session) {
 		c.session = nil
 		c.status.Connected = false
 		c.status.ConnectionID = ""
+		c.notifyLocked()
 	}
 	c.mu.Unlock()
-	c.notify()
 }
 
 func (c *Client) updateRevision(current *session, revision uint64) {
@@ -317,28 +324,9 @@ func (c *Client) updateRevision(current *session, revision uint64) {
 	c.mu.Unlock()
 }
 
-func (c *Client) notify() {
-	select {
-	case c.updates <- struct{}{}:
-	default:
-	}
-}
-
-func brokerEndpoint(raw string) (string, error) {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "ws" && parsed.Scheme != "wss") {
-		return "", errors.New("broker URL must be an absolute ws:// or wss:// URL")
-	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" {
-		return "", errors.New("broker URL must not contain credentials, query, fragment, or an escaped path")
-	}
-	if parsed.Path != "" && parsed.Path != "/" {
-		if parsed.Path != broker.ConnectPath {
-			return "", errors.New("broker URL path must be empty or /v1/connect")
-		}
-	}
-	parsed.Path = broker.ConnectPath
-	return parsed.String(), nil
+func (c *Client) notifyLocked() {
+	close(c.updates)
+	c.updates = make(chan struct{})
 }
 
 func fullJitter(maximum time.Duration) time.Duration {

@@ -5,6 +5,8 @@ package store
 import (
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestDataSourceNameUsesLocalWindowsFileURI(t *testing.T) {
@@ -26,5 +28,16 @@ func TestPreparePathRejectsWindowsNetworkPath(t *testing.T) {
 func TestValidatePathRejectsWindowsNetworkPath(t *testing.T) {
 	if err := ValidatePath(`\\server\share\delegation\broker.sqlite3`); err == nil {
 		t.Fatal("ValidatePath accepted a Windows network path")
+	}
+}
+
+func TestWindowsDriveTypeRejectsMappedNetworkDrive(t *testing.T) {
+	if err := validateWindowsDriveType(windows.DRIVE_REMOTE); err == nil {
+		t.Fatal("validateWindowsDriveType accepted a mapped network drive")
+	}
+	for _, driveType := range []uint32{windows.DRIVE_FIXED, windows.DRIVE_REMOVABLE, windows.DRIVE_RAMDISK} {
+		if err := validateWindowsDriveType(driveType); err != nil {
+			t.Fatalf("validateWindowsDriveType(%d): %v", driveType, err)
+		}
 	}
 }

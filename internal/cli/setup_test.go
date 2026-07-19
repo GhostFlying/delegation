@@ -16,7 +16,7 @@ import (
 )
 
 func TestSetupBroker(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTestDirectory(t)
 	configPath := filepath.Join(dir, "config.json")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -56,9 +56,9 @@ func TestSetupBroker(t *testing.T) {
 }
 
 func TestSetupBrokerPersistsExplicitStatePath(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTestDirectory(t)
 	configPath := filepath.Join(dir, "config.json")
-	statePath := filepath.Join(t.TempDir(), "registry", "broker.sqlite3")
+	statePath := privateTestPath(t, filepath.Join("registry", "broker.sqlite3"))
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run([]string{
@@ -149,7 +149,7 @@ func TestSetupBrokerRejectsUnusableStateWithoutSideEffects(t *testing.T) {
 }
 
 func TestSetupDeviceWithoutAuthentication(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "device.json")
+	configPath := privateTestPath(t, "device.json")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	args := []string{
@@ -187,7 +187,7 @@ func TestSetupDeviceWithoutAuthentication(t *testing.T) {
 }
 
 func TestSetupDeviceWithoutAuthenticationGeneratesDeviceID(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "device.json")
+	configPath := privateTestPath(t, "device.json")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run([]string{
@@ -213,7 +213,7 @@ func TestSetupDeviceWithoutAuthenticationGeneratesDeviceID(t *testing.T) {
 func TestSetupTokenAuthenticationRequiresDeviceID(t *testing.T) {
 	for _, role := range []string{"controller", "device"} {
 		t.Run(role, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := privateTestDirectory(t)
 			configPath := filepath.Join(dir, role+".json")
 			tokenPath := filepath.Join(dir, role+".token")
 			if _, err := tokenfile.Ensure(tokenPath); err != nil {
@@ -240,7 +240,7 @@ func TestSetupTokenAuthenticationRequiresDeviceID(t *testing.T) {
 }
 
 func TestSetupControllerWithTokenAuthentication(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTestDirectory(t)
 	configPath := filepath.Join(dir, "controller.json")
 	tokenPath := filepath.Join(dir, "controller.token")
 	if _, err := tokenfile.Ensure(tokenPath); err != nil {
@@ -274,7 +274,7 @@ func TestSetupClientRequiresAcknowledgementForRemotePlaintext(t *testing.T) {
 	for _, role := range []string{"controller", "device"} {
 		for _, authMode := range []string{"none", "token"} {
 			t.Run(role+"/"+authMode, func(t *testing.T) {
-				dir := t.TempDir()
+				dir := privateTestDirectory(t)
 				configPath := filepath.Join(dir, role+".json")
 				args := []string{
 					"setup", role,
@@ -384,7 +384,7 @@ func TestSetupBrokerWarnsForAcknowledgedNonLoopback(t *testing.T) {
 	for _, authMode := range []string{"none", "token"} {
 		for _, listen := range []string{"0.0.0.0:8787", "[::]:8787", "broker.example.test:8787"} {
 			t.Run(authMode+"/"+listen, func(t *testing.T) {
-				configPath := filepath.Join(t.TempDir(), "config.json")
+				configPath := privateTestPath(t, "config.json")
 				var stdout bytes.Buffer
 				var stderr bytes.Buffer
 
@@ -438,7 +438,7 @@ func TestSetupBrokerDoesNotWarnForSafeListener(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			configPath := filepath.Join(t.TempDir(), "config.json")
+			configPath := privateTestPath(t, "config.json")
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 			args := []string{
@@ -464,7 +464,7 @@ func TestSetupBrokerDoesNotWarnForSafeListener(t *testing.T) {
 }
 
 func TestSetupBrokerWarningFailureDoesNotCreateConfig(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTestDirectory(t)
 	configPath := filepath.Join(dir, "config.json")
 	var stdout bytes.Buffer
 
@@ -525,6 +525,23 @@ func TestSetupBrokerChecksConfigBeforeCreatingToken(t *testing.T) {
 	tokenPath := filepath.Join(dir, "secrets", "broker.token")
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
 		t.Fatalf("token was created when config already existed: %v", err)
+	}
+}
+
+func TestSetupBrokerChecksConfigAuthorityBeforeCreatingToken(t *testing.T) {
+	dir := unsafeTestDirectory(t)
+	configPath := filepath.Join(dir, "config.json")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run([]string{"setup", "broker", "--config", configPath}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatal("setup accepted an unsafe config authority")
+	}
+	tokenPath := filepath.Join(dir, "secrets", "broker.token")
+	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+		t.Fatalf("token was created before config authority validation: %v", err)
 	}
 }
 
@@ -599,7 +616,7 @@ func TestSetupBrokerRejectsDanglingConfigTokenParentAlias(t *testing.T) {
 }
 
 func TestConcurrentBrokerSetupKeepsWinningToken(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTestDirectory(t)
 	configPath := filepath.Join(dir, "config.json")
 	args := []string{"setup", "broker", "--config", configPath, "--json"}
 	type outcome struct {

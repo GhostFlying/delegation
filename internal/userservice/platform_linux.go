@@ -3,15 +3,19 @@
 package userservice
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 var runSystemctl = func(args ...string) (userServiceCommandResult, error) {
 	return executeUserServiceCommand("systemctl", args...)
 }
+
+var waitForLinuxServiceReady = waitForServiceReady
 
 func platformPrepare(binaryPath, configPath string) (Result, error) {
 	descriptor, err := RenderSystemd(binaryPath, configPath)
@@ -26,36 +30,81 @@ func platformPrepare(binaryPath, configPath string) (Result, error) {
 	return Result{State: state, Kind: descriptor.Kind, Artifact: path}, err
 }
 
-func platformActivate(result Result, _, _ string) (Result, error) {
+func platformActivate(result Result, binaryPath, configPath string) (Result, error) {
 	if result.State != StatePrepared && result.State != StateActive {
 		return result, fmt.Errorf("cannot activate systemd user service from state %s", result.State)
 	}
 	reloaded, err := runSystemctl("--user", "--no-ask-password", "daemon-reload")
 	if err != nil || reloaded.ExitCode != 0 {
-		return reconcileSystemdFailure(result, errors.Join(err, commandFailure("reload systemd user manager", reloaded)))
+		return reconcileSystemdFailure(
+			result, binaryPath, configPath,
+			errors.Join(err, commandFailure("reload systemd user manager", reloaded)),
+		)
+	}
+	matched, err := querySystemdIdentity(result, binaryPath, configPath)
+	if err != nil {
+		result.State = StateIndeterminate
+		return result, err
+	}
+	if !matched {
+		result.State = StateForeignConflict
+		return result, errors.New("loaded systemd unit is shadowed or has drop-in overrides")
 	}
 	enabled, err := runSystemctl(
 		"--user", "--no-ask-password", "enable", "--now", SystemdUnitName,
 	)
 	if err != nil || enabled.ExitCode != 0 {
-		return reconcileSystemdFailure(result, errors.Join(err, commandFailure("enable systemd user service", enabled)))
+		return reconcileSystemdFailure(
+			result, binaryPath, configPath,
+			errors.Join(err, commandFailure("enable systemd user service", enabled)),
+		)
 	}
 	isEnabled, isActive, err := querySystemdState()
 	if err != nil || !isEnabled || !isActive {
 		result.State = StateIndeterminate
 		return result, errors.Join(err, errors.New("systemd user service did not become enabled and active"))
 	}
+	matched, err = querySystemdIdentity(result, binaryPath, configPath)
+	if err != nil {
+		result.State = StateIndeterminate
+		return result, err
+	}
+	if !matched {
+		result.State = StateForeignConflict
+		return result, errors.New("systemd unit identity changed during activation")
+	}
+	if err := waitForLinuxServiceReady(configPath); err != nil {
+		result.State = StateIndeterminate
+		return result, fmt.Errorf("systemd user service did not become ready: %w", err)
+	}
 	result.State = StateActive
 	return result, nil
 }
 
-func reconcileSystemdFailure(result Result, activationErr error) (Result, error) {
+func reconcileSystemdFailure(
+	result Result,
+	binaryPath, configPath string,
+	activationErr error,
+) (Result, error) {
+	matched, identityErr := querySystemdIdentity(result, binaryPath, configPath)
+	if identityErr != nil {
+		result.State = StateIndeterminate
+		return result, errors.Join(activationErr, identityErr)
+	}
+	if !matched {
+		result.State = StateForeignConflict
+		return result, errors.Join(activationErr, errors.New("loaded systemd unit is shadowed or has drop-in overrides"))
+	}
 	enabled, active, queryErr := querySystemdState()
 	if queryErr != nil {
 		result.State = StateIndeterminate
 		return result, errors.Join(activationErr, queryErr)
 	}
 	if enabled && active {
+		if readyErr := waitForLinuxServiceReady(configPath); readyErr != nil {
+			result.State = StateIndeterminate
+			return result, errors.Join(activationErr, fmt.Errorf("systemd user service did not become ready: %w", readyErr))
+		}
 		result.State = StateActive
 		return result, nil
 	}
@@ -63,6 +112,44 @@ func reconcileSystemdFailure(result Result, activationErr error) (Result, error)
 		result.State = StateIndeterminate
 	}
 	return result, activationErr
+}
+
+func querySystemdIdentity(result Result, binaryPath, configPath string) (bool, error) {
+	descriptor, err := RenderSystemd(binaryPath, configPath)
+	if err != nil {
+		return false, err
+	}
+	content, err := os.ReadFile(result.Artifact)
+	if err != nil {
+		return false, fmt.Errorf("read prepared systemd unit: %w", err)
+	}
+	if !bytes.Equal(content, descriptor.Content) {
+		return false, nil
+	}
+	show, err := runSystemctl(
+		"--user", "--no-ask-password", "show", SystemdUnitName,
+		"--property=FragmentPath", "--property=DropInPaths",
+	)
+	if err != nil || show.ExitCode != 0 {
+		return false, errors.Join(err, commandFailure("inspect loaded systemd unit", show))
+	}
+	properties := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(show.Output)), "\n") {
+		name, value, found := strings.Cut(line, "=")
+		if !found || name == "" {
+			return false, errors.New("systemd returned malformed unit identity")
+		}
+		if _, exists := properties[name]; exists {
+			return false, errors.New("systemd returned duplicate unit identity properties")
+		}
+		properties[name] = value
+	}
+	fragment, hasFragment := properties["FragmentPath"]
+	dropIns, hasDropIns := properties["DropInPaths"]
+	if len(properties) != 2 || !hasFragment || !hasDropIns {
+		return false, errors.New("systemd omitted required unit identity properties")
+	}
+	return filepath.Clean(fragment) == filepath.Clean(result.Artifact) && strings.TrimSpace(dropIns) == "", nil
 }
 
 func querySystemdState() (bool, bool, error) {

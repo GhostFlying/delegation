@@ -10,7 +10,8 @@ import (
 	"github.com/GhostFlying/delegation/internal/identity"
 )
 
-const MaximumDevicePage = 100
+// MaximumDevicePage keeps a page of maximum-size descriptors below the wire envelope limit.
+const MaximumDevicePage = 32
 
 var ErrRevisionChanged = errors.New("device registry revision changed")
 

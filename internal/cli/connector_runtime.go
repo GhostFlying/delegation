@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
@@ -34,26 +35,38 @@ func runConnectorService(
 	if err != nil {
 		return err
 	}
+	var stderrMu sync.Mutex
+	writeStderr := func(format string, args ...any) error {
+		stderrMu.Lock()
+		defer stderrMu.Unlock()
+		_, err := fmt.Fprintf(stderr, format, args...)
+		return err
+	}
 	client, err := connector.New(connector.Options{
-		BrokerURL:    cfg.Broker.URL,
-		ControllerID: cfg.ControllerID,
-		DeviceID:     cfg.DeviceID,
-		DeviceName:   cfg.DeviceName,
-		Role:         role,
-		AuthMode:     cfg.Broker.Auth.Mode,
-		Token:        token,
+		BrokerURL:                cfg.Broker.URL,
+		AllowInsecureNonLoopback: cfg.Broker.AllowInsecureNonLoopback,
+		ControllerID:             cfg.ControllerID,
+		DeviceID:                 cfg.DeviceID,
+		DeviceName:               cfg.DeviceName,
+		Role:                     role,
+		AuthMode:                 cfg.Broker.Auth.Mode,
+		Token:                    token,
 		ReportError: func(err error) {
-			_, _ = fmt.Fprintf(stderr, "delegation: connector reconnecting: %v\n", err)
+			_ = writeStderr("delegation: connector reconnecting: %v\n", err)
 		},
 	})
 	if err != nil {
 		return err
 	}
-	endpoint, err := localbridge.Endpoint(configPath, cfg.DeviceID)
+	endpoint, err := localbridge.Endpoint(cfg.ControllerID, cfg.DeviceID)
 	if err != nil {
 		return err
 	}
-	bridge, err := localbridge.Listen(endpoint, role, client)
+	bridge, err := localbridge.Listen(endpoint, localbridge.ServiceIdentity{
+		ControllerID: cfg.ControllerID,
+		DeviceID:     cfg.DeviceID,
+		Role:         role,
+	}, client)
 	if err != nil {
 		return err
 	}
@@ -67,7 +80,7 @@ func runConnectorService(
 	go func() {
 		bridgeDone <- bridge.Serve(runContext)
 	}()
-	if _, err := fmt.Fprintf(stderr, "delegation: %s connector service started\n", cfg.Role); err != nil {
+	if err := writeStderr("delegation: %s connector service started\n", cfg.Role); err != nil {
 		cancel()
 		_ = bridge.Close()
 		<-connectorDone

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/GhostFlying/delegation/internal/securefs"
 )
 
 func TestEnsureCreatesAndReusesProtectedToken(t *testing.T) {
@@ -97,7 +99,7 @@ func TestEncodeAndParseRoundTrip(t *testing.T) {
 }
 
 func TestValidateRejectsMalformedToken(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "token")
+	path := filepath.Join(t.TempDir(), "secrets", "token")
 	overwriteProtectedToken(t, path, []byte("not-a-256-bit-token\n"))
 	if err := Validate(path); err == nil {
 		t.Fatal("Validate() accepted malformed token material")
@@ -105,7 +107,7 @@ func TestValidateRejectsMalformedToken(t *testing.T) {
 }
 
 func TestValidateAcceptsTokenWithoutTrailingNewline(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "token")
+	path := filepath.Join(t.TempDir(), "secrets", "token")
 	token := base64.RawURLEncoding.EncodeToString(make([]byte, tokenBytes))
 	overwriteProtectedToken(t, path, []byte(token))
 	if err := Validate(path); err != nil {
@@ -114,7 +116,7 @@ func TestValidateAcceptsTokenWithoutTrailingNewline(t *testing.T) {
 }
 
 func TestValidateRejectsOversizedTokenFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "token")
+	path := filepath.Join(t.TempDir(), "secrets", "token")
 	overwriteProtectedToken(t, path, bytes.Repeat([]byte("a"), maxTokenFileSize+1))
 	if err := Validate(path); err == nil {
 		t.Fatal("Validate() accepted oversized token material")
@@ -180,10 +182,18 @@ func TestEnsureSyncsEveryNewDirectory(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "one", "two", "token")
 	originalSync := syncTokenDirectory
-	t.Cleanup(func() { syncTokenDirectory = originalSync })
+	originalPublishedSync := syncPublishedToken
+	t.Cleanup(func() {
+		syncTokenDirectory = originalSync
+		syncPublishedToken = originalPublishedSync
+	})
 	var synced []string
 	syncTokenDirectory = func(syncPath string) error {
 		synced = append(synced, syncPath)
+		return nil
+	}
+	syncPublishedToken = func(*securefs.Root) error {
+		synced = append(synced, filepath.Dir(path))
 		return nil
 	}
 
@@ -193,6 +203,25 @@ func TestEnsureSyncsEveryNewDirectory(t *testing.T) {
 	want := []string{filepath.Dir(root), root, filepath.Join(root, "one"), filepath.Join(root, "one", "two")}
 	if !slices.Equal(synced, want) {
 		t.Fatalf("synced paths = %q, want %q", synced, want)
+	}
+}
+
+func TestWriteNewReportsCommittedDirectorySyncFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets", "device.token")
+	originalSync := syncTokenDirectory
+	originalPublishedSync := syncPublishedToken
+	t.Cleanup(func() {
+		syncTokenDirectory = originalSync
+		syncPublishedToken = originalPublishedSync
+	})
+	syncTokenDirectory = func(string) error { return nil }
+	syncPublishedToken = func(*securefs.Root) error { return errors.New("injected sync failure") }
+	created, err := WriteNew(path, Token{1})
+	if !created || err == nil {
+		t.Fatalf("WriteNew() = %v, %v; want committed error", created, err)
+	}
+	if got, readErr := Read(path); readErr != nil || got != (Token{1}) {
+		t.Fatalf("Read() after committed error = %#v, %v", got, readErr)
 	}
 }
 

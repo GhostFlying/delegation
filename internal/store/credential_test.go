@@ -3,9 +3,11 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/GhostFlying/delegation/internal/control"
+	moderncsqlite "modernc.org/sqlite"
 )
 
 const (
@@ -111,6 +113,132 @@ func TestPendingCredentialCanBeActivatedOrRemovedExactly(t *testing.T) {
 	}
 	if _, err := store.Credential(ctx, testControllerID, otherDevice); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted pending credential error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPublishPendingCredentialRejectsReplacedWriterBeforePublishing(t *testing.T) {
+	registry := openTestStore(t)
+	ctx := context.Background()
+	oldMAC := CredentialMAC{5}
+	oldPending := NewCredential(
+		testControllerID, testDeviceID, control.DeviceRoleWorker, oldMAC, testTime(),
+	)
+	oldPending.Disabled = true
+	oldPending.Pending = true
+	if err := registry.CreateCredential(ctx, oldPending); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.DeletePendingCredential(ctx, testControllerID, testDeviceID, oldMAC); err != nil {
+		t.Fatal(err)
+	}
+
+	replacementMAC := CredentialMAC{6}
+	replacement := NewCredential(
+		testControllerID, testDeviceID, control.DeviceRoleWorker, replacementMAC, testTime(),
+	)
+	replacement.Disabled = true
+	replacement.Pending = true
+	if err := registry.CreateCredential(ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPublisherCalled := false
+	committed, err := registry.PublishPendingCredential(
+		ctx, testControllerID, testDeviceID, oldMAC,
+		func() (bool, error) {
+			oldPublisherCalled = true
+			return true, nil
+		},
+	)
+	if !errors.Is(err, ErrNotFound) || committed || oldPublisherCalled {
+		t.Fatalf(
+			"replaced publication = committed %v, called %v, error %v",
+			committed, oldPublisherCalled, err,
+		)
+	}
+	committed, err = registry.PublishPendingCredential(
+		ctx, testControllerID, testDeviceID, replacementMAC,
+		func() (bool, error) { return true, nil },
+	)
+	if err != nil || !committed {
+		t.Fatalf("replacement publication = committed %v, error %v", committed, err)
+	}
+	if authenticated, err := registry.AuthenticateCredential(ctx, replacementMAC); err != nil ||
+		authenticated.MAC != replacementMAC {
+		t.Fatalf("replacement credential = %#v, error %v", authenticated, err)
+	}
+}
+
+func TestPublishPendingCredentialHoldsWriteFenceDuringPublication(t *testing.T) {
+	registry := openTestStore(t)
+	ctx := context.Background()
+	contender, err := registry.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer contender.Close()
+	if _, err := contender.ExecContext(ctx, "PRAGMA busy_timeout = 0"); err != nil {
+		t.Fatal(err)
+	}
+
+	mac := CredentialMAC{8}
+	pending := NewCredential(testControllerID, testDeviceID, control.DeviceRoleWorker, mac, testTime())
+	pending.Disabled = true
+	pending.Pending = true
+	if err := registry.CreateCredential(ctx, pending); err != nil {
+		t.Fatal(err)
+	}
+	writeFenceObserved := false
+	committed, err := registry.PublishPendingCredential(
+		ctx, testControllerID, testDeviceID, mac,
+		func() (bool, error) {
+			if _, lockErr := contender.ExecContext(ctx, "BEGIN IMMEDIATE"); lockErr == nil {
+				_, _ = contender.ExecContext(context.Background(), "ROLLBACK")
+				return false, errors.New("replacement writer entered during credential publication")
+			} else {
+				var sqliteError *moderncsqlite.Error
+				if !errors.As(lockErr, &sqliteError) || sqliteError.Code()&0xff != sqliteBusy {
+					return false, fmt.Errorf("probe credential publication fence: %w", lockErr)
+				}
+			}
+			writeFenceObserved = true
+			return true, nil
+		},
+	)
+	if err != nil || !committed || !writeFenceObserved {
+		t.Fatalf(
+			"fenced publication = committed %v, fence observed %v, error %v",
+			committed, writeFenceObserved, err,
+		)
+	}
+}
+
+func TestPublishPendingCredentialPreservesPendingAfterCommittedPublishError(t *testing.T) {
+	registry := openTestStore(t)
+	ctx := context.Background()
+	mac := CredentialMAC{7}
+	pending := NewCredential(testControllerID, testDeviceID, control.DeviceRoleWorker, mac, testTime())
+	pending.Disabled = true
+	pending.Pending = true
+	if err := registry.CreateCredential(ctx, pending); err != nil {
+		t.Fatal(err)
+	}
+	want := errors.New("directory sync failed")
+	committed, err := registry.PublishPendingCredential(
+		ctx, testControllerID, testDeviceID, mac,
+		func() (bool, error) { return true, want },
+	)
+	if !committed || !errors.Is(err, want) {
+		t.Fatalf("committed publication failure = committed %v, error %v", committed, err)
+	}
+	if stored, err := registry.Credential(ctx, testControllerID, testDeviceID); err != nil || stored != pending {
+		t.Fatalf("pending credential after publication failure = %#v, error %v", stored, err)
+	}
+	if err := registry.ActivateCredential(ctx, testControllerID, testDeviceID, mac); err != nil {
+		t.Fatalf("recover committed publication: %v", err)
+	}
+	if err := registry.ActivateCredential(ctx, testControllerID, testDeviceID, mac); err != nil {
+		t.Fatalf("idempotent committed publication recovery: %v", err)
 	}
 }
 

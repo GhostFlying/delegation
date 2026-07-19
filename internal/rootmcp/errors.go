@@ -30,3 +30,14 @@ func explainBridgeError(err error) error {
 	}
 	return errors.New("the local delegation connector is unavailable; run delegation doctor and ensure its service is running")
 }
+
+func explainEnsureRootError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var rpcError *localbridge.RPCError
+	if errors.As(err, &rpcError) && rpcError.Code == protocol.ErrorConflict {
+		return errors.New("this Codex task is already bound to another delegation root device and cannot be rebound")
+	}
+	return explainBridgeError(err)
+}

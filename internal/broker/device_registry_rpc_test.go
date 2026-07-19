@@ -157,6 +157,34 @@ func TestAuthorizedDeviceRegistryRPCs(t *testing.T) {
 	}
 }
 
+func TestCredentialRevocationStopsEstablishedRegistrySession(t *testing.T) {
+	harness := newBrokerHarnessForRole(t, config.AuthModeToken, time.Second, control.DeviceRoleController)
+	connection, _, err := dialBroker(harness, &harness.deviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendHello(t, connection, control.DeviceRoleController)
+	principal := ensureRootPrincipal(t, connection)
+	if err := harness.registry.DisableCredential(
+		context.Background(), brokerTestControllerID, brokerTestDeviceID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	response := writeAndRead(t, connection, principalRequest(
+		t, protocol.MethodListDevices, protocol.ListDevicesParams{Limit: 10}, principal,
+	))
+	if response.Error == nil || response.Error.Code != protocol.ErrorForbidden || len(response.Payload) != 0 {
+		t.Fatalf("revoked session response = %#v", response)
+	}
+	expectConnectionClosed(t, connection)
+	record, err := harness.registry.DescribeDevice(
+		context.Background(), brokerTestControllerID, brokerTestDeviceID,
+	)
+	if err != nil || record.Device.Online {
+		t.Fatalf("revoked device = %#v, error %v", record, err)
+	}
+}
+
 func TestDeviceRegistryRPCRejectsAuthorizationBypass(t *testing.T) {
 	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
 	connection, _, err := dialBroker(harness, nil)

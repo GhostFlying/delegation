@@ -2,7 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,15 +30,13 @@ func TestConfigRoundTrip(t *testing.T) {
 			},
 		},
 	}
-	path := filepath.Join(t.TempDir(), "config.json")
+	path := filepath.Join(t.TempDir(), "private", "config.json")
 
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeProtectedConfigFixture(t, path, data)
 	got, err := Read(path)
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +89,80 @@ func TestBrokerURLRejectsEmbeddedCredentials(t *testing.T) {
 
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() accepted credentials in broker URL")
+	}
+}
+
+func TestBrokerURLRejectsEmptyHostname(t *testing.T) {
+	if _, err := NormalizeBrokerURL("wss://:8787", false); err == nil {
+		t.Fatal("NormalizeBrokerURL accepted an empty hostname")
+	}
+}
+
+func TestBrokerURLValidationMatchesConnectorEndpoint(t *testing.T) {
+	valid := Config{
+		SchemaVersion: CurrentSchemaVersion,
+		Role:          RoleController,
+		ControllerID:  testID,
+		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
+		DeviceName:    "controller",
+		Broker: BrokerConfig{
+			URL:  "wss://broker.example.test",
+			Auth: AuthConfig{Mode: AuthModeNone},
+		},
+	}
+	for _, brokerURL := range []string{
+		"wss://broker.example.test/other",
+		"wss://broker.example.test/%76%31/connect",
+		"wss://broker.example.test?",
+		"wss://broker.example.test/v1/connect#fragment",
+	} {
+		t.Run(brokerURL, func(t *testing.T) {
+			cfg := valid
+			cfg.Broker.URL = brokerURL
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate() accepted a broker URL the connector cannot use")
+			}
+		})
+	}
+	for _, brokerURL := range []string{
+		"wss://broker.example.test",
+		"wss://broker.example.test/",
+		"wss://broker.example.test/v1/connect",
+	} {
+		t.Run("valid "+brokerURL, func(t *testing.T) {
+			cfg := valid
+			cfg.Broker.URL = brokerURL
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := NormalizeBrokerURL(brokerURL, false)
+			if err != nil || got != "wss://broker.example.test/v1/connect" {
+				t.Fatalf("NormalizeBrokerURL() = %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestDeviceNameUsesRuntimeDescriptorRules(t *testing.T) {
+	valid := Config{
+		SchemaVersion: CurrentSchemaVersion,
+		Role:          RoleDevice,
+		ControllerID:  testID,
+		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
+		DeviceName:    "builder",
+		Broker: BrokerConfig{
+			URL:  "wss://broker.example.test",
+			Auth: AuthConfig{Mode: AuthModeNone},
+		},
+	}
+	for _, name := range []string{"line\nbreak", strings.Repeat("x", 129), string([]byte{0xff})} {
+		t.Run(name[:min(len(name), 16)], func(t *testing.T) {
+			cfg := valid
+			cfg.DeviceName = name
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate() accepted a device name rejected by the connector")
+			}
+		})
 	}
 }
 
@@ -207,10 +278,8 @@ func TestReadRejectsUnknownAndTrailingFields(t *testing.T) {
 	}
 	for name, contents := range tests {
 		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.json")
-			if err := os.WriteFile(path, contents, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			path := filepath.Join(t.TempDir(), "private", "config.json")
+			writeProtectedConfigFixture(t, path, contents)
 			if _, err := Read(path); err == nil {
 				t.Fatal("Read() accepted invalid config")
 			}
@@ -255,9 +324,51 @@ func TestSchemaOneRequiresSetupAgain(t *testing.T) {
 	if err == nil {
 		t.Fatal("schema 1 config was accepted")
 	}
-	for _, text := range []string{"move the config aside", "--controller-id", "--listen", "--auth-mode", "--token-file", "--state", "--allow-insecure-nonloopback", "any non-loopback listener"} {
+	for _, text := range []string{
+		"move the config aside",
+		"--controller-id",
+		"--listen",
+		"--auth-mode",
+		"--state",
+		"--allow-insecure-nonloopback",
+		"move the shared broker token aside",
+		"verify the selected new master-token path does not exist",
+		"omit --token-file only after verifying the default token path is absent",
+		"do not reuse the schema version 1 broker token",
+		"issue fresh per-device credentials",
+	} {
 		if !strings.Contains(err.Error(), text) {
 			t.Fatalf("schema 1 validation error = %q, want %q", err, text)
+		}
+	}
+}
+
+func TestSchemaOneTargetRequiresFreshDeviceCredential(t *testing.T) {
+	cfg := Config{
+		SchemaVersion: 1,
+		Role:          RoleDevice,
+		ControllerID:  testID,
+		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
+		DeviceName:    "device",
+		Broker: BrokerConfig{
+			URL: "wss://broker.example.test",
+			Auth: AuthConfig{
+				Mode:      AuthModeToken,
+				TokenFile: filepath.Join(t.TempDir(), "obsolete-target.token"),
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("schema 1 target config was accepted")
+	}
+	for _, text := range []string{
+		"enroll a fresh device-bound credential",
+		"newly transferred credential path",
+		"do not reuse the schema version 1 target token",
+	} {
+		if !strings.Contains(err.Error(), text) {
+			t.Fatalf("schema 1 target validation error = %q, want %q", err, text)
 		}
 	}
 }
@@ -303,14 +414,12 @@ func TestReadSchemaTwoRequiresTransportAwareSetup(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.json")
+			path := filepath.Join(t.TempDir(), "private", "config.json")
 			data, err := json.Marshal(test.cfg)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, data, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writeProtectedConfigFixture(t, path, data)
 			_, err = Read(path)
 			if err == nil {
 				t.Fatal("Read() accepted schema 2 config")
@@ -333,7 +442,7 @@ func TestFutureSchemaRequiresNewerRuntime(t *testing.T) {
 }
 
 func TestReadFutureSchemaWithUnknownFieldsRequiresNewerRuntime(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "future.json")
+	path := filepath.Join(t.TempDir(), "private", "future.json")
 	data, err := json.Marshal(map[string]any{
 		"schemaVersion": CurrentSchemaVersion + 1,
 		"role":          "broker",
@@ -342,11 +451,58 @@ func TestReadFutureSchemaWithUnknownFieldsRequiresNewerRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeProtectedConfigFixture(t, path, data)
 	_, err = Read(path)
 	if err == nil || !strings.Contains(err.Error(), "newer delegation runtime") || strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("future config read error = %v", err)
+	}
+}
+
+func TestReadRejectsOversizedProtectedConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "config.json")
+	writeProtectedConfigFixture(t, path, make([]byte, maximumConfigSize+1))
+	if _, err := Read(path); err == nil {
+		t.Fatal("Read accepted an oversized config")
+	}
+}
+
+func writeProtectedConfigFixture(t *testing.T, path string, data []byte) {
+	t.Helper()
+	directory := filepath.Dir(path)
+	if err := createDirectoriesDurably(directory); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := holdConfigDirectory(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	tempName, temp, err := createConfigTemp(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Remove(tempName)
+	if _, err := temp.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := temp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lease.PublishNoReplace(tempName, filepath.Base(path)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func protectedTestConfig(t *testing.T) Config {
+	t.Helper()
+	return Config{
+		SchemaVersion: CurrentSchemaVersion,
+		Role:          RoleBroker,
+		ControllerID:  testID,
+		Broker: BrokerConfig{
+			Listen:    "127.0.0.1:8787",
+			StateFile: testStateFile(t),
+			Auth:      AuthConfig{Mode: AuthModeNone},
+		},
 	}
 }

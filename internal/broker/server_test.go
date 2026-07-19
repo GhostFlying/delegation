@@ -47,6 +47,32 @@ type faultRegistry struct {
 	authenticateCanceled chan struct{}
 }
 
+type transientOfflineRegistry struct {
+	*store.Store
+	failures atomic.Int32
+	attempts chan uint64
+	failure  error
+}
+
+func (r *transientOfflineRegistry) MarkDeviceOffline(
+	ctx context.Context,
+	controllerID, deviceID string,
+	expectedRevision uint64,
+	observedAt time.Time,
+) (control.Device, error) {
+	r.attempts <- expectedRevision
+	for {
+		remaining := r.failures.Load()
+		if remaining == 0 {
+			break
+		}
+		if r.failures.CompareAndSwap(remaining, remaining-1) {
+			return control.Device{}, r.failure
+		}
+	}
+	return r.Store.MarkDeviceOffline(ctx, controllerID, deviceID, expectedRevision, observedAt)
+}
+
 func (f *faultRegistry) AuthenticateCredential(
 	ctx context.Context,
 	mac store.CredentialMAC,
@@ -128,7 +154,7 @@ func TestTokenConnectionHeartbeatUnknownMethodsAndDisconnect(t *testing.T) {
 		t.Fatalf("heartbeat response error = %#v", heartbeatResponse.Error)
 	}
 	heartbeatResult := decodeResult[protocol.HeartbeatResult](t, heartbeatResponse)
-	if heartbeatResult.Revision != 2 || heartbeatResult.ServerTime != 2 {
+	if heartbeatResult.Revision != 1 || heartbeatResult.ServerTime != 2 {
 		t.Fatalf("heartbeat result = %#v", heartbeatResult)
 	}
 	unknown := writeAndRead(t, connection, request(t, "future.request", struct{}{}))
@@ -138,7 +164,7 @@ func TestTokenConnectionHeartbeatUnknownMethodsAndDisconnect(t *testing.T) {
 	if err := connection.Close(websocket.StatusNormalClosure, "done"); err != nil {
 		t.Fatal(err)
 	}
-	waitForDevice(t, harness.registry, false, 3)
+	waitForDevice(t, harness.registry, false, 2)
 }
 
 func TestTokenAuthenticationAndCredentialRoleAreEnforced(t *testing.T) {
@@ -176,6 +202,134 @@ func TestTokenAuthenticationAndCredentialRoleAreEnforced(t *testing.T) {
 	}
 }
 
+func TestPendingHelloAdmissionIsBoundedAndRecovers(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		authMode    config.AuthMode
+		globalLimit int
+		deviceLimit int
+	}{
+		{name: "global none-auth limit", authMode: config.AuthModeNone, globalLimit: 1, deviceLimit: 2},
+		{name: "per-device token limit", authMode: config.AuthModeToken, globalLimit: 2, deviceLimit: 1},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			harness := newBrokerHarness(t, testCase.authMode, time.Second)
+			harness.server.mu.Lock()
+			harness.server.helloLimit = testCase.globalLimit
+			harness.server.deviceHelloLimit = testCase.deviceLimit
+			harness.server.mu.Unlock()
+			var token *tokenfile.Token
+			if testCase.authMode == config.AuthModeToken {
+				token = &harness.deviceToken
+			}
+			first, _, err := dialBroker(harness, token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, response, err := dialBroker(harness, token)
+			if second != nil {
+				second.CloseNow()
+			}
+			if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("saturated dial response = %#v, error %v", response, err)
+			}
+			response.Body.Close()
+			first.CloseNow()
+
+			deadline := time.Now().Add(time.Second)
+			for {
+				recovered, response, err := dialBroker(harness, token)
+				if err == nil {
+					recovered.CloseNow()
+					break
+				}
+				if response != nil {
+					response.Body.Close()
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("pending hello slot did not recover: %v", err)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
+
+func TestConnectionIDFailureDoesNotRegisterDevice(t *testing.T) {
+	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	failure := errors.New("connection ID generator failed")
+	harness.server.newID = func() (string, error) { return "", failure }
+	connection, _, err := dialBroker(harness, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := writeAndRead(t, connection, helloRequest(t, control.DeviceRoleWorker))
+	if response.Error == nil || response.Error.Code != protocol.ErrorInternal {
+		t.Fatalf("connection ID failure response = %#v", response)
+	}
+	expectReported(t, harness.reported, failure)
+	if _, err := harness.registry.DescribeDevice(
+		context.Background(), brokerTestControllerID, brokerTestDeviceID,
+	); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("connection ID failure registered a device: %v", err)
+	}
+}
+
+func TestOfflineRetryCannotReleaseReplacementLease(t *testing.T) {
+	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	failure := errors.New("transient offline failure")
+	retrying := &transientOfflineRegistry{
+		Store: harness.registry, attempts: make(chan uint64, 4), failure: failure,
+	}
+	retrying.failures.Store(1)
+	harness.server.registry = retrying
+	harness.server.offlineRetryInterval = 500 * time.Millisecond
+
+	first, _, err := dialBroker(harness, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := sendHello(t, first, control.DeviceRoleWorker); result.Revision != 1 {
+		t.Fatalf("first hello = %#v", result)
+	}
+	first.CloseNow()
+	select {
+	case revision := <-retrying.attempts:
+		if revision != 1 {
+			t.Fatalf("initial offline revision = %d", revision)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("initial offline transition did not run")
+	}
+	expectReported(t, harness.reported, failure)
+
+	second, _, err := dialBroker(harness, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := sendHello(t, second, control.DeviceRoleWorker); result.Revision != 2 {
+		t.Fatalf("replacement hello = %#v", result)
+	}
+	select {
+	case revision := <-retrying.attempts:
+		if revision != 1 {
+			t.Fatalf("retried offline revision = %d", revision)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("offline transition was not retried")
+	}
+	record, err := harness.registry.DescribeDevice(
+		context.Background(), brokerTestControllerID, brokerTestDeviceID,
+	)
+	if err != nil || !record.Device.Online || record.Device.Revision != 2 {
+		t.Fatalf("replacement after delayed retry = %#v, error %v", record, err)
+	}
+	if err := second.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatal(err)
+	}
+	waitForDevice(t, harness.registry, false, 3)
+}
+
 func TestDuplicateConnectionCannotOfflineReplacement(t *testing.T) {
 	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
 	first, _, err := dialBroker(harness, nil)
@@ -198,19 +352,19 @@ func TestDuplicateConnectionCannotOfflineReplacement(t *testing.T) {
 		t.Fatal("replaced connection remained readable")
 	}
 	heartbeat := writeAndRead(t, second, request(t, protocol.MethodHeartbeat, protocol.Heartbeat{}))
-	if result := decodeResult[protocol.HeartbeatResult](t, heartbeat); result.Revision != 3 {
+	if result := decodeResult[protocol.HeartbeatResult](t, heartbeat); result.Revision != 2 {
 		t.Fatalf("replacement heartbeat = %#v", result)
 	}
 	record, err := harness.registry.DescribeDevice(
 		context.Background(), brokerTestControllerID, brokerTestDeviceID,
 	)
-	if err != nil || !record.Device.Online || record.Device.Revision != 3 {
+	if err != nil || !record.Device.Online || record.Device.Revision != 2 {
 		t.Fatalf("replacement device = %#v, error %v", record, err)
 	}
 	if err := second.Close(websocket.StatusNormalClosure, "done"); err != nil {
 		t.Fatal(err)
 	}
-	waitForDevice(t, harness.registry, false, 4)
+	waitForDevice(t, harness.registry, false, 3)
 }
 
 func TestActivationNeverReplacesNewerLease(t *testing.T) {
@@ -480,6 +634,22 @@ func TestUnexpectedRegistryFailuresAreUnavailableAndReported(t *testing.T) {
 		expectReported(t, harness.reported, failure)
 	})
 
+	t.Run("established session authentication", func(t *testing.T) {
+		harness := newBrokerHarness(t, config.AuthModeToken, time.Second)
+		connection, _, err := dialBroker(harness, &harness.deviceToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sendHello(t, connection, control.DeviceRoleWorker)
+		failure := errors.New("session authentication database failed")
+		harness.server.registry = &faultRegistry{Store: harness.registry, authenticateErr: failure}
+		response := writeAndRead(t, connection, request(t, protocol.MethodHeartbeat, protocol.Heartbeat{}))
+		if response.Error == nil || response.Error.Code != protocol.ErrorUnavailable {
+			t.Fatalf("session authentication failure response = %#v", response)
+		}
+		expectReported(t, harness.reported, failure)
+	})
+
 	t.Run("registration", func(t *testing.T) {
 		harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
 		failure := errors.New("registration database failed")
@@ -665,7 +835,7 @@ func hello(role control.DeviceRole) protocol.Hello {
 		Role:           role,
 		OS:             "linux",
 		Arch:           "amd64",
-		RuntimeVersion: "0.1.0-alpha.0",
+		RuntimeVersion: "0.1.0-alpha.0.m1",
 		Features:       []string{protocol.FeatureDeviceRegistry},
 	}
 }

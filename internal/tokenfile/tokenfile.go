@@ -10,6 +10,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/GhostFlying/delegation/internal/securefs"
 )
 
 const (
@@ -81,12 +83,14 @@ func WriteNew(path string, token Token) (bool, error) {
 	if err := createDirectoriesDurably(filepath.Dir(path)); err != nil {
 		return false, fmt.Errorf("create token directory: %w", err)
 	}
-	if err := validateTokenDirectory(filepath.Dir(path)); err != nil {
+	directoryLease, err := holdTokenDirectory(filepath.Dir(path))
+	if err != nil {
 		return false, err
 	}
+	defer directoryLease.Close()
 	encoded := Encode(token) + "\n"
 
-	tempPath, file, err := createSecureTemp(filepath.Dir(path))
+	tempName, file, err := createSecureTemp(directoryLease)
 	if err != nil {
 		return false, err
 	}
@@ -95,7 +99,7 @@ func WriteNew(path string, token Token) (bool, error) {
 		if tempInstalled {
 			return nil
 		}
-		if err := os.Remove(tempPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := directoryLease.Remove(tempName); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove temporary token file: %w", err)
 		}
 		return nil
@@ -112,15 +116,21 @@ func WriteNew(path string, token Token) (bool, error) {
 	if err := file.Close(); err != nil {
 		return false, errors.Join(fmt.Errorf("close temporary token file: %w", err), cleanupTemp())
 	}
-	committed, err := installTokenNoReplace(tempPath, path)
+	if err := directoryLease.VerifyPath(); err != nil {
+		return false, errors.Join(fmt.Errorf("verify token directory before install: %w", err), cleanupTemp())
+	}
+	committed, err := directoryLease.PublishNoReplace(tempName, filepath.Base(path))
 	if committed && err == nil {
 		tempInstalled = true
 	}
 	if err != nil {
 		return committed, errors.Join(fmt.Errorf("install token file: %w", err), cleanupTemp())
 	}
-	if err := syncTokenDirectory(filepath.Dir(path)); err != nil {
+	if err := syncPublishedToken(directoryLease); err != nil {
 		return true, fmt.Errorf("token file was created but directory sync failed: %w", err)
+	}
+	if err := directoryLease.VerifyPath(); err != nil {
+		return true, fmt.Errorf("token file was created but directory path changed: %w", err)
 	}
 	return true, nil
 }
@@ -133,34 +143,29 @@ func Validate(path string) error {
 
 // Read validates and returns token material from a protected token file.
 func Read(path string) (Token, error) {
-	token, file, _, err := openAndRead(path)
+	if !filepath.IsAbs(path) {
+		return Token{}, errors.New("token file path must be absolute")
+	}
+	directory, err := holdTokenDirectory(filepath.Dir(path))
 	if err != nil {
 		return Token{}, err
 	}
-	if err := file.Close(); err != nil {
-		return Token{}, fmt.Errorf("close token file: %w", err)
-	}
-	return token, nil
-}
-
-func openAndRead(path string) (Token, *os.File, os.FileInfo, error) {
-	if !filepath.IsAbs(path) {
-		return Token{}, nil, nil, errors.New("token file path must be absolute")
-	}
-	info, err := os.Lstat(path)
+	defer directory.Close()
+	name := filepath.Base(path)
+	info, err := directory.Lstat(name)
 	if err != nil {
-		return Token{}, nil, nil, fmt.Errorf("inspect token file: %w", err)
+		return Token{}, fmt.Errorf("inspect token file: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return Token{}, nil, nil, errors.New("token file must be a regular file")
+		return Token{}, errors.New("token file must be a regular file")
 	}
-	file, err := openSecureRead(path)
+	file, err := openSecureRead(directory, name)
 	if err != nil {
-		return Token{}, nil, nil, fmt.Errorf("open token file: %w", err)
+		return Token{}, fmt.Errorf("open token file: %w", err)
 	}
-	fail := func(err error) (Token, *os.File, os.FileInfo, error) {
+	fail := func(err error) (Token, error) {
 		_ = file.Close()
-		return Token{}, nil, nil, err
+		return Token{}, err
 	}
 	openedInfo, err := file.Stat()
 	if err != nil {
@@ -170,6 +175,9 @@ func openAndRead(path string) (Token, *os.File, os.FileInfo, error) {
 		return fail(errors.New("token file changed while it was being opened"))
 	}
 	if err := validateFilePermissions(file, openedInfo); err != nil {
+		return fail(err)
+	}
+	if err := directory.VerifyPath(); err != nil {
 		return fail(err)
 	}
 
@@ -185,29 +193,35 @@ func openAndRead(path string) (Token, *os.File, os.FileInfo, error) {
 	if err != nil {
 		return fail(errors.New("token file must contain one 256-bit base64url token"))
 	}
-	return token, file, openedInfo, nil
+	if err := file.Close(); err != nil {
+		return Token{}, fmt.Errorf("close token file: %w", err)
+	}
+	return token, nil
 }
 
-func createSecureTemp(directory string) (string, *os.File, error) {
+func createSecureTemp(directory *securefs.Root) (string, *os.File, error) {
 	for range 100 {
 		random := make([]byte, 16)
 		if _, err := rand.Read(random); err != nil {
 			return "", nil, fmt.Errorf("generate temporary token name: %w", err)
 		}
-		path := filepath.Join(directory, ".token-"+hex.EncodeToString(random)+".tmp")
-		file, err := openSecureNew(path)
+		name := ".token-" + hex.EncodeToString(random) + ".tmp"
+		file, err := openSecureNew(directory, name)
 		if errors.Is(err, os.ErrExist) {
 			continue
 		}
 		if err != nil {
 			return "", nil, fmt.Errorf("create temporary token file: %w", err)
 		}
-		return path, file, nil
+		return name, file, nil
 	}
 	return "", nil, errors.New("create temporary token file: exhausted name attempts")
 }
 
 var syncTokenDirectory = syncParentDirectory
+var syncPublishedToken = func(root *securefs.Root) error {
+	return root.Sync()
+}
 
 func createDirectoriesDurably(path string) error {
 	var missing []string
@@ -230,14 +244,20 @@ func createDirectoriesDurably(path string) error {
 		}
 		current = parent
 	}
+	if err := validateTokenDirectoryLocation(current); err != nil {
+		return fmt.Errorf("validate existing token directory location %s: %w", current, err)
+	}
 	if err := syncTokenDirectory(filepath.Dir(current)); err != nil {
 		return fmt.Errorf("sync parent of existing directory %s: %w", current, err)
 	}
 
 	for i := len(missing) - 1; i >= 0; i-- {
 		directory := missing[i]
-		if err := os.Mkdir(directory, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		if err := createTokenDirectory(directory); err != nil && !errors.Is(err, os.ErrExist) {
 			return err
+		}
+		if err := validateTokenDirectoryLocation(directory); err != nil {
+			return fmt.Errorf("validate new token directory location %s: %w", directory, err)
 		}
 		if err := syncTokenDirectory(filepath.Dir(directory)); err != nil {
 			return fmt.Errorf("sync parent of new directory %s: %w", directory, err)

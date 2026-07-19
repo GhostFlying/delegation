@@ -84,6 +84,22 @@ func TestValidateBrokerAuthorityRejectsAliases(t *testing.T) {
 		}
 	})
 
+	t.Run("hard linked master token and instance lease", func(t *testing.T) {
+		root := t.TempDir()
+		masterPath := filepath.Join(root, "master.token")
+		statePath := filepath.Join(root, "broker.sqlite3")
+		if err := os.WriteFile(masterPath, []byte("authority"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(masterPath, statePath+".broker.lock"); err != nil {
+			t.Skipf("creating a hard link is unavailable: %v", err)
+		}
+		err := ValidateBrokerAuthority(filepath.Join(root, "config.json"), statePath, masterPath)
+		if err == nil || !strings.Contains(err.Error(), "broker instance lease path conflicts with broker master token") {
+			t.Fatalf("ValidateBrokerAuthority() error = %v", err)
+		}
+	})
+
 	t.Run("symlinked state sidecars", func(t *testing.T) {
 		root := t.TempDir()
 		statePath := filepath.Join(root, "broker.sqlite3")
@@ -135,6 +151,7 @@ func TestValidateCredentialOutputRejectsAuthorityFiles(t *testing.T) {
 		{name: "rollback journal", path: statePath + "-journal", want: "broker rollback journal"},
 		{name: "WAL", path: statePath + "-wal", want: "broker WAL"},
 		{name: "shared memory", path: statePath + "-shm", want: "broker shared memory"},
+		{name: "instance lease", path: statePath + ".broker.lock", want: "broker instance lease"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := ValidateCredentialOutput(test.path, configPath, statePath, masterPath)
@@ -142,5 +159,24 @@ func TestValidateCredentialOutputRejectsAuthorityFiles(t *testing.T) {
 				t.Fatalf("ValidateCredentialOutput() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestValidateCredentialOutputRejectsHardLinkedBrokerLease(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	statePath := filepath.Join(root, "broker.sqlite3")
+	masterPath := filepath.Join(root, "master.token")
+	leasePath := statePath + ".broker.lock"
+	outputPath := filepath.Join(root, "device.token")
+	if err := os.WriteFile(leasePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(leasePath, outputPath); err != nil {
+		t.Skipf("creating a hard link is unavailable: %v", err)
+	}
+	err := ValidateCredentialOutput(outputPath, configPath, statePath, masterPath)
+	if err == nil || !strings.Contains(err.Error(), "broker instance lease") {
+		t.Fatalf("ValidateCredentialOutput() error = %v", err)
 	}
 }

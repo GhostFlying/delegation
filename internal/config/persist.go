@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/GhostFlying/delegation/internal/securefs"
 )
 
 type CommittedError struct {
@@ -29,27 +31,18 @@ func WriteNew(path string, cfg Config) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("config already exists: %s", path)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect config: %w", err)
+	directoryLease, name, err := prepareWrite(path)
+	if err != nil {
+		return err
 	}
+	defer directoryLease.Close()
 
-	dir := filepath.Dir(path)
-	if err := createDirectoriesDurably(dir); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-	temp, err := os.CreateTemp(dir, ".config-*.tmp")
+	tempName, temp, err := createConfigTemp(directoryLease)
 	if err != nil {
 		return fmt.Errorf("create temporary config: %w", err)
 	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
+	defer directoryLease.Remove(tempName)
 
-	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
-		return fmt.Errorf("protect temporary config: %w", err)
-	}
 	encoder := json.NewEncoder(temp)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(cfg); err != nil {
@@ -63,14 +56,23 @@ func WriteNew(path string, cfg Config) error {
 	if err := temp.Close(); err != nil {
 		return fmt.Errorf("close config: %w", err)
 	}
-	installErr := noReplaceRename(tempPath, path)
+	if err := directoryLease.VerifyPath(); err != nil {
+		return fmt.Errorf("verify config directory before install: %w", err)
+	}
+	committed, installErr := directoryLease.PublishNoReplace(tempName, name)
 	if installErr != nil && !IsCommitted(installErr) {
+		if committed {
+			return &CommittedError{Err: fmt.Errorf("install config: %w", installErr)}
+		}
 		return fmt.Errorf("install config: %w", installErr)
 	}
-	if err := syncInstalledConfig(dir); err != nil {
+	if err := syncPublishedConfig(directoryLease); err != nil {
 		if installErr != nil {
 			err = errors.Join(installErr, err)
 		}
+		return &CommittedError{Err: err}
+	}
+	if err := directoryLease.VerifyPath(); err != nil {
 		return &CommittedError{Err: err}
 	}
 	if installErr != nil {
@@ -79,7 +81,45 @@ func WriteNew(path string, cfg Config) error {
 	return nil
 }
 
+// PrepareWrite creates and validates the config directory and confirms that
+// path is available. Callers that create related credentials before WriteNew
+// use this to reject an unsafe config authority before writing secret state.
+func PrepareWrite(path string) error {
+	directoryLease, _, err := prepareWrite(path)
+	if err != nil {
+		return err
+	}
+	return directoryLease.Close()
+}
+
+func prepareWrite(path string) (*securefs.Root, string, error) {
+	if !filepath.IsAbs(path) {
+		return nil, "", errors.New("config file path must be absolute")
+	}
+
+	dir := filepath.Dir(path)
+	if err := createDirectoriesDurably(dir); err != nil {
+		return nil, "", fmt.Errorf("create config directory: %w", err)
+	}
+	directoryLease, err := holdConfigDirectory(dir)
+	if err != nil {
+		return nil, "", err
+	}
+	name := filepath.Base(path)
+	if _, err := directoryLease.Lstat(name); err == nil {
+		_ = directoryLease.Close()
+		return nil, "", fmt.Errorf("config already exists: %s", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		_ = directoryLease.Close()
+		return nil, "", fmt.Errorf("inspect config: %w", err)
+	}
+	return directoryLease, name, nil
+}
+
 var syncInstalledConfig = syncParentDirectory
+var syncPublishedConfig = func(root *securefs.Root) error {
+	return root.Sync()
+}
 
 func createDirectoriesDurably(path string) error {
 	var missing []string
@@ -102,6 +142,9 @@ func createDirectoriesDurably(path string) error {
 		}
 		current = parent
 	}
+	if err := validateConfigDirectoryLocation(current); err != nil {
+		return fmt.Errorf("validate existing config directory location %s: %w", current, err)
+	}
 	// A prior attempt may have created the existing anchor but failed while
 	// syncing its parent. Syncing it again makes retries close that durability
 	// gap before creating any descendants.
@@ -111,8 +154,11 @@ func createDirectoriesDurably(path string) error {
 
 	for i := len(missing) - 1; i >= 0; i-- {
 		directory := missing[i]
-		if err := os.Mkdir(directory, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		if err := createConfigDirectory(directory); err != nil && !errors.Is(err, os.ErrExist) {
 			return err
+		}
+		if err := validateConfigDirectoryLocation(directory); err != nil {
+			return fmt.Errorf("validate new config directory location %s: %w", directory, err)
 		}
 		if err := syncInstalledConfig(filepath.Dir(directory)); err != nil {
 			return fmt.Errorf("sync parent of new directory %s: %w", directory, err)

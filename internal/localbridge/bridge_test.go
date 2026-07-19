@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"net"
 	"reflect"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
@@ -119,6 +121,24 @@ func TestControllerBridgeForwardsAllowedCalls(t *testing.T) {
 		calls[1].method != protocol.MethodListDevices || calls[1].treeID != bridgeTestTreeID ||
 		calls[1].source == nil || *calls[1].source != source {
 		t.Fatalf("forwarded calls = %#v", calls)
+	}
+}
+
+func TestBridgeProbeRequiresExactServiceIdentity(t *testing.T) {
+	backend := &fakeBackend{result: json.RawMessage(`{}`)}
+	client, stop := startTestBridge(t, control.DeviceRoleController, backend)
+	defer stop()
+	expected := testServiceIdentity(control.DeviceRoleController)
+	if err := Probe(context.Background(), client.endpoint, expected); err != nil {
+		t.Fatal(err)
+	}
+	wrong := expected
+	wrong.ControllerID = "123e4567-e89b-42d3-a456-426614174399"
+	if err := Probe(context.Background(), client.endpoint, wrong); err == nil {
+		t.Fatal("Probe accepted a bridge from another controller")
+	}
+	if calls := backend.snapshot(); len(calls) != 0 {
+		t.Fatalf("identity probes reached broker backend: %#v", calls)
 	}
 }
 
@@ -254,29 +274,41 @@ func TestFrameCodecHandlesPartialWritesAndRejectsOversize(t *testing.T) {
 	}
 }
 
-func TestEndpointIsStableAndDeviceScoped(t *testing.T) {
-	configPath := t.TempDir() + "/config.json"
-	first, err := Endpoint(configPath, bridgeTestDeviceID)
+func TestEndpointIsStableAndControllerDeviceScoped(t *testing.T) {
+	first, err := Endpoint(bridgeTestControllerID, bridgeTestDeviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repeated, err := Endpoint(configPath, bridgeTestDeviceID)
+	repeated, err := Endpoint(bridgeTestControllerID, bridgeTestDeviceID)
 	if err != nil || first != repeated {
 		t.Fatalf("repeated endpoint = %q, error %v; want %q", repeated, err, first)
 	}
-	other, err := Endpoint(configPath, "123e4567-e89b-42d3-a456-426614174398")
-	if err != nil || other == first {
-		t.Fatalf("device-scoped endpoint = %q, error %v", other, err)
+	otherController, err := Endpoint("123e4567-e89b-42d3-a456-426614174398", bridgeTestDeviceID)
+	if err != nil || otherController == first {
+		t.Fatalf("controller-scoped endpoint = %q, error %v", otherController, err)
+	}
+	otherDevice, err := Endpoint(bridgeTestControllerID, "123e4567-e89b-42d3-a456-426614174398")
+	if err != nil || otherDevice == first {
+		t.Fatalf("device-scoped endpoint = %q, error %v", otherDevice, err)
+	}
+}
+
+func TestServerCloseReturnsListenerCleanupFailure(t *testing.T) {
+	want := errors.New("cleanup failed")
+	server := &Server{
+		listener:    &failingListener{closeErr: want},
+		connections: make(map[net.Conn]struct{}),
+		serveDone:   make(chan struct{}),
+	}
+	if err := server.Close(); !errors.Is(err, want) {
+		t.Fatalf("Close() error = %v, want %v", err, want)
 	}
 }
 
 func startTestBridge(t *testing.T, role control.DeviceRole, backend Backend) (*Client, func()) {
 	t.Helper()
-	endpoint, err := Endpoint(t.TempDir()+"/config.json", bridgeTestDeviceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	server, err := Listen(endpoint, role, backend)
+	endpoint := testEndpoint(t)
+	server, err := Listen(endpoint, testServiceIdentity(role), backend)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,6 +342,31 @@ func startTestBridge(t *testing.T, role control.DeviceRole, backend Backend) (*C
 	return client, stop
 }
 
+func testEndpoint(t *testing.T) string {
+	t.Helper()
+	controllerID, err := identity.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deviceID, err := identity.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := Endpoint(controllerID, deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return endpoint
+}
+
+func testServiceIdentity(role control.DeviceRole) ServiceIdentity {
+	return ServiceIdentity{
+		ControllerID: bridgeTestControllerID,
+		DeviceID:     bridgeTestDeviceID,
+		Role:         role,
+	}
+}
+
 func assertRPCCode(t *testing.T, err error, code int) {
 	t.Helper()
 	var rpcError *RPCError
@@ -328,3 +385,16 @@ func (w *oneByteWriter) Write(data []byte) (int, error) {
 	}
 	return w.Buffer.Write(data[:1])
 }
+
+type failingListener struct {
+	closeErr error
+}
+
+func (*failingListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+func (l *failingListener) Close() error            { return l.closeErr }
+func (*failingListener) Addr() net.Addr            { return testAddr("failing") }
+
+type testAddr string
+
+func (testAddr) Network() string  { return "test" }
+func (a testAddr) String() string { return string(a) }

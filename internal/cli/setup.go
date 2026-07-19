@@ -98,13 +98,16 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	if err := ensureConfigAvailable(resolvedConfig); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := store.ValidatePath(resolvedState); err != nil {
-		return writeError(stderr, err)
-	}
 	if err := pathguard.ValidateBrokerAuthority(resolvedConfig, resolvedState, auth.TokenFile); err != nil {
 		return writeError(stderr, err)
 	}
+	if err := store.ValidatePath(resolvedState); err != nil {
+		return writeError(stderr, err)
+	}
 	if err := writeInsecureTransportWarning(stderr, cfg); err != nil {
+		return writeError(stderr, err)
+	}
+	if err := delegationconfig.PrepareWrite(resolvedConfig); err != nil {
 		return writeError(stderr, err)
 	}
 	if auth.Mode == delegationconfig.AuthModeToken {

@@ -8,63 +8,16 @@ import (
 	"os"
 	"unsafe"
 
+	"github.com/GhostFlying/delegation/internal/securefs"
 	"golang.org/x/sys/windows"
 )
 
-func openSecureNew(path string) (*os.File, error) {
-	sid, err := currentUserSID()
-	if err != nil {
-		return nil, err
-	}
-	sidString := sid.String()
-	descriptor, err := windows.SecurityDescriptorFromString("O:" + sidString + "D:P(A;;FA;;;" + sidString + ")")
-	if err != nil {
-		return nil, fmt.Errorf("build token security descriptor: %w", err)
-	}
-	pathPtr, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	attributes := windows.SecurityAttributes{
-		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
-		SecurityDescriptor: descriptor,
-	}
-	handle, err := windows.CreateFile(
-		pathPtr,
-		windows.GENERIC_WRITE,
-		0,
-		&attributes,
-		windows.CREATE_NEW,
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_WRITE_THROUGH,
-		0,
-	)
-	if err != nil {
-		if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-			return nil, os.ErrExist
-		}
-		return nil, err
-	}
-	return os.NewFile(uintptr(handle), path), nil
+func openSecureNew(directory *securefs.Root, name string) (*os.File, error) {
+	return directory.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_SYNC, 0o600)
 }
 
-func openSecureRead(path string) (*os.File, error) {
-	pathPtr, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	handle, err := windows.CreateFile(
-		pathPtr,
-		windows.GENERIC_READ|windows.READ_CONTROL,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return os.NewFile(uintptr(handle), path), nil
+func openSecureRead(directory *securefs.Root, name string) (*os.File, error) {
+	return directory.OpenFile(name, os.O_RDONLY, 0)
 }
 
 func validateFilePermissions(file *os.File, _ os.FileInfo) error {
@@ -90,9 +43,6 @@ func validateFilePermissions(file *os.File, _ os.FileInfo) error {
 	if err != nil {
 		return fmt.Errorf("read token file DACL control: %w", err)
 	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
-		return errors.New("token file DACL must be protected from inheritance")
-	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
 		return fmt.Errorf("read token file DACL: %w", err)
@@ -107,6 +57,9 @@ func validateFilePermissions(file *os.File, _ os.FileInfo) error {
 	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
 		return errors.New("token file DACL must contain one allow entry")
 	}
+	if control&windows.SE_DACL_PROTECTED == 0 && ace.Header.AceFlags&windows.INHERITED_ACE == 0 {
+		return errors.New("token file DACL must be protected or inherited from its validated directory")
+	}
 	sid, err := currentUserSID()
 	if err != nil {
 		return err
@@ -119,8 +72,8 @@ func validateFilePermissions(file *os.File, _ os.FileInfo) error {
 	if err != nil {
 		return fmt.Errorf("read token file owner: %w", err)
 	}
-	if owner == nil || !owner.Equals(sid) {
-		return errors.New("token file must be owned by the current user")
+	if owner == nil || (!owner.Equals(sid) && !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid)) {
+		return errors.New("token file must be owned by the current user or local Administrators")
 	}
 	return nil
 }

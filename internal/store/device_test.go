@@ -46,36 +46,36 @@ func TestAuthenticatedDeviceLeaseAndRevocation(t *testing.T) {
 		t.Fatalf("idempotent heartbeat = %#v, error %v", device, err)
 	}
 	device, err = registry.HeartbeatDevice(ctx, testControllerID, testDeviceID, 2, time.Unix(110, 0))
-	if err != nil || device.Revision != 3 || device.LastSeenAt != 110 {
+	if err != nil || device.Revision != 2 || device.LastSeenAt != 110 {
 		t.Fatalf("new heartbeat = %#v, error %v", device, err)
 	}
 	if _, err := registry.MarkDeviceOffline(
-		ctx, testControllerID, testDeviceID, 2, time.Unix(120, 0),
+		ctx, testControllerID, testDeviceID, 1, time.Unix(120, 0),
 	); !errors.Is(err, ErrStaleRevision) {
 		t.Fatalf("stale disconnect error = %v, want ErrStaleRevision", err)
 	}
-	device, err = registry.MarkDeviceOffline(ctx, testControllerID, testDeviceID, 3, time.Unix(120, 0))
-	if err != nil || device.Online || device.Revision != 4 || device.LastSeenAt != 120 {
+	device, err = registry.MarkDeviceOffline(ctx, testControllerID, testDeviceID, 2, time.Unix(120, 0))
+	if err != nil || device.Online || device.Revision != 3 || device.LastSeenAt != 120 {
 		t.Fatalf("offline device = %#v, error %v", device, err)
 	}
-	device, err = registry.MarkDeviceOffline(ctx, testControllerID, testDeviceID, 4, time.Unix(130, 0))
-	if err != nil || device.Revision != 4 || device.LastSeenAt != 120 {
+	device, err = registry.MarkDeviceOffline(ctx, testControllerID, testDeviceID, 3, time.Unix(130, 0))
+	if err != nil || device.Revision != 3 || device.LastSeenAt != 120 {
 		t.Fatalf("idempotent disconnect = %#v, error %v", device, err)
 	}
 	if _, err := registry.HeartbeatDevice(
-		ctx, testControllerID, testDeviceID, 4, time.Unix(130, 0),
+		ctx, testControllerID, testDeviceID, 3, time.Unix(130, 0),
 	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("offline heartbeat error = %v, want ErrConflict", err)
 	}
 	device, err = registry.RegisterAuthenticatedDevice(ctx, mac, descriptor, time.Unix(115, 0))
-	if err != nil || !device.Online || device.Revision != 5 || device.LastSeenAt != 115 {
+	if err != nil || !device.Online || device.Revision != 4 || device.LastSeenAt != 115 {
 		t.Fatalf("renewed device lease = %#v, error %v", device, err)
 	}
 	if err := registry.DisableCredential(ctx, testControllerID, testDeviceID); err != nil {
 		t.Fatal(err)
 	}
 	device, err = queryDevice(ctx, registry.db, testControllerID, testDeviceID)
-	if err != nil || device.Online || device.Revision != 6 {
+	if err != nil || device.Online || device.Revision != 5 {
 		t.Fatalf("revoked device = %#v, error %v", device, err)
 	}
 	if _, err := registry.AuthenticateCredential(ctx, mac); !errors.Is(err, ErrCredentialDisabled) {
@@ -265,7 +265,7 @@ func deviceDescriptor(controllerID, deviceID string, role control.DeviceRole) co
 		Role:            role,
 		OS:              "linux",
 		Arch:            "amd64",
-		RuntimeVersion:  "0.1.0-alpha.0",
+		RuntimeVersion:  "0.1.0-alpha.0.m1",
 		ProtocolVersion: 1,
 		Features:        []string{"deviceRegistryV1"},
 	}

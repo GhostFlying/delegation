@@ -70,7 +70,7 @@ func loadRootMCPServer(configPath string) (*mcp.Server, error) {
 	if err := pathguard.ValidateConnectorAuthority(configPath, cfg.Broker.Auth.TokenFile); err != nil {
 		return nil, err
 	}
-	endpoint, err := localbridge.Endpoint(configPath, cfg.DeviceID)
+	endpoint, err := localbridge.Endpoint(cfg.ControllerID, cfg.DeviceID)
 	if err != nil {
 		return nil, err
 	}
@@ -78,5 +78,5 @@ func loadRootMCPServer(configPath string) (*mcp.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return rootmcp.NewServer(backend)
+	return rootmcp.NewServer(backend, cfg.ControllerID, cfg.DeviceID)
 }

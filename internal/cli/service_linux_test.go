@@ -6,24 +6,33 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/GhostFlying/delegation/internal/broker"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/userservice"
 )
 
+const serviceTestControllerID = "123e4567-e89b-42d3-a456-426614174720"
+
 func TestServiceInstallActivatesSystemdUnit(t *testing.T) {
 	root := t.TempDir()
 	installNoopSystemctl(t, root)
+	listen := startTestBrokerReadiness(t)
 	configPath := filepath.Join(root, "config.json")
 	configHome := filepath.Join(root, "xdg")
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	var setupOutput bytes.Buffer
 	var setupError bytes.Buffer
-	if code := Run([]string{"setup", "broker", "--config", configPath}, &setupOutput, &setupError); code != 0 {
+	if code := Run([]string{
+		"setup", "broker", "--config", configPath,
+		"--controller-id", serviceTestControllerID, "--listen", listen,
+	}, &setupOutput, &setupError); code != 0 {
 		t.Fatalf("setup code = %d, want 0; stderr = %q", code, setupError.String())
 	}
 	var stdout bytes.Buffer
@@ -50,6 +59,7 @@ func TestServiceInstallActivatesSystemdUnit(t *testing.T) {
 
 func TestServiceInstallActivatesSystemdUnitByDefault(t *testing.T) {
 	root := t.TempDir()
+	listen := startTestBrokerReadiness(t)
 	configPath := filepath.Join(root, "config.json")
 	configHome := filepath.Join(root, "xdg")
 	commandLog := filepath.Join(root, "systemctl.log")
@@ -58,7 +68,14 @@ func TestServiceInstallActivatesSystemdUnitByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	systemctl := filepath.Join(bin, "systemctl")
-	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$DELEGATION_TEST_SYSTEMCTL_LOG\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(systemctl, []byte(`#!/bin/sh
+printf '%s\n' "$*" >>"$DELEGATION_TEST_SYSTEMCTL_LOG"
+case " $* " in
+  *" show "*)
+    printf 'FragmentPath=%s/systemd/user/delegation.service\nDropInPaths=\n' "$XDG_CONFIG_HOME"
+    ;;
+esac
+`), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -66,7 +83,10 @@ func TestServiceInstallActivatesSystemdUnitByDefault(t *testing.T) {
 	t.Setenv("DELEGATION_TEST_SYSTEMCTL_LOG", commandLog)
 	var setupOutput bytes.Buffer
 	var setupError bytes.Buffer
-	if code := Run([]string{"setup", "broker", "--config", configPath}, &setupOutput, &setupError); code != 0 {
+	if code := Run([]string{
+		"setup", "broker", "--config", configPath,
+		"--controller-id", serviceTestControllerID, "--listen", listen,
+	}, &setupOutput, &setupError); code != 0 {
 		t.Fatalf("setup code = %d, stderr = %q", code, setupError.String())
 	}
 	var stdout bytes.Buffer
@@ -88,9 +108,11 @@ func TestServiceInstallActivatesSystemdUnitByDefault(t *testing.T) {
 	}
 	want := strings.Join([]string{
 		"--user --no-ask-password daemon-reload",
+		"--user --no-ask-password show " + userservice.SystemdUnitName + " --property=FragmentPath --property=DropInPaths",
 		"--user --no-ask-password enable --now " + userservice.SystemdUnitName,
 		"--user --no-ask-password is-enabled --quiet " + userservice.SystemdUnitName,
 		"--user --no-ask-password is-active --quiet " + userservice.SystemdUnitName,
+		"--user --no-ask-password show " + userservice.SystemdUnitName + " --property=FragmentPath --property=DropInPaths",
 		"",
 	}, "\n")
 	if string(log) != want {
@@ -189,6 +211,7 @@ func TestServiceInstallReportsForeignConflictAsJSON(t *testing.T) {
 func TestServiceInstallReportsManagedDrift(t *testing.T) {
 	root := t.TempDir()
 	installNoopSystemctl(t, root)
+	listen := startTestBrokerReadiness(t)
 	configHome := filepath.Join(root, "xdg")
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	firstConfig := filepath.Join(root, "first.json")
@@ -196,7 +219,10 @@ func TestServiceInstallReportsManagedDrift(t *testing.T) {
 	for _, configPath := range []string{firstConfig, secondConfig} {
 		var setupOutput bytes.Buffer
 		var setupError bytes.Buffer
-		if code := Run([]string{"setup", "broker", "--config", configPath}, &setupOutput, &setupError); code != 0 {
+		if code := Run([]string{
+			"setup", "broker", "--config", configPath,
+			"--controller-id", serviceTestControllerID, "--listen", listen,
+		}, &setupOutput, &setupError); code != 0 {
 			t.Fatalf("setup %s code = %d, want 0; stderr = %q", configPath, code, setupError.String())
 		}
 	}
@@ -222,12 +248,16 @@ func TestServiceInstallReportsManagedDrift(t *testing.T) {
 func TestServiceInstallReportsCommittedStateWhenOutputFails(t *testing.T) {
 	root := t.TempDir()
 	installNoopSystemctl(t, root)
+	listen := startTestBrokerReadiness(t)
 	configPath := filepath.Join(root, "config.json")
 	configHome := filepath.Join(root, "xdg")
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	var setupOutput bytes.Buffer
 	var setupError bytes.Buffer
-	if code := Run([]string{"setup", "broker", "--config", configPath}, &setupOutput, &setupError); code != 0 {
+	if code := Run([]string{
+		"setup", "broker", "--config", configPath,
+		"--controller-id", serviceTestControllerID, "--listen", listen,
+	}, &setupOutput, &setupError); code != 0 {
 		t.Fatalf("setup code = %d, want 0; stderr = %q", code, setupError.String())
 	}
 	var stderr bytes.Buffer
@@ -254,10 +284,28 @@ func installNoopSystemctl(t *testing.T, root string) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(bin, "systemctl")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte(`#!/bin/sh
+case " $* " in
+  *" show "*)
+    printf 'FragmentPath=%s/systemd/user/delegation.service\nDropInPaths=\n' "$XDG_CONFIG_HOME"
+    ;;
+esac
+exit 0
+`), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func startTestBrokerReadiness(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set(broker.HealthServiceHeader, "broker")
+		writer.Header().Set(broker.HealthControllerHeader, serviceTestControllerID)
+		_, _ = writer.Write([]byte("ok\n"))
+	}))
+	t.Cleanup(server.Close)
+	return strings.TrimPrefix(server.URL, "http://")
 }
 
 func (failingWriter) Write([]byte) (int, error) {

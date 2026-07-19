@@ -3,23 +3,33 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 plugin_root="$repo_root/plugins/delegation"
-tmp=$(mktemp -d)
+if [ "$(uname -s)" = Darwin ]; then
+  tmp=$(mktemp -d /tmp/dp.XXXXXX)
+else
+  tmp=$(mktemp -d)
+fi
+service_pid=
 cleanup() {
+  if [ -n "$service_pid" ]; then
+    kill "$service_pid" 2>/dev/null || true
+    wait "$service_pid" 2>/dev/null || true
+  fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT HUP INT TERM
 go_bin=${GO:-go}
 "$go_bin" -C "$repo_root" build -trimpath -buildvcs=false -o "$tmp/delegation" ./cmd/delegation
 unset DELEGATION_BINARY
+unset DELEGATION_HOME
 
 if DELEGATION_HOME="$tmp/missing" "$plugin_root/scripts/delegation-mcp" mcp root >"$tmp/out" 2>"$tmp/err"; then
   printf '%s\n' 'expected missing runtime launcher to fail' >&2
   exit 1
 fi
-grep -F 'runtime 0.1.0-alpha.0 is not installed' "$tmp/err" >/dev/null
+grep -F 'runtime 0.1.0-alpha.0.m1 is not installed' "$tmp/err" >/dev/null
 
 DELEGATION_BINARY="$tmp/delegation" "$plugin_root/scripts/delegation-mcp" version --json >"$tmp/version"
-grep -F '"version":"0.1.0-alpha.0"' "$tmp/version" >/dev/null
+grep -F '"version":"0.1.0-alpha.0.m1"' "$tmp/version" >/dev/null
 
 cp -R "$plugin_root" "$tmp/plugin"
 mkdir -p "$tmp/payload" "$tmp/fake-bin"
@@ -36,7 +46,7 @@ case "$(uname -m)" in
   arm64|aarch64) arch=arm64 ;;
   *) exit 1 ;;
 esac
-artifact="delegation_0.1.0-alpha.0_${os}_${arch}.tar.gz"
+artifact="delegation_0.1.0-alpha.0.m1_${os}_${arch}.tar.gz"
 if command -v sha256sum >/dev/null 2>&1; then
   checksum=$(sha256sum "$tmp/artifact.tar.gz" | awk '{ print $1 }')
 else
@@ -109,7 +119,7 @@ exit "$link_status"
 EOF
 chmod 0755 "$tmp/fake-bin/link"
 
-expected_url="https://github.com/GhostFlying/delegation/releases/download/v0.1.0-alpha.0/$artifact"
+expected_url="https://github.com/GhostFlying/delegation/releases/download/v0.1.0-alpha.0.m1/$artifact"
 download_log="$tmp/downloads.log"
 DELEGATION_TEST_EXPECTED_URL=$expected_url
 DELEGATION_TEST_DOWNLOAD_LOG=$download_log
@@ -149,20 +159,42 @@ grep -F 'downloaded runtime reports version' "$tmp/version-err" >/dev/null
 test "$(wc -l <"$download_log")" -eq 1
 DELEGATION_TEST_EXPECTED_URL=$expected_url
 
-mkdir -p "$tmp/home/.locks/install-0.1.0-alpha.0-$os-$arch"
+unsafe_home="$tmp/unsafe-home"
+mkdir -p "$unsafe_home"
+chmod 0755 "$unsafe_home"
 : >"$download_log"
-installed=$(PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$tmp/home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime")
-test "$installed" = "$tmp/home/bin/0.1.0-alpha.0/$os-$arch/delegation"
+if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$unsafe_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime" >"$tmp/unsafe-home-out" 2>"$tmp/unsafe-home-err"; then
+  printf '%s\n' 'expected an unsafe existing delegation home to fail' >&2
+  exit 1
+fi
+grep -F 'mode 0700; refusing to modify existing permissions' "$tmp/unsafe-home-err" >/dev/null
+case "$os" in
+  linux) test "$(stat -c '%a' "$unsafe_home")" = 755 ;;
+  darwin) test "$(stat -f '%Lp' "$unsafe_home")" = 755 ;;
+esac
+test ! -s "$download_log"
+test ! -e "$unsafe_home/bin"
+
+runtime_user_home="$tmp/runtime-user-home"
+runtime_home="$runtime_user_home/.delegation"
+umask 022
+mkdir -p "$runtime_user_home"
+: >"$download_log"
+installed=$(PATH="$tmp/fake-bin:$PATH" HOME="$runtime_user_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime")
+test "$installed" = "$runtime_home/bin/0.1.0-alpha.0.m1/$os-$arch/delegation"
 test -x "$installed"
 test "$(wc -l <"$download_log")" -eq 1
+case "$os" in
+  linux) test "$(stat -c '%a' "$runtime_home")" = 700 ;;
+  darwin) test "$(stat -f '%Lp' "$runtime_home")" = 700 ;;
+esac
 "$installed" version --json >"$tmp/installed-version"
-grep -F '"version":"0.1.0-alpha.0"' "$tmp/installed-version" >/dev/null
-DELEGATION_HOME="$tmp/home" "$tmp/plugin/scripts/delegation-mcp" version --json >"$tmp/launcher-installed-version"
-grep -F '"version":"0.1.0-alpha.0"' "$tmp/launcher-installed-version" >/dev/null
+grep -F '"version":"0.1.0-alpha.0.m1"' "$tmp/installed-version" >/dev/null
+HOME="$runtime_user_home" "$tmp/plugin/scripts/delegation-mcp" version --json >"$tmp/launcher-installed-version"
+grep -F '"version":"0.1.0-alpha.0.m1"' "$tmp/launcher-installed-version" >/dev/null
 launcher="$tmp/plugin/scripts/delegation-mcp"
-config="$tmp/controller.json"
-DELEGATION_HOME="$tmp/home" "$launcher" setup controller \
-  --config "$config" \
+config="$runtime_home/config.json"
+HOME="$runtime_user_home" "$launcher" setup controller \
   --controller-id 11111111-1111-4111-8111-111111111111 \
   --device-id 22222222-2222-4222-8222-222222222222 \
   --device-name acceptance-device \
@@ -170,14 +202,15 @@ DELEGATION_HOME="$tmp/home" "$launcher" setup controller \
   --auth-mode none \
   --json >"$tmp/launcher-setup"
 grep -F '"role":"controller"' "$tmp/launcher-setup" >/dev/null
-DELEGATION_HOME="$tmp/home" "$launcher" doctor --config "$config" --json >"$tmp/launcher-doctor"
+test -f "$config"
+HOME="$runtime_user_home" "$launcher" doctor --json >"$tmp/launcher-doctor"
 grep -F '"ok":true' "$tmp/launcher-doctor" >/dev/null
 {
   printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"launcher-test","version":"1"}}}'
   printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
   printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
   sleep 1
-} | DELEGATION_CONFIG="$config" DELEGATION_HOME="$tmp/home" "$launcher" mcp root >"$tmp/launcher-mcp"
+} | DELEGATION_CONFIG="$config" HOME="$runtime_user_home" "$launcher" mcp root >"$tmp/launcher-mcp"
 grep -F '"name":"list_devices"' "$tmp/launcher-mcp" >/dev/null
 grep -F '"name":"describe_device"' "$tmp/launcher-mcp" >/dev/null
 if [ "$os" = linux ]; then
@@ -185,22 +218,35 @@ if [ "$os" = linux ]; then
 #!/bin/sh
 set -eu
 printf '%s\n' "$*" >>"$DELEGATION_TEST_SYSTEMCTL_LOG"
+case " $* " in
+  *" show "*)
+    printf 'FragmentPath=%s/systemd/user/delegation.service\nDropInPaths=\n' "$XDG_CONFIG_HOME"
+    ;;
+esac
 EOF
   chmod 0755 "$tmp/fake-bin/systemctl"
-  service_artifact="$tmp/service-home/xdg/systemd/user/delegation.service"
+  service_config_home="$tmp/service-config"
+  service_artifact="$service_config_home/systemd/user/delegation.service"
   service_log="$tmp/systemctl.log"
-  mkdir -p "$tmp/service-home"
-  PATH="$tmp/fake-bin:$PATH" HOME="$tmp/service-home" XDG_CONFIG_HOME="$tmp/service-home/xdg" \
-    DELEGATION_HOME="$tmp/home" DELEGATION_TEST_SYSTEMCTL_LOG="$service_log" \
+  mkdir -p "$service_config_home"
+  HOME="$runtime_user_home" \
+    "$launcher" service run --config "$config" \
+    >"$tmp/launcher-service-run-out" 2>"$tmp/launcher-service-run-err" &
+  service_pid=$!
+  PATH="$tmp/fake-bin:$PATH" HOME="$runtime_user_home" XDG_CONFIG_HOME="$service_config_home" \
+    DELEGATION_TEST_SYSTEMCTL_LOG="$service_log" \
     "$launcher" service install --config "$config" --json >"$tmp/launcher-service"
   grep -F '"state":"active"' "$tmp/launcher-service" >/dev/null
   grep -F '"kind":"systemdUser"' "$tmp/launcher-service" >/dev/null
   grep -F "\"artifact\":\"$service_artifact\"" "$tmp/launcher-service" >/dev/null
   test -f "$service_artifact"
-  test "$(wc -l <"$service_log")" -eq 4
+  test "$(wc -l <"$service_log")" -eq 6
+  kill "$service_pid"
+  wait "$service_pid"
+  service_pid=
 fi
 printf '%s\n' unexpected >"$(dirname "$installed")/unexpected.txt"
-if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$tmp/home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime" >"$tmp/existing-extra-out" 2>"$tmp/existing-extra-err"; then
+if PATH="$tmp/fake-bin:$PATH" HOME="$runtime_user_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime" >"$tmp/existing-extra-out" 2>"$tmp/existing-extra-err"; then
   printf '%s\n' 'expected an installed directory with extra files to fail' >&2
   exit 1
 fi
@@ -208,7 +254,7 @@ grep -F 'installed runtime directory contains unexpected files' "$tmp/existing-e
 rm "$(dirname "$installed")/unexpected.txt"
 
 race_home="$tmp/race-home"
-race_target="$race_home/bin/0.1.0-alpha.0/$os-$arch"
+race_target="$race_home/bin/0.1.0-alpha.0.m1/$os-$arch"
 installed=$(PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$race_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" DELEGATION_TEST_CREATE_TARGET="$race_target" "$tmp/plugin/scripts/install-runtime")
 test "$installed" = "$race_target/delegation"
 test -x "$installed"
@@ -222,7 +268,7 @@ PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$concurrent_home" DELEGATION_TEST_AR
 second_pid=$!
 wait "$first_pid"
 wait "$second_pid"
-concurrent_binary="$concurrent_home/bin/0.1.0-alpha.0/$os-$arch/delegation"
+concurrent_binary="$concurrent_home/bin/0.1.0-alpha.0.m1/$os-$arch/delegation"
 test "$(sed -n '1p' "$tmp/concurrent-first")" = "$concurrent_binary"
 test "$(sed -n '1p' "$tmp/concurrent-second")" = "$concurrent_binary"
 test -x "$concurrent_binary"
@@ -236,7 +282,7 @@ if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$directory_race_home" DELEGATION_
   printf '%s\n' 'expected a directory at the publication path to fail' >&2
   exit 1
 fi
-directory_race_binary="$directory_race_home/bin/0.1.0-alpha.0/$os-$arch/delegation"
+directory_race_binary="$directory_race_home/bin/0.1.0-alpha.0.m1/$os-$arch/delegation"
 test -d "$directory_race_binary"
 grep -F 'failed to publish runtime without replacing another file' "$tmp/directory-race-err" >/dev/null
 
@@ -246,7 +292,7 @@ if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$symlink_race_home" DELEGATION_TE
   printf '%s\n' 'expected a symlink at the publication path to fail' >&2
   exit 1
 fi
-symlink_race_binary="$symlink_race_home/bin/0.1.0-alpha.0/$os-$arch/delegation"
+symlink_race_binary="$symlink_race_home/bin/0.1.0-alpha.0.m1/$os-$arch/delegation"
 test -L "$symlink_race_binary"
 test -z "$(LC_ALL=C ls -A1 "$symlink_race_outside")"
 grep -F 'failed to publish runtime without replacing another file' "$tmp/symlink-race-err" >/dev/null
@@ -268,4 +314,4 @@ if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$tmp/malicious-home" DELEGATION_T
 fi
 grep -F 'must contain one regular file' "$tmp/malicious-err" >/dev/null
 test ! -x "$tmp/outside"
-test ! -e "$tmp/malicious-home/bin/0.1.0-alpha.0/$os-$arch"
+test ! -e "$tmp/malicious-home/bin/0.1.0-alpha.0.m1/$os-$arch"

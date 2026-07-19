@@ -1,6 +1,6 @@
 ---
 name: cross-device-delegation
-description: Delegate a bounded Codex subtask to an appropriate managed device and collaborate with the resulting remote worker. Use for platform-specific builds or validation, access to device-local tools or hardware, or any task whose required operating system or environment differs from the root task.
+description: Delegate a bounded Codex subtask to an appropriate managed device and collaborate with the resulting remote worker. Use for platform-specific builds or validation, advertised runtime features, or any task whose required operating system or environment differs from the root task.
 ---
 
 # Cross-device Delegation
@@ -11,8 +11,11 @@ different registered environment; do not fork the root conversation onto the tar
 ## Select A Device
 
 Delegation MCP instructions contain no device roster. Call `list_devices` for current availability,
-then `describe_device` when toolchains, hardware, tags, or capacity affect the choice. Match the
-task's explicit platform and environment requirements before preferring proximity or idle capacity.
+then `describe_device` for the full advertised feature list and current presence details. Match the
+task against reported OS, architecture, runtime and protocol versions, features, and online state.
+M1 does not report arbitrary toolchains, hardware, tags, or capacity; do not infer them from a
+device name. Ask the user for missing placement facts or validate them explicitly once worker
+execution exists.
 
 If Delegation tools are unavailable, use `$delegation-setup`; do not replace cross-device
 delegation with an unrelated remote environment without telling the user.

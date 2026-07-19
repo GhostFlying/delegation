@@ -23,9 +23,13 @@ const (
 )
 
 type brokerListenFunc func(context.Context, string, string) (net.Listener, error)
+type brokerLeaseFunc func(string) (io.Closer, error)
+type brokerStoreOpenFunc func(context.Context, string) (*store.Store, error)
 
 type brokerRuntimeOptions struct {
 	listen      brokerListenFunc
+	lease       brokerLeaseFunc
+	openStore   brokerStoreOpenFunc
 	prepare     func(context.Context, *broker.Server) (store.PresenceTransition, error)
 	reportError func(error)
 }
@@ -35,6 +39,7 @@ type brokerRuntimeResources struct {
 	httpServer *http.Server
 	broker     *broker.Server
 	registry   *store.Store
+	lease      io.Closer
 	serveDone  <-chan error
 }
 
@@ -74,7 +79,24 @@ func runBrokerService(
 	if ctx.Err() != nil {
 		return nil
 	}
-	resources.registry, err = store.Open(ctx, cfg.Broker.StateFile)
+	acquireLease := options.lease
+	if acquireLease == nil {
+		acquireLease = func(path string) (io.Closer, error) {
+			return store.AcquireBrokerLease(path)
+		}
+	}
+	resources.lease, err = acquireLease(cfg.Broker.StateFile)
+	if err != nil {
+		return fmt.Errorf("acquire broker instance lease: %w", err)
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	openStore := options.openStore
+	if openStore == nil {
+		openStore = store.Open
+	}
+	resources.registry, err = openStore(ctx, cfg.Broker.StateFile)
 	if err != nil {
 		if cleanContextCancellation(ctx, err) {
 			return nil
@@ -195,6 +217,11 @@ func (r *brokerRuntimeResources) close() error {
 	if r.registry != nil {
 		if err := r.registry.Close(); err != nil {
 			failures = append(failures, fmt.Errorf("close broker state: %w", err))
+		}
+	}
+	if r.lease != nil {
+		if err := r.lease.Close(); err != nil {
+			failures = append(failures, fmt.Errorf("release broker instance lease: %w", err))
 		}
 	}
 	return errors.Join(failures...)

@@ -46,9 +46,7 @@ func TestOpenSecureReadDoesNotFollowSymlink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	file, err := openSecureRead(link)
-	if err == nil {
-		file.Close()
-		t.Fatal("openSecureRead() followed a symlink")
+	if _, err := Read(link); err == nil {
+		t.Fatal("Read() followed a symlink")
 	}
 }

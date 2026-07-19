@@ -24,12 +24,12 @@ type unixListener struct {
 	closeErr  error
 }
 
-func normalizeConfigPath(path string) string {
-	return path
-}
-
-func platformEndpoint(_ string, name string) (string, error) {
-	endpoint := filepath.Join("/tmp", fmt.Sprintf("delegation-%d", os.Geteuid()), name+".sock")
+func platformEndpoint(name string) (string, error) {
+	home, err := canonicalUserHome()
+	if err != nil {
+		return "", err
+	}
+	endpoint := filepath.Join(home, ".delegation", "run", name+".sock")
 	if len([]byte(endpoint)) > maximumUnixSocketPath {
 		return "", fmt.Errorf("local bridge socket path exceeds %d bytes", maximumUnixSocketPath)
 	}
@@ -58,6 +58,8 @@ func listen(endpoint string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
+	rawListener := listener.(*net.UnixListener)
+	rawListener.SetUnlinkOnClose(false)
 	cleanup := func() {
 		_ = listener.Close()
 		_ = os.Remove(endpoint)
@@ -89,14 +91,72 @@ func dial(ctx context.Context, endpoint string) (net.Conn, error) {
 }
 
 func prepareSocketDirectory(path string) error {
-	err := os.Mkdir(path, 0o700)
-	if err != nil && !errors.Is(err, os.ErrExist) {
-		return fmt.Errorf("create local bridge directory: %w", err)
+	home, err := canonicalUserHome()
+	if err != nil {
+		return err
 	}
-	return validateSocketDirectory(path)
+	if filepath.Clean(path) != filepath.Join(home, ".delegation", "run") {
+		return errors.New("local bridge directory is outside the current user runtime namespace")
+	}
+	if err := validateUserHome(home); err != nil {
+		return err
+	}
+	for _, directory := range []string{filepath.Join(home, ".delegation"), path} {
+		err := os.Mkdir(directory, 0o700)
+		if err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("create local bridge directory: %w", err)
+		}
+		if err := validatePrivateDirectory(directory); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateSocketDirectory(path string) error {
+	home, err := canonicalUserHome()
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(path) != filepath.Join(home, ".delegation", "run") {
+		return errors.New("local bridge directory is outside the current user runtime namespace")
+	}
+	if err := validateUserHome(home); err != nil {
+		return err
+	}
+	if err := validatePrivateDirectory(filepath.Join(home, ".delegation")); err != nil {
+		return err
+	}
+	return validatePrivateDirectory(path)
+}
+
+func canonicalUserHome() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve local bridge user home: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return "", fmt.Errorf("resolve local bridge user home aliases: %w", err)
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func validateUserHome(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect local bridge user home: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 {
+		return errors.New("local bridge user home must be a non-symlink directory not writable by other users")
+	}
+	if !ownedByCurrentUser(info) {
+		return errors.New("local bridge user home must be owned by the current user")
+	}
+	return nil
+}
+
+func validatePrivateDirectory(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("inspect local bridge directory: %w", err)

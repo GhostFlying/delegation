@@ -260,11 +260,8 @@ func (d DeviceDescriptor) Validate() error {
 		{name: "runtimeVersion", value: d.RuntimeVersion, limit: 64},
 	}
 	for _, field := range fields {
-		if strings.TrimSpace(field.value) == "" || len(field.value) > field.limit {
-			return fmt.Errorf("%s must contain 1 through %d bytes", field.name, field.limit)
-		}
-		if !utf8.ValidString(field.value) || strings.IndexFunc(field.value, unicode.IsControl) >= 0 {
-			return fmt.Errorf("%s must be valid text without control characters", field.name)
+		if err := validateBoundedText(field.name, field.value, field.limit); err != nil {
+			return err
 		}
 	}
 	if d.ProtocolVersion < 1 {
@@ -282,6 +279,21 @@ func (d DeviceDescriptor) Validate() error {
 			return errors.New("features must be sorted and unique")
 		}
 		previous = feature
+	}
+	return nil
+}
+
+// ValidateDeviceName applies the same device-name rules used by wire descriptors.
+func ValidateDeviceName(name string) error {
+	return validateBoundedText("name", name, 128)
+}
+
+func validateBoundedText(name, value string, limit int) error {
+	if strings.TrimSpace(value) == "" || len(value) > limit {
+		return fmt.Errorf("%s must contain 1 through %d bytes", name, limit)
+	}
+	if !utf8.ValidString(value) || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return fmt.Errorf("%s must be valid text without control characters", name)
 	}
 	return nil
 }

@@ -82,16 +82,57 @@ Token authentication is the default. Controller and device setup accept only a t
 the token itself is never accepted as a command-line value. Pass the same `--device-id` used when
 the broker issued that token. Setup validates the complete role configuration before creating
 local credentials and never overwrites an existing configuration.
+
+Enroll each controller or device from the broker installation before running target setup. Choose
+a new stable UUID for the device, then run the broker's launcher with the matching role:
+
+```bash
+plugins/delegation/scripts/delegation-mcp credential issue \
+  --config <broker-config> \
+  --role <controller-or-device> \
+  --device-id <device-uuid> \
+  --out <protected-staging-token-file>
+```
+
+Transfer that file over an authenticated encrypted channel and preserve or re-establish
+current-user-only file protection on the target. Never paste its contents into a Codex task, shell
+argument, config file, or broker URL. Run `setup controller` or `setup device` on the target with
+the broker's `controllerId`, the exact issued `deviceId`, and the protected token path. After
+`doctor` succeeds, remove any intermediate transfer copy. Revoke a lost or retired credential only
+from the broker installation:
+
+```bash
+plugins/delegation/scripts/delegation-mcp credential revoke \
+  --config <broker-config> \
+  --device-id <device-uuid>
+```
+
+Revocation closes the credential's access on its next broker frame and marks the device offline.
+Re-enrollment after revocation requires a new device UUID.
+
 Schema v2 introduced an absolute broker `stateFile`, which schema v3 retains. Credential commands
 use that configured path directly instead of deriving a database location from their environment.
 Schema v3 makes plaintext non-loopback acknowledgement consistent for every authentication mode
-and role. Schema v1 and v2 are not migrated in place. Before moving an old broker configuration
-aside, preserve every setting and identify the state database previously used by credential
-commands. Rerun `setup broker` with the existing controller ID, listener, authentication mode,
-master token path when used, state path, and `--allow-insecure-nonloopback` for any non-loopback
-listener. For an old controller or device configuration, preserve its identity, name, broker URL,
-authentication mode, and token path; add the acknowledgement only for a non-loopback `ws://` URL.
-Do not accept a new default unless it matches the existing setting or database.
+and role. Schema v1 and v2 configs are not migrated in place. Preserve non-secret identity and
+endpoint settings locally, move the old config aside, and rerun setup with explicit values rather
+than accepting changed defaults. Schema v1 used one shared bearer token: never reuse it as either
+the private M1 broker master or a device credential. Move the old shared token aside with the config
+and verify the selected new master-token path does not exist. Omit `--token-file` only after checking
+that setup's default token path is absent, or pass a different nonexistent path so setup creates a
+fresh private M1 master. Then issue a fresh credential for every target device, transfer each token
+as a protected file, and only then configure that target. Schema v2 may retain an existing protected
+M1 master or per-device token path while rerunning setup with all other values explicit.
+
+M0 Windows homes require a clean re-home because they used ordinary inherited profile-directory
+ACLs. Stop the managed service, rename the entire old Delegation home to an offline backup outside
+the new home, and run the M1 installer and setup against an empty default home or a new
+`DELEGATION_HOME`. Do not point any new config, token, state, or service definition back into the
+backup. Recreate the broker trust state and issue fresh per-device credentials; never print or copy
+old token contents through a shell or Codex task. After `doctor` and all re-enrolled devices pass,
+remove the offline backup according to the host's credential-retirement policy. M1 intentionally
+refuses to change permissions on an existing M0 Windows home, so moving only `config.json` is not a
+supported upgrade path.
+
 Run `doctor` through the launcher after setup to validate the local schema, authority paths, state
 path, and protected token file. A broker, controller, or device can run in the foreground with
 `service run`. Install and activate the configured role as the current user's managed service with:
@@ -116,7 +157,10 @@ versioned executable path; verify ownership, remove the old native definition ex
 The bundled root MCP initializes without broker access so setup remains available when the runtime
 or connector is offline. Its instructions are static and do not inject a device roster. Call
 `list_devices` for a current, tree-authorized view of the controller registry, then call
-`describe_device` before choosing a target whose toolchains, tags, or capacity matter.
+`describe_device` when the full runtime feature list or current presence details matter. M1 exposes
+device identity, role, OS, architecture, runtime and protocol versions, features, online state, and
+last-seen time. It does not expose arbitrary toolchain, hardware, tag, or capacity metadata; do not
+infer those properties from a device name.
 
 The root MCP talks only to the same-user local connector bridge. It neither reads the connector's
 broker token nor opens a broker connection itself. Device calls lazily bind the Codex task's

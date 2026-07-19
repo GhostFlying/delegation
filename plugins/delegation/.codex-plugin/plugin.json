@@ -1,7 +1,7 @@
 {
   "name": "delegation",
-  "version": "0.1.0-alpha.0",
-  "description": "Delegate Codex work to managed devices with platform-specific environments.",
+  "version": "0.1.0-alpha.0.m1",
+  "description": "Discover managed devices and inspect their platform-specific environments.",
   "author": {
     "name": "GhostFlying",
     "url": "https://github.com/GhostFlying"
@@ -13,15 +13,15 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Delegation",
-    "shortDescription": "Delegate Codex tasks across managed devices",
-    "longDescription": "Choose an appropriate managed device, prepare its workspace, and collaborate with a remote Codex worker without moving the root task.",
+    "shortDescription": "Discover managed development devices",
+    "longDescription": "Inspect controller-managed devices and their platform and runtime capabilities before selecting a future delegation target. Worker execution and workspace transport are not available in M1.",
     "developerName": "GhostFlying",
     "category": "Developer Tools",
-    "capabilities": ["Cross-device delegation", "Managed workspaces"],
+    "capabilities": ["Managed device discovery", "Platform capability inventory"],
     "websiteURL": "https://github.com/GhostFlying/delegation",
     "defaultPrompt": [
       "List the devices available for this task.",
-      "Delegate this platform-specific validation to an appropriate device."
+      "Describe the capabilities and current status of a managed device."
     ]
   },
   "mcpServers": "./.mcp.json"

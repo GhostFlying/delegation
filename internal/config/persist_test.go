@@ -7,10 +7,12 @@ import (
 	"runtime"
 	"slices"
 	"testing"
+
+	"github.com/GhostFlying/delegation/internal/securefs"
 )
 
 func TestWriteNewRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
+	path := filepath.Join(t.TempDir(), "private", "config.json")
 	cfg := Config{
 		SchemaVersion: CurrentSchemaVersion,
 		Role:          RoleBroker,
@@ -43,7 +45,7 @@ func TestWriteNewRoundTrip(t *testing.T) {
 }
 
 func TestWriteNewDoesNotReplaceExistingConfig(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
+	path := filepath.Join(t.TempDir(), "private", "config.json")
 	first := Config{
 		SchemaVersion: CurrentSchemaVersion,
 		Role:          RoleBroker,
@@ -73,7 +75,7 @@ func TestWriteNewDoesNotReplaceExistingConfig(t *testing.T) {
 }
 
 func TestWriteNewReportsCommittedSyncFailure(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "private")
 	path := filepath.Join(dir, "config.json")
 	cfg := Config{
 		SchemaVersion: CurrentSchemaVersion,
@@ -86,13 +88,13 @@ func TestWriteNewReportsCommittedSyncFailure(t *testing.T) {
 		},
 	}
 	originalSync := syncInstalledConfig
-	t.Cleanup(func() { syncInstalledConfig = originalSync })
-	syncInstalledConfig = func(syncPath string) error {
-		if syncPath == dir {
-			return errors.New("injected sync failure")
-		}
-		return nil
-	}
+	originalPublishedSync := syncPublishedConfig
+	t.Cleanup(func() {
+		syncInstalledConfig = originalSync
+		syncPublishedConfig = originalPublishedSync
+	})
+	syncInstalledConfig = func(string) error { return nil }
+	syncPublishedConfig = func(*securefs.Root) error { return errors.New("injected sync failure") }
 
 	err := WriteNew(path, cfg)
 	if !IsCommitted(err) {
@@ -121,10 +123,18 @@ func TestWriteNewSyncsEveryNewDirectory(t *testing.T) {
 		},
 	}
 	originalSync := syncInstalledConfig
-	t.Cleanup(func() { syncInstalledConfig = originalSync })
+	originalPublishedSync := syncPublishedConfig
+	t.Cleanup(func() {
+		syncInstalledConfig = originalSync
+		syncPublishedConfig = originalPublishedSync
+	})
 	var synced []string
 	syncInstalledConfig = func(syncPath string) error {
 		synced = append(synced, syncPath)
+		return nil
+	}
+	syncPublishedConfig = func(*securefs.Root) error {
+		synced = append(synced, filepath.Dir(path))
 		return nil
 	}
 

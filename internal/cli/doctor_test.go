@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -14,7 +13,7 @@ import (
 )
 
 func TestDoctorValidatesBrokerConfiguration(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
+	configPath := privateTestPath(t, "config.json")
 	var setupOutput bytes.Buffer
 	var setupError bytes.Buffer
 	if code := Run([]string{"setup", "broker", "--config", configPath}, &setupOutput, &setupError); code != 0 {
@@ -48,7 +47,7 @@ func TestDoctorValidatesBrokerConfiguration(t *testing.T) {
 }
 
 func TestDoctorRejectsMalformedToken(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
+	configPath := privateTestPath(t, "config.json")
 	var setupOutput bytes.Buffer
 	var setupError bytes.Buffer
 	if code := Run([]string{"setup", "broker", "--config", configPath}, &setupOutput, &setupError); code != 0 {

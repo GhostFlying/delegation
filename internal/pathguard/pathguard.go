@@ -72,6 +72,7 @@ func brokerAuthorityFiles(configPath, statePath, masterPath string) []namedPath 
 		namedPath{name: "broker rollback journal", path: statePath + "-journal"},
 		namedPath{name: "broker WAL", path: statePath + "-wal"},
 		namedPath{name: "broker shared memory", path: statePath + "-shm"},
+		namedPath{name: "broker instance lease", path: statePath + ".broker.lock"},
 	)
 }
 
@@ -126,8 +127,9 @@ func resolveFuturePath(path string, followedLinks int) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read path alias %s: %w", candidate, err)
 		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(resolved, target)
+		target, err = resolveLinkTarget(resolved, target)
+		if err != nil {
+			return "", fmt.Errorf("resolve path alias %s: %w", candidate, err)
 		}
 		remaining := append([]string{target}, components[index+1:]...)
 		return resolveFuturePath(filepath.Join(remaining...), followedLinks+1)

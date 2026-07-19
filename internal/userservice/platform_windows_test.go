@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"golang.org/x/sys/windows"
 )
 
@@ -45,6 +47,7 @@ func TestWindowsInstallCreatesTaskWithoutForce(t *testing.T) {
 }
 
 func TestWindowsInstallEnablesAndRunsTask(t *testing.T) {
+	stubScheduledTaskReadiness(t, nil)
 	originalRunner := runTaskCommand
 	t.Cleanup(func() { runTaskCommand = originalRunner })
 	var calls [][]string
@@ -80,6 +83,7 @@ func TestWindowsInstallEnablesAndRunsTask(t *testing.T) {
 }
 
 func TestWindowsInstallReconcilesLostEnableResponse(t *testing.T) {
+	stubScheduledTaskReadiness(t, nil)
 	originalRunner := runTaskCommand
 	t.Cleanup(func() { runTaskCommand = originalRunner })
 	var active []byte
@@ -105,6 +109,66 @@ func TestWindowsInstallReconcilesLostEnableResponse(t *testing.T) {
 	}
 	result, err := Install(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
 	if err != nil || result.State != StateActive {
+		t.Fatalf("Install() = %#v, %v", result, err)
+	}
+}
+
+func TestWindowsInstallRejectsTaskThatNeverBecomesReady(t *testing.T) {
+	readinessErr := errors.New("connector exited before opening its local bridge")
+	stubScheduledTaskReadiness(t, readinessErr)
+	originalRunner := runTaskCommand
+	t.Cleanup(func() { runTaskCommand = originalRunner })
+	var active []byte
+	runTaskCommand = func(args ...string) (taskCommandResult, error) {
+		if args[0] == "/Create" {
+			data, err := os.ReadFile(args[4])
+			if err != nil {
+				t.Fatal(err)
+			}
+			active, err = encodeTaskXMLUTF16LE(strings.Replace(
+				taskXMLText(t, data), "<Enabled>false</Enabled>", "<Enabled>true</Enabled>", 1,
+			))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if args[0] == "/Query" {
+			return taskCommandResult{Output: active}, nil
+		}
+		return taskCommandResult{}, nil
+	}
+	result, err := Install(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	if !errors.Is(err, readinessErr) || result.State != StateIndeterminate {
+		t.Fatalf("Install() = %#v, %v", result, err)
+	}
+}
+
+func TestWindowsInstallRejectsReadyEndpointWithoutRunningTask(t *testing.T) {
+	stubScheduledTaskReadiness(t, nil)
+	scheduledTaskRunning = func() (bool, error) { return false, nil }
+	originalRunner := runTaskCommand
+	t.Cleanup(func() { runTaskCommand = originalRunner })
+	var active []byte
+	runTaskCommand = func(args ...string) (taskCommandResult, error) {
+		if args[0] == "/Create" {
+			data, err := os.ReadFile(args[4])
+			if err != nil {
+				t.Fatal(err)
+			}
+			active, err = encodeTaskXMLUTF16LE(strings.Replace(
+				taskXMLText(t, data), "<Enabled>false</Enabled>", "<Enabled>true</Enabled>", 1,
+			))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if args[0] == "/Query" {
+			return taskCommandResult{Output: active}, nil
+		}
+		return taskCommandResult{}, nil
+	}
+	result, err := Install(`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	if err == nil || result.State != StateIndeterminate || !strings.Contains(err.Error(), "no running managed instance") {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
 }
@@ -280,6 +344,18 @@ func TestWindowsTaskUserIDsEqualUsesSIDIdentity(t *testing.T) {
 	}
 }
 
+func stubScheduledTaskReadiness(t *testing.T, err error) {
+	t.Helper()
+	originalReadiness := waitForScheduledTaskReady
+	originalRunning := scheduledTaskRunning
+	waitForScheduledTaskReady = func(string) error { return err }
+	scheduledTaskRunning = func() (bool, error) { return true, nil }
+	t.Cleanup(func() {
+		waitForScheduledTaskReady = originalReadiness
+		scheduledTaskRunning = originalRunning
+	})
+}
+
 func TestWindowsTaskSchedulerRoundTrip(t *testing.T) {
 	if os.Getenv("DELEGATION_WINDOWS_INTEGRATION") != "1" {
 		t.Skip("set DELEGATION_WINDOWS_INTEGRATION=1 to use the real Task Scheduler")
@@ -350,5 +426,80 @@ func TestWindowsTaskSchedulerRoundTrip(t *testing.T) {
 	second, err := executeTaskCommand("/Create", "/TN", taskName, "/XML", tempPath)
 	if err != nil || second.ExitCode == 0 {
 		t.Fatalf("second no-force create = %#v, %v", second, err)
+	}
+}
+
+func TestWindowsTaskSchedulerRequiresRuntimeReadiness(t *testing.T) {
+	if os.Getenv("DELEGATION_WINDOWS_INTEGRATION") != "1" {
+		t.Skip("set DELEGATION_WINDOWS_INTEGRATION=1 to use the real Task Scheduler")
+	}
+	binaryPath := os.Getenv("DELEGATION_WINDOWS_BINARY")
+	if binaryPath == "" {
+		t.Skip("set DELEGATION_WINDOWS_BINARY to a built delegation executable")
+	}
+	if !filepath.IsAbs(binaryPath) {
+		t.Fatalf("DELEGATION_WINDOWS_BINARY must be absolute: %q", binaryPath)
+	}
+	_, _ = executeTaskCommand("/End", "/TN", ScheduledTask)
+	_, _ = executeTaskCommand("/Delete", "/TN", ScheduledTask, "/F")
+	t.Cleanup(func() {
+		_, _ = executeTaskCommand("/End", "/TN", ScheduledTask)
+		_, _ = executeTaskCommand("/Delete", "/TN", ScheduledTask, "/F")
+	})
+
+	root := t.TempDir()
+	configPath := filepath.Join(root, "first", "config.json")
+	cfg := windowsIntegrationBrokerConfig(t, root)
+	writeWindowsIntegrationConfig(t, configPath, cfg)
+	result, err := Install(binaryPath, configPath)
+	if err != nil || result.State != StateActive {
+		t.Fatalf("activate built delegation task = %#v, %v", result, err)
+	}
+	if ended, err := executeTaskCommand("/End", "/TN", ScheduledTask); err != nil || ended.ExitCode != 0 {
+		t.Fatalf("end built delegation task = %#v, %v", ended, err)
+	}
+	if deleted, err := executeTaskCommand("/Delete", "/TN", ScheduledTask, "/F"); err != nil || deleted.ExitCode != 0 {
+		t.Fatalf("delete built delegation task = %#v, %v", deleted, err)
+	}
+
+	cfg = windowsIntegrationBrokerConfig(t, root)
+	configPath = filepath.Join(root, "second", "config.json")
+	writeWindowsIntegrationConfig(t, configPath, cfg)
+	systemDirectory, err := windows.GetSystemDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err = Install(filepath.Join(systemDirectory, "where.exe"), configPath)
+	if err == nil || result.State != StateIndeterminate {
+		t.Fatalf("activate immediate-exit task = %#v, %v", result, err)
+	}
+}
+
+func windowsIntegrationBrokerConfig(t *testing.T, root string) delegationconfig.Config {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return delegationconfig.Config{
+		SchemaVersion: delegationconfig.CurrentSchemaVersion,
+		Role:          delegationconfig.RoleBroker,
+		ControllerID:  "123e4567-e89b-42d3-a456-426614174701",
+		Broker: delegationconfig.BrokerConfig{
+			Listen:    address,
+			StateFile: filepath.Join(root, "state", "broker.sqlite3"),
+			Auth:      delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
+		},
+	}
+}
+
+func writeWindowsIntegrationConfig(t *testing.T, path string, cfg delegationconfig.Config) {
+	t.Helper()
+	if err := delegationconfig.WriteNew(path, cfg); err != nil {
+		t.Fatal(err)
 	}
 }

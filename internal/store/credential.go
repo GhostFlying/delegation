@@ -150,6 +150,47 @@ WHERE controller_id = ? AND device_id = ? AND token_mac = ? AND pending = 1
 	return ErrNotFound
 }
 
+// PublishPendingCredential fences a token publication against replacement of
+// the pending enrollment. The callback must not call Store methods because it
+// runs while an immediate write transaction is held.
+func (s *Store) PublishPendingCredential(
+	ctx context.Context,
+	controllerID, deviceID string,
+	mac CredentialMAC,
+	publish func() (bool, error),
+) (bool, error) {
+	if err := validateCredentialIdentity(controllerID, deviceID); err != nil {
+		return false, err
+	}
+	if publish == nil {
+		return false, errors.New("credential publisher is required")
+	}
+	committed := false
+	err := s.withImmediateTransaction(ctx, func(connection *sql.Conn) error {
+		credential, err := queryCredential(ctx, connection, controllerID, deviceID)
+		if err != nil {
+			return err
+		}
+		if !credential.Disabled || !credential.Pending ||
+			subtle.ConstantTimeCompare(credential.MAC[:], mac[:]) != 1 {
+			return ErrNotFound
+		}
+		committed, err = publish()
+		if err != nil {
+			return err
+		}
+		result, err := connection.ExecContext(ctx, `
+UPDATE credentials SET disabled = 0, pending = 0
+WHERE controller_id = ? AND device_id = ? AND token_mac = ? AND disabled = 1 AND pending = 1
+`, controllerID, deviceID, mac[:])
+		if err != nil {
+			return fmt.Errorf("activate published device credential: %w", err)
+		}
+		return requireAffectedRow(result, "activate published device credential")
+	})
+	return committed, err
+}
+
 func (s *Store) DeletePendingCredential(ctx context.Context, controllerID, deviceID string, mac CredentialMAC) error {
 	if err := validateCredentialIdentity(controllerID, deviceID); err != nil {
 		return err

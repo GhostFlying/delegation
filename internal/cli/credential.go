@@ -38,6 +38,20 @@ var credentialNow = func() time.Time {
 	return time.Now().UTC()
 }
 
+type credentialIssueRegistry interface {
+	Credential(context.Context, string, string) (store.Credential, error)
+	CreateCredential(context.Context, store.Credential) error
+	ActivateCredential(context.Context, string, string, store.CredentialMAC) error
+	DeletePendingCredential(context.Context, string, string, store.CredentialMAC) error
+	PublishPendingCredential(
+		context.Context,
+		string,
+		string,
+		store.CredentialMAC,
+		func() (bool, error),
+	) (bool, error)
+}
+
 func runCredential(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: delegation credential <issue|revoke> [options]")
@@ -119,7 +133,7 @@ func runCredentialIssue(args []string, stdout, stderr io.Writer) int {
 
 func issueCredential(
 	ctx context.Context,
-	registry *store.Store,
+	registry credentialIssueRegistry,
 	master tokenfile.Token,
 	controllerID string,
 	deviceID string,
@@ -188,20 +202,26 @@ func issueCredential(
 	if err := registry.CreateCredential(ctx, pending); err != nil {
 		return credentialResult{}, false, err
 	}
-	fileCommitted, err := tokenfile.WriteNew(tokenPath, deviceToken)
+	fileCommitted, err := registry.PublishPendingCredential(
+		ctx,
+		controllerID,
+		deviceID,
+		mac,
+		func() (bool, error) { return tokenfile.WriteNew(tokenPath, deviceToken) },
+	)
 	if err != nil {
 		if fileCommitted {
 			return credentialResult{}, true, fmt.Errorf(
 				"token file is committed and credential remains pending; rerun the same command: %w", err,
 			)
 		}
+		if errors.Is(err, os.ErrExist) {
+			return credentialResult{}, false, fmt.Errorf(
+				"output token appeared during enrollment; credential remains pending for safe recovery: %w", err,
+			)
+		}
 		cleanupErr := registry.DeletePendingCredential(ctx, controllerID, deviceID, mac)
 		return credentialResult{}, false, errors.Join(err, cleanupErr)
-	}
-	if err := registry.ActivateCredential(ctx, controllerID, deviceID, mac); err != nil {
-		return credentialResult{}, true, fmt.Errorf(
-			"token file is committed and credential remains pending; rerun the same command: %w", err,
-		)
 	}
 	return issuedCredentialResult(controllerID, deviceID, role, tokenPath, false), true, nil
 }

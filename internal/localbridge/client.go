@@ -20,6 +20,33 @@ type RPCError struct {
 	Message string
 }
 
+// Probe verifies that the endpoint serves the expected configured connector.
+func Probe(ctx context.Context, endpoint string, expected ServiceIdentity) error {
+	if err := expected.Validate(); err != nil {
+		return fmt.Errorf("expected local bridge identity: %w", err)
+	}
+	client, err := NewClient(endpoint)
+	if err != nil {
+		return err
+	}
+	var actual ServiceIdentity
+	if err := client.Call(ctx, methodIdentity, "", nil, struct{}{}, &actual); err != nil {
+		return fmt.Errorf("read local bridge identity: %w", err)
+	}
+	if err := actual.Validate(); err != nil {
+		return fmt.Errorf("invalid local bridge identity: %w", err)
+	}
+	if actual != expected {
+		return fmt.Errorf(
+			"local bridge identity mismatch: got controller %s device %s role %s",
+			actual.ControllerID,
+			actual.DeviceID,
+			actual.Role,
+		)
+	}
+	return nil
+}
+
 func (e *RPCError) Error() string {
 	return fmt.Sprintf("local bridge RPC %d: %s", e.Code, e.Message)
 }

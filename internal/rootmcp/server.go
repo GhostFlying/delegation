@@ -20,12 +20,13 @@ import (
 const (
 	ToolListDevices    = "list_devices"
 	ToolDescribeDevice = "describe_device"
-	maximumDevicePage  = 16
-	listFeatureLimit   = 16
-	maximumOutputBytes = 32 * 1024
+	maximumDevicePage  = 4
+	listFeatureLimit   = 0
+	maximumListBytes   = 4 * 1024
+	maximumDetailBytes = 8 * 1024
 	bridgeCallTimeout  = 15 * time.Second
 	uuidPattern        = `^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`
-	serverInstructions = "Delegation exposes the live device registry for this root task. Use list_devices before selecting a target, choose an online device whose OS, architecture, and features fit the work, and use describe_device when one candidate needs full details. Registry cursors are revision-bound; restart listing without a cursor if the registry changed."
+	serverInstructions = "Delegation exposes the live device registry for this root task. Use list_devices for bounded summaries, then describe_device before selecting a candidate when advertised features matter. Choose an online device whose OS, architecture, and features fit the work. Registry cursors are revision-bound; restart listing without a cursor if the registry changed."
 )
 
 type Backend interface {
@@ -33,12 +34,14 @@ type Backend interface {
 }
 
 type Root struct {
-	backend Backend
+	backend      Backend
+	controllerID string
+	deviceID     string
 }
 
 type ListDevicesInput struct {
 	Cursor string `json:"cursor,omitempty" jsonschema:"opaque cursor returned by a previous list_devices call"`
-	Limit  int    `json:"limit,omitempty" jsonschema:"maximum devices to return, from 1 through 16; defaults to 16"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"maximum devices to return, from 1 through 4; defaults to 4"`
 }
 
 type ListDevicesOutput struct {
@@ -63,21 +66,28 @@ type DeviceSummary struct {
 	OS                string             `json:"os"`
 	Arch              string             `json:"arch"`
 	RuntimeVersion    string             `json:"runtimeVersion"`
-	Features          []string           `json:"features"`
+	ProtocolVersion   int                `json:"protocolVersion"`
+	Features          []string           `json:"features,omitempty"`
 	FeaturesTruncated bool               `json:"featuresTruncated,omitempty"`
 	Online            bool               `json:"online"`
 	LastSeenAt        int64              `json:"lastSeenAt"`
 }
 
-func NewServer(backend Backend) (*mcp.Server, error) {
+func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, error) {
 	if backend == nil {
 		return nil, errors.New("root MCP backend is required")
+	}
+	if err := identity.ValidateID(controllerID); err != nil {
+		return nil, fmt.Errorf("root MCP controllerId %w", err)
+	}
+	if err := identity.ValidateID(deviceID); err != nil {
+		return nil, fmt.Errorf("root MCP deviceId %w", err)
 	}
 	listInputSchema, describeInputSchema, err := inputSchemas()
 	if err != nil {
 		return nil, err
 	}
-	root := &Root{backend: backend}
+	root := &Root{backend: backend, controllerID: controllerID, deviceID: deviceID}
 	server := mcp.NewServer(
 		&mcp.Implementation{
 			Name: "delegation", Title: "Delegation", Version: buildinfo.Version,
@@ -90,7 +100,7 @@ func NewServer(backend Backend) (*mcp.Server, error) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        ToolListDevices,
 		Title:       "List delegation devices",
-		Description: "List live controller-owned devices with revision-bound pagination for target selection.",
+		Description: "List bounded summaries of live controller-owned devices with revision-bound pagination. Use describe_device for features.",
 		Annotations: readOnlyAnnotations(),
 		InputSchema: listInputSchema,
 	}, root.listDevices)
@@ -152,7 +162,7 @@ func (r *Root) listDevices(
 			return nil, ListDevicesOutput{}, err
 		}
 	}
-	if err := enforceOutputLimit(output); err != nil {
+	if err := enforceOutputLimit(output, maximumListBytes); err != nil {
 		return nil, ListDevicesOutput{}, err
 	}
 	return nil, output, nil
@@ -193,7 +203,7 @@ func (r *Root) describeDevice(
 		Revision: result.Revision,
 		Device:   summarizeDevice(result.Device, len(result.Device.Features)),
 	}
-	if err := enforceOutputLimit(output); err != nil {
+	if err := enforceOutputLimit(output, maximumDetailBytes); err != nil {
 		return nil, DescribeDeviceOutput{}, err
 	}
 	return nil, output, nil
@@ -231,13 +241,13 @@ func inputSchemas() (*jsonschema.Schema, *jsonschema.Schema, error) {
 	return list, describe, nil
 }
 
-func enforceOutputLimit(output any) error {
+func enforceOutputLimit(output any, maximumBytes int) error {
 	data, err := json.Marshal(output)
 	if err != nil {
 		return fmt.Errorf("encode delegation tool output: %w", err)
 	}
-	if len(data) > maximumOutputBytes {
-		return fmt.Errorf("delegation tool output exceeds %d bytes", maximumOutputBytes)
+	if len(data) > maximumBytes {
+		return fmt.Errorf("delegation tool output exceeds %d bytes", maximumBytes)
 	}
 	return nil
 }
@@ -253,6 +263,9 @@ func validateListResult(
 	if len(result.Devices) > 0 && result.Revision == 0 {
 		return errors.New("delegation service returned devices without a registry revision")
 	}
+	if params.ExpectedRevision != nil && result.Revision != *params.ExpectedRevision {
+		return errors.New("delegation service returned a device page from another registry revision")
+	}
 	previous := params.AfterDeviceID
 	for _, device := range result.Devices {
 		if err := device.Validate(); err != nil {
@@ -260,6 +273,9 @@ func validateListResult(
 		}
 		if device.ControllerID != controllerID {
 			return errors.New("delegation service returned a device from another controller")
+		}
+		if device.Revision > result.Revision {
+			return errors.New("delegation service returned a device newer than its registry revision")
 		}
 		if previous != "" && device.DeviceID <= previous {
 			return errors.New("delegation service returned devices out of order")
@@ -304,7 +320,7 @@ func (r *Root) ensureRoot(
 		protocol.EnsureRootTreeParams{ExternalThreadID: threadID},
 		&result,
 	); err != nil {
-		return control.Tree{}, control.Principal{}, explainBridgeError(err)
+		return control.Tree{}, control.Principal{}, explainEnsureRootError(err)
 	}
 	if err := result.Tree.Validate(); err != nil {
 		return control.Tree{}, control.Principal{}, fmt.Errorf("delegation service returned an invalid tree: %w", err)
@@ -313,6 +329,8 @@ func (r *Root) ensureRoot(
 		return control.Tree{}, control.Principal{}, fmt.Errorf("delegation service returned an invalid principal: %w", err)
 	}
 	if result.Tree.ExternalThreadID != threadID ||
+		result.Tree.ControllerID != r.controllerID ||
+		result.Tree.RootDeviceID != r.deviceID ||
 		result.Tree.ControllerID != result.Principal.ControllerID ||
 		result.Tree.TreeID != result.Principal.TreeID ||
 		result.Tree.RootAgentID != result.Principal.AgentID ||
@@ -361,6 +379,7 @@ func summarizeDevice(device control.Device, featureLimit int) DeviceSummary {
 		OS:                device.OS,
 		Arch:              device.Arch,
 		RuntimeVersion:    device.RuntimeVersion,
+		ProtocolVersion:   device.ProtocolVersion,
 		Features:          slices.Clone(device.Features[:limit]),
 		FeaturesTruncated: limit != len(device.Features),
 		Online:            device.Online,

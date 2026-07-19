@@ -104,7 +104,7 @@ func TestDeviceMetadataIsBounded(t *testing.T) {
 		Role:            DeviceRoleWorker,
 		OS:              "windows",
 		Arch:            "amd64",
-		RuntimeVersion:  "0.1.0-alpha.0",
+		RuntimeVersion:  "0.1.0-alpha.0.m1",
 		ProtocolVersion: 1,
 		Features:        []string{"deviceRegistryV1", "fullDuplexRpcV1"},
 	}

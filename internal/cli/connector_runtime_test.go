@@ -29,7 +29,7 @@ const (
 )
 
 func TestConnectorServicesRegisterDevicesAndServeControllerBridge(t *testing.T) {
-	registry, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "broker.sqlite3"))
+	registry, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "state", "broker.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestConnectorServicesRegisterDevicesAndServeControllerBridge(t *testing.T) 
 		ControllerID:      runtimeControllerID,
 		AuthMode:          delegationconfig.AuthModeNone,
 		Registry:          registry,
-		HeartbeatInterval: 20 * time.Millisecond,
+		HeartbeatInterval: 500 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +92,7 @@ func TestConnectorServicesRegisterDevicesAndServeControllerBridge(t *testing.T) 
 	waitForRuntimeDevice(t, registry, runtimeDeviceID, true)
 	waitForRuntimeDevice(t, registry, runtimeWorkerID, true)
 
-	endpoint, err := localbridge.Endpoint(controllerPath, runtimeDeviceID)
+	endpoint, err := localbridge.Endpoint(runtimeControllerID, runtimeDeviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,17 +164,19 @@ func TestConnectorServicesRegisterDevicesAndServeControllerBridge(t *testing.T) 
 
 func assertRootMCPDevices(t *testing.T, configPath string) {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	server, err := loadRootMCPServer(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := server.Connect(context.Background(), serverTransport, nil)
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "integration-test", Version: "1"}, nil)
-	clientSession, err := client.Connect(context.Background(), clientTransport, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
 	if err != nil {
 		serverSession.Close()
 		t.Fatal(err)
@@ -187,10 +189,10 @@ func assertRootMCPDevices(t *testing.T, configPath string) {
 			t.Errorf("close root MCP server: %v", err)
 		}
 	})
-	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
 		Meta:      mcp.Meta{"threadId": runtimeThreadID},
 		Name:      rootmcp.ToolListDevices,
-		Arguments: map[string]any{"limit": 10},
+		Arguments: map[string]any{"limit": 4},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +215,7 @@ func assertRootMCPDevices(t *testing.T, configPath string) {
 }
 
 func TestConnectorAuthorityIsReadBeforeRuntimeSideEffects(t *testing.T) {
-	root := t.TempDir()
+	root := privateTestDirectory(t)
 	tokenPath := filepath.Join(root, "device.token")
 	if _, err := tokenfile.WriteNew(tokenPath, tokenfile.Token{1, 2, 3}); err != nil {
 		t.Fatal(err)
@@ -257,7 +259,7 @@ func setupConnectorRuntimeTest(
 	deviceID, brokerURL string,
 ) (string, delegationconfig.Config) {
 	t.Helper()
-	configPath := filepath.Join(t.TempDir(), string(role)+".json")
+	configPath := privateTestPath(t, string(role)+".json")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if code := Run([]string{

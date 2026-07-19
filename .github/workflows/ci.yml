@@ -34,6 +34,14 @@ jobs:
         run: go test ./...
       - name: Vet
         run: go vet ./...
+      - name: Test macOS LaunchAgent round trip
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/delegation" ./cmd/delegation
+          DELEGATION_DARWIN_INTEGRATION=1 \
+            DELEGATION_DARWIN_BINARY="$RUNNER_TEMP/delegation" \
+            go test ./internal/userservice -run '^TestDarwinLaunchAgentRoundTrip$' -count=1
       - name: Test POSIX launchers and installer
         if: runner.os != 'Windows'
         shell: bash
@@ -47,7 +55,10 @@ jobs:
         shell: pwsh
         env:
           DELEGATION_WINDOWS_INTEGRATION: "1"
-        run: go test ./internal/userservice -run TestWindowsTaskSchedulerRoundTrip -count=1
+          DELEGATION_WINDOWS_BINARY: ${{ runner.temp }}/delegation.exe
+        run: |
+          go build -o $env:DELEGATION_WINDOWS_BINARY ./cmd/delegation
+          go test ./internal/userservice -run 'TestWindowsTaskScheduler(RoundTrip|RequiresRuntimeReadiness)' -count=1
 
   race:
     name: Race
@@ -148,7 +159,7 @@ jobs:
           added = json.loads((temp / "plugin-add.json").read_text())
           listed = json.loads((temp / "plugin-list.json").read_text())
           assert added["pluginId"] == "delegation@delegation"
-          assert added["version"] == "0.1.0-alpha.0"
+          assert added["version"] == "0.1.0-alpha.0.m1"
           entry = next(item for item in listed["installed"] if item["pluginId"] == "delegation@delegation")
           assert entry["installed"] is True
           assert entry["enabled"] is True

@@ -11,6 +11,27 @@ function Assert-True {
     }
 }
 
+function New-ProtectedDelegationHome {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+
+    New-Item -ItemType Directory -Force -Path $Path | Out-Null
+    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $security = New-Object System.Security.AccessControl.DirectorySecurity
+    $security.SetOwner($sid)
+    $security.SetAccessRuleProtection($true, $false)
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $sid,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        $inheritance,
+        [System.Security.AccessControl.PropagationFlags]::None,
+        [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    $security.AddAccessRule($rule) | Out-Null
+    Set-Acl -LiteralPath $Path -AclObject $security
+}
+
 function Invoke-ChildProcess {
     param(
         [Parameter(Mandatory = $true)] [string] $FilePath,
@@ -79,6 +100,9 @@ $ErrorActionPreference = "Stop"
 function Get-FileHash {
     throw "test: installer must not call Get-FileHash"
 }
+function Get-Acl {
+    throw "test: installer must not call Get-Acl"
+}
 function Invoke-WebRequest {
     param(
         [Parameter(Mandatory = $true)] [string] $Uri,
@@ -133,7 +157,7 @@ try {
     }
     $missingPS = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", $launcherPS, "mcp", "root") $missingEnvironment
     Assert-True ($missingPS.ExitCode -eq 127) "PowerShell launcher missing-runtime exit was $($missingPS.ExitCode)"
-    Assert-True ($missingPS.Stderr -match "runtime 0.1.0-alpha.0 is not installed") "PowerShell launcher missing-runtime error was unclear"
+    Assert-True ($missingPS.Stderr -match "runtime 0.1.0-alpha.0.m1 is not installed") "PowerShell launcher missing-runtime error was unclear"
 
     $missingCmd = Invoke-BatchFile -Path $launcherCmd -ScriptArguments @("mcp", "root") -Environment $missingEnvironment
     Assert-True ($missingCmd.ExitCode -eq 127) "cmd launcher missing-runtime exit was $($missingCmd.ExitCode); stdout: $($missingCmd.Stdout); stderr: $($missingCmd.Stderr)"
@@ -144,7 +168,7 @@ try {
     }
     $override = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", $launcherPS, "version", "--json") $overrideEnvironment
     Assert-True ($override.ExitCode -eq 0) "PowerShell launcher override failed: $($override.Stderr)"
-    Assert-True ($override.Stdout -match '"version":"0.1.0-alpha.0"') "PowerShell launcher did not pass arguments through"
+    Assert-True ($override.Stdout -match '"version":"0.1.0-alpha.0.m1"') "PowerShell launcher did not pass arguments through"
     $overrideConfig = Join-Path $tempRoot "override\controller.json"
     $overrideSetup = Invoke-ChildProcess $runtime @(
         "setup", "controller",
@@ -191,29 +215,101 @@ try {
         "Arm64" { $arch = "arm64" }
         default { throw "unsupported test architecture: $architecture" }
     }
-    $artifactName = "delegation_0.1.0-alpha.0_windows_${arch}.zip"
+    $artifactName = "delegation_0.1.0-alpha.0.m1_windows_${arch}.zip"
     $artifact = Join-Path $tempRoot $artifactName
     Compress-Archive -LiteralPath (Join-Path $payload "delegation.exe") -DestinationPath $artifact
     Write-ArtifactChecksum $testPlugin $artifact $artifactName
 
-    $expectedUrl = "https://github.com/GhostFlying/delegation/releases/download/v0.1.0-alpha.0/$artifactName"
+    $expectedUrl = "https://github.com/GhostFlying/delegation/releases/download/v0.1.0-alpha.0.m1/$artifactName"
     $windowsPowerShellHome = Join-Path $tempRoot "windows-powershell-home"
     $windowsPowerShellInstall = Invoke-WindowsPowerShellInstall $windowsPowerShell (Join-Path $testPlugin "scripts\install-runtime.ps1") $artifact $expectedUrl $windowsPowerShellHome
-    $windowsPowerShellBinary = Join-Path $windowsPowerShellHome "bin\0.1.0-alpha.0\windows-$arch\delegation.exe"
+    $windowsPowerShellBinary = Join-Path $windowsPowerShellHome "bin\0.1.0-alpha.0.m1\windows-$arch\delegation.exe"
     Assert-True ($windowsPowerShellInstall.ExitCode -eq 0) "Windows PowerShell installation failed: $($windowsPowerShellInstall.Stderr)"
     Assert-True (($windowsPowerShellInstall.Stdout | Out-String).Trim() -eq $windowsPowerShellBinary) "Windows PowerShell installer returned an unexpected path"
     Assert-True (Test-Path -LiteralPath $windowsPowerShellBinary -PathType Leaf) "Windows PowerShell did not commit the runtime"
+
+	$resolvedAncestorTarget = Join-Path $tempRoot "resolved-ancestor-target"
+	$resolvedAncestorAlias = Join-Path $tempRoot "resolved-ancestor-alias"
+	New-Item -ItemType Directory -Path $resolvedAncestorTarget | Out-Null
+	New-Item -ItemType Junction -Path $resolvedAncestorAlias -Target $resolvedAncestorTarget | Out-Null
+	$resolvedAncestorHome = Join-Path $resolvedAncestorAlias "delegation-home"
+	$resolvedAncestorInstall = Invoke-WindowsPowerShellInstall $windowsPowerShell (Join-Path $testPlugin "scripts\install-runtime.ps1") $artifact $expectedUrl $resolvedAncestorHome
+	$resolvedAncestorBinary = Join-Path $resolvedAncestorHome "bin\0.1.0-alpha.0.m1\windows-$arch\delegation.exe"
+	Assert-True ($resolvedAncestorInstall.ExitCode -eq 0) "Windows installer rejected a junction that resolves to a local volume: $($resolvedAncestorInstall.Stderr)"
+	Assert-True (Test-Path -LiteralPath $resolvedAncestorBinary -PathType Leaf) "Windows installer did not commit through a resolved local ancestor"
+
+	$networkShareName = "DelegationTest" + [guid]::NewGuid().ToString("N")
+	$networkSharePath = Join-Path $tempRoot "network-share-target"
+	$networkAlias = Join-Path $tempRoot "network-share-alias"
+	$networkFixtureReady = $false
+	$networkShareCreated = $false
+	New-Item -ItemType Directory -Path $networkSharePath | Out-Null
+	try {
+		$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+		New-SmbShare -Name $networkShareName -Path $networkSharePath -FullAccess $currentUser -Temporary | Out-Null
+		$networkShareCreated = $true
+		$networkTarget = "\\localhost\$networkShareName"
+		New-Item -ItemType SymbolicLink -Path $networkAlias -Target $networkTarget -ErrorAction Stop | Out-Null
+		$networkFixtureReady = $true
+		$networkHome = Join-Path $networkAlias "delegation-home"
+		$networkInstall = Invoke-WindowsPowerShellInstall $windowsPowerShell (Join-Path $testPlugin "scripts\install-runtime.ps1") $artifact $expectedUrl $networkHome
+		Assert-True ($networkInstall.ExitCode -ne 0) "Windows installer accepted a local-path ancestor that resolves to SMB"
+		Assert-True ($networkInstall.Stderr -match "network path|local-volume validation|could not resolve delegation home") "Windows installer returned an unclear resolved-network error: $($networkInstall.Stderr)"
+		Assert-True (-not (Test-Path -LiteralPath (Join-Path $networkSharePath "delegation-home"))) "Windows installer wrote through the SMB ancestor before rejecting it"
+	} catch {
+		if ($networkFixtureReady -or $env:CI -eq "true") {
+			throw
+		}
+		Write-Verbose "resolved SMB ancestor test unavailable: $($_.Exception.Message)"
+	} finally {
+		if ($networkFixtureReady -and (Test-Path -LiteralPath $networkAlias)) {
+			Remove-Item -LiteralPath $networkAlias -Force
+		}
+		if ($networkShareCreated) {
+			Remove-SmbShare -Name $networkShareName -Force -Confirm:$false
+		}
+	}
 
     $installerCmd = Join-Path $testPlugin "scripts\install-runtime.cmd"
     $windowsPowerShellEnvironment = @{
         DELEGATION_BINARY = $null
         DELEGATION_HOME = $windowsPowerShellHome
     }
+    $windowsPowerShellConfig = Join-Path $windowsPowerShellHome "config.json"
+    $windowsPowerShellSetup = Invoke-ChildProcess $windowsPowerShellBinary @(
+        "setup", "controller",
+        "--controller-id", "33333333-3333-4333-8333-333333333333",
+        "--device-id", "44444444-4444-4444-8444-444444444444",
+        "--device-name", "installed-runtime-device",
+        "--broker-url", "ws://127.0.0.1:8787",
+        "--auth-mode", "none",
+        "--json"
+    ) $windowsPowerShellEnvironment
+    Assert-True ($windowsPowerShellSetup.ExitCode -eq 0) "installed runtime could not initialize its default home: $($windowsPowerShellSetup.Stderr)"
+    Assert-True ($windowsPowerShellSetup.Stdout -match '"role":"controller"') "installed runtime setup returned an unexpected result"
+    Assert-True (Test-Path -LiteralPath $windowsPowerShellConfig -PathType Leaf) "installed runtime setup did not use the default config path"
+    $windowsPowerShellDoctor = Invoke-ChildProcess $windowsPowerShellBinary @("doctor", "--json") $windowsPowerShellEnvironment
+    Assert-True ($windowsPowerShellDoctor.ExitCode -eq 0 -and $windowsPowerShellDoctor.Stdout -match '"ok":true') "installed runtime was not ready after default setup: $($windowsPowerShellDoctor.Stderr)"
+
+    $unsafeHome = Join-Path $tempRoot "unsafe-existing-home"
+    New-Item -ItemType Directory -Path $unsafeHome | Out-Null
+    $unsafeAclBefore = Get-Acl -LiteralPath $unsafeHome
+    Assert-True (-not $unsafeAclBefore.AreAccessRulesProtected) "unsafe-home fixture unexpectedly has a protected DACL"
+    $unsafeInstall = Invoke-WindowsPowerShellInstall $windowsPowerShell (Join-Path $testPlugin "scripts\install-runtime.ps1") $artifact $expectedUrl $unsafeHome
+    Assert-True ($unsafeInstall.ExitCode -ne 0) "installer accepted an unsafe existing delegation home"
+    $unsafeErrorIsClear = $unsafeInstall.Stderr -match "delegation home must be owned by the current user" -and
+        $unsafeInstall.Stderr -match "protected current-user-only DACL" -and
+        $unsafeInstall.Stderr -match "refusing to\s+modify existing permissions"
+    Assert-True $unsafeErrorIsClear "unsafe delegation-home error was unclear: $($unsafeInstall.Stderr)"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $unsafeHome "bin"))) "installer wrote into an unsafe existing delegation home"
+    $unsafeAclAfter = Get-Acl -LiteralPath $unsafeHome
+    Assert-True (-not $unsafeAclAfter.AreAccessRulesProtected) "installer silently changed the unsafe delegation-home DACL"
+
     $installerCmdRepeat = Invoke-BatchFile -Path $installerCmd -Environment $windowsPowerShellEnvironment
     Assert-True ($installerCmdRepeat.ExitCode -eq 0) "cmd installer repeat failed: $($installerCmdRepeat.Stderr)"
     Assert-True (($installerCmdRepeat.Stdout | Out-String).Trim() -eq $windowsPowerShellBinary) "cmd installer did not reuse the existing runtime"
 
-    $windowsPowerShellLock = Join-Path $windowsPowerShellHome ".locks\install-0.1.0-alpha.0-windows-$arch.lock"
+    $windowsPowerShellLock = Join-Path $windowsPowerShellHome ".locks\install-0.1.0-alpha.0.m1-windows-$arch.lock"
     $heldWindowsPowerShellLock = [System.IO.File]::Open(
         $windowsPowerShellLock,
         [System.IO.FileMode]::OpenOrCreate,
@@ -249,12 +345,9 @@ try {
     $env:DELEGATION_TEST_EXPECTED_URL = $expectedUrl
     $global:DelegationTestDownloadCount = 0
     $env:DELEGATION_HOME = Join-Path $tempRoot "installed-home"
-    $staleLockDirectory = Join-Path $env:DELEGATION_HOME ".locks"
-    New-Item -ItemType Directory -Force -Path $staleLockDirectory | Out-Null
-    $staleLock = Join-Path $staleLockDirectory "install-0.1.0-alpha.0-windows-$arch.lock"
-    Set-Content -LiteralPath $staleLock -Value "stale" -Encoding ascii
+    $staleLock = Join-Path $env:DELEGATION_HOME ".locks\install-0.1.0-alpha.0.m1-windows-$arch.lock"
     $installed = & (Join-Path $testPlugin "scripts\install-runtime.ps1")
-    $expectedBinary = Join-Path $env:DELEGATION_HOME "bin\0.1.0-alpha.0\windows-$arch\delegation.exe"
+    $expectedBinary = Join-Path $env:DELEGATION_HOME "bin\0.1.0-alpha.0.m1\windows-$arch\delegation.exe"
     Assert-True ($installed -eq $expectedBinary) "installer returned $installed, expected $expectedBinary"
     Assert-True (Test-Path -LiteralPath $expectedBinary -PathType Leaf) "installer did not atomically install the runtime"
     Assert-True ($global:DelegationTestDownloadCount -eq 1) "installer made $global:DelegationTestDownloadCount download requests"
@@ -264,9 +357,9 @@ try {
         DELEGATION_HOME = $env:DELEGATION_HOME
     }
     $installedPS = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", $launcherPS, "version", "--json") $installedEnvironment
-    Assert-True ($installedPS.ExitCode -eq 0 -and $installedPS.Stdout -match '"version":"0.1.0-alpha.0"') "PowerShell launcher did not find the installed runtime"
+    Assert-True ($installedPS.ExitCode -eq 0 -and $installedPS.Stdout -match '"version":"0.1.0-alpha.0.m1"') "PowerShell launcher did not find the installed runtime"
     $installedCmd = Invoke-BatchFile -Path $launcherCmd -ScriptArguments @("version", "--json") -Environment $installedEnvironment
-    Assert-True ($installedCmd.ExitCode -eq 0 -and $installedCmd.Stdout -match '"version":"0.1.0-alpha.0"') "cmd launcher did not find the installed runtime"
+    Assert-True ($installedCmd.ExitCode -eq 0 -and $installedCmd.Stdout -match '"version":"0.1.0-alpha.0.m1"') "cmd launcher did not find the installed runtime"
     Assert-True (Test-Path -LiteralPath $staleLock -PathType Leaf) "installer removed its persistent lock file"
 
     $installedExtra = Join-Path (Split-Path -Parent $expectedBinary) "unexpected.txt"
@@ -282,7 +375,8 @@ try {
     Assert-True $existingExtraFailed "installer accepted an installed runtime directory with extra files"
 
     $reparseHome = Join-Path $tempRoot "reparse-home"
-    $reparseTarget = Join-Path $reparseHome "bin\0.1.0-alpha.0\windows-$arch"
+    $reparseTarget = Join-Path $reparseHome "bin\0.1.0-alpha.0.m1\windows-$arch"
+    New-ProtectedDelegationHome -Path $reparseHome
     New-Item -ItemType Directory -Force -Path $reparseTarget | Out-Null
     $reparseBinary = Join-Path $reparseTarget "delegation.exe"
     $reparseCreated = $false
@@ -301,8 +395,9 @@ try {
     }
 
     $junctionHome = Join-Path $tempRoot "junction-home"
-    $junctionParent = Join-Path $junctionHome "bin\0.1.0-alpha.0"
+    $junctionParent = Join-Path $junctionHome "bin\0.1.0-alpha.0.m1"
     $junctionOutside = Join-Path $tempRoot "junction-outside"
+    New-ProtectedDelegationHome -Path $junctionHome
     New-Item -ItemType Directory -Force -Path $junctionParent, $junctionOutside | Out-Null
     $junctionTarget = Join-Path $junctionParent "windows-$arch"
     New-Item -ItemType Junction -Path $junctionTarget -Target $junctionOutside | Out-Null
@@ -313,7 +408,7 @@ try {
     Assert-True ($junctionResult.ExitCode -ne 0 -and $junctionResult.Stderr -match "runtime target must not be a reparse point") "Windows PowerShell installer accepted a reparse-point target directory"
 
     $raceHome = Join-Path $tempRoot "race-home"
-    $raceTarget = Join-Path $raceHome "bin\0.1.0-alpha.0\windows-$arch"
+    $raceTarget = Join-Path $raceHome "bin\0.1.0-alpha.0.m1\windows-$arch"
     $env:DELEGATION_HOME = $raceHome
     $env:DELEGATION_TEST_CREATE_TARGET = $raceTarget
     $raceFailed = $false
@@ -329,8 +424,9 @@ try {
 
     $activeHome = Join-Path $tempRoot "active-lock-home"
     $activeLockDirectory = Join-Path $activeHome ".locks"
+    New-ProtectedDelegationHome -Path $activeHome
     New-Item -ItemType Directory -Force -Path $activeLockDirectory | Out-Null
-    $activeLock = Join-Path $activeLockDirectory "install-0.1.0-alpha.0-windows-$arch.lock"
+    $activeLock = Join-Path $activeLockDirectory "install-0.1.0-alpha.0.m1-windows-$arch.lock"
     $heldLock = [System.IO.File]::Open(
         $activeLock,
         [System.IO.FileMode]::OpenOrCreate,
@@ -348,7 +444,7 @@ try {
     }
     Assert-True $activeLockFailed "installer ignored an active process-held lock"
     $recovered = & (Join-Path $testPlugin "scripts\install-runtime.ps1")
-    $expectedRecovered = Join-Path $activeHome "bin\0.1.0-alpha.0\windows-$arch\delegation.exe"
+    $expectedRecovered = Join-Path $activeHome "bin\0.1.0-alpha.0.m1\windows-$arch\delegation.exe"
     Assert-True ($recovered -eq $expectedRecovered -and (Test-Path -LiteralPath $expectedRecovered -PathType Leaf)) "installer did not recover after the process-held lock was released"
 
     $badChecksumPlugin = Join-Path $tempRoot "bad-checksum-plugin"

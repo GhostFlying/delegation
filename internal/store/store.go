@@ -29,9 +29,21 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	directory, err := openStateDirectoryGuard(filepath.Dir(resolved))
+	if err != nil {
+		return nil, err
+	}
+	directoryOpen := true
+	closeDirectory := func() error {
+		if !directoryOpen {
+			return nil
+		}
+		directoryOpen = false
+		return directory.Close()
+	}
 	db, err := sql.Open("sqlite", dataSourceName(resolved))
 	if err != nil {
-		return nil, fmt.Errorf("open broker state: %w", err)
+		return nil, errors.Join(fmt.Errorf("open broker state: %w", err), closeDirectory())
 	}
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(4)
@@ -39,7 +51,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 	store := &Store{db: db}
 	closeOnError := func(err error) (*Store, error) {
-		return nil, errors.Join(err, db.Close())
+		return nil, errors.Join(err, db.Close(), closeDirectory())
 	}
 	if err := db.PingContext(ctx); err != nil {
 		return closeOnError(fmt.Errorf("open broker state: %w", err))
@@ -55,6 +67,18 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 	if err := store.checkIntegrity(ctx); err != nil {
 		return closeOnError(err)
+	}
+	if err := protectDatabaseArtifacts(resolved); err != nil {
+		return closeOnError(err)
+	}
+	if err := ValidatePath(resolved); err != nil {
+		return closeOnError(err)
+	}
+	if err := directory.VerifyPath(); err != nil {
+		return closeOnError(err)
+	}
+	if err := closeDirectory(); err != nil {
+		return closeOnError(fmt.Errorf("close broker state directory: %w", err))
 	}
 	return store, nil
 }
@@ -82,19 +106,36 @@ func preparePath(path string) (string, error) {
 	}
 	path = filepath.Clean(path)
 	directory := filepath.Dir(path)
-	createdDirectory := false
+	anchor, err := nearestExistingPath(directory)
+	if err != nil {
+		return "", err
+	}
+	if err := validateStateDirectoryLocation(anchor); err != nil {
+		return "", fmt.Errorf("validate existing broker state directory location: %w", err)
+	}
 	if _, err := os.Lstat(directory); errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			return "", fmt.Errorf("create broker state directory: %w", err)
+		var missing []string
+		for current := directory; filepath.Clean(current) != filepath.Clean(anchor); current = filepath.Dir(current) {
+			parent := filepath.Dir(current)
+			if parent == current {
+				return "", fmt.Errorf("broker state directory has no existing ancestor: %s", directory)
+			}
+			missing = append(missing, current)
 		}
-		createdDirectory = true
+		for index := len(missing) - 1; index >= 0; index-- {
+			created := missing[index]
+			if err := createPrivateDirectory(created); err != nil {
+				return "", fmt.Errorf("create broker state directory: %w", err)
+			}
+			if err := validateStateDirectoryLocation(created); err != nil {
+				return "", fmt.Errorf("validate new broker state directory location: %w", err)
+			}
+		}
 	} else if err != nil {
 		return "", fmt.Errorf("inspect broker state directory: %w", err)
 	}
-	if createdDirectory {
-		if err := os.Chmod(directory, 0o700); err != nil {
-			return "", fmt.Errorf("protect broker state directory: %w", err)
-		}
+	if err := validateStateDirectoryLocation(directory); err != nil {
+		return "", fmt.Errorf("validate broker state directory location: %w", err)
 	}
 	if err := ValidatePath(path); err != nil {
 		return "", err
@@ -116,20 +157,42 @@ func ValidatePath(path string) error {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("broker state directory must be a local directory, not a symbolic link")
 		}
-		if err := validatePrivateDirectory(info); err != nil {
+		if err := validatePrivateDirectory(directory, info); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect broker state directory: %w", err)
 	}
-	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("broker state must be a regular file, not a symbolic link")
+	for _, artifact := range databaseArtifacts(path) {
+		if info, err := os.Lstat(artifact); err == nil {
+			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+				return errors.New("broker state artifacts must be regular files, not symbolic links")
+			}
+			if err := validatePrivateStateFile(artifact, info); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect broker state artifact: %w", err)
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect broker state: %w", err)
 	}
 	return nil
+}
+
+func protectDatabaseArtifacts(path string) error {
+	for _, artifact := range databaseArtifacts(path) {
+		if _, err := os.Lstat(artifact); err == nil {
+			if err := protectDatabaseFile(artifact); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect broker state artifact: %w", err)
+		}
+	}
+	return nil
+}
+
+func databaseArtifacts(path string) []string {
+	return []string{path, path + "-wal", path + "-shm", path + "-journal", path + ".broker.lock"}
 }
 
 func (s *Store) enableWAL(ctx context.Context) error {
@@ -157,20 +220,6 @@ func (s *Store) enableWAL(ctx context.Context) error {
 		delay *= 2
 	}
 	panic("unreachable WAL retry loop")
-}
-
-func protectDatabaseFile(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("inspect opened broker state: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("opened broker state is not a regular file")
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("protect broker state: %w", err)
-	}
-	return nil
 }
 
 func (s *Store) checkIntegrity(ctx context.Context) error {

@@ -10,7 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
@@ -62,7 +62,7 @@ func TestBrokerServiceRunsConfiguredAuthModes(t *testing.T) {
 
 func TestBrokerServiceUsesConfiguredMasterToken(t *testing.T) {
 	configPath, cfg := setupBrokerRuntimeTest(t, "token")
-	deviceTokenPath := filepath.Join(t.TempDir(), "device.token")
+	deviceTokenPath := privateTestPath(t, "device.token")
 	var issueOutput bytes.Buffer
 	var issueError bytes.Buffer
 	if code := Run([]string{
@@ -173,6 +173,58 @@ func TestBrokerServiceClosesManagedWebSocketAndMarksDeviceOffline(t *testing.T) 
 	}
 }
 
+func TestBrokerServiceRejectsSecondProcessWithoutInvalidatingLiveLease(t *testing.T) {
+	const helperEnvironment = "DELEGATION_TEST_SECOND_BROKER"
+	if os.Getenv(helperEnvironment) == "1" {
+		configPath := os.Getenv("DELEGATION_TEST_BROKER_CONFIG")
+		cfg, err := delegationconfig.Read(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = runBrokerService(context.Background(), configPath, cfg, io.Discard, brokerRuntimeOptions{
+			listen: func(ctx context.Context, _, _ string) (net.Listener, error) {
+				var listenConfig net.ListenConfig
+				return listenConfig.Listen(ctx, "tcp", "127.0.0.1:0")
+			},
+		})
+		if !errors.Is(err, store.ErrBrokerLeaseHeld) {
+			t.Fatalf("second broker error = %v, want ErrBrokerLeaseHeld", err)
+		}
+		return
+	}
+
+	configPath, cfg := setupBrokerRuntimeTest(t, "none")
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- runBrokerService(ctx, configPath, cfg, io.Discard, testBrokerListen(ready))
+	}()
+	address := waitForBrokerAddress(t, ready, done)
+	waitForBrokerHealth(t, address)
+	connection, _, err := websocket.Dial(context.Background(), "ws://"+address+"/v1/connect", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	sendRuntimeHello(t, connection, runtimeDeviceID)
+
+	command := exec.Command(os.Args[0],
+		"-test.run=^TestBrokerServiceRejectsSecondProcessWithoutInvalidatingLiveLease$", "-test.count=1",
+	)
+	command.Env = append(os.Environ(),
+		helperEnvironment+"=1",
+		"DELEGATION_TEST_BROKER_CONFIG="+configPath,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("second broker helper failed: %v\n%s", err, output)
+	}
+	sendRuntimeHeartbeat(t, connection)
+
+	cancel()
+	waitForBrokerStop(t, done)
+}
+
 func TestBrokerServiceBindFailurePreservesPresence(t *testing.T) {
 	configPath, cfg := setupBrokerRuntimeTest(t, "none")
 	registry, err := store.Open(context.Background(), cfg.Broker.StateFile)
@@ -186,7 +238,7 @@ func TestBrokerServiceBindFailurePreservesPresence(t *testing.T) {
 		Role:            control.DeviceRoleWorker,
 		OS:              "linux",
 		Arch:            "amd64",
-		RuntimeVersion:  "0.1.0-alpha.0",
+		RuntimeVersion:  "0.1.0-alpha.0.m1",
 		ProtocolVersion: protocol.Version,
 	}, time.Unix(10, 0))
 	if err != nil {
@@ -215,6 +267,31 @@ func TestBrokerServiceBindFailurePreservesPresence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(record.Device, want) {
 		t.Fatalf("device after bind failure = %#v, want %#v", record.Device, want)
+	}
+}
+
+func TestBrokerServiceLeaseFailurePrecedesStoreOpen(t *testing.T) {
+	configPath, cfg := setupBrokerRuntimeTest(t, "none")
+	injected := errors.New("broker lease held")
+	storeOpened := false
+	err := runBrokerService(context.Background(), configPath, cfg, io.Discard, brokerRuntimeOptions{
+		listen: func(ctx context.Context, _, _ string) (net.Listener, error) {
+			var listenConfig net.ListenConfig
+			return listenConfig.Listen(ctx, "tcp", "127.0.0.1:0")
+		},
+		lease: func(string) (io.Closer, error) {
+			return nil, injected
+		},
+		openStore: func(context.Context, string) (*store.Store, error) {
+			storeOpened = true
+			return nil, errors.New("store must not open")
+		},
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("runBrokerService() error = %v", err)
+	}
+	if storeOpened {
+		t.Fatal("broker opened its state store before acquiring the instance lease")
 	}
 }
 
@@ -311,7 +388,7 @@ func TestBrokerServiceTreatsPrepareCancellationAsCleanStop(t *testing.T) {
 }
 
 func TestBrokerServiceWarnsBeforeInsecureListen(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
+	configPath := privateTestPath(t, "config.json")
 	var setupOutput bytes.Buffer
 	var setupError bytes.Buffer
 	if code := Run([]string{
@@ -345,7 +422,7 @@ func TestBrokerServiceWarnsBeforeInsecureListen(t *testing.T) {
 
 func setupBrokerRuntimeTest(t *testing.T, authMode string) (string, delegationconfig.Config) {
 	t.Helper()
-	configPath := filepath.Join(t.TempDir(), "config.json")
+	configPath := privateTestPath(t, "config.json")
 	args := []string{
 		"setup", "broker",
 		"--config", configPath,
@@ -435,7 +512,7 @@ func sendRuntimeHello(t *testing.T, connection *websocket.Conn, deviceID string)
 		Role:           control.DeviceRoleWorker,
 		OS:             "linux",
 		Arch:           "amd64",
-		RuntimeVersion: "0.1.0-alpha.0",
+		RuntimeVersion: "0.1.0-alpha.0.m1",
 		Features:       []string{protocol.FeatureDeviceRegistry},
 	})
 	if err != nil {
@@ -474,5 +551,47 @@ func sendRuntimeHello(t *testing.T, connection *websocket.Conn, deviceID string)
 	}
 	if response.Error != nil || response.ReplyTo != requestID {
 		t.Fatalf("hello response = %#v", response)
+	}
+}
+
+func sendRuntimeHeartbeat(t *testing.T, connection *websocket.Conn) {
+	t.Helper()
+	payload, err := json.Marshal(protocol.Heartbeat{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID, err := protocol.NewRequestID(protocol.DirectionConnector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := protocol.Marshal(protocol.Envelope{
+		ProtocolVersion: protocol.Version,
+		Kind:            protocol.KindRequest,
+		RequestID:       requestID,
+		Method:          protocol.MethodHeartbeat,
+		ControllerID:    runtimeControllerID,
+		Payload:         payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeatContext, stopHeartbeat := context.WithTimeout(context.Background(), time.Second)
+	defer stopHeartbeat()
+	if err := connection.Write(heartbeatContext, websocket.MessageText, message); err != nil {
+		t.Fatal(err)
+	}
+	messageType, data, err := connection.Read(heartbeatContext)
+	if err != nil {
+		t.Fatalf("read heartbeat response: %v", err)
+	}
+	if messageType != websocket.MessageText {
+		t.Fatalf("heartbeat response type = %v", messageType)
+	}
+	response, err := protocol.Read(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Error != nil || response.ReplyTo != requestID {
+		t.Fatalf("heartbeat response = %#v", response)
 	}
 }

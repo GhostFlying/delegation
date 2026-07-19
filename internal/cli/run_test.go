@@ -14,7 +14,7 @@ func TestVersionJSON(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("Run() code = %d, want 0; stderr = %q", code, stderr.String())
 	}
-	if got, want := stdout.String(), "{\"version\":\"0.1.0-alpha.0\"}\n"; got != want {
+	if got, want := stdout.String(), "{\"version\":\"0.1.0-alpha.0.m1\"}\n"; got != want {
 		t.Fatalf("Run() stdout = %q, want %q", got, want)
 	}
 	if stderr.Len() != 0 {

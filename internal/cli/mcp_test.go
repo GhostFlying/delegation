@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,12 +27,19 @@ func TestRootMCPInitializesOfflineWithoutReadingDeviceToken(t *testing.T) {
 	go func() {
 		runDone <- runRootMCP(context.Background(), configPath, serverTransport)
 	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
-	session, err := client.Connect(context.Background(), clientTransport, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
 	if err != nil {
-		t.Fatal(err)
+		select {
+		case runErr := <-runDone:
+			t.Fatalf("connect root MCP after server exit %v: %v", runErr, err)
+		default:
+			t.Fatal(err)
+		}
 	}
-	tools, err := session.ListTools(context.Background(), nil)
+	tools, err := session.ListTools(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +106,7 @@ func TestRootMCPStdioHelper(t *testing.T) {
 
 func writeRootMCPConfig(t *testing.T, role delegationconfig.Role) string {
 	t.Helper()
-	directory := t.TempDir()
+	directory := privateTestDirectory(t)
 	configPath := filepath.Join(directory, "config.json")
 	cfg := delegationconfig.Config{
 		SchemaVersion: delegationconfig.CurrentSchemaVersion,
@@ -119,11 +125,7 @@ func writeRootMCPConfig(t *testing.T, role delegationconfig.Role) string {
 	if role == delegationconfig.RoleDevice {
 		cfg.DeviceName = "worker"
 	}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+	if err := delegationconfig.WriteNew(configPath, cfg); err != nil {
 		t.Fatal(err)
 	}
 	if err := cfg.Validate(); err != nil {

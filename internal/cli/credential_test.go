@@ -32,9 +32,64 @@ type credentialTestEnvironment struct {
 	masterPath string
 }
 
+type sequencedPublishCredentialRegistry struct {
+	*store.Store
+	mu                 sync.Mutex
+	publishCalls       int
+	oldReached         chan struct{}
+	oldRelease         chan struct{}
+	replacementReached chan struct{}
+	replacementRelease chan struct{}
+}
+
+type conflictingOutputCredentialRegistry struct {
+	*store.Store
+	path string
+}
+
+func (r *conflictingOutputCredentialRegistry) PublishPendingCredential(
+	ctx context.Context,
+	controllerID, deviceID string,
+	mac store.CredentialMAC,
+	publish func() (bool, error),
+) (bool, error) {
+	if _, err := tokenfile.WriteNew(r.path, tokenfile.Token{9}); err != nil {
+		return false, err
+	}
+	return r.Store.PublishPendingCredential(ctx, controllerID, deviceID, mac, publish)
+}
+
+func (r *sequencedPublishCredentialRegistry) PublishPendingCredential(
+	ctx context.Context,
+	controllerID, deviceID string,
+	mac store.CredentialMAC,
+	publish func() (bool, error),
+) (bool, error) {
+	r.mu.Lock()
+	call := r.publishCalls
+	r.publishCalls++
+	var reached, release chan struct{}
+	switch call {
+	case 0:
+		reached, release = r.oldReached, r.oldRelease
+	case 1:
+		reached, release = r.replacementReached, r.replacementRelease
+	}
+	r.mu.Unlock()
+	if reached != nil {
+		close(reached)
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-release:
+		}
+	}
+	return r.Store.PublishPendingCredential(ctx, controllerID, deviceID, mac, publish)
+}
+
 func TestCredentialIssueAndRecover(t *testing.T) {
 	environment := setupCredentialTestBroker(t, "token")
-	tokenPath := filepath.Join(t.TempDir(), "device.token")
+	tokenPath := privateTestPath(t, "device.token")
 	issueArgs := credentialIssueArgs(environment, credentialTestDeviceID, tokenPath)
 
 	stdout, stderr, code := runCredentialTestCommand(issueArgs)
@@ -91,7 +146,7 @@ func TestCredentialIssueAndRecover(t *testing.T) {
 
 func TestCredentialIssueRecoversCommittedPendingToken(t *testing.T) {
 	environment := setupCredentialTestBroker(t, "token")
-	tokenPath := filepath.Join(t.TempDir(), "pending.token")
+	tokenPath := privateTestPath(t, "pending.token")
 	master := mustReadToken(t, environment.masterPath)
 	deviceToken, err := tokenfile.Generate()
 	if err != nil {
@@ -138,8 +193,8 @@ func TestCredentialIssueRecoversCommittedPendingToken(t *testing.T) {
 func TestConcurrentCredentialIssueForSameDeviceHasOneWinner(t *testing.T) {
 	environment := setupCredentialTestBroker(t, "token")
 	paths := []string{
-		filepath.Join(t.TempDir(), "first.token"),
-		filepath.Join(t.TempDir(), "second.token"),
+		privateTestPath(t, "first.token"),
+		privateTestPath(t, "second.token"),
 	}
 	type outcome struct {
 		stdout string
@@ -179,6 +234,155 @@ func TestConcurrentCredentialIssueForSameDeviceHasOneWinner(t *testing.T) {
 	}
 }
 
+func TestExpiredPendingReplacementFencesDelayedOldWriter(t *testing.T) {
+	registry := openCredentialTestStore(t, filepath.Join(t.TempDir(), "state", "broker.sqlite3"))
+	defer registry.Close()
+	fenced := &sequencedPublishCredentialRegistry{
+		Store:              registry,
+		oldReached:         make(chan struct{}),
+		oldRelease:         make(chan struct{}),
+		replacementReached: make(chan struct{}),
+		replacementRelease: make(chan struct{}),
+	}
+	master := tokenfile.Token{1}
+	tokenPath := privateTestPath(t, "device.token")
+	initialNow := time.Unix(2_000_000_000, 0).UTC()
+	currentNow := initialNow
+	var nowMu sync.RWMutex
+	originalNow := credentialNow
+	credentialNow = func() time.Time {
+		nowMu.RLock()
+		defer nowMu.RUnlock()
+		return currentNow
+	}
+	defer func() { credentialNow = originalNow }()
+
+	type outcome struct {
+		result    credentialResult
+		committed bool
+		err       error
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	oldDone := make(chan outcome, 1)
+	go func() {
+		result, committed, err := issueCredential(
+			ctx,
+			fenced,
+			master,
+			credentialTestControllerID,
+			credentialTestDeviceID,
+			control.DeviceRoleWorker,
+			tokenPath,
+		)
+		oldDone <- outcome{result: result, committed: committed, err: err}
+	}()
+	select {
+	case <-fenced.oldReached:
+	case <-ctx.Done():
+		t.Fatal("old credential writer did not reach publication boundary")
+	}
+	oldReleased := false
+	replacementReleased := false
+	defer func() {
+		if !oldReleased {
+			close(fenced.oldRelease)
+		}
+		if !replacementReleased {
+			close(fenced.replacementRelease)
+		}
+	}()
+	nowMu.Lock()
+	currentNow = initialNow.Add(pendingCredentialRecoveryLease + time.Second)
+	nowMu.Unlock()
+
+	replacementDone := make(chan outcome, 1)
+	go func() {
+		result, committed, err := issueCredential(
+			ctx,
+			fenced,
+			master,
+			credentialTestControllerID,
+			credentialTestDeviceID,
+			control.DeviceRoleWorker,
+			tokenPath,
+		)
+		replacementDone <- outcome{result: result, committed: committed, err: err}
+	}()
+	select {
+	case <-fenced.replacementReached:
+	case <-ctx.Done():
+		t.Fatal("replacement credential writer did not reach publication boundary")
+	}
+
+	close(fenced.oldRelease)
+	oldReleased = true
+	var old outcome
+	select {
+	case old = <-oldDone:
+	case <-ctx.Done():
+		t.Fatal("old credential writer did not stop after replacement")
+	}
+	if old.committed || !errors.Is(old.err, store.ErrNotFound) {
+		t.Fatalf("old writer result = %#v, committed %v, error %v", old.result, old.committed, old.err)
+	}
+	if _, err := os.Lstat(tokenPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old writer published a token after replacement: %v", err)
+	}
+	if pending, err := registry.Credential(
+		ctx, credentialTestControllerID, credentialTestDeviceID,
+	); err != nil || !pending.Pending || !pending.Disabled {
+		t.Fatalf("old writer removed replacement enrollment = %#v, error %v", pending, err)
+	}
+
+	close(fenced.replacementRelease)
+	replacementReleased = true
+	var replacement outcome
+	select {
+	case replacement = <-replacementDone:
+	case <-ctx.Done():
+		t.Fatal("replacement credential writer did not finish")
+	}
+	if replacement.err != nil || !replacement.committed || replacement.result.Recovered {
+		t.Fatalf(
+			"replacement result = %#v, committed %v, error %v",
+			replacement.result, replacement.committed, replacement.err,
+		)
+	}
+
+	deviceToken := mustReadToken(t, tokenPath)
+	replacementMAC := delegationcredential.MAC(master, deviceToken)
+	authenticated, err := registry.AuthenticateCredential(ctx, replacementMAC)
+	if err != nil || authenticated.MAC != replacementMAC || authenticated.Pending || authenticated.Disabled {
+		t.Fatalf("replacement credential = %#v, error %v", authenticated, err)
+	}
+}
+
+func TestCredentialIssueRetainsPendingWhenOutputAppearsDuringPublication(t *testing.T) {
+	registry := openCredentialTestStore(t, filepath.Join(t.TempDir(), "state", "broker.sqlite3"))
+	defer registry.Close()
+	tokenPath := privateTestPath(t, "device.token")
+	conflicting := &conflictingOutputCredentialRegistry{Store: registry, path: tokenPath}
+	_, committed, err := issueCredential(
+		context.Background(),
+		conflicting,
+		tokenfile.Token{1},
+		credentialTestControllerID,
+		credentialTestDeviceID,
+		control.DeviceRoleWorker,
+		tokenPath,
+	)
+	if committed || !errors.Is(err, os.ErrExist) {
+		t.Fatalf("conflicting publication = committed %v, error %v", committed, err)
+	}
+	pending, err := registry.Credential(
+		context.Background(), credentialTestControllerID, credentialTestDeviceID,
+	)
+	if err != nil || !pending.Pending || !pending.Disabled {
+		t.Fatalf("pending credential after conflicting output = %#v, error %v", pending, err)
+	}
+}
+
 func TestPendingCredentialRecoveryLease(t *testing.T) {
 	fixedNow := time.Unix(2_000_000_000, 0).UTC()
 	originalNow := credentialNow
@@ -196,7 +400,7 @@ func TestPendingCredentialRecoveryLease(t *testing.T) {
 	}
 	for index, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			registry := openCredentialTestStore(t, filepath.Join(t.TempDir(), "broker.sqlite3"))
+			registry := openCredentialTestStore(t, filepath.Join(t.TempDir(), "state", "broker.sqlite3"))
 			defer registry.Close()
 			master := tokenfile.Token{1}
 			pending := store.NewCredential(
@@ -211,7 +415,7 @@ func TestPendingCredentialRecoveryLease(t *testing.T) {
 			if err := registry.CreateCredential(context.Background(), pending); err != nil {
 				t.Fatal(err)
 			}
-			tokenPath := filepath.Join(t.TempDir(), "device.token")
+			tokenPath := privateTestPath(t, "device.token")
 			_, committed, err := issueCredential(
 				context.Background(), registry, master, credentialTestControllerID,
 				credentialTestDeviceID, control.DeviceRoleWorker, tokenPath,
@@ -271,7 +475,7 @@ func TestCredentialIssueRequiresExplicitDeviceID(t *testing.T) {
 		"credential", "issue",
 		"--config", environment.configPath,
 		"--role", "device",
-		"--out", filepath.Join(t.TempDir(), "device.token"),
+		"--out", privateTestPath(t, "device.token"),
 	})
 	if code == 0 || !strings.Contains(stderr, "deviceId must be a UUID") {
 		t.Fatalf("missing deviceId code = %d, stderr = %q", code, stderr)
@@ -281,7 +485,7 @@ func TestCredentialIssueRequiresExplicitDeviceID(t *testing.T) {
 func TestCredentialIssueRequiresBrokerTokenAuthentication(t *testing.T) {
 	environment := setupCredentialTestBroker(t, "none")
 	_, stderr, code := runCredentialTestCommand(
-		credentialIssueArgs(environment, credentialTestDeviceID, filepath.Join(t.TempDir(), "device.token")),
+		credentialIssueArgs(environment, credentialTestDeviceID, privateTestPath(t, "device.token")),
 	)
 	if code == 0 || !strings.Contains(stderr, "requires broker token authentication") {
 		t.Fatalf("none-auth issue code = %d, stderr = %q", code, stderr)
@@ -289,7 +493,10 @@ func TestCredentialIssueRequiresBrokerTokenAuthentication(t *testing.T) {
 }
 
 func TestCredentialStateSidecarsCannotAliasAuthorityFiles(t *testing.T) {
-	root := t.TempDir()
+	root := privateTestDirectory(t)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	configPath := filepath.Join(root, "config.json")
 	statePath := filepath.Join(root, "broker.sqlite3")
 	masterPath := filepath.Join(root, "master.token")
@@ -309,7 +516,7 @@ func TestCredentialStateSidecarsCannotAliasAuthorityFiles(t *testing.T) {
 
 func setupCredentialTestBroker(t *testing.T, authMode string) credentialTestEnvironment {
 	t.Helper()
-	root := t.TempDir()
+	root := privateTestDirectory(t)
 	environment := credentialTestEnvironment{
 		configPath: filepath.Join(root, "config.json"),
 		statePath:  filepath.Join(root, "state", "broker.sqlite3"),
@@ -352,7 +559,7 @@ func TestCredentialUsesBrokerConfiguredState(t *testing.T) {
 	stdout, stderr, code := runCredentialTestCommand(credentialIssueArgs(
 		environment,
 		credentialTestDeviceID,
-		filepath.Join(t.TempDir(), "device.token"),
+		privateTestPath(t, "device.token"),
 	))
 	if code != 0 {
 		t.Fatalf("issue code = %d, stderr = %q", code, stderr)
@@ -373,10 +580,7 @@ func TestCredentialRejectsSchemaOneWithoutMutatingOldAuthority(t *testing.T) {
 	if err := registry.Close(); err != nil {
 		t.Fatal(err)
 	}
-	configPath := filepath.Join(t.TempDir(), "custom", "config.json")
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	configPath := privateTestPath(t, "config.json")
 	masterPath := filepath.Join(oldHome, "secrets", "broker.token")
 	if _, err := tokenfile.Ensure(masterPath); err != nil {
 		t.Fatal(err)
@@ -397,6 +601,13 @@ func TestCredentialRejectsSchemaOneWithoutMutatingOldAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	protectedFixture := oldConfig
+	protectedFixture.SchemaVersion = delegationconfig.CurrentSchemaVersion
+	protectedFixture.Broker.Listen = "127.0.0.1:9876"
+	protectedFixture.Broker.StateFile = statePath
+	if err := delegationconfig.WriteNew(configPath, protectedFixture); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +619,7 @@ func TestCredentialRejectsSchemaOneWithoutMutatingOldAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	outputToken := filepath.Join(t.TempDir(), "device.token")
+	outputToken := privateTestPath(t, "device.token")
 	_, stderr, code := runCredentialTestCommand([]string{
 		"credential", "issue",
 		"--config", configPath,

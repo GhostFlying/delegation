@@ -9,18 +9,37 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GhostFlying/delegation/internal/control"
 )
 
-func TestUnixBridgeUsesPrivateSocketAndRejectsSecondServer(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	endpoint, err := Endpoint(configPath, bridgeTestDeviceID)
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("/tmp", "dlh-")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
+	if err := os.Chmod(home, 0o700); err != nil {
+		panic(err)
+	}
+	previous, hadPrevious := os.LookupEnv("HOME")
+	if err := os.Setenv("HOME", home); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	if hadPrevious {
+		_ = os.Setenv("HOME", previous)
+	} else {
+		_ = os.Unsetenv("HOME")
+	}
+	_ = os.RemoveAll(home)
+	os.Exit(code)
+}
+
+func TestUnixBridgeUsesPrivateSocketAndRejectsSecondServer(t *testing.T) {
+	endpoint := testEndpoint(t)
 	backend := &fakeBackend{}
-	server, err := Listen(endpoint, control.DeviceRoleController, backend)
+	server, err := Listen(endpoint, testServiceIdentity(control.DeviceRoleController), backend)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +51,7 @@ func TestUnixBridgeUsesPrivateSocketAndRejectsSecondServer(t *testing.T) {
 	if err != nil || socketInfo.Mode()&os.ModeSocket == 0 || socketInfo.Mode().Perm() != 0o600 {
 		t.Fatalf("socket = %#v, error %v", socketInfo, err)
 	}
-	if second, err := Listen(endpoint, control.DeviceRoleController, backend); err == nil {
+	if second, err := Listen(endpoint, testServiceIdentity(control.DeviceRoleController), backend); err == nil {
 		second.Close()
 		t.Fatal("second local bridge server bound the same endpoint")
 	}
@@ -41,6 +60,28 @@ func TestUnixBridgeUsesPrivateSocketAndRejectsSecondServer(t *testing.T) {
 	}
 	if _, err := os.Lstat(endpoint); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("closed bridge retained socket: %v", err)
+	}
+}
+
+func TestUnixBridgeRejectsPreclaimableRuntimeNamespace(t *testing.T) {
+	home, err := os.MkdirTemp("/tmp", "dh-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	if err := os.Chmod(home, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	endpoint, err := Endpoint(bridgeTestControllerID, bridgeTestDeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server, err := Listen(
+		endpoint, testServiceIdentity(control.DeviceRoleController), &fakeBackend{},
+	); err == nil {
+		server.Close()
+		t.Fatal("Listen accepted a user runtime namespace writable by another account")
 	}
 }
 
@@ -80,16 +121,14 @@ func TestUnixBridgeReplacesOnlyPrivateStaleSockets(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			configPath := filepath.Join(t.TempDir(), "config.json")
-			endpoint, err := Endpoint(configPath, bridgeTestDeviceID)
-			if err != nil {
-				t.Fatal(err)
-			}
+			endpoint := testEndpoint(t)
 			if err := prepareSocketDirectory(filepath.Dir(endpoint)); err != nil {
 				t.Fatal(err)
 			}
 			test.stale(t, endpoint)
-			server, err := Listen(endpoint, control.DeviceRoleController, &fakeBackend{})
+			server, err := Listen(
+				endpoint, testServiceIdentity(control.DeviceRoleController), &fakeBackend{},
+			)
 			if test.want {
 				if err != nil {
 					t.Fatal(err)
@@ -106,11 +145,7 @@ func TestUnixBridgeReplacesOnlyPrivateStaleSockets(t *testing.T) {
 }
 
 func TestUnixClientRejectsInsecureSocketPermissions(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	endpoint, err := Endpoint(configPath, bridgeTestDeviceID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	endpoint := testEndpoint(t)
 	if err := prepareSocketDirectory(filepath.Dir(endpoint)); err != nil {
 		t.Fatal(err)
 	}
@@ -128,5 +163,67 @@ func TestUnixClientRejectsInsecureSocketPermissions(t *testing.T) {
 	}
 	if err := client.Call(context.Background(), "future.call", "", nil, struct{}{}, nil); err == nil {
 		t.Fatal("client connected to an insecure local socket")
+	}
+}
+
+func TestUnixListenerDoesNotUnlinkReplacementSocket(t *testing.T) {
+	endpoint := testEndpoint(t)
+	var err error
+	first, err := listen(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(endpoint); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := net.Listen("unix", endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	if err := os.Chmod(endpoint, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(endpoint); err != nil {
+		t.Fatalf("closing old listener removed replacement socket: %v", err)
+	}
+}
+
+func TestServerCancellationClosesIncompleteLocalCall(t *testing.T) {
+	endpoint := testEndpoint(t)
+	var err error
+	server, err := Listen(endpoint, testServiceIdentity(control.DeviceRoleController), &fakeBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	connection, err := dial(context.Background(), endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, err := connection.Write([]byte{0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	started := time.Now()
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Close() waited %v for an incomplete local call", elapsed)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve() did not return after cancellation")
 	}
 }

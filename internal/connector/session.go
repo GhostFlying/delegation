@@ -20,6 +20,18 @@ type callResult struct {
 	err     error
 }
 
+type writeNotStartedError struct {
+	err error
+}
+
+func (e *writeNotStartedError) Error() string {
+	return e.err.Error()
+}
+
+func (e *writeNotStartedError) Unwrap() error {
+	return e.err
+}
+
 type pendingCall struct {
 	treeID string
 	result chan callResult
@@ -113,12 +125,20 @@ func (s *session) call(
 		copy := *source
 		request.Source = &copy
 	}
+	data, err := protocol.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("encode broker %s request: %w", method, err)
+	}
 	pending := pendingCall{treeID: treeID, result: make(chan callResult, 1)}
 	if err := s.addPending(requestID, pending); err != nil {
 		return nil, err
 	}
-	if err := s.write(ctx, request); err != nil {
+	if err := s.writeData(ctx, data); err != nil {
 		s.removePending(requestID)
+		var notStarted *writeNotStartedError
+		if errors.As(err, &notStarted) {
+			return nil, notStarted.err
+		}
 		s.close(fmt.Errorf("write broker request: %w", err))
 		return nil, err
 	}
@@ -128,9 +148,6 @@ func (s *session) call(
 	case <-ctx.Done():
 		s.removePending(requestID)
 		return nil, ctx.Err()
-	case <-s.done:
-		s.removePending(requestID)
-		return nil, s.err()
 	}
 }
 
@@ -200,16 +217,16 @@ func (s *session) heartbeatLoop(intervalMS int64) {
 func (s *session) complete(response protocol.Envelope) error {
 	s.pendingMu.Lock()
 	pending, found := s.pending[response.ReplyTo]
-	if found {
-		delete(s.pending, response.ReplyTo)
-	}
-	s.pendingMu.Unlock()
 	if !found {
+		s.pendingMu.Unlock()
 		return nil
 	}
 	if response.TreeID != pending.treeID {
+		s.pendingMu.Unlock()
 		return errors.New("broker response treeId does not match its request")
 	}
+	delete(s.pending, response.ReplyTo)
+	s.pendingMu.Unlock()
 	result := callResult{payload: response.Payload}
 	if response.Error != nil {
 		result.err = &RPCError{Code: response.Error.Code, Message: response.Error.Message}
@@ -265,10 +282,17 @@ func (s *session) write(ctx context.Context, envelope protocol.Envelope) error {
 	if err != nil {
 		return err
 	}
-	writeContext, cancel := context.WithTimeout(ctx, writeTimeout)
-	defer cancel()
+	return s.writeData(ctx, data)
+}
+
+func (s *session) writeData(ctx context.Context, data []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return &writeNotStartedError{err: err}
+	}
+	writeContext, cancel := context.WithTimeout(ctx, writeTimeout)
+	defer cancel()
 	return s.connection.Write(writeContext, websocket.MessageText, data)
 }
 

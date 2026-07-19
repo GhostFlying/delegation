@@ -8,22 +8,16 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/GhostFlying/delegation/internal/securefs"
 )
 
-func openSecureNew(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	return os.NewFile(uintptr(fd), path), nil
+func openSecureNew(directory *securefs.Root, name string) (*os.File, error) {
+	return directory.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
 }
 
-func openSecureRead(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
-	}
-	return os.NewFile(uintptr(fd), path), nil
+func openSecureRead(directory *securefs.Root, name string) (*os.File, error) {
+	return directory.OpenFile(name, os.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 }
 
 func validateFilePermissions(_ *os.File, info os.FileInfo) error {

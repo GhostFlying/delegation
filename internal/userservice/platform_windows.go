@@ -10,19 +10,27 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
 
-const taskCommandTimeout = 30 * time.Second
+const (
+	taskCommandTimeout = 30 * time.Second
+)
 
 type taskCommandResult struct {
 	Output   []byte
 	ExitCode int
 }
 
-var runTaskCommand = executeTaskCommand
+var (
+	runTaskCommand            = executeTaskCommand
+	waitForScheduledTaskReady = waitForServiceReady
+	scheduledTaskRunning      = queryScheduledTaskRunning
+)
 
 func platformPrepare(binaryPath, configPath string) (Result, error) {
 	sid, err := windowsUserSID()
@@ -117,13 +125,47 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 		result.State = StateIndeterminate
 		return result, errors.Join(runErr, taskCommandFailure("start scheduled task", run))
 	}
+	if err := waitForScheduledTaskReady(configPath); err != nil {
+		result.State = StateIndeterminate
+		return result, fmt.Errorf("scheduled task did not become ready: %w", err)
+	}
 	enabled, verifyErr = scheduledTaskEnabled(binaryPath, configPath)
 	if !enabled || verifyErr != nil {
 		result.State = StateIndeterminate
 		return result, errors.Join(verifyErr, errors.New("scheduled task changed after it was started"))
 	}
+	running, runningErr := scheduledTaskRunning()
+	if runningErr != nil || !running {
+		result.State = StateIndeterminate
+		return result, errors.Join(runningErr, errors.New("scheduled task has no running managed instance"))
+	}
 	result.State = StateActive
 	return result, nil
+}
+
+func queryScheduledTaskRunning() (bool, error) {
+	directory, err := windows.GetSystemDirectory()
+	if err != nil {
+		return false, fmt.Errorf("resolve Windows system directory: %w", err)
+	}
+	executable := filepath.Join(directory, "WindowsPowerShell", "v1.0", "powershell.exe")
+	const script = `$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$t=$s.GetFolder('\').GetTask('Delegation Connector');[Console]::Out.Write($t.GetInstances(0).Count)`
+	ctx, cancel := context.WithTimeout(context.Background(), taskCommandTimeout)
+	defer cancel()
+	output, err := exec.CommandContext(
+		ctx, executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
+	).Output()
+	if ctx.Err() != nil {
+		return false, fmt.Errorf("query scheduled task instances: %w", ctx.Err())
+	}
+	if err != nil {
+		return false, fmt.Errorf("query scheduled task instances: %w", err)
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil || count < 0 {
+		return false, errors.New("Task Scheduler returned an invalid running instance count")
+	}
+	return count > 0, nil
 }
 
 func scheduledTaskEnabled(binaryPath, configPath string) (bool, error) {

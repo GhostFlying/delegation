@@ -26,9 +26,14 @@ import (
 
 const (
 	ConnectPath              = "/v1/connect"
+	HealthServiceHeader      = "X-Delegation-Service"
+	HealthControllerHeader   = "X-Delegation-Controller-Id"
 	defaultHeartbeatInterval = 15 * time.Second
 	writeTimeout             = 10 * time.Second
 	cleanupTimeout           = 5 * time.Second
+	maximumPendingHellos     = 64
+	maximumDeviceHellos      = 2
+	defaultOfflineRetry      = time.Second
 )
 
 type Registry interface {
@@ -51,6 +56,7 @@ type Options struct {
 	Registry          Registry
 	HeartbeatInterval time.Duration
 	Now               func() time.Time
+	NewID             func() (string, error)
 	ReportError       func(error)
 }
 
@@ -60,16 +66,27 @@ type Server struct {
 	masterToken       tokenfile.Token
 	registry          Registry
 	heartbeatInterval time.Duration
+	newID             func() (string, error)
 	now               func() time.Time
 	reportError       func(error)
 	context           context.Context
 	cancel            context.CancelFunc
 
-	mu          sync.Mutex
-	connections map[string]*session
-	peers       map[*websocket.Conn]struct{}
-	closed      bool
-	handlers    sync.WaitGroup
+	mu               sync.Mutex
+	connections      map[string]*session
+	peers            map[*websocket.Conn]struct{}
+	pendingHellos    int
+	deviceHellos     map[string]int
+	helloLimit       int
+	deviceHelloLimit int
+	closed           bool
+	handlers         sync.WaitGroup
+	background       sync.WaitGroup
+
+	retryMu              sync.Mutex
+	offlineRetries       map[string]uint64
+	offlineRetryWake     chan struct{}
+	offlineRetryInterval time.Duration
 
 	shutdownOnce sync.Once
 	shutdownDone chan struct{}
@@ -78,15 +95,17 @@ type Server struct {
 
 type peerAuthority struct {
 	credentialMAC *store.CredentialMAC
+	deviceID      string
 }
 
 type session struct {
-	server       *Server
-	connection   *websocket.Conn
-	connectionID string
-	deviceID     string
-	role         control.DeviceRole
-	revision     atomic.Uint64
+	server        *Server
+	connection    *websocket.Conn
+	connectionID  string
+	deviceID      string
+	role          control.DeviceRole
+	credentialMAC *store.CredentialMAC
+	revision      atomic.Uint64
 }
 
 type internalError struct {
@@ -132,6 +151,10 @@ func New(options Options) (*Server, error) {
 	if now == nil {
 		now = time.Now
 	}
+	newID := options.NewID
+	if newID == nil {
+		newID = identity.NewID
+	}
 	reportError := options.ReportError
 	if reportError == nil {
 		reportError = func(err error) {
@@ -139,17 +162,26 @@ func New(options Options) (*Server, error) {
 		}
 	}
 	server := &Server{
-		controllerID:      options.ControllerID,
-		authMode:          options.AuthMode,
-		registry:          options.Registry,
-		heartbeatInterval: heartbeatInterval,
-		now:               now,
-		reportError:       reportError,
-		connections:       map[string]*session{},
-		peers:             map[*websocket.Conn]struct{}{},
-		shutdownDone:      make(chan struct{}),
+		controllerID:         options.ControllerID,
+		authMode:             options.AuthMode,
+		registry:             options.Registry,
+		heartbeatInterval:    heartbeatInterval,
+		newID:                newID,
+		now:                  now,
+		reportError:          reportError,
+		connections:          map[string]*session{},
+		peers:                map[*websocket.Conn]struct{}{},
+		deviceHellos:         map[string]int{},
+		helloLimit:           maximumPendingHellos,
+		deviceHelloLimit:     maximumDeviceHellos,
+		offlineRetries:       map[string]uint64{},
+		offlineRetryWake:     make(chan struct{}, 1),
+		offlineRetryInterval: defaultOfflineRetry,
+		shutdownDone:         make(chan struct{}),
 	}
 	server.context, server.cancel = context.WithCancel(context.Background())
+	server.background.Add(1)
+	go server.retryOfflineLoop()
 	if options.MasterToken != nil {
 		server.masterToken = *options.MasterToken
 	}
@@ -165,6 +197,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(ConnectPath, s.handleConnect)
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.Header().Set(HealthServiceHeader, "broker")
+		writer.Header().Set(HealthControllerHeader, s.controllerID)
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte("ok\n"))
 	})
@@ -206,6 +240,7 @@ func (s *Server) startShutdown() {
 		forceClose.Wait()
 		close(closeErrors)
 		s.handlers.Wait()
+		s.background.Wait()
 
 		var failures []error
 		for err := range closeErrors {
@@ -258,6 +293,43 @@ func (s *Server) untrackPeer(peer *websocket.Conn) {
 	s.mu.Unlock()
 }
 
+func (s *Server) reserveHello() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.pendingHellos >= s.helloLimit {
+		return false
+	}
+	s.pendingHellos++
+	return true
+}
+
+func (s *Server) reserveDeviceHello(deviceID string) bool {
+	if deviceID == "" {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.deviceHellos[deviceID] >= s.deviceHelloLimit {
+		return false
+	}
+	s.deviceHellos[deviceID]++
+	return true
+}
+
+func (s *Server) releaseHello(deviceID string) {
+	s.mu.Lock()
+	s.pendingHellos--
+	if deviceID != "" {
+		remaining := s.deviceHellos[deviceID] - 1
+		if remaining == 0 {
+			delete(s.deviceHellos, deviceID)
+		} else {
+			s.deviceHellos[deviceID] = remaining
+		}
+	}
+	s.mu.Unlock()
+}
+
 func (s *Server) handleConnect(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
 		writer.Header().Set("Allow", http.MethodGet)
@@ -269,6 +341,17 @@ func (s *Server) handleConnect(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	defer s.handlers.Done()
+	if !s.reserveHello() {
+		http.Error(writer, "too many pending connector handshakes", http.StatusServiceUnavailable)
+		return
+	}
+	helloDeviceID := ""
+	helloReserved := true
+	defer func() {
+		if helloReserved {
+			s.releaseHello(helloDeviceID)
+		}
+	}()
 
 	authContext, cancelAuth := context.WithCancel(request.Context())
 	stopBrokerCancellation := context.AfterFunc(s.context, cancelAuth)
@@ -287,6 +370,11 @@ func (s *Server) handleConnect(writer http.ResponseWriter, request *http.Request
 		http.Error(writer, "broker unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	if !s.reserveDeviceHello(authority.deviceID) {
+		http.Error(writer, "too many pending connector handshakes", http.StatusServiceUnavailable)
+		return
+	}
+	helloDeviceID = authority.deviceID
 	connection, err := websocket.Accept(writer, request, nil)
 	if err != nil {
 		return
@@ -299,6 +387,8 @@ func (s *Server) handleConnect(writer http.ResponseWriter, request *http.Request
 	defer s.untrackPeer(connection)
 
 	current, err := s.acceptHello(s.context, connection, authority)
+	s.releaseHello(helloDeviceID)
+	helloReserved = false
 	if err != nil {
 		return
 	}
@@ -332,10 +422,11 @@ func (s *Server) authenticateRequest(ctx context.Context, request *http.Request)
 		return peerAuthority{}, store.ErrNotFound
 	}
 	mac := credential.MAC(s.masterToken, deviceToken)
-	if _, err := s.registry.AuthenticateCredential(ctx, mac); err != nil {
+	registered, err := s.registry.AuthenticateCredential(ctx, mac)
+	if err != nil {
 		return peerAuthority{}, err
 	}
-	return peerAuthority{credentialMAC: &mac}, nil
+	return peerAuthority{credentialMAC: &mac, deviceID: registered.DeviceID}, nil
 }
 
 func (s *Server) acceptHello(
@@ -362,6 +453,13 @@ func (s *Server) acceptHello(
 		_ = s.writeError(ctx, connection, envelope, protocol.ErrorInvalidParams, "invalid hello payload")
 		return nil, errors.New("invalid hello payload")
 	}
+	connectionID, err := s.newID()
+	if err != nil {
+		internal := &internalError{operation: "create connection ID", err: err}
+		s.reportError(internal)
+		_ = s.writeError(ctx, connection, envelope, protocol.ErrorInternal, "broker failed to create connection")
+		return nil, internal
+	}
 	device, err := s.registerDevice(ctx, authority, hello)
 	if err != nil {
 		if registrationDenied(err) {
@@ -374,17 +472,13 @@ func (s *Server) acceptHello(
 		_ = s.writeError(ctx, connection, envelope, protocol.ErrorUnavailable, "broker unavailable")
 		return nil, err
 	}
-	connectionID, err := identity.NewID()
-	if err != nil {
-		_ = s.writeError(ctx, connection, envelope, protocol.ErrorInternal, "broker failed to create connection")
-		return nil, err
-	}
 	current := &session{
-		server:       s,
-		connection:   connection,
-		connectionID: connectionID,
-		deviceID:     device.DeviceID,
-		role:         device.Role,
+		server:        s,
+		connection:    connection,
+		connectionID:  connectionID,
+		deviceID:      device.DeviceID,
+		role:          device.Role,
+		credentialMAC: authority.credentialMAC,
 	}
 	current.revision.Store(device.Revision)
 	result := protocol.HelloResult{
@@ -444,7 +538,74 @@ func (s *Server) releaseLease(current *session) {
 	)
 	if err != nil && !errors.Is(err, store.ErrStaleRevision) {
 		s.reportError(&internalError{operation: "mark device offline", err: err})
+		s.enqueueOfflineRetry(current.deviceID, current.revision.Load())
 	}
+}
+
+func (s *Server) enqueueOfflineRetry(deviceID string, revision uint64) {
+	if s.context.Err() != nil {
+		return
+	}
+	s.retryMu.Lock()
+	if current := s.offlineRetries[deviceID]; revision > current {
+		s.offlineRetries[deviceID] = revision
+	}
+	s.retryMu.Unlock()
+	select {
+	case s.offlineRetryWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) retryOfflineLoop() {
+	defer s.background.Done()
+	for {
+		select {
+		case <-s.context.Done():
+			return
+		case <-s.offlineRetryWake:
+		}
+		for {
+			timer := time.NewTimer(s.offlineRetryInterval)
+			select {
+			case <-s.context.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if !s.retryOfflinePass() {
+				break
+			}
+		}
+	}
+}
+
+func (s *Server) retryOfflinePass() bool {
+	s.retryMu.Lock()
+	retries := make(map[string]uint64, len(s.offlineRetries))
+	for deviceID, revision := range s.offlineRetries {
+		retries[deviceID] = revision
+	}
+	s.retryMu.Unlock()
+
+	for deviceID, revision := range retries {
+		ctx, cancel := context.WithTimeout(s.context, cleanupTimeout)
+		_, err := s.registry.MarkDeviceOffline(ctx, s.controllerID, deviceID, revision, s.now())
+		cancel()
+		if err != nil && !errors.Is(err, store.ErrStaleRevision) {
+			continue
+		}
+		s.retryMu.Lock()
+		if s.offlineRetries[deviceID] == revision {
+			delete(s.offlineRetries, deviceID)
+		}
+		s.retryMu.Unlock()
+	}
+
+	s.retryMu.Lock()
+	pending := len(s.offlineRetries) != 0
+	s.retryMu.Unlock()
+	return pending
 }
 
 func (s *session) run(ctx context.Context) error {
@@ -475,6 +636,21 @@ func (s *session) handleEnvelope(ctx context.Context, envelope protocol.Envelope
 			_ = s.server.writeError(ctx, s.connection, envelope, protocol.ErrorForbidden, "controller mismatch")
 		}
 		return false, errors.New("connection sent a mismatched controllerId")
+	}
+	if err := s.validateAuthority(ctx); err != nil {
+		if registrationDenied(err) {
+			if envelope.Kind == protocol.KindRequest {
+				_ = s.server.writeError(ctx, s.connection, envelope, protocol.ErrorForbidden, "session credential is no longer valid")
+			}
+			return false, err
+		}
+		if isContextError(err) {
+			return false, err
+		}
+		if envelope.Kind == protocol.KindRequest {
+			_ = s.server.writeError(ctx, s.connection, envelope, protocol.ErrorUnavailable, "broker unavailable")
+		}
+		return false, &internalError{operation: "reauthenticate session", err: err}
 	}
 	switch envelope.Kind {
 	case protocol.KindNotification, protocol.KindResponse:
@@ -522,6 +698,20 @@ func (s *session) handleEnvelope(ctx context.Context, envelope protocol.Envelope
 		return false, err
 	}
 	return true, nil
+}
+
+func (s *session) validateAuthority(ctx context.Context) error {
+	if s.credentialMAC == nil {
+		return nil
+	}
+	credential, err := s.server.registry.AuthenticateCredential(ctx, *s.credentialMAC)
+	if err != nil {
+		return err
+	}
+	if credential.ControllerID != s.server.controllerID || credential.DeviceID != s.deviceID || credential.Role != s.role {
+		return store.ErrAuthorizationDenied
+	}
+	return nil
 }
 
 func validPeerDirection(envelope protocol.Envelope) bool {

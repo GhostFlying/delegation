@@ -25,18 +25,22 @@ type Backend interface {
 }
 
 type Server struct {
-	listener  net.Listener
-	role      control.DeviceRole
-	backend   Backend
-	sem       chan struct{}
-	started   atomic.Bool
-	closeOnce sync.Once
-	wait      sync.WaitGroup
-	serveDone chan struct{}
+	listener    net.Listener
+	identity    ServiceIdentity
+	backend     Backend
+	sem         chan struct{}
+	started     atomic.Bool
+	closeOnce   sync.Once
+	wait        sync.WaitGroup
+	serveDone   chan struct{}
+	mu          sync.Mutex
+	connections map[net.Conn]struct{}
+	closed      bool
+	closeErr    error
 }
 
-func Listen(endpoint string, role control.DeviceRole, backend Backend) (*Server, error) {
-	if err := role.Validate(); err != nil {
+func Listen(endpoint string, identity ServiceIdentity, backend Backend) (*Server, error) {
+	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
 	if backend == nil {
@@ -47,8 +51,8 @@ func Listen(endpoint string, role control.DeviceRole, backend Backend) (*Server,
 		return nil, fmt.Errorf("listen on local delegation endpoint: %w", err)
 	}
 	return &Server{
-		listener: listener, role: role, backend: backend, sem: make(chan struct{}, maximumConcurrentCalls),
-		serveDone: make(chan struct{}),
+		listener: listener, identity: identity, backend: backend, sem: make(chan struct{}, maximumConcurrentCalls),
+		serveDone: make(chan struct{}), connections: make(map[net.Conn]struct{}),
 	}, nil
 }
 
@@ -57,9 +61,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		return errors.New("local bridge server is already running")
 	}
 	defer close(s.serveDone)
-	stop := context.AfterFunc(ctx, func() {
-		_ = s.listener.Close()
-	})
+	stop := context.AfterFunc(ctx, s.stop)
 	defer stop()
 	defer s.wait.Wait()
 	for {
@@ -72,6 +74,11 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 		select {
 		case s.sem <- struct{}{}:
+			if !s.track(connection) {
+				<-s.sem
+				_ = connection.Close()
+				continue
+			}
 			s.wait.Add(1)
 			go s.handle(ctx, connection)
 		default:
@@ -81,18 +88,60 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 func (s *Server) Close() error {
-	s.closeOnce.Do(func() {
-		_ = s.listener.Close()
-	})
+	s.stop()
 	if s.started.Load() {
 		<-s.serveDone
 	}
-	return nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeErr
+}
+
+func (s *Server) stop() {
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		connections := make([]net.Conn, 0, len(s.connections))
+		for connection := range s.connections {
+			connections = append(connections, connection)
+		}
+		s.mu.Unlock()
+
+		var failures []error
+		if err := s.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			failures = append(failures, fmt.Errorf("close local delegation listener: %w", err))
+		}
+		for _, connection := range connections {
+			if err := connection.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				failures = append(failures, fmt.Errorf("close local delegation connection: %w", err))
+			}
+		}
+		s.mu.Lock()
+		s.closeErr = errors.Join(failures...)
+		s.mu.Unlock()
+	})
+}
+
+func (s *Server) track(connection net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.connections[connection] = struct{}{}
+	return true
+}
+
+func (s *Server) untrack(connection net.Conn) {
+	s.mu.Lock()
+	delete(s.connections, connection)
+	s.mu.Unlock()
 }
 
 func (s *Server) handle(serverContext context.Context, connection net.Conn) {
 	defer s.wait.Done()
 	defer func() { <-s.sem }()
+	defer s.untrack(connection)
 	defer connection.Close()
 	ctx, cancel := context.WithTimeout(serverContext, localCallTimeout)
 	defer cancel()
@@ -137,7 +186,21 @@ func (s *Server) handle(serverContext context.Context, connection net.Conn) {
 }
 
 func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *protocol.Error) {
-	if s.role != control.DeviceRoleController {
+	if request.Method == methodIdentity {
+		if request.TreeID != "" || request.Source != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid bridge identity request"}
+		}
+		var params struct{}
+		if err := decodeResult(request.Payload, &params); err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid bridge identity request"}
+		}
+		result, err := json.Marshal(s.identity)
+		if err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode bridge identity"}
+		}
+		return result, nil
+	}
+	if s.identity.Role != control.DeviceRoleController {
 		return nil, &protocol.Error{Code: protocol.ErrorForbidden, Message: "controller bridge required"}
 	}
 	switch request.Method {

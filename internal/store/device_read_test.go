@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
 const deviceThirdID = "123e4567-e89b-42d3-a456-426614174032"
@@ -55,20 +57,110 @@ func TestListDevicesUsesRevisionBoundPages(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	stable, err := registry.ListDevices(ctx, testControllerID, DevicePageRequest{
+		AfterDeviceID:    first.NextCursor,
+		Limit:            2,
+		ExpectedRevision: &first.Revision,
+	})
+	if err != nil || stable.Revision != first.Revision || len(stable.Devices) != 1 || stable.Devices[0].LastSeenAt != 4 {
+		t.Fatalf("heartbeat-stable page = %#v, error %v", stable, err)
+	}
+	register := deviceDescriptor(testControllerID, "123e4567-e89b-42d3-a456-426614174034", control.DeviceRoleWorker)
+	if _, err := registry.RegisterTrustedDevice(ctx, register, time.Unix(5, 0)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := registry.ListDevices(ctx, testControllerID, DevicePageRequest{
 		AfterDeviceID:    first.NextCursor,
 		Limit:            2,
 		ExpectedRevision: &first.Revision,
 	}); !errors.Is(err, ErrRevisionChanged) {
-		t.Fatalf("revision drift error = %v, want ErrRevisionChanged", err)
+		t.Fatalf("roster revision drift error = %v, want ErrRevisionChanged", err)
 	}
-	currentRevision := uint64(4)
-	if retry, err := registry.ListDevices(ctx, testControllerID, DevicePageRequest{
-		AfterDeviceID:    first.NextCursor,
-		Limit:            2,
-		ExpectedRevision: &currentRevision,
-	}); err != nil || retry.Revision != 4 || len(retry.Devices) != 1 {
-		t.Fatalf("revision-bound retry = %#v, error %v", retry, err)
+}
+
+func TestHeartbeatsDoNotLivelockMaximumDevicePages(t *testing.T) {
+	registry := openTestStore(t)
+	ctx := context.Background()
+	var devices []control.Device
+	for index := range MaximumDevicePage + 1 {
+		descriptor := deviceDescriptor(
+			testControllerID,
+			fmt.Sprintf("123e4567-e89b-42d3-a456-%012d", index+100),
+			control.DeviceRoleWorker,
+		)
+		device, err := registry.RegisterTrustedDevice(ctx, descriptor, time.Unix(int64(index+1), 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		devices = append(devices, device)
+	}
+	first, err := registry.ListDevices(ctx, testControllerID, DevicePageRequest{Limit: MaximumDevicePage})
+	if err != nil || len(first.Devices) != MaximumDevicePage || first.NextCursor == "" {
+		t.Fatalf("first maximum page = %#v, error %v", first, err)
+	}
+	for index, device := range devices {
+		if _, err := registry.HeartbeatDevice(
+			ctx,
+			device.ControllerID,
+			device.DeviceID,
+			device.Revision,
+			time.Unix(int64(100+index), 0),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	second, err := registry.ListDevices(ctx, testControllerID, DevicePageRequest{
+		AfterDeviceID: first.NextCursor, Limit: MaximumDevicePage, ExpectedRevision: &first.Revision,
+	})
+	if err != nil || second.Revision != first.Revision || len(second.Devices) != 1 || second.NextCursor != "" {
+		t.Fatalf("second maximum page = %#v, error %v", second, err)
+	}
+}
+
+func TestMaximumDevicePageFitsProtocolEnvelope(t *testing.T) {
+	features := make([]string, 64)
+	for index := range features {
+		features[index] = fmt.Sprintf("f%02d%s", index, strings.Repeat("x", 61))
+	}
+	devices := make([]control.Device, MaximumDevicePage)
+	for index := range devices {
+		devices[index] = control.Device{
+			ControllerID:    testControllerID,
+			DeviceID:        fmt.Sprintf("123e4567-e89b-42d3-a456-%012d", index),
+			Name:            strings.Repeat("n", 128),
+			Role:            control.DeviceRoleWorker,
+			OS:              strings.Repeat("o", 32),
+			Arch:            strings.Repeat("a", 32),
+			RuntimeVersion:  strings.Repeat("v", 64),
+			ProtocolVersion: protocol.Version,
+			Features:        features,
+			Online:          true,
+			LastSeenAt:      1,
+			Revision:        uint64(index + 1),
+		}
+		if err := devices[index].Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload, err := json.Marshal(protocol.ListDevicesResult{
+		Revision: 1, Devices: devices, NextCursor: devices[len(devices)-1].DeviceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := protocol.Marshal(protocol.Envelope{
+		ProtocolVersion: protocol.Version,
+		Kind:            protocol.KindResponse,
+		RequestID:       "b_123e4567-e89b-42d3-a456-426614174001",
+		ReplyTo:         "c_123e4567-e89b-42d3-a456-426614174002",
+		ControllerID:    testControllerID,
+		Payload:         payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > protocol.MaxMessageSize {
+		t.Fatalf("maximum device page encoded to %d bytes", len(encoded))
 	}
 }
 

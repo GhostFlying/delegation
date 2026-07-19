@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -39,6 +40,25 @@ type fakeRootBackend struct {
 	ensureResult   *protocol.EnsureRootTreeResult
 	listResult     *protocol.ListDevicesResult
 	describeResult *protocol.DescribeDeviceResult
+}
+
+type cancelRootBackend struct {
+	started  chan struct{}
+	canceled chan error
+}
+
+func (b *cancelRootBackend) Call(
+	ctx context.Context,
+	_ string,
+	_ string,
+	_ *control.PrincipalIdentity,
+	_ any,
+	_ any,
+) error {
+	close(b.started)
+	<-ctx.Done()
+	b.canceled <- ctx.Err()
+	return ctx.Err()
 }
 
 func (b *fakeRootBackend) Call(
@@ -112,9 +132,9 @@ func (b *fakeRootBackend) snapshot() []rootMCPCall {
 
 func TestRootMCPListsStaticReadOnlyToolsAndBindsThread(t *testing.T) {
 	backend := &fakeRootBackend{}
-	clientSession, closeSessions := connectRootMCP(t, backend)
+	ctx, clientSession, closeSessions := connectRootMCP(t, backend)
 	defer closeSessions()
-	tools, err := clientSession.ListTools(context.Background(), nil)
+	tools, err := clientSession.ListTools(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,24 +151,25 @@ func TestRootMCPListsStaticReadOnlyToolsAndBindsThread(t *testing.T) {
 		assertToolSchema(t, tool)
 	}
 
-	first := callTool(t, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{"limit": 2})
+	first := callTool(t, ctx, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{"limit": 2})
 	if first.IsError {
 		t.Fatalf("list_devices result = %#v", first)
 	}
 	var firstPage ListDevicesOutput
 	decodeStructured(t, first.StructuredContent, &firstPage)
 	if firstPage.Revision != 7 || len(firstPage.Devices) != 2 || firstPage.NextCursor == "" ||
-		len(firstPage.Devices[0].Features) != listFeatureLimit ||
-		!firstPage.Devices[0].FeaturesTruncated || firstPage.Devices[1].FeaturesTruncated {
+		len(firstPage.Devices[0].Features) != 0 ||
+		!firstPage.Devices[0].FeaturesTruncated || !firstPage.Devices[1].FeaturesTruncated ||
+		firstPage.Devices[0].ProtocolVersion != protocol.Version {
 		t.Fatalf("first MCP device page = %#v", firstPage)
 	}
-	second := callTool(t, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{
+	second := callTool(t, ctx, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{
 		"cursor": firstPage.NextCursor, "limit": 2,
 	})
 	if second.IsError {
 		t.Fatalf("second list_devices result = %#v", second)
 	}
-	described := callTool(t, clientSession, ToolDescribeDevice, rootMCPThreadID, map[string]any{
+	described := callTool(t, ctx, clientSession, ToolDescribeDevice, rootMCPThreadID, map[string]any{
 		"deviceId": rootMCPWorkerID,
 	})
 	if described.IsError {
@@ -157,6 +178,7 @@ func TestRootMCPListsStaticReadOnlyToolsAndBindsThread(t *testing.T) {
 	var description DescribeDeviceOutput
 	decodeStructured(t, described.StructuredContent, &description)
 	if description.Revision != 8 || description.Device.DeviceID != rootMCPWorkerID ||
+		description.Device.ProtocolVersion != protocol.Version ||
 		len(description.Device.Features) != 24 || description.Device.FeaturesTruncated {
 		t.Fatalf("MCP device description = %#v", description)
 	}
@@ -186,7 +208,7 @@ func TestRootMCPListsStaticReadOnlyToolsAndBindsThread(t *testing.T) {
 
 func TestRootMCPFailsClosedWithoutValidThreadMetadata(t *testing.T) {
 	backend := &fakeRootBackend{}
-	clientSession, closeSessions := connectRootMCP(t, backend)
+	ctx, clientSession, closeSessions := connectRootMCP(t, backend)
 	defer closeSessions()
 	for name, meta := range map[string]mcp.Meta{
 		"missing":      nil,
@@ -194,7 +216,7 @@ func TestRootMCPFailsClosedWithoutValidThreadMetadata(t *testing.T) {
 		"invalid UUID": {"threadId": "not-a-uuid"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{
+			result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
 				Meta: meta, Name: ToolListDevices, Arguments: map[string]any{},
 			})
 			if err != nil {
@@ -221,6 +243,10 @@ func TestRootMCPFailsClosedOnMismatchedRootBinding(t *testing.T) {
 		{name: "controller", mutate: func(result *protocol.EnsureRootTreeResult) {
 			result.Principal.ControllerID = rootMCPWorkerID
 		}},
+		{name: "configured controller", mutate: func(result *protocol.EnsureRootTreeResult) {
+			result.Tree.ControllerID = rootMCPWorkerID
+			result.Principal.ControllerID = rootMCPWorkerID
+		}},
 		{name: "tree", mutate: func(result *protocol.EnsureRootTreeResult) {
 			result.Principal.TreeID = rootMCPWorkerID
 		}},
@@ -228,6 +254,10 @@ func TestRootMCPFailsClosedOnMismatchedRootBinding(t *testing.T) {
 			result.Principal.AgentID = rootMCPWorkerID
 		}},
 		{name: "root device", mutate: func(result *protocol.EnsureRootTreeResult) {
+			result.Principal.DeviceID = rootMCPWorkerID
+		}},
+		{name: "configured root device", mutate: func(result *protocol.EnsureRootTreeResult) {
+			result.Tree.RootDeviceID = rootMCPWorkerID
 			result.Principal.DeviceID = rootMCPWorkerID
 		}},
 		{name: "parent", mutate: func(result *protocol.EnsureRootTreeResult) {
@@ -242,9 +272,9 @@ func TestRootMCPFailsClosedOnMismatchedRootBinding(t *testing.T) {
 			binding := rootResult(rootMCPThreadID)
 			test.mutate(&binding)
 			backend := &fakeRootBackend{ensureResult: &binding}
-			clientSession, closeSessions := connectRootMCP(t, backend)
+			ctx, clientSession, closeSessions := connectRootMCP(t, backend)
 			defer closeSessions()
-			result := callTool(t, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{})
+			result := callTool(t, ctx, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{})
 			if !result.IsError {
 				t.Fatalf("mismatched root binding result = %#v", result)
 			}
@@ -260,20 +290,72 @@ func TestRootMCPReturnsRecoverableBridgeErrors(t *testing.T) {
 	backend := &fakeRootBackend{err: &localbridge.RPCError{
 		Code: protocol.ErrorUnavailable, Message: "broker unavailable",
 	}}
-	clientSession, closeSessions := connectRootMCP(t, backend)
+	ctx, clientSession, closeSessions := connectRootMCP(t, backend)
 	defer closeSessions()
-	result := callTool(t, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{})
+	result := callTool(t, ctx, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{})
 	if !result.IsError || !strings.Contains(toolText(result), "connector is offline") {
 		t.Fatalf("offline bridge result = %#v", result)
 	}
 	backend.mu.Lock()
 	backend.err = nil
 	backend.mu.Unlock()
-	invalidCursor := callTool(t, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{
+	invalidCursor := callTool(t, ctx, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{
 		"cursor": "invalid!",
 	})
 	if !invalidCursor.IsError || !strings.Contains(toolText(invalidCursor), "cursor") {
 		t.Fatalf("invalid cursor result = %#v", invalidCursor)
+	}
+}
+
+func TestRootMCPExplainsRootBindingConflict(t *testing.T) {
+	backend := &fakeRootBackend{err: &localbridge.RPCError{
+		Code: protocol.ErrorConflict, Message: "root device mismatch",
+	}}
+	ctx, clientSession, closeSessions := connectRootMCP(t, backend)
+	defer closeSessions()
+	result := callTool(t, ctx, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{})
+	text := toolText(result)
+	if !result.IsError || !strings.Contains(text, "bound to another delegation root device") ||
+		strings.Contains(text, "without a cursor") {
+		t.Fatalf("root conflict result = %#v", result)
+	}
+}
+
+func TestRootMCPCancellationReachesBackend(t *testing.T) {
+	backend := &cancelRootBackend{started: make(chan struct{}), canceled: make(chan error, 1)}
+	_, clientSession, closeSessions := connectRootMCP(t, backend)
+	defer closeSessions()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+			Meta:      mcp.Meta{"threadId": rootMCPThreadID},
+			Name:      ToolListDevices,
+			Arguments: map[string]any{},
+		})
+		callDone <- err
+	}()
+	select {
+	case <-backend.started:
+	case <-time.After(time.Second):
+		t.Fatal("root MCP backend call did not start")
+	}
+	select {
+	case err := <-callDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("canceled MCP call error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("MCP call did not honor its deadline")
+	}
+	cancel()
+	select {
+	case err := <-backend.canceled:
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("backend cancellation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("MCP cancellation did not reach the backend")
 	}
 }
 
@@ -284,9 +366,9 @@ func TestRootMCPRejectsInvalidRegistryResults(t *testing.T) {
 		Revision: 7,
 		Devices:  []control.Device{device},
 	}}
-	clientSession, closeSessions := connectRootMCP(t, backend)
+	ctx, clientSession, closeSessions := connectRootMCP(t, backend)
 	defer closeSessions()
-	result := callTool(t, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{})
+	result := callTool(t, ctx, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{})
 	if !result.IsError || !strings.Contains(toolText(result), "invalid device") {
 		t.Fatalf("invalid registry result = %#v", result)
 	}
@@ -297,7 +379,7 @@ func TestRootMCPRejectsInvalidRegistryResults(t *testing.T) {
 	backend.describeResult = &protocol.DescribeDeviceResult{Revision: 8, Device: valid}
 	backend.describeResult.Device.ControllerID = "123e4567-e89b-42d3-a456-426614174499"
 	backend.mu.Unlock()
-	result = callTool(t, clientSession, ToolDescribeDevice, rootMCPThreadID, map[string]any{
+	result = callTool(t, ctx, clientSession, ToolDescribeDevice, rootMCPThreadID, map[string]any{
 		"deviceId": rootMCPWorkerID,
 	})
 	if !result.IsError || !strings.Contains(toolText(result), "mismatched device") {
@@ -305,11 +387,43 @@ func TestRootMCPRejectsInvalidRegistryResults(t *testing.T) {
 	}
 }
 
+func TestValidateListResultRejectsRevisionSkew(t *testing.T) {
+	expected := uint64(7)
+	device := testDevice(rootMCPWorkerID, control.DeviceRoleWorker, 2)
+	for _, test := range []struct {
+		name   string
+		result protocol.ListDevicesResult
+		params protocol.ListDevicesParams
+	}{
+		{
+			name:   "cursor revision mismatch",
+			result: protocol.ListDevicesResult{Revision: 8},
+			params: protocol.ListDevicesParams{Limit: 1, ExpectedRevision: &expected},
+		},
+		{
+			name:   "device newer than registry",
+			result: protocol.ListDevicesResult{Revision: 7, Devices: []control.Device{device}},
+			params: protocol.ListDevicesParams{Limit: 1},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.name == "device newer than registry" {
+				test.result.Devices[0].Revision = 8
+			}
+			if err := validateListResult(test.result, test.params, rootMCPControllerID); err == nil {
+				t.Fatal("validateListResult accepted revision skew")
+			}
+		})
+	}
+}
+
 func TestRootMCPOutputIsBounded(t *testing.T) {
-	if maximumDevicePage > 16 || listFeatureLimit > 16 || len(serverInstructions) > 512 {
+	if maximumDevicePage > 4 || listFeatureLimit != 0 || maximumListBytes > 4*1024 ||
+		maximumDetailBytes > 8*1024 || len(serverInstructions) > 512 {
 		t.Fatalf(
-			"root MCP bounds = page %d, features %d, instructions %d bytes",
-			maximumDevicePage, listFeatureLimit, len(serverInstructions),
+			"root MCP bounds = page %d, features %d, list %d bytes, detail %d bytes, instructions %d bytes",
+			maximumDevicePage, listFeatureLimit, maximumListBytes, maximumDetailBytes,
+			len(serverInstructions),
 		)
 	}
 	features := make([]string, 64)
@@ -337,9 +451,9 @@ func TestRootMCPOutputIsBounded(t *testing.T) {
 		Revision: ^uint64(0),
 		Devices:  devices,
 	}}
-	clientSession, closeSessions := connectRootMCP(t, backend)
+	ctx, clientSession, closeSessions := connectRootMCP(t, backend)
 	defer closeSessions()
-	result := callTool(t, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{
+	result := callTool(t, ctx, clientSession, ToolListDevices, rootMCPThreadID, map[string]any{
 		"limit": maximumDevicePage,
 	})
 	if result.IsError {
@@ -349,8 +463,11 @@ func TestRootMCPOutputIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(data) > maximumOutputBytes {
-		t.Fatalf("maximum list_devices output = %d bytes, want at most %d", len(data), maximumOutputBytes)
+	if len(data) > maximumListBytes {
+		t.Fatalf("maximum list_devices output = %d bytes, want at most %d", len(data), maximumListBytes)
+	}
+	if strings.Contains(string(data), `"features":`) {
+		t.Fatalf("list_devices output includes full feature data: %s", data)
 	}
 
 	summary := summarizeDevice(control.Device{
@@ -364,7 +481,7 @@ func TestRootMCPOutputIsBounded(t *testing.T) {
 		Online:         true,
 		LastSeenAt:     int64(^uint64(0) >> 1),
 	}, listFeatureLimit)
-	if len(summary.Features) != listFeatureLimit || !summary.FeaturesTruncated {
+	if len(summary.Features) != 0 || !summary.FeaturesTruncated {
 		t.Fatalf("bounded summary = %#v", summary)
 	}
 }
@@ -407,24 +524,27 @@ func assertToolSchema(t *testing.T, tool *mcp.Tool) {
 	}
 }
 
-func connectRootMCP(t *testing.T, backend Backend) (*mcp.ClientSession, func()) {
+func connectRootMCP(t *testing.T, backend Backend) (context.Context, *mcp.ClientSession, func()) {
 	t.Helper()
-	server, err := NewServer(backend)
+	server, err := NewServer(backend, rootMCPControllerID, rootMCPDeviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := server.Connect(context.Background(), serverTransport, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
-	clientSession, err := client.Connect(context.Background(), clientTransport, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
 	if err != nil {
 		serverSession.Close()
+		cancel()
 		t.Fatal(err)
 	}
-	return clientSession, func() {
+	return ctx, clientSession, func() {
+		defer cancel()
 		if err := clientSession.Close(); err != nil {
 			t.Errorf("close MCP client: %v", err)
 		}
@@ -436,12 +556,13 @@ func connectRootMCP(t *testing.T, backend Backend) (*mcp.ClientSession, func()) 
 
 func callTool(
 	t *testing.T,
+	ctx context.Context,
 	client *mcp.ClientSession,
 	name, threadID string,
 	arguments any,
 ) *mcp.CallToolResult {
 	t.Helper()
-	result, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+	result, err := client.CallTool(ctx, &mcp.CallToolParams{
 		Meta: mcp.Meta{"threadId": threadID}, Name: name, Arguments: arguments,
 	})
 	if err != nil {
@@ -500,7 +621,7 @@ func testDevice(deviceID string, role control.DeviceRole, featureCount int) cont
 		Role:            role,
 		OS:              "windows",
 		Arch:            "amd64",
-		RuntimeVersion:  "0.1.0-alpha.0",
+		RuntimeVersion:  "0.1.0-alpha.0.m1",
 		ProtocolVersion: protocol.Version,
 		Features:        features,
 		Online:          true,
