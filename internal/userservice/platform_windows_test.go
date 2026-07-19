@@ -434,6 +434,8 @@ func TestWindowsTaskSchedulerRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// schtasks.exe replaces RegistrationInfo/URI with the /TN value.
+	desired.URI = taskName
 	existing, err := parseTaskDefinition(query.Output)
 	if err != nil {
 		t.Fatal(err)
