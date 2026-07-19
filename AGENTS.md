@@ -19,6 +19,10 @@
 - At each checkpoint, obtain an independent, read-only agent review of the complete checkpoint
   commit range and current tree. Fix and re-review until no actionable findings remain before
   declaring the checkpoint accepted. Intermediate commits do not require separate reviews.
+- Also run a read-only local Claude Code review of each frozen checkpoint with `claude -p`, trying
+  `--model claude-fable-5` first. Record any unavailable model, failed invocation, or fallback
+  explicitly; this supplements rather than replaces the independent agent review. Fix actionable
+  findings and rerun the Claude review until it is clean.
 - Use `feat/<topic>`, `bugfix/<topic>`, `refactor/<topic>`, `test/<topic>`, `docs/<topic>`,
   `chore/<topic>`, or `release/<version>` for parallel implementation branches. Do not include
   personal names, device identifiers, or task identifiers in branch names.
@@ -26,5 +30,5 @@
 ## Phase Boundaries
 
 - Complete, review, and report the active milestone before starting the next milestone.
-- Do not add M2 managed-worker behavior until the M1 broker and device-control checkpoint has been
-  independently reviewed and accepted.
+- Do not add M2 managed-worker behavior until the M1.1 peer-topology amendment has been independently
+  reviewed and accepted.
