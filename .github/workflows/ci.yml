@@ -129,6 +129,11 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.13"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: true
       - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
         with:
           node-version: 24.15.0
@@ -156,10 +161,16 @@ jobs:
           from pathlib import Path
 
           temp = Path(os.environ["RUNNER_TEMP"])
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
           added = json.loads((temp / "plugin-add.json").read_text())
           listed = json.loads((temp / "plugin-list.json").read_text())
+          manifest_version = json.loads(
+              (workspace / "plugins/delegation/.codex-plugin/plugin.json").read_text()
+          )["version"]
+          runtime_version = (workspace / "plugins/delegation/VERSION").read_text().strip()
+          assert manifest_version == runtime_version
           assert added["pluginId"] == "delegation@delegation"
-          assert added["version"] == "0.1.0-alpha.0.m1"
+          assert added["version"] == manifest_version
           entry = next(item for item in listed["installed"] if item["pluginId"] == "delegation@delegation")
           assert entry["installed"] is True
           assert entry["enabled"] is True
@@ -168,6 +179,42 @@ jobs:
           launcher = Path(added["installedPath"]) / "scripts" / "delegation-mcp"
           assert os.access(launcher, os.X_OK)
           PY
+      - name: Reinstall a cachebusted plugin snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CODEX_HOME="$HOME/.codex-delegation-ci"
+          snapshot="$RUNNER_TEMP/cachebuster-marketplace"
+          mkdir -p "$snapshot/.agents/plugins" "$snapshot/plugins"
+          cp .agents/plugins/marketplace.json "$snapshot/.agents/plugins/marketplace.json"
+          cp -R plugins/delegation "$snapshot/plugins/delegation"
+          python .ci/codex/codex-rs/skills/src/assets/samples/plugin-creator/scripts/update_plugin_cachebuster.py \
+            --cachebuster ci-m11 "$snapshot/plugins/delegation"
+          codex plugin remove delegation@delegation --json > "$RUNNER_TEMP/plugin-remove.json"
+          codex plugin marketplace remove delegation --json > "$RUNNER_TEMP/marketplace-remove.json"
+          codex plugin marketplace add "$snapshot" --json > "$RUNNER_TEMP/cache-marketplace-add.json"
+          codex plugin add delegation@delegation --json > "$RUNNER_TEMP/cache-plugin-add.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          snapshot = temp / "cachebuster-marketplace"
+          base_version = (snapshot / "plugins/delegation/VERSION").read_text().strip()
+          added = json.loads((temp / "cache-plugin-add.json").read_text())
+          assert added["version"] == f"{base_version}+codex.ci-m11"
+          assert Path(added["installedPath"]).name == added["version"]
+          assert (snapshot / "plugins/delegation/VERSION").read_text().strip() == base_version
+          PY
+      - name: Test three isolated Codex peers
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/delegation" ./cmd/delegation
+          DELEGATION_E2E_BINARY="$RUNNER_TEMP/delegation" \
+            CODEX_BINARY="$(command -v codex)" \
+            go test -tags=integration -count=1 -v ./tests/codex_peer_e2e
 
   release-package:
     name: Deterministic release package
