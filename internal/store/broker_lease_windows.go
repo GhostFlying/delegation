@@ -10,32 +10,32 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const allBrokerLeaseBytes = ^uint32(0)
+const allLeaseBytes = ^uint32(0)
 
-func lockBrokerLease(file *os.File) error {
+func lockInstanceLease(file *os.File, description string, heldError error) error {
 	err := windows.LockFileEx(
 		windows.Handle(file.Fd()),
 		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
 		0,
-		allBrokerLeaseBytes,
-		allBrokerLeaseBytes,
+		allLeaseBytes,
+		allLeaseBytes,
 		&windows.Overlapped{},
 	)
 	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-		return fmt.Errorf("%w", ErrBrokerLeaseHeld)
+		return fmt.Errorf("%w", heldError)
 	}
 	if err != nil {
-		return fmt.Errorf("lock broker instance lease: %w", err)
+		return fmt.Errorf("lock %s instance lease: %w", description, err)
 	}
 	return nil
 }
 
-func unlockBrokerLease(file *os.File) error {
+func unlockInstanceLease(file *os.File) error {
 	err := windows.UnlockFileEx(
-		windows.Handle(file.Fd()), 0, allBrokerLeaseBytes, allBrokerLeaseBytes, &windows.Overlapped{},
+		windows.Handle(file.Fd()), 0, allLeaseBytes, allLeaseBytes, &windows.Overlapped{},
 	)
 	if err != nil {
-		return fmt.Errorf("unlock broker instance lease: %w", err)
+		return fmt.Errorf("unlock instance lease: %w", err)
 	}
 	return nil
 }

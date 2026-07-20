@@ -211,29 +211,40 @@ func protectDatabaseArtifacts(path string) error {
 }
 
 func databaseArtifacts(path string) []string {
-	return []string{path, path + "-wal", path + "-shm", path + "-journal", path + ".broker.lock"}
+	return []string{
+		path,
+		path + "-wal",
+		path + "-shm",
+		path + "-journal",
+		path + ".broker.lock",
+		path + ".peer.lock",
+	}
 }
 
 func (s *Store) enableWAL(ctx context.Context) error {
+	return enableStateWAL(ctx, s.db, "broker")
+}
+
+func enableStateWAL(ctx context.Context, db *sql.DB, description string) error {
 	delay := 10 * time.Millisecond
 	for attempt := range walRetryLimit {
 		var mode string
-		err := s.db.QueryRowContext(ctx, "PRAGMA journal_mode = WAL").Scan(&mode)
+		err := db.QueryRowContext(ctx, "PRAGMA journal_mode = WAL").Scan(&mode)
 		if err == nil {
 			if mode != "wal" {
-				return fmt.Errorf("enable broker state WAL: SQLite selected %q", mode)
+				return fmt.Errorf("enable %s state WAL: SQLite selected %q", description, mode)
 			}
 			return nil
 		}
 		var sqliteError *moderncsqlite.Error
 		if !errors.As(err, &sqliteError) || sqliteError.Code()&0xff != sqliteBusy || attempt == walRetryLimit-1 {
-			return fmt.Errorf("enable broker state WAL: %w", err)
+			return fmt.Errorf("enable %s state WAL: %w", description, err)
 		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return fmt.Errorf("enable broker state WAL: %w", ctx.Err())
+			return fmt.Errorf("enable %s state WAL: %w", description, ctx.Err())
 		case <-timer.C:
 		}
 		delay *= 2
@@ -242,24 +253,37 @@ func (s *Store) enableWAL(ctx context.Context) error {
 }
 
 func (s *Store) checkIntegrity(ctx context.Context) error {
+	return checkStateIntegrity(ctx, s.db, "broker")
+}
+
+func checkStateIntegrity(ctx context.Context, db *sql.DB, description string) error {
 	var result string
-	if err := s.db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&result); err != nil {
-		return fmt.Errorf("check broker state integrity: %w", err)
+	if err := db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&result); err != nil {
+		return fmt.Errorf("check %s state integrity: %w", description, err)
 	}
 	if result != "ok" {
-		return fmt.Errorf("check broker state integrity: %s", result)
+		return fmt.Errorf("check %s state integrity: %s", description, result)
 	}
 	return nil
 }
 
 func (s *Store) withImmediateTransaction(ctx context.Context, operation func(*sql.Conn) error) (err error) {
-	connection, err := s.db.Conn(ctx)
+	return withImmediateTransaction(ctx, s.db, "broker", operation)
+}
+
+func withImmediateTransaction(
+	ctx context.Context,
+	db *sql.DB,
+	description string,
+	operation func(*sql.Conn) error,
+) (err error) {
+	connection, err := db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("reserve broker state connection: %w", err)
+		return fmt.Errorf("reserve %s state connection: %w", description, err)
 	}
 	defer connection.Close()
 	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return fmt.Errorf("begin broker state transaction: %w", err)
+		return fmt.Errorf("begin %s state transaction: %w", description, err)
 	}
 	defer func() {
 		if err != nil {
@@ -270,7 +294,7 @@ func (s *Store) withImmediateTransaction(ctx context.Context, operation func(*sq
 		return err
 	}
 	if _, err := connection.ExecContext(ctx, "COMMIT"); err != nil {
-		return fmt.Errorf("commit broker state transaction: %w", err)
+		return fmt.Errorf("commit %s state transaction: %w", description, err)
 	}
 	return nil
 }
