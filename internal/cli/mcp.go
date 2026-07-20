@@ -67,7 +67,7 @@ func loadRootMCPServer(configPath string) (*mcp.Server, error) {
 	if cfg.Role != delegationconfig.RolePeer {
 		return nil, errors.New("root MCP requires a peer configuration")
 	}
-	if err := pathguard.ValidateConnectorAuthority(configPath, cfg.Broker.Auth.TokenFile); err != nil {
+	if err := pathguard.ValidatePeerAuthority(configPath, cfg.Peer.StateFile, cfg.Broker.Auth.TokenFile); err != nil {
 		return nil, err
 	}
 	endpoint, err := localbridge.Endpoint(cfg.ControllerID, cfg.DeviceID)

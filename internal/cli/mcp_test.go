@@ -121,6 +121,13 @@ func writeRootMCPConfig(t *testing.T, role delegationconfig.Role) string {
 				TokenFile: filepath.Join(directory, "missing-device-token"),
 			},
 		},
+		Peer: delegationconfig.PeerConfig{
+			CodexBinary:    os.Args[0],
+			CodexHome:      filepath.Join(directory, "codex-home"),
+			WorkspaceRoot:  filepath.Join(directory, "workspaces"),
+			StateFile:      filepath.Join(directory, "state", "peer.sqlite3"),
+			MaxWorkerSlots: 1,
+		},
 	}
 	if role == delegationconfig.RoleBroker {
 		cfg.DeviceID = ""
@@ -130,6 +137,7 @@ func writeRootMCPConfig(t *testing.T, role delegationconfig.Role) string {
 			StateFile: filepath.Join(directory, "state", "broker.sqlite3"),
 			Auth:      delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
 		}
+		cfg.Peer = delegationconfig.PeerConfig{}
 	}
 	if err := delegationconfig.WriteNew(configPath, cfg); err != nil {
 		t.Fatal(err)

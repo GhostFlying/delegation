@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
@@ -17,12 +18,14 @@ import (
 )
 
 type setupResult struct {
-	Role         delegationconfig.Role `json:"role"`
-	ConfigPath   string                `json:"configPath"`
-	ControllerID string                `json:"controllerId"`
-	DeviceID     string                `json:"deviceId,omitempty"`
-	StatePath    string                `json:"statePath,omitempty"`
-	TokenFile    string                `json:"tokenFile,omitempty"`
+	Role          delegationconfig.Role `json:"role"`
+	ConfigPath    string                `json:"configPath"`
+	ControllerID  string                `json:"controllerId"`
+	DeviceID      string                `json:"deviceId,omitempty"`
+	StatePath     string                `json:"statePath,omitempty"`
+	CodexHome     string                `json:"codexHome,omitempty"`
+	WorkspaceRoot string                `json:"workspaceRoot,omitempty"`
+	TokenFile     string                `json:"tokenFile,omitempty"`
 }
 
 func runSetup(args []string, stdout, stderr io.Writer) int {
@@ -141,6 +144,11 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	brokerURL := flags.String("broker-url", "", "broker ws:// or wss:// URL")
 	authMode := flags.String("auth-mode", string(delegationconfig.AuthModeToken), "authentication mode: token or none")
 	tokenFile := flags.String("token-file", "", "existing peer token file path")
+	codexBinary := flags.String("codex-binary", "codex", "Codex executable path or name")
+	codexHome := flags.String("codex-home", "", "managed worker CODEX_HOME; defaults beside the peer config")
+	workspaceRoot := flags.String("workspace-root", "", "managed worker workspace root; defaults beside the peer config")
+	statePath := flags.String("state", "", "peer reservation database path; defaults beside the peer config")
+	maxWorkerSlots := flags.Int("max-worker-slots", 4, "maximum concurrent managed workers")
 	allowInsecure := flags.Bool("allow-insecure-nonloopback", false, "acknowledge plaintext non-loopback transport")
 	jsonOutput := flags.Bool("json", false, "print setup result as JSON")
 	if code := parseFlags(flags, args); code >= 0 {
@@ -157,6 +165,41 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		return writeError(stderr, err)
 	}
 	auth, err := resolveAuth(*authMode, *tokenFile, "")
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	resolvedCodexBinary, err := resolveExecutable(*codexBinary)
+	if err != nil {
+		return writeError(stderr, fmt.Errorf("resolve Codex executable: %w", err))
+	}
+	if *codexHome == "" {
+		*codexHome = filepath.Join(filepath.Dir(resolvedConfig), "codex")
+	}
+	resolvedCodexHome, err := absolutePath(*codexHome)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	if target, evalErr := filepath.EvalSymlinks(resolvedCodexHome); evalErr == nil {
+		resolvedCodexHome = target
+	} else if !errors.Is(evalErr, os.ErrNotExist) {
+		return writeError(stderr, fmt.Errorf("resolve worker CODEX_HOME: %w", evalErr))
+	}
+	if *workspaceRoot == "" {
+		*workspaceRoot = filepath.Join(filepath.Dir(resolvedConfig), "workspaces")
+	}
+	resolvedWorkspaceRoot, err := absolutePath(*workspaceRoot)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	if target, evalErr := filepath.EvalSymlinks(resolvedWorkspaceRoot); evalErr == nil {
+		resolvedWorkspaceRoot = target
+	} else if !errors.Is(evalErr, os.ErrNotExist) {
+		return writeError(stderr, fmt.Errorf("resolve worker workspace root: %w", evalErr))
+	}
+	if *statePath == "" {
+		*statePath = filepath.Join(filepath.Dir(resolvedConfig), "state", "peer.sqlite3")
+	}
+	resolvedState, err := absolutePath(*statePath)
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -186,6 +229,13 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 			Auth:                     auth,
 			AllowInsecureNonLoopback: *allowInsecure,
 		},
+		Peer: delegationconfig.PeerConfig{
+			CodexBinary:    resolvedCodexBinary,
+			CodexHome:      resolvedCodexHome,
+			WorkspaceRoot:  resolvedWorkspaceRoot,
+			StateFile:      resolvedState,
+			MaxWorkerSlots: *maxWorkerSlots,
+		},
 	}
 	if err := cfg.Validate(); err != nil {
 		return writeError(stderr, err)
@@ -193,7 +243,10 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if err := ensureConfigAvailable(resolvedConfig); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := pathguard.ValidateConnectorAuthority(resolvedConfig, auth.TokenFile); err != nil {
+	if err := pathguard.ValidatePeerAuthority(resolvedConfig, resolvedState, auth.TokenFile); err != nil {
+		return writeError(stderr, err)
+	}
+	if err := store.ValidatePath(resolvedState); err != nil {
 		return writeError(stderr, err)
 	}
 	if auth.Mode == delegationconfig.AuthModeToken {
@@ -204,15 +257,24 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if err := writeInsecureTransportWarning(stderr, cfg); err != nil {
 		return writeError(stderr, err)
 	}
+	if err := prepareManagedDirectory(resolvedCodexHome, "worker CODEX_HOME"); err != nil {
+		return writeError(stderr, err)
+	}
+	if err := prepareManagedDirectory(resolvedWorkspaceRoot, "worker workspace root"); err != nil {
+		return writeError(stderr, err)
+	}
 	if err := delegationconfig.WriteNew(resolvedConfig, cfg); err != nil {
 		return writeError(stderr, err)
 	}
 	return writeSetupResult(stdout, stderr, setupResult{
-		Role:         cfg.Role,
-		ConfigPath:   resolvedConfig,
-		ControllerID: cfg.ControllerID,
-		DeviceID:     cfg.DeviceID,
-		TokenFile:    auth.TokenFile,
+		Role:          cfg.Role,
+		ConfigPath:    resolvedConfig,
+		ControllerID:  cfg.ControllerID,
+		DeviceID:      cfg.DeviceID,
+		StatePath:     cfg.Peer.StateFile,
+		CodexHome:     cfg.Peer.CodexHome,
+		WorkspaceRoot: cfg.Peer.WorkspaceRoot,
+		TokenFile:     auth.TokenFile,
 	}, *jsonOutput)
 }
 
@@ -314,10 +376,59 @@ func writeSetupResult(stdout, stderr io.Writer, result setupResult, jsonOutput b
 	if result.StatePath != "" {
 		fmt.Fprintf(stdout, "state: %s\n", result.StatePath)
 	}
+	if result.CodexHome != "" {
+		fmt.Fprintf(stdout, "managed CODEX_HOME: %s\n", result.CodexHome)
+	}
+	if result.WorkspaceRoot != "" {
+		fmt.Fprintf(stdout, "workspace root: %s\n", result.WorkspaceRoot)
+	}
 	if result.TokenFile != "" {
 		fmt.Fprintf(stdout, "tokenFile: %s\n", result.TokenFile)
 	}
 	return 0
+}
+
+func resolveExecutable(name string) (string, error) {
+	if name == "" {
+		return "", errors.New("Codex executable is required")
+	}
+	resolved, err := exec.LookPath(name)
+	if err != nil {
+		return "", err
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", err
+	}
+	resolved, err = filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("Codex executable must be a regular file")
+	}
+	return resolved, nil
+}
+
+func prepareManagedDirectory(path, description string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", description, err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("protect %s: %w", description, err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", description, err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s must resolve to a directory", description)
+	}
+	return nil
 }
 
 func writeError(stderr io.Writer, err error) int {

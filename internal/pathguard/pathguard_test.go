@@ -19,11 +19,12 @@ func TestValidateBrokerAuthorityAcceptsDistinctPaths(t *testing.T) {
 	}
 }
 
-func TestValidateConnectorAuthorityRejectsAliases(t *testing.T) {
+func TestValidatePeerAuthorityRejectsAliases(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.json")
 	tokenPath := filepath.Join(root, "device.token")
-	if err := ValidateConnectorAuthority(configPath, tokenPath); err != nil {
+	statePath := filepath.Join(root, "peer.sqlite3")
+	if err := ValidatePeerAuthority(configPath, statePath, tokenPath); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(configPath, []byte("config"), 0o600); err != nil {
@@ -32,9 +33,24 @@ func TestValidateConnectorAuthorityRejectsAliases(t *testing.T) {
 	if err := os.Link(configPath, tokenPath); err != nil {
 		t.Skipf("creating a hard link is unavailable: %v", err)
 	}
-	if err := ValidateConnectorAuthority(configPath, tokenPath); err == nil ||
+	if err := ValidatePeerAuthority(configPath, statePath, tokenPath); err == nil ||
 		!strings.Contains(err.Error(), "peer token") {
-		t.Fatalf("ValidateConnectorAuthority() error = %v", err)
+		t.Fatalf("ValidatePeerAuthority() error = %v", err)
+	}
+}
+
+func TestValidatePeerAuthorityRejectsStateSidecarAliases(t *testing.T) {
+	root := t.TempDir()
+	statePath := filepath.Join(root, "peer.sqlite3")
+	if err := os.WriteFile(statePath, []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(statePath, statePath+"-wal"); err != nil {
+		t.Skipf("creating a hard link is unavailable: %v", err)
+	}
+	err := ValidatePeerAuthority(filepath.Join(root, "peer.json"), statePath, "")
+	if err == nil || !strings.Contains(err.Error(), "peer WAL path conflicts with peer state") {
+		t.Fatalf("ValidatePeerAuthority() error = %v", err)
 	}
 }
 

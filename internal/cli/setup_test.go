@@ -150,6 +150,13 @@ func TestSetupBrokerRejectsUnusableStateWithoutSideEffects(t *testing.T) {
 
 func TestSetupPeerWithoutAuthentication(t *testing.T) {
 	configPath := privateTestPath(t, "peer.json")
+	codexHome := filepath.Join(filepath.Dir(configPath), "worker-codex")
+	workspaceRoot := filepath.Join(filepath.Dir(configPath), "worker-workspaces")
+	statePath := filepath.Join(filepath.Dir(configPath), "state", "peer.sqlite3")
+	codexBinary, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	args := []string{
@@ -160,6 +167,10 @@ func TestSetupPeerWithoutAuthentication(t *testing.T) {
 		"--device-name", "windows-builder",
 		"--broker-url", "wss://broker.example.test",
 		"--auth-mode", "none",
+		"--codex-binary", codexBinary,
+		"--codex-home", codexHome,
+		"--workspace-root", workspaceRoot,
+		"--state", statePath,
 	}
 
 	code := Run(args, &stdout, &stderr)
@@ -180,9 +191,19 @@ func TestSetupPeerWithoutAuthentication(t *testing.T) {
 			URL:  "wss://broker.example.test",
 			Auth: delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
 		},
+		Peer: delegationconfig.PeerConfig{
+			CodexBinary:    codexBinary,
+			CodexHome:      codexHome,
+			WorkspaceRoot:  workspaceRoot,
+			StateFile:      statePath,
+			MaxWorkerSlots: 4,
+		},
 	}
 	if cfg != want {
 		t.Fatalf("config = %#v, want %#v", cfg, want)
+	}
+	if _, err := os.Stat(filepath.Join(codexHome, "config.toml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("setup created a managed Codex config file: %v", err)
 	}
 }
 

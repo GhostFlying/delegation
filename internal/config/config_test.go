@@ -29,6 +29,7 @@ func TestConfigRoundTrip(t *testing.T) {
 				TokenFile: tokenFile,
 			},
 		},
+		Peer: testPeerRuntime(t),
 	}
 	path := filepath.Join(t.TempDir(), "private", "config.json")
 
@@ -116,6 +117,7 @@ func TestBrokerURLRejectsEmbeddedCredentials(t *testing.T) {
 			URL:  "wss://token@broker.example.test",
 			Auth: AuthConfig{Mode: AuthModeNone},
 		},
+		Peer: testPeerRuntime(t),
 	}
 
 	if err := cfg.Validate(); err == nil {
@@ -140,6 +142,7 @@ func TestBrokerURLValidationMatchesConnectorEndpoint(t *testing.T) {
 			URL:  "wss://broker.example.test",
 			Auth: AuthConfig{Mode: AuthModeNone},
 		},
+		Peer: testPeerRuntime(t),
 	}
 	for _, brokerURL := range []string{
 		"wss://broker.example.test/other",
@@ -186,6 +189,7 @@ func TestDeviceNameUsesRuntimeDescriptorRules(t *testing.T) {
 			URL:  "wss://broker.example.test",
 			Auth: AuthConfig{Mode: AuthModeNone},
 		},
+		Peer: testPeerRuntime(t),
 	}
 	for _, name := range []string{"line\nbreak", strings.Repeat("x", 129), string([]byte{0xff})} {
 		t.Run(name[:min(len(name), 16)], func(t *testing.T) {
@@ -212,6 +216,7 @@ func TestTokenAuthPlaintextRequiresAcknowledgement(t *testing.T) {
 				TokenFile: filepath.Join(t.TempDir(), "device.token"),
 			},
 		},
+		Peer: testPeerRuntime(t),
 	}
 
 	if err := cfg.Validate(); err == nil {
@@ -243,6 +248,7 @@ func TestPlaintextBrokerURLRequiresAcknowledgement(t *testing.T) {
 			URL:  "ws://broker.example.test:8787",
 			Auth: AuthConfig{Mode: AuthModeNone},
 		},
+		Peer: testPeerRuntime(t),
 	}
 
 	if err := cfg.Validate(); err == nil {
@@ -272,6 +278,7 @@ func TestBrokerURLPortMustBeUsable(t *testing.T) {
 					URL:  brokerURL,
 					Auth: AuthConfig{Mode: AuthModeNone},
 				},
+				Peer: testPeerRuntime(t),
 			}
 			if err := cfg.Validate(); err == nil {
 				t.Fatal("Validate() accepted unusable broker URL port")
@@ -347,7 +354,7 @@ func TestConfigRejectsUnsupportedSchemaVersions(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Validate accepted schema version %d", version)
 		}
-		for _, text := range []string{"unsupported config schema version", "supports only version 1", "setup broker or setup peer"} {
+		for _, text := range []string{"unsupported config schema version", "supports only version 2", "setup broker or setup peer"} {
 			if !strings.Contains(err.Error(), text) {
 				t.Fatalf("schema version %d error = %q, want %q", version, err, text)
 			}
@@ -367,9 +374,21 @@ func TestReadReportsUnsupportedSchemaBeforeUnknownFields(t *testing.T) {
 	}
 	writeProtectedConfigFixture(t, path, data)
 	_, err = Read(path)
-	if err == nil || !strings.Contains(err.Error(), "unsupported config schema version 2") ||
+	if err == nil || !strings.Contains(err.Error(), "unsupported config schema version 3") ||
 		strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("unsupported config read error = %v", err)
+	}
+}
+
+func testPeerRuntime(t *testing.T) PeerConfig {
+	t.Helper()
+	root := t.TempDir()
+	return PeerConfig{
+		CodexBinary:    filepath.Join(root, "codex"),
+		CodexHome:      filepath.Join(root, "codex-home"),
+		WorkspaceRoot:  filepath.Join(root, "workspaces"),
+		StateFile:      filepath.Join(root, "peer.sqlite3"),
+		MaxWorkerSlots: 4,
 	}
 }
 

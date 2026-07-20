@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	CurrentSchemaVersion = 1
+	CurrentSchemaVersion = 2
 	brokerConnectPath    = "/v1/connect"
 	maximumConfigSize    = 1024 * 1024
+	MaximumWorkerSlots   = 64
 )
 
 type Role string
@@ -44,6 +45,7 @@ type Config struct {
 	DeviceID      string       `json:"deviceId,omitempty"`
 	DeviceName    string       `json:"deviceName,omitempty"`
 	Broker        BrokerConfig `json:"broker"`
+	Peer          PeerConfig   `json:"peer"`
 }
 
 type BrokerConfig struct {
@@ -57,6 +59,14 @@ type BrokerConfig struct {
 type AuthConfig struct {
 	Mode      AuthMode `json:"mode"`
 	TokenFile string   `json:"tokenFile,omitempty"`
+}
+
+type PeerConfig struct {
+	CodexBinary    string `json:"codexBinary,omitempty"`
+	CodexHome      string `json:"codexHome,omitempty"`
+	WorkspaceRoot  string `json:"workspaceRoot,omitempty"`
+	StateFile      string `json:"stateFile,omitempty"`
+	MaxWorkerSlots int    `json:"maxWorkerSlots,omitempty"`
 }
 
 func DefaultHome() (string, error) {
@@ -139,8 +149,8 @@ func (c Config) Validate() error {
 
 	switch c.Role {
 	case RoleBroker:
-		if c.DeviceID != "" || c.DeviceName != "" || c.Broker.URL != "" {
-			return errors.New("broker config must not contain device fields or broker URL")
+		if c.DeviceID != "" || c.DeviceName != "" || c.Broker.URL != "" || c.Peer != (PeerConfig{}) {
+			return errors.New("broker config must not contain peer fields or broker URL")
 		}
 		if !filepath.IsAbs(c.Broker.StateFile) {
 			return errors.New("broker stateFile must be an absolute path")
@@ -160,6 +170,21 @@ func (c Config) Validate() error {
 		}
 		if _, err := NormalizeBrokerURL(c.Broker.URL, c.Broker.AllowInsecureNonLoopback); err != nil {
 			return err
+		}
+		if !filepath.IsAbs(c.Peer.CodexBinary) {
+			return errors.New("peer codexBinary must be an absolute path")
+		}
+		if !filepath.IsAbs(c.Peer.CodexHome) {
+			return errors.New("peer codexHome must be an absolute path")
+		}
+		if !filepath.IsAbs(c.Peer.WorkspaceRoot) {
+			return errors.New("peer workspaceRoot must be an absolute path")
+		}
+		if !filepath.IsAbs(c.Peer.StateFile) {
+			return errors.New("peer stateFile must be an absolute path")
+		}
+		if c.Peer.MaxWorkerSlots < 1 || c.Peer.MaxWorkerSlots > MaximumWorkerSlots {
+			return fmt.Errorf("peer maxWorkerSlots must be from 1 through %d", MaximumWorkerSlots)
 		}
 	default:
 		return fmt.Errorf("unsupported role %q", c.Role)

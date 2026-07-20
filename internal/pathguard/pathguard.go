@@ -13,18 +13,20 @@ type namedPath struct {
 	path string
 }
 
-// ValidateConnectorAuthority rejects an alias between a connector's
-// configuration and peer token.
-func ValidateConnectorAuthority(configPath, tokenPath string) error {
-	if tokenPath == "" {
-		return nil
-	}
-	conflicts, err := equivalent(configPath, tokenPath)
-	if err != nil {
-		return err
-	}
-	if conflicts {
-		return errors.New("peer token path conflicts with peer configuration")
+// ValidatePeerAuthority rejects aliases between the configuration, token, and
+// reservation database files that make up a peer authority.
+func ValidatePeerAuthority(configPath, statePath, tokenPath string) error {
+	files := peerAuthorityFiles(configPath, statePath, tokenPath)
+	for firstIndex, first := range files {
+		for _, second := range files[firstIndex+1:] {
+			conflicts, err := equivalent(first.path, second.path)
+			if err != nil {
+				return err
+			}
+			if conflicts {
+				return fmt.Errorf("%s path conflicts with %s", second.name, first.name)
+			}
+		}
 	}
 	return nil
 }
@@ -73,6 +75,20 @@ func brokerAuthorityFiles(configPath, statePath, masterPath string) []namedPath 
 		namedPath{name: "broker WAL", path: statePath + "-wal"},
 		namedPath{name: "broker shared memory", path: statePath + "-shm"},
 		namedPath{name: "broker instance lease", path: statePath + ".broker.lock"},
+	)
+}
+
+func peerAuthorityFiles(configPath, statePath, tokenPath string) []namedPath {
+	files := []namedPath{{name: "peer configuration", path: configPath}}
+	if tokenPath != "" {
+		files = append(files, namedPath{name: "peer token", path: tokenPath})
+	}
+	return append(files,
+		namedPath{name: "peer state", path: statePath},
+		namedPath{name: "peer rollback journal", path: statePath + "-journal"},
+		namedPath{name: "peer WAL", path: statePath + "-wal"},
+		namedPath{name: "peer shared memory", path: statePath + "-shm"},
+		namedPath{name: "peer instance lease", path: statePath + ".peer.lock"},
 	)
 }
 
