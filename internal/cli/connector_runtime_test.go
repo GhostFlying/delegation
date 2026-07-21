@@ -14,6 +14,7 @@ import (
 
 	"github.com/GhostFlying/delegation/internal/broker"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/rootmcp"
@@ -247,6 +248,58 @@ func TestConnectorAuthorityIsReadBeforeRuntimeSideEffects(t *testing.T) {
 	err = runConnectorService(ctx, configPath, cfg, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "read peer token") {
 		t.Fatalf("missing connector authority error = %v", err)
+	}
+}
+
+func TestPeerWorkerAuthorizerRequiresMatchingActiveReservation(t *testing.T) {
+	ctx := context.Background()
+	state, err := store.OpenPeer(ctx, filepath.Join(t.TempDir(), "state", "peer.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	principal := control.NewWorkerPrincipal(
+		runtimeControllerID,
+		"123e4567-e89b-42d3-a456-426614174210",
+		"123e4567-e89b-42d3-a456-426614174211",
+		"123e4567-e89b-42d3-a456-426614174212",
+		runtimeDeviceID,
+	).Identity()
+	worker, err := state.ReserveWorker(ctx, store.WorkerReservation{
+		WorkerKey: store.WorkerKey{
+			ControllerID: principal.ControllerID,
+			TreeID:       principal.TreeID,
+			AgentID:      principal.AgentID,
+		},
+		ParentAgentID:  principal.ParentAgentID,
+		DeviceID:       principal.DeviceID,
+		TaskName:       "authorization test",
+		WorkspacePath:  filepath.Join(t.TempDir(), "workspace"),
+		ProfileVersion: 1,
+	}, 1, time.Unix(100, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizer := peerWorkerAuthorizer{state: state, deviceID: runtimeDeviceID}
+	if err := authorizer.AuthorizeWorker(ctx, principal); err == nil {
+		t.Fatal("authorizer accepted a reserved worker before startup")
+	}
+	if _, err := state.BeginWorkerStart(ctx, worker.WorkerKey, 1, time.Unix(101, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := authorizer.AuthorizeWorker(ctx, principal); err != nil {
+		t.Fatal(err)
+	}
+	wrongParent := principal
+	wrongParent.ParentAgentID = "123e4567-e89b-42d3-a456-426614174213"
+	if err := authorizer.AuthorizeWorker(ctx, wrongParent); err == nil {
+		t.Fatal("authorizer accepted a mismatched parent")
+	}
+	if _, err := state.FailWorker(ctx, worker.WorkerKey, "startup_failed", time.Unix(102, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := authorizer.AuthorizeWorker(ctx, principal); err == nil {
+		t.Fatal("authorizer accepted a failed worker")
 	}
 }
 

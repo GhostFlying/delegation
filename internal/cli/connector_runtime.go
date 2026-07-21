@@ -9,8 +9,10 @@ import (
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
+	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/pathguard"
+	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
 
@@ -19,7 +21,7 @@ func runConnectorService(
 	configPath string,
 	cfg delegationconfig.Config,
 	stderr io.Writer,
-) error {
+) (resultErr error) {
 	token, err := loadConnectorAuthority(configPath, cfg)
 	if err != nil {
 		return err
@@ -30,6 +32,17 @@ func runConnectorService(
 	if ctx.Err() != nil {
 		return nil
 	}
+	lease, err := store.AcquirePeerLease(cfg.Peer.StateFile)
+	if err != nil {
+		return err
+	}
+	peerState, err := store.OpenPeer(ctx, cfg.Peer.StateFile)
+	if err != nil {
+		return errors.Join(err, lease.Close())
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, peerState.Close(), lease.Close())
+	}()
 	var stderrMu sync.Mutex
 	writeStderr := func(format string, args ...any) error {
 		stderrMu.Lock()
@@ -56,10 +69,15 @@ func runConnectorService(
 	if err != nil {
 		return err
 	}
-	bridge, err := localbridge.Listen(endpoint, localbridge.ServiceIdentity{
-		ControllerID: cfg.ControllerID,
-		DeviceID:     cfg.DeviceID,
-	}, client)
+	bridge, err := localbridge.ListenWithWorkerAuthorization(
+		endpoint,
+		localbridge.ServiceIdentity{
+			ControllerID: cfg.ControllerID,
+			DeviceID:     cfg.DeviceID,
+		},
+		client,
+		peerWorkerAuthorizer{state: peerState, deviceID: cfg.DeviceID},
+	)
 	if err != nil {
 		return err
 	}
@@ -110,6 +128,39 @@ func runConnectorService(
 		firstErr = errors.New("stopped unexpectedly")
 	}
 	return errors.Join(fmt.Errorf("%s stopped: %w", firstName, firstErr), closeErr, connectorErr, bridgeErr)
+}
+
+type peerWorkerAuthorizer struct {
+	state    *store.PeerStore
+	deviceID string
+}
+
+func (a peerWorkerAuthorizer) AuthorizeWorker(
+	ctx context.Context,
+	principal control.PrincipalIdentity,
+) error {
+	if a.state == nil || principal.ParentAgentID == "" || principal.DeviceID != a.deviceID {
+		return errors.New("worker principal does not belong to this peer")
+	}
+	worker, err := a.state.GetWorker(ctx, store.WorkerKey{
+		ControllerID: principal.ControllerID,
+		TreeID:       principal.TreeID,
+		AgentID:      principal.AgentID,
+	})
+	if err != nil {
+		return err
+	}
+	if worker.ParentAgentID != principal.ParentAgentID || worker.DeviceID != principal.DeviceID {
+		return errors.New("worker principal does not match its reservation")
+	}
+	switch worker.Status {
+	case store.WorkerStarting, store.WorkerReady, store.WorkerRunning, store.WorkerIdle:
+		return nil
+	case store.WorkerReserved, store.WorkerFailed:
+		return errors.New("worker reservation is not active")
+	default:
+		return errors.New("worker reservation has an unsupported status")
+	}
 }
 
 func loadConnectorAuthority(

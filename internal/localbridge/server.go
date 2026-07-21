@@ -24,10 +24,15 @@ type Backend interface {
 	Call(context.Context, string, string, *control.PrincipalIdentity, any, any) error
 }
 
+type WorkerAuthorizer interface {
+	AuthorizeWorker(context.Context, control.PrincipalIdentity) error
+}
+
 type Server struct {
 	listener    net.Listener
 	identity    ServiceIdentity
 	backend     Backend
+	workers     WorkerAuthorizer
 	sem         chan struct{}
 	started     atomic.Bool
 	closeOnce   sync.Once
@@ -40,6 +45,15 @@ type Server struct {
 }
 
 func Listen(endpoint string, identity ServiceIdentity, backend Backend) (*Server, error) {
+	return ListenWithWorkerAuthorization(endpoint, identity, backend, nil)
+}
+
+func ListenWithWorkerAuthorization(
+	endpoint string,
+	identity ServiceIdentity,
+	backend Backend,
+	workers WorkerAuthorizer,
+) (*Server, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
@@ -51,7 +65,8 @@ func Listen(endpoint string, identity ServiceIdentity, backend Backend) (*Server
 		return nil, fmt.Errorf("listen on local delegation endpoint: %w", err)
 	}
 	return &Server{
-		listener: listener, identity: identity, backend: backend, sem: make(chan struct{}, maximumConcurrentCalls),
+		listener: listener, identity: identity, backend: backend, workers: workers,
+		sem:       make(chan struct{}, maximumConcurrentCalls),
 		serveDone: make(chan struct{}), connections: make(map[net.Conn]struct{}),
 	}, nil
 }
@@ -205,12 +220,22 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		if request.TreeID != "" || request.Source != nil {
 			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid root tree request"}
 		}
-	case protocol.MethodListDevices, protocol.MethodDescribeDevice:
+	case protocol.MethodListDevices, protocol.MethodDescribeDevice,
+		protocol.MethodSendMessage, protocol.MethodWaitMailbox:
 		if request.TreeID == "" || request.Source == nil {
-			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "device request requires a principal"}
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "request requires a principal"}
 		}
 	default:
 		return nil, &protocol.Error{Code: protocol.ErrorMethodNotFound, Message: "method not found"}
+	}
+	if request.Source != nil &&
+		(request.Source.ControllerID != s.identity.ControllerID || request.Source.DeviceID != s.identity.DeviceID) {
+		return nil, &protocol.Error{Code: protocol.ErrorForbidden, Message: "principal is not local to this peer"}
+	}
+	if request.Source != nil && request.Source.ParentAgentID != "" {
+		if s.workers == nil || s.workers.AuthorizeWorker(ctx, *request.Source) != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorForbidden, Message: "managed worker is not authorized"}
+		}
 	}
 	var result json.RawMessage
 	err := s.backend.Call(

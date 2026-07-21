@@ -43,6 +43,22 @@ type fakeBackend struct {
 	finished chan struct{}
 }
 
+type fakeWorkerAuthorizer struct {
+	mu      sync.Mutex
+	sources []control.PrincipalIdentity
+	err     error
+}
+
+func (a *fakeWorkerAuthorizer) AuthorizeWorker(
+	_ context.Context,
+	source control.PrincipalIdentity,
+) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sources = append(a.sources, source)
+	return a.err
+}
+
 func (b *fakeBackend) Call(
 	ctx context.Context,
 	method, treeID string,
@@ -187,6 +203,87 @@ func TestBridgeEnforcesRoleShapeAllowlistAndErrorMapping(t *testing.T) {
 	}
 }
 
+func TestBridgeRequiresLocalReservationAuthorizationForWorkerCalls(t *testing.T) {
+	backend := &fakeBackend{result: json.RawMessage(`{
+        "messageId":"123e4567-e89b-42d3-a456-426614174309",
+        "sequence":1
+    }`)}
+	worker := control.NewWorkerPrincipal(
+		bridgeTestControllerID,
+		bridgeTestTreeID,
+		bridgeTestAgentID,
+		"123e4567-e89b-42d3-a456-426614174304",
+		bridgeTestDeviceID,
+	).Identity()
+
+	unauthorizedClient, stopUnauthorized := startTestBridge(t, backend)
+	var result protocol.SendMessageResult
+	err := unauthorizedClient.Call(
+		context.Background(),
+		protocol.MethodSendMessage,
+		worker.TreeID,
+		&worker,
+		protocol.SendMessageParams{
+			Target:  protocol.MessageTarget{Kind: protocol.MessageTargetParent},
+			Message: "status",
+		},
+		&result,
+	)
+	assertRPCCode(t, err, protocol.ErrorForbidden)
+	stopUnauthorized()
+
+	authorizer := &fakeWorkerAuthorizer{}
+	client, stop := startAuthorizedTestBridge(t, backend, authorizer)
+	defer stop()
+	if err := client.Call(
+		context.Background(),
+		protocol.MethodSendMessage,
+		worker.TreeID,
+		&worker,
+		protocol.SendMessageParams{
+			Target:  protocol.MessageTarget{Kind: protocol.MessageTargetParent},
+			Message: "status",
+		},
+		&result,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if result.Sequence != 1 {
+		t.Fatalf("send message result = %#v", result)
+	}
+	authorizer.mu.Lock()
+	sources := append([]control.PrincipalIdentity(nil), authorizer.sources...)
+	authorizer.mu.Unlock()
+	if !reflect.DeepEqual(sources, []control.PrincipalIdentity{worker}) {
+		t.Fatalf("authorized worker sources = %#v", sources)
+	}
+
+	authorizer.mu.Lock()
+	authorizer.err = errors.New("reservation missing")
+	authorizer.mu.Unlock()
+	err = client.Call(
+		context.Background(),
+		protocol.MethodWaitMailbox,
+		worker.TreeID,
+		&worker,
+		protocol.WaitMailboxParams{Limit: 1, TimeoutMillis: 1},
+		&protocol.WaitMailboxResult{},
+	)
+	assertRPCCode(t, err, protocol.ErrorForbidden)
+
+	crossDevice := worker
+	crossDevice.DeviceID = "123e4567-e89b-42d3-a456-426614174398"
+	err = client.Call(
+		context.Background(),
+		protocol.MethodSendMessage,
+		crossDevice.TreeID,
+		&crossDevice,
+		protocol.SendMessageParams{},
+		&protocol.SendMessageResult{},
+	)
+	assertRPCCode(t, err, protocol.ErrorForbidden)
+}
+
 func TestClientCancellationReachesBridgeBackend(t *testing.T) {
 	backend := &fakeBackend{
 		result: json.RawMessage(`{}`), block: true, started: make(chan struct{}), finished: make(chan struct{}),
@@ -302,9 +399,22 @@ func TestUnsupportedLocalBridgeRequestFailsClosed(t *testing.T) {
 }
 
 func startTestBridge(t *testing.T, backend Backend) (*Client, func()) {
+	return startAuthorizedTestBridge(t, backend, nil)
+}
+
+func startAuthorizedTestBridge(
+	t *testing.T,
+	backend Backend,
+	authorizer WorkerAuthorizer,
+) (*Client, func()) {
 	t.Helper()
 	endpoint := testEndpoint(t)
-	server, err := Listen(endpoint, testServiceIdentity(), backend)
+	server, err := ListenWithWorkerAuthorization(
+		endpoint,
+		testServiceIdentity(),
+		backend,
+		authorizer,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

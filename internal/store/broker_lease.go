@@ -12,7 +12,7 @@ import (
 
 var (
 	ErrBrokerLeaseHeld = errors.New("broker instance lease is already held")
-	ErrPeerLeaseHeld   = errors.New("peer instance lease is already held")
+	ErrPeerLeaseHeld   = errors.New("peer connector is already running for this state")
 )
 
 // InstanceLease prevents two service processes from owning the same state store.
