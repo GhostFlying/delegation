@@ -107,6 +107,38 @@ CREATE TABLE agent_spawn_receipts (
 CREATE INDEX agent_spawn_receipts_by_parent_sequence
 	ON agent_spawn_receipts(controller_id, tree_id, source_agent_id, sequence);
 
+CREATE TABLE agent_operation_receipts (
+	controller_id TEXT NOT NULL,
+	tree_id TEXT NOT NULL,
+	source_agent_id TEXT NOT NULL,
+	operation_id TEXT NOT NULL,
+	action TEXT NOT NULL CHECK (action IN ('send', 'followup', 'interrupt')),
+	agent_id TEXT NOT NULL,
+	payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+	outcome TEXT NOT NULL CHECK (
+		(action = 'send' AND outcome IN ('pending', 'queued', 'steered', 'failed')) OR
+		(action = 'followup' AND outcome IN ('pending', 'started', 'failed')) OR
+		(action = 'interrupt' AND outcome IN ('pending', 'interrupted', 'failed'))
+	),
+	failure_code TEXT NOT NULL CHECK (
+		length(CAST(failure_code AS BLOB)) <= 64 AND
+		((outcome = 'failed' AND length(failure_code) > 0) OR
+		 (outcome != 'failed' AND failure_code = ''))
+	),
+	created_at INTEGER NOT NULL CHECK (created_at >= 0),
+	updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+	PRIMARY KEY (controller_id, tree_id, source_agent_id, operation_id),
+	FOREIGN KEY (controller_id, tree_id)
+		REFERENCES trees(controller_id, tree_id) ON DELETE CASCADE,
+	FOREIGN KEY (controller_id, tree_id, source_agent_id)
+		REFERENCES principals(controller_id, tree_id, agent_id) ON DELETE CASCADE,
+	FOREIGN KEY (controller_id, tree_id, agent_id)
+		REFERENCES principals(controller_id, tree_id, agent_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX agent_operation_receipts_by_agent
+	ON agent_operation_receipts(controller_id, tree_id, agent_id, created_at, operation_id);
+
 CREATE TABLE mailboxes (
     controller_id TEXT NOT NULL,
     tree_id TEXT NOT NULL,

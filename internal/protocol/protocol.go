@@ -78,7 +78,13 @@ const (
 	MethodDescribeDevice  = "device.describe"
 	MethodSpawnAgent      = "agent.spawn"
 	MethodListAgents      = "agent.list"
+	MethodSendAgent       = "agent.send"
+	MethodFollowupAgent   = "agent.followup"
+	MethodInterruptAgent  = "agent.interrupt"
 	MethodSpawnWorker     = "worker.spawn"
+	MethodSendWorker      = "worker.send"
+	MethodFollowupWorker  = "worker.followup"
+	MethodInterruptWorker = "worker.interrupt"
 )
 
 type CancelRequestParams struct {
