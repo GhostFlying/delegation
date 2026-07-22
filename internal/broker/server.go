@@ -38,6 +38,7 @@ const (
 	rootMailboxWaitHeadroom      = 16
 	maximumAsyncMailboxWaits     = config.MaximumWorkerSlots + rootMailboxWaitHeadroom
 	mailboxRequestTimeout        = 30 * time.Second
+	agentWaitRequestTimeout      = 30 * time.Second
 	agentSpawnRequestTimeout     = 125 * time.Second
 	agentOperationRequestTimeout = 125 * time.Second
 	maximumPendingPeerCalls      = 128
@@ -66,6 +67,7 @@ type Registry interface {
 	QueueAgentMessageAndFinishOperation(context.Context, store.AgentOperationKey, string, time.Time) (store.AgentOperationReceipt, store.MailboxDelivery, error)
 	ClaimWorkerLifecycleSession(context.Context, store.WorkerLifecycleSessionClaim) (uint64, error)
 	ApplyWorkerLifecyclePage(context.Context, store.WorkerLifecyclePageApply) (protocol.SyncWorkerLifecycleResult, error)
+	ListAgentLifecycleActivity(context.Context, control.PrincipalIdentity, store.AgentLifecyclePageRequest) (store.AgentLifecyclePage, error)
 }
 
 type Options struct {
@@ -829,6 +831,8 @@ func (s *session) handleEnvelope(
 		return false, s.startAgentOperation(ctx, sessionContext, envelope)
 	case protocol.MethodSyncWorkerLifecycle:
 		return false, s.handleSyncWorkerLifecycle(ctx, envelope)
+	case protocol.MethodWaitAgent:
+		return false, s.startAgentWait(ctx, sessionContext, envelope)
 	}
 	if envelope.Method != protocol.MethodHeartbeat {
 		return false, s.writeError(ctx, envelope, protocol.ErrorMethodNotFound, "method not found")
