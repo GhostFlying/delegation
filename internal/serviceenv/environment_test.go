@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -31,9 +32,53 @@ func TestLoadProtectedFileResolvesOnlyReferencedProviderEnvironment(t *testing.T
 	}
 }
 
+func TestLoadProtectedFileIncludesTargetHostAuthentication(t *testing.T) {
+	config := strings.Replace(serviceConfig, `,"env_key":"GATEWAY_KEY"`, "", 1)
+	path := protectedEnvironmentFile(t, strings.Join([]string{
+		codexconfig.EnvironmentVariable + "=" + config,
+		"CODEX_ACCESS_TOKEN=access-token",
+		"CODEX_API_KEY=codex-api-key",
+		"OPENAI_API_KEY=openai-api-key",
+		"",
+	}, "\n"))
+	resolved, err := LoadProtectedFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"CODEX_ACCESS_TOKEN": "access-token",
+		"CODEX_API_KEY":      "codex-api-key",
+		"OPENAI_API_KEY":     "openai-api-key",
+	}
+	if !reflect.DeepEqual(resolved.Environment, want) {
+		t.Fatalf("resolved authentication environment = %#v, want %#v", resolved.Environment, want)
+	}
+}
+
+func TestLoadInheritedIncludesTargetHostAuthentication(t *testing.T) {
+	config := strings.Replace(serviceConfig, `,"env_key":"GATEWAY_KEY"`, "", 1)
+	t.Setenv(codexconfig.EnvironmentVariable, config)
+	t.Setenv("CODEX_ACCESS_TOKEN", "access-token")
+	t.Setenv("CODEX_API_KEY", "codex-api-key")
+	t.Setenv("OPENAI_API_KEY", "openai-api-key")
+	resolved, err := LoadInherited()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"CODEX_ACCESS_TOKEN": "access-token",
+		"CODEX_API_KEY":      "codex-api-key",
+		"OPENAI_API_KEY":     "openai-api-key",
+	}
+	if !reflect.DeepEqual(resolved.Environment, want) {
+		t.Fatalf("resolved authentication environment = %#v, want %#v", resolved.Environment, want)
+	}
+}
+
 func TestLoadProtectedFileRejectsUnsafeOrAmbiguousContent(t *testing.T) {
 	for name, contents := range map[string]string{
 		"unreferenced": codexconfig.EnvironmentVariable + "=" + serviceConfig + "\nGATEWAY_KEY=key\nOTHER=value\n",
+		"empty auth":   codexconfig.EnvironmentVariable + "=" + serviceConfig + "\nGATEWAY_KEY=key\nCODEX_API_KEY=\n",
 		"duplicate":    "KEY=one\nKEY=two\n",
 		"shell export": "export KEY=value\n",
 		"empty key":    "=value\n",

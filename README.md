@@ -127,11 +127,13 @@ plugins/delegation/scripts/delegation-mcp service install \
 ```
 
 The peer environment file is a current-user-only file containing literal `NAME=value` lines. It
-must define `DELEGATION_CODEX_CONFIG_JSON` and exactly the provider credential variables referenced
-by that JSON; values are not shell-expanded. Keep it outside the managed worker `CODEX_HOME` and
-workspace root, and never put a broker or peer token in it. A foreground `service run --config
-<peer.json>` may inherit the same values from the current environment; add `--environment-file` to
-test the native-service source directly.
+must define `DELEGATION_CODEX_CONFIG_JSON` and the provider credential variables referenced by that
+JSON. It may also contain the target host's existing `CODEX_ACCESS_TOKEN`, `CODEX_API_KEY`, or
+`OPENAI_API_KEY`; these authenticate the managed app-server and are excluded from worker shells.
+Values are not shell-expanded. Keep the file outside the managed worker `CODEX_HOME` and workspace
+root, and never put a broker or peer token in it. A foreground `service run --config <peer.json>`
+inherits the same values from the current environment; add `--environment-file` to test the
+native-service source directly.
 
 Installation writes a disabled definition first, then enables, starts, and verifies it through the
 native service manager. The definitions are `delegation-broker.service` and

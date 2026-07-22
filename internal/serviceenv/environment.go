@@ -22,6 +22,12 @@ const (
 
 var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 
+var hostAuthenticationEnvironment = []string{
+	"CODEX_ACCESS_TOKEN",
+	"CODEX_API_KEY",
+	"OPENAI_API_KEY",
+}
+
 type Resolved struct {
 	Config      map[string]any
 	Environment map[string]string
@@ -59,6 +65,7 @@ func resolve(
 ) (Resolved, error) {
 	credentials := codexconfig.CredentialEnvironmentVariables(config)
 	allowed := append([]string{codexconfig.EnvironmentVariable}, credentials...)
+	allowed = append(allowed, hostAuthenticationEnvironment...)
 	if provided != nil {
 		for name := range provided {
 			if !containsName(allowed, name) {
@@ -66,11 +73,24 @@ func resolve(
 			}
 		}
 	}
-	environment := make(map[string]string, len(credentials))
+	environment := make(map[string]string, len(credentials)+len(hostAuthenticationEnvironment))
 	for _, name := range credentials {
 		value, found := lookup(name)
 		if !found || value == "" {
 			return Resolved{}, fmt.Errorf("peer service environment variable %s is missing or empty", name)
+		}
+		environment[name] = value
+	}
+	for _, name := range hostAuthenticationEnvironment {
+		if containsName(credentials, name) {
+			continue
+		}
+		value, found := lookup(name)
+		if !found {
+			continue
+		}
+		if value == "" {
+			return Resolved{}, fmt.Errorf("peer service environment variable %s is empty", name)
 		}
 		environment[name] = value
 	}

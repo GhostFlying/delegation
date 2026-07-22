@@ -34,7 +34,8 @@ means trusting the entire tailnet. This authentication warning is separate from 
 transport warning.
 
 After setup, use `service run --config <path>` for a foreground process. A peer foreground process
-loads `DELEGATION_CODEX_CONFIG_JSON` and its referenced provider credential variables from the
-current environment. To install a role-specific current-user service, use `service install
+loads `DELEGATION_CODEX_CONFIG_JSON`, its referenced provider credential variables, and the target
+host's available standard Codex/OpenAI authentication variables from the current environment. To
+install a role-specific current-user service, use `service install
 --config <broker.json>` for a broker or `service install --config <peer.json> --environment-file
 <peer.env>` for a peer. Read the native-service reference before creating that protected file.

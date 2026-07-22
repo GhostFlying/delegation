@@ -11,12 +11,15 @@ The peer environment file is required for native service installation because sy
 and Task Scheduler do not reliably inherit the setup shell. It must be an absolute,
 current-user-only protected file outside the managed worker `CODEX_HOME` and workspace root. The
 file uses literal `NAME=value` lines with no shell expansion or quote processing. It must contain
-`DELEGATION_CODEX_CONFIG_JSON` and exactly the credential variables referenced by that JSON. Do not
-put broker or peer tokens in this file.
+`DELEGATION_CODEX_CONFIG_JSON` and the credential variables referenced by that JSON. It may also
+contain `CODEX_ACCESS_TOKEN`, `CODEX_API_KEY`, or `OPENAI_API_KEY` from the target host so the
+managed app-server can use the host's existing authentication; worker shells exclude these values.
+Do not put broker or peer tokens in this file.
 
-For an interactive foreground peer, `service run --config <peer.json>` reads the provider config
-and referenced credentials from the current environment. Add `--environment-file <peer.env>` to
-exercise the same source used by the native service.
+For an interactive foreground peer, `service run --config <peer.json>` reads the provider config,
+referenced credentials, and any available standard Codex/OpenAI authentication variables from the
+current environment. Add `--environment-file <peer.env>` to exercise the same source used by the
+native service.
 The native identities are:
 
 - Linux: `delegation-broker.service` and `delegation-peer.service`.
