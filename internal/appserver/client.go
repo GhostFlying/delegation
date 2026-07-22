@@ -25,18 +25,20 @@ const (
 	// MaxMessageBytes bounds each JSONL message in either direction.
 	MaxMessageBytes = 16 << 20
 
-	defaultHandshakeTimeout  = 30 * time.Second
-	defaultCloseTimeout      = 10 * time.Second
-	defaultWriteTimeout      = 10 * time.Second
-	defaultStderrLimit       = 64 << 10
-	defaultNotificationQueue = 512
-	defaultMaxPendingCalls   = 256
-	maximumStderrLimit       = 1 << 20
-	maximumNotificationQueue = 8192
-	maximumPendingCalls      = 4096
-	maximumAbandonedCalls    = 4096
-	callbackRejectTimeout    = 2 * time.Second
-	callbackDrainTimeout     = 250 * time.Millisecond
+	defaultHandshakeTimeout   = 30 * time.Second
+	defaultCloseTimeout       = 10 * time.Second
+	defaultWriteTimeout       = 10 * time.Second
+	defaultStderrLimit        = 64 << 10
+	defaultNotificationQueue  = 512
+	defaultMaxPendingCalls    = 256
+	maximumStderrLimit        = 1 << 20
+	maximumNotificationQueue  = 8192
+	maximumPendingCalls       = 4096
+	maximumAbandonedCalls     = 4096
+	callbackRejectTimeout     = 2 * time.Second
+	callbackDrainTimeout      = 250 * time.Millisecond
+	processOutputDrainTimeout = time.Second
+	forcedExitGrace           = 2 * time.Second
 )
 
 var highVolumeNotificationMethods = []string{
@@ -56,18 +58,25 @@ var highVolumeNotificationMethods = []string{
 }
 
 var (
-	ErrClosed               = errors.New("app-server client is closed")
-	ErrBusy                 = errors.New("app-server client has too many pending calls")
-	ErrMessageTooLarge      = errors.New("app-server JSON message exceeds 16 MiB")
-	ErrNotificationOverflow = errors.New("app-server notification queue is full")
-	ErrCloseTimeout         = errors.New("timed out closing app-server")
+	ErrClosed                 = errors.New("app-server client is closed")
+	ErrBusy                   = errors.New("app-server client has too many pending calls")
+	ErrMessageTooLarge        = errors.New("app-server JSON message exceeds 16 MiB")
+	ErrNotificationOverflow   = errors.New("app-server notification queue is full")
+	ErrCloseTimeout           = errors.New("timed out closing app-server")
+	ErrProcessExitUnconfirmed = errors.New("app-server process tree exit was not confirmed")
+	ErrRequestNotWritten      = errors.New("app-server request was not written")
 )
 
 // Options defines one isolated app-server child process.
 type Options struct {
-	Binary             string
+	Binary string
+	// SupervisorBinary is required on macOS and must dispatch
+	// RunDarwinSupervisorIfRequested before normal command handling. Other
+	// platforms ignore it.
+	SupervisorBinary   string
 	CodexHome          string
 	Environment        map[string]string
+	UnsetEnvironment   []string
 	ClientVersion      string
 	HandshakeTimeout   time.Duration
 	CloseTimeout       time.Duration
@@ -108,12 +117,15 @@ type pendingCall struct {
 
 type Client struct {
 	command       *exec.Cmd
+	processOwner  ownedProcess
 	stdin         io.WriteCloser
 	stdout        io.ReadCloser
+	stderrPipe    io.ReadCloser
 	closeTimeout  time.Duration
 	maxPending    int
 	stderr        *tailBuffer
 	stderrDone    chan struct{}
+	stdoutDone    chan struct{}
 	processExited chan struct{}
 
 	nextID  atomic.Uint64
@@ -130,11 +142,13 @@ type Client struct {
 	done          chan struct{}
 	terminateOnce sync.Once
 	stdinOnce     sync.Once
+	outputOnce    sync.Once
 	killOnce      sync.Once
+	killErr       error
 
 	errMu       sync.Mutex
 	terminalErr error
-	waitErr     error
+	waitResult  processWaitResult
 }
 
 // Start launches and initializes a long-lived Codex app-server over stdio.
@@ -143,39 +157,61 @@ func Start(ctx context.Context, options Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	command := exec.Command(validated.Binary, "app-server", "--listen", "stdio://", "--session-source", "app-server")
-	command.Env = buildEnvironment(validated.Environment, validated.CodexHome)
-	stdin, err := command.StdinPipe()
+	// The released Codex multitool does not expose the standalone
+	// codex-app-server --session-source flag. Managed identity is carried by the
+	// thread-scoped threadSource and broker principal instead.
+	command := exec.Command(validated.Binary, "app-server", "--listen", "stdio://")
+	command.Env = buildEnvironment(
+		validated.Environment,
+		validated.UnsetEnvironment,
+		validated.CodexHome,
+	)
+	processOwner, err := prepareOwnedProcess(
+		command,
+		validated.SupervisorBinary,
+		validated.CloseTimeout,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("open app-server stdin: %w", err)
+		return nil, fmt.Errorf("prepare app-server process ownership: %w", err)
 	}
-	stdout, err := command.StdoutPipe()
+	stdio, err := openChildStdio()
 	if err != nil {
-		_ = stdin.Close()
-		return nil, fmt.Errorf("open app-server stdout: %w", err)
+		_ = processOwner.Terminate()
+		return nil, fmt.Errorf("open app-server stdio: %w", err)
 	}
-	stderr, err := command.StderrPipe()
-	if err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		return nil, fmt.Errorf("open app-server stderr: %w", err)
-	}
+	command.Stdin = stdio.stdinChild
+	command.Stdout = stdio.stdoutChild
+	command.Stderr = stdio.stderrChild
 	client := &Client{
-		command: command, stdin: stdin, stdout: stdout, closeTimeout: validated.CloseTimeout,
-		maxPending: validated.MaxPendingCalls, stderr: newTailBuffer(validated.StderrLimit),
-		stderrDone: make(chan struct{}), processExited: make(chan struct{}), writeGate: make(chan struct{}, 1),
+		command: command, processOwner: processOwner,
+		stdin: stdio.stdin, stdout: stdio.stdout, stderrPipe: stdio.stderr,
+		closeTimeout: validated.CloseTimeout,
+		maxPending:   validated.MaxPendingCalls, stderr: newTailBuffer(validated.StderrLimit),
+		stderrDone: make(chan struct{}), stdoutDone: make(chan struct{}),
+		processExited: make(chan struct{}), writeGate: make(chan struct{}, 1),
 		pending: map[uint64]pendingCall{}, abandoned: map[uint64]struct{}{},
 		notifications: make(chan Notification, validated.NotificationBuffer), fatal: make(chan error, 1),
 		done: make(chan struct{}),
 	}
 	client.writeGate <- struct{}{}
 	if err := command.Start(); err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		_ = stderr.Close()
+		_ = stdio.close()
+		_ = processOwner.Terminate()
 		return nil, fmt.Errorf("start app-server: %w", err)
 	}
-	go client.drainStderr(stderr)
+	// These are the parent's copies. The child inherited its own descriptors at
+	// Start, and keeping these open would prevent readers from observing EOF.
+	_ = stdio.closeChildEnds()
+	if err := processOwner.Attach(command.Process); err != nil {
+		terminationErr := processOwner.Terminate()
+		_ = stdio.closeParentEnds()
+		_ = command.Wait()
+		return nil, errors.Join(
+			fmt.Errorf("own app-server process group or job: %w", err),
+			terminationErr,
+		)
+	}
+	go client.drainStderr(stdio.stderr)
 	go client.readLoop()
 	go client.waitLoop()
 
@@ -186,7 +222,7 @@ func Start(ctx context.Context, options Options) (*Client, error) {
 			"name": "delegation", "title": "Delegation Connector", "version": validated.ClientVersion,
 		},
 		"capabilities": map[string]any{
-			"experimentalApi": false, "requestAttestation": false,
+			"experimentalApi": true, "requestAttestation": false,
 			"mcpServerOpenaiFormElicitation": false,
 			"optOutNotificationMethods":      highVolumeNotificationMethods,
 		},
@@ -202,6 +238,58 @@ func Start(ctx context.Context, options Options) (*Client, error) {
 		return nil, fmt.Errorf("notify app-server initialized: %w", err)
 	}
 	return client, nil
+}
+
+// childStdio uses caller-owned pipe ends instead of Cmd's pipe helpers. Wait
+// closes helper-created pipes and may otherwise race the readers before their
+// final JSONL or diagnostics drain.
+type childStdio struct {
+	stdin, stdinChild   *os.File
+	stdout, stdoutChild *os.File
+	stderr, stderrChild *os.File
+}
+
+func openChildStdio() (*childStdio, error) {
+	return openChildStdioWith(os.Pipe)
+}
+
+func openChildStdioWith(openPipe func() (*os.File, *os.File, error)) (*childStdio, error) {
+	stdio := &childStdio{}
+	var err error
+	stdio.stdinChild, stdio.stdin, err = openPipe()
+	if err == nil {
+		stdio.stdout, stdio.stdoutChild, err = openPipe()
+	}
+	if err == nil {
+		stdio.stderr, stdio.stderrChild, err = openPipe()
+	}
+	if err != nil {
+		_ = stdio.close()
+		return nil, err
+	}
+	return stdio, nil
+}
+
+func (s *childStdio) closeChildEnds() error {
+	return closeFiles(s.stdinChild, s.stdoutChild, s.stderrChild)
+}
+
+func (s *childStdio) closeParentEnds() error {
+	return closeFiles(s.stdin, s.stdout, s.stderr)
+}
+
+func (s *childStdio) close() error {
+	return errors.Join(s.closeParentEnds(), s.closeChildEnds())
+}
+
+func closeFiles(files ...*os.File) error {
+	var result error
+	for _, file := range files {
+		if file != nil {
+			result = errors.Join(result, file.Close())
+		}
+	}
+	return result
 }
 
 // Call sends one request and decodes its result. Concurrent calls are supported.
@@ -228,34 +316,51 @@ func (c *Client) Call(ctx context.Context, method string, params, result any) er
 	}
 	if err := c.writeLocked(ctx, data); err != nil {
 		c.removePending(id, false)
-		c.fail(fmt.Errorf("write app-server %s request: %w", method, err))
+		if !errors.Is(err, ErrRequestNotWritten) {
+			c.fail(fmt.Errorf("write app-server %s request: %w", method, err))
+		}
 		release()
 		return err
 	}
 	release()
 
-	select {
-	case response := <-pending.result:
-		if response.err != nil {
-			return response.err
-		}
-		if result == nil {
-			return nil
-		}
-		if err := json.Unmarshal(response.result, result); err != nil {
-			return fmt.Errorf("decode app-server %s result: %w", method, err)
-		}
-		return nil
-	case <-ctx.Done():
-		c.removePending(id, true)
-		return ctx.Err()
-	case <-c.done:
-		c.removePending(id, false)
-		if err := c.Err(); err != nil {
-			return err
-		}
-		return ErrClosed
+	callResponse := c.waitForCall(ctx, id, pending)
+	if callResponse.err != nil {
+		return callResponse.err
 	}
+	if result == nil {
+		return nil
+	}
+	if err := json.Unmarshal(callResponse.result, result); err != nil {
+		return fmt.Errorf("decode app-server %s result: %w", method, err)
+	}
+	return nil
+}
+
+func (c *Client) waitForCall(ctx context.Context, id uint64, pending pendingCall) response {
+	select {
+	case callResponse := <-pending.result:
+		return callResponse
+	case <-ctx.Done():
+		if c.removePending(id, true) {
+			return response{err: ctx.Err()}
+		}
+		return <-pending.result
+	case <-c.done:
+		return c.finishStoppedCall(id, pending)
+	}
+}
+
+func (c *Client) finishStoppedCall(id uint64, pending pendingCall) response {
+	if !c.removePending(id, false) {
+		// complete or failPending already claimed the request. Its buffered
+		// delivery is authoritative even when done closed concurrently.
+		return <-pending.result
+	}
+	if err := c.Err(); err != nil {
+		return response{err: err}
+	}
+	return response{err: ErrClosed}
 }
 
 // Notify sends one client notification.
@@ -275,7 +380,9 @@ func (c *Client) Notify(ctx context.Context, method string, params any) error {
 		return err
 	}
 	if err := c.writeLocked(ctx, data); err != nil {
-		c.fail(fmt.Errorf("write app-server %s notification: %w", method, err))
+		if !errors.Is(err, ErrRequestNotWritten) {
+			c.fail(fmt.Errorf("write app-server %s notification: %w", method, err))
+		}
 		release()
 		return err
 	}
@@ -336,7 +443,8 @@ func (c *Client) StderrTail() []byte {
 	return c.stderr.snapshot()
 }
 
-// Close closes stdin and waits for the child, killing it when the close deadline expires.
+// Close closes stdin and confirms the child was reaped, killing it when the
+// cooperative close deadline expires.
 func (c *Client) Close(ctx context.Context) error {
 	c.closing.Store(true)
 	c.terminate(nil)
@@ -345,40 +453,79 @@ func (c *Client) Close(ctx context.Context) error {
 	defer cancel()
 	select {
 	case <-c.processExited:
-		c.errMu.Lock()
-		waitErr := c.waitErr
-		c.errMu.Unlock()
-		if waitErr != nil {
-			return fmt.Errorf("close app-server: %w", waitErr)
-		}
-		return nil
+		return c.processExitError("close app-server")
 	case <-waitCtx.Done():
-		c.killProcess()
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("close app-server: %w", err)
+		closeErr := closeWaitError(ctx, waitCtx)
+		killErr := c.killProcess()
+		select {
+		case <-c.processExited:
+			return errors.Join(closeErr, killErr, c.processExitError("forced app-server exit"))
+		default:
 		}
-		return fmt.Errorf("%w: %v", ErrCloseTimeout, waitCtx.Err())
+		forcedContext, forcedCancel := context.WithTimeout(ctx, c.closeTimeout+forcedExitGrace)
+		defer forcedCancel()
+		select {
+		case <-c.processExited:
+			return errors.Join(closeErr, killErr, c.processExitError("forced app-server exit"))
+		case <-forcedContext.Done():
+			c.closeOutput()
+			return errors.Join(
+				closeErr,
+				killErr,
+				ErrProcessExitUnconfirmed,
+				fmt.Errorf("wait for forced app-server exit: %w", forcedContext.Err()),
+			)
+		}
 	}
 }
 
+func closeWaitError(ctx, waitCtx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("close app-server: %w", err)
+	}
+	return fmt.Errorf("%w: %v", ErrCloseTimeout, waitCtx.Err())
+}
+
+func (c *Client) processExitError(description string) error {
+	c.errMu.Lock()
+	result := c.waitResult
+	c.errMu.Unlock()
+	if result.cleanupErr != nil {
+		c.closeOutput()
+		return errors.Join(
+			ErrProcessExitUnconfirmed,
+			fmt.Errorf("%s: %w", description, result.err()),
+		)
+	}
+	if result.exitErr != nil {
+		return fmt.Errorf("%s: %w", description, result.exitErr)
+	}
+	return nil
+}
+
 func (c *Client) readLoop() {
+	defer close(c.stdoutDone)
+	defer close(c.notifications)
+	defer c.stdout.Close()
 	reader := bufio.NewReaderSize(c.stdout, 64<<10)
 	for {
 		line, err := readBoundedLine(reader, MaxMessageBytes)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				if c.closing.Load() {
-					return
-				}
-				select {
-				case <-c.processExited:
-					return
-				case <-time.After(100 * time.Millisecond):
-					c.fail(errors.New("app-server stdout closed unexpectedly"))
-					return
-				}
+			if c.closing.Load() {
+				return
 			}
-			c.fail(fmt.Errorf("read app-server message: %w", err))
+			select {
+			case <-c.processExited:
+				return
+			case <-c.done:
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+			if errors.Is(err, io.EOF) {
+				c.fail(errors.New("app-server stdout closed unexpectedly"))
+			} else {
+				c.fail(fmt.Errorf("read app-server message: %w", err))
+			}
 			return
 		}
 		if len(line) == 0 {
@@ -402,8 +549,6 @@ func (c *Client) readLoop() {
 			}
 			select {
 			case c.notifications <- Notification{Method: message.method, Params: cloneRaw(message.params)}:
-			case <-c.done:
-				return
 			default:
 				c.fail(ErrNotificationOverflow)
 				return
@@ -445,6 +590,14 @@ func (c *Client) complete(message decodedMessage) error {
 		return nil
 	}
 	c.pendingMu.Unlock()
+	select {
+	case <-c.done:
+		// Shutdown can complete pending callers before the child flushes its
+		// final response. Ignore that response so later lifecycle notifications
+		// on the same stdout stream can still be drained.
+		return nil
+	default:
+	}
 	return fmt.Errorf("app-server response references unknown request ID %d", message.responseID)
 }
 
@@ -466,15 +619,15 @@ func (c *Client) addPending(id uint64, pending pendingCall) error {
 	return nil
 }
 
-func (c *Client) removePending(id uint64, abandon bool) {
+func (c *Client) removePending(id uint64, abandon bool) bool {
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()
 	if _, found := c.pending[id]; !found {
-		return
+		return false
 	}
 	delete(c.pending, id)
 	if !abandon {
-		return
+		return true
 	}
 	c.abandoned[id] = struct{}{}
 	c.abandonOrder = append(c.abandonOrder, id)
@@ -483,12 +636,13 @@ func (c *Client) removePending(id uint64, abandon bool) {
 		c.abandonOrder = c.abandonOrder[1:]
 		delete(c.abandoned, oldest)
 	}
+	return true
 }
 
 func (c *Client) acquireWriter(ctx context.Context) (func(), error) {
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, errors.Join(ErrRequestNotWritten, ctx.Err())
 	case <-c.done:
 		if err := c.Err(); err != nil {
 			return nil, err
@@ -514,7 +668,7 @@ func (c *Client) writeLocked(ctx context.Context, data []byte) error {
 		return ErrMessageTooLarge
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return errors.Join(ErrRequestNotWritten, err)
 	}
 	line := make([]byte, len(data)+1)
 	copy(line, data)
@@ -536,11 +690,10 @@ func (c *Client) writeLocked(ctx context.Context, data []byte) error {
 		default:
 		}
 		// Anonymous child-process pipes do not reliably support write deadlines on
-		// every platform. Closing the pipe and killing the owned child guarantees
+		// every platform. Closing the pipe and killing the owned process guarantees
 		// that the blocked Write is interrupted without depending on that support.
 		c.closeInput()
-		c.killProcess()
-		return writeCtx.Err()
+		return errors.Join(writeCtx.Err(), c.killProcess())
 	case <-c.done:
 		select {
 		case err := <-writeDone:
@@ -583,20 +736,39 @@ func writeAll(writer io.Writer, data []byte) error {
 	return nil
 }
 
-func (c *Client) drainStderr(stderr io.Reader) {
+func (c *Client) drainStderr(stderr io.ReadCloser) {
+	defer stderr.Close()
 	defer close(c.stderrDone)
 	_, _ = io.Copy(c.stderr, stderr)
 }
 
 func (c *Client) waitLoop() {
-	err := c.command.Wait()
-	<-c.stderrDone
+	result := c.processOwner.Wait(c.command)
 	c.errMu.Lock()
-	c.waitErr = err
+	c.waitResult = result
 	c.errMu.Unlock()
 	close(c.processExited)
+	c.waitForOutputDrain()
 	if !c.closing.Load() {
-		c.fail(&ProcessError{Err: err, StderrTail: c.stderr.snapshot()})
+		c.fail(&ProcessError{Err: result.err(), StderrTail: c.stderr.snapshot()})
+	}
+}
+
+func (c *Client) waitForOutputDrain() {
+	stdoutDone := c.stdoutDone
+	stderrDone := c.stderrDone
+	timer := time.NewTimer(processOutputDrainTimeout)
+	defer timer.Stop()
+	for stdoutDone != nil || stderrDone != nil {
+		select {
+		case <-stdoutDone:
+			stdoutDone = nil
+		case <-stderrDone:
+			stderrDone = nil
+		case <-timer.C:
+			c.closeOutput()
+			return
+		}
 	}
 }
 
@@ -663,12 +835,22 @@ func (c *Client) closeInput() {
 	c.stdinOnce.Do(func() { _ = c.stdin.Close() })
 }
 
-func (c *Client) killProcess() {
-	c.killOnce.Do(func() {
-		if c.command.Process != nil {
-			_ = c.command.Process.Kill()
+func (c *Client) closeOutput() {
+	c.outputOnce.Do(func() {
+		if c.stdout != nil {
+			_ = c.stdout.Close()
+		}
+		if c.stderrPipe != nil {
+			_ = c.stderrPipe.Close()
 		}
 	})
+}
+
+func (c *Client) killProcess() error {
+	c.killOnce.Do(func() {
+		c.killErr = c.processOwner.Terminate()
+	})
+	return c.killErr
 }
 
 func readBoundedLine(reader *bufio.Reader, limit int) ([]byte, error) {
@@ -712,12 +894,32 @@ func validateOptions(options Options) (Options, error) {
 	if !homeInfo.IsDir() {
 		return Options{}, errors.New("app-server CODEX_HOME must be a directory")
 	}
+	if runtime.GOOS == "darwin" {
+		if options.SupervisorBinary == "" || !filepath.IsAbs(options.SupervisorBinary) {
+			return Options{}, errors.New("app-server supervisor binary must be an absolute path on macOS")
+		}
+		supervisorInfo, err := os.Stat(options.SupervisorBinary)
+		if err != nil {
+			return Options{}, fmt.Errorf("inspect app-server supervisor binary: %w", err)
+		}
+		if !supervisorInfo.Mode().IsRegular() {
+			return Options{}, errors.New("app-server supervisor binary must be a regular file on macOS")
+		}
+	}
 	for key, value := range options.Environment {
 		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
 			return Options{}, fmt.Errorf("app-server environment contains invalid key %q", key)
 		}
 		if environmentKeyEqual(key, "CODEX_HOME") && !samePath(value, options.CodexHome) {
 			return Options{}, errors.New("app-server Environment CODEX_HOME conflicts with CodexHome")
+		}
+	}
+	for _, key := range options.UnsetEnvironment {
+		if key == "" || strings.ContainsAny(key, "=\x00") {
+			return Options{}, fmt.Errorf("app-server unset environment contains invalid key %q", key)
+		}
+		if environmentKeyEqual(key, "CODEX_HOME") {
+			return Options{}, errors.New("app-server cannot unset CODEX_HOME")
 		}
 	}
 	if options.ClientVersion == "" {
@@ -756,8 +958,11 @@ func validateOptions(options Options) (Options, error) {
 	return options, nil
 }
 
-func buildEnvironment(overrides map[string]string, codexHome string) []string {
+func buildEnvironment(overrides map[string]string, unset []string, codexHome string) []string {
 	environment := append([]string(nil), os.Environ()...)
+	for _, key := range unset {
+		environment = removeEnvironment(environment, key)
+	}
 	keys := make([]string, 0, len(overrides))
 	for key := range overrides {
 		keys = append(keys, key)
@@ -770,12 +975,15 @@ func buildEnvironment(overrides map[string]string, codexHome string) []string {
 }
 
 func setEnvironment(environment []string, key, value string) []string {
-	prefix := key + "="
-	filtered := slices.DeleteFunc(environment, func(entry string) bool {
+	filtered := removeEnvironment(environment, key)
+	return append(filtered, key+"="+value)
+}
+
+func removeEnvironment(environment []string, key string) []string {
+	return slices.DeleteFunc(environment, func(entry string) bool {
 		entryKey, _, found := strings.Cut(entry, "=")
 		return found && environmentKeyEqual(entryKey, key)
 	})
-	return append(filtered, prefix+value)
 }
 
 func environmentKeyEqual(left, right string) bool {
