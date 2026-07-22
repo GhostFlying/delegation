@@ -31,8 +31,11 @@ installed checkpoint boundary instead of pretending unavailable workspace tools 
    selected `target_device_id`, a unique lowercase `task_name`, and a self-contained `message`.
    Include the requested output, validation command, and relevant platform constraint; do not send
    the whole root transcript.
-2. Treat `pending` as an indeterminate delivery result. Retry with the same spawn ID and exactly the
-   same arguments. Never create a second agent merely because the first response was lost.
+2. Inspect the dispatch `outcome`. `busy` means the target had no worker slot. `indeterminate`
+   means no definitive target result could be confirmed or durably recorded, so the worker may
+   already have started. Both keep one pending receipt: retry with the same spawn ID and exactly the
+   same arguments. Never create a second agent merely because capacity was full or a result was
+   lost.
 3. Use `list_agents` to inspect durable status. Keep unrelated subtasks local and spawn multiple
    workers only when their work is independent.
 

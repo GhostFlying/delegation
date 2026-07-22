@@ -186,11 +186,13 @@ the current peer: self-targeting still creates a separate managed Codex thread i
 app-server. The broker persists the worker principal and dispatch receipt before contacting the
 target, so a lost response can be retried with the same spawn ID and exactly the same arguments.
 
-The returned status is `started`, `failed`, or `pending`. `pending` means the durable receipt exists
-but the broker could not establish a definitive target result; retry the exact request rather than
-inventing another spawn ID. Use `list_agents` to inspect the current tree's receipts and terminal
-failure codes. Task names identify agents within a root tree and cannot be reused for another
-spawn.
+The returned durable status is `started`, `failed`, or `pending`, and the dispatch attempt also has
+an `outcome`. `busy` means the target had no worker slot. `indeterminate` means no definitive target
+result could be confirmed or durably recorded; the worker may already have started. Both retain one
+pending receipt and must be retried with the same spawn ID and exactly the same arguments. `started`
+and `failed` outcomes are terminal. Use `list_agents` to inspect the current tree's durable receipts
+and terminal failure codes. Task names identify agents within a root tree and cannot be reused for
+another spawn.
 
 This M2 checkpoint starts workers in an empty managed workspace. Use `send_message` to steer a
 running worker or queue a message for an idle worker, `followup_task` to start a new turn for an idle

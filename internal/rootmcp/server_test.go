@@ -143,7 +143,8 @@ func (b *fakeRootBackend) Call(
 		}
 		input := params.(protocol.SpawnAgentParams)
 		*result.(*protocol.SpawnAgentResult) = protocol.SpawnAgentResult{
-			Agent: testAgent(input.SpawnID, input.TargetDeviceID, input.TaskName, 1),
+			Agent:   testAgent(input.SpawnID, input.TargetDeviceID, input.TaskName, 1),
+			Outcome: protocol.AgentSpawnOutcomeStarted,
 		}
 	case protocol.MethodListAgents:
 		if agentsResult != nil {
@@ -317,11 +318,12 @@ func TestRootMCPSpawnsAndListsDurableAgents(t *testing.T) {
 	if spawned.IsError {
 		t.Fatalf("spawn_agent result = %#v", spawned)
 	}
-	var agent AgentOutput
+	var agent SpawnAgentOutput
 	decodeStructured(t, spawned.StructuredContent, &agent)
 	if agent.SpawnID != rootMCPThreadID || agent.AgentID != rootMCPWorkerID ||
 		agent.ParentAgentID != rootMCPAgentID || agent.TargetDeviceID != rootMCPWorkerID ||
-		agent.TaskName != "windows_build" || agent.Status != protocol.AgentSpawnStarted {
+		agent.TaskName != "windows_build" || agent.Status != protocol.AgentSpawnStarted ||
+		agent.Outcome != protocol.AgentSpawnOutcomeStarted {
 		t.Fatalf("spawn_agent output = %#v", agent)
 	}
 	listed := callTool(t, ctx, clientSession, ToolListAgents, rootMCPThreadID, map[string]any{"limit": 1})
@@ -342,6 +344,56 @@ func TestRootMCPSpawnsAndListsDurableAgents(t *testing.T) {
 	if spawnParams.Message != "Run the Windows build and report the exact result." ||
 		calls[1].source == nil || *calls[1].source != rootResult(rootMCPThreadID).Principal.Identity() {
 		t.Fatalf("spawn backend call = %#v", calls[1])
+	}
+}
+
+func TestRootMCPRejectsMismatchedSpawnAttemptOutcome(t *testing.T) {
+	backend := &fakeRootBackend{spawnResult: &protocol.SpawnAgentResult{
+		Agent:   testAgent(rootMCPThreadID, rootMCPWorkerID, "busy_mismatch", 1),
+		Outcome: protocol.AgentSpawnOutcomeBusy,
+	}}
+	ctx, clientSession, closeSessions := connectRootMCP(t, backend)
+	defer closeSessions()
+	spawned := callTool(t, ctx, clientSession, ToolSpawnAgent, rootMCPThreadID, map[string]any{
+		"spawn_id":         rootMCPThreadID,
+		"target_device_id": rootMCPWorkerID,
+		"task_name":        "busy_mismatch",
+		"message":          "Reject an inconsistent busy outcome.",
+	})
+	if !spawned.IsError {
+		t.Fatalf("mismatched spawn outcome was accepted: %#v", spawned)
+	}
+}
+
+func TestRootMCPReturnsPendingSpawnAttemptOutcomes(t *testing.T) {
+	for _, outcome := range []protocol.AgentSpawnOutcome{
+		protocol.AgentSpawnOutcomeBusy,
+		protocol.AgentSpawnOutcomeIndeterminate,
+	} {
+		t.Run(string(outcome), func(t *testing.T) {
+			agent := testAgent(rootMCPThreadID, rootMCPWorkerID, "pending_attempt", 1)
+			agent.Status = protocol.AgentSpawnPending
+			backend := &fakeRootBackend{spawnResult: &protocol.SpawnAgentResult{
+				Agent: agent, Outcome: outcome,
+			}}
+			ctx, clientSession, closeSessions := connectRootMCP(t, backend)
+			defer closeSessions()
+			spawned := callTool(t, ctx, clientSession, ToolSpawnAgent, rootMCPThreadID, map[string]any{
+				"spawn_id":         rootMCPThreadID,
+				"target_device_id": rootMCPWorkerID,
+				"task_name":        "pending_attempt",
+				"message":          "Return the pending dispatch attempt outcome.",
+			})
+			if spawned.IsError {
+				t.Fatalf("pending %s spawn result = %#v", outcome, spawned)
+			}
+			var output SpawnAgentOutput
+			decodeStructured(t, spawned.StructuredContent, &output)
+			if output.Status != protocol.AgentSpawnPending || output.Outcome != outcome ||
+				output.AgentID != rootMCPWorkerID || output.TaskName != "pending_attempt" {
+				t.Fatalf("pending %s spawn output = %#v", outcome, output)
+			}
+		})
 	}
 }
 

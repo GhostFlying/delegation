@@ -30,6 +30,17 @@ type AgentOutput struct {
 	FailureCode    string                    `json:"failure_code,omitempty"`
 }
 
+type SpawnAgentOutput struct {
+	SpawnID        string                     `json:"spawn_id"`
+	AgentID        string                     `json:"agent_id"`
+	ParentAgentID  string                     `json:"parent_agent_id"`
+	TargetDeviceID string                     `json:"target_device_id"`
+	TaskName       string                     `json:"task_name"`
+	Status         protocol.AgentSpawnStatus  `json:"status"`
+	Outcome        protocol.AgentSpawnOutcome `json:"outcome"`
+	FailureCode    string                     `json:"failure_code,omitempty"`
+}
+
 type ListAgentsInput struct {
 	Cursor string `json:"cursor,omitempty" jsonschema:"opaque cursor returned by a previous list_agents call"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"maximum agents to return, from 1 through 32; defaults to 32"`
@@ -44,35 +55,35 @@ func (r *Root) spawnAgent(
 	ctx context.Context,
 	request *mcp.CallToolRequest,
 	input SpawnAgentInput,
-) (*mcp.CallToolResult, AgentOutput, error) {
+) (*mcp.CallToolResult, SpawnAgentOutput, error) {
 	threadID, err := threadID(request)
 	if err != nil {
-		return nil, AgentOutput{}, err
+		return nil, SpawnAgentOutput{}, err
 	}
 	params := protocol.SpawnAgentParams{
 		SpawnID: input.SpawnID, TargetDeviceID: input.TargetDeviceID,
 		TaskName: input.TaskName, Message: input.Message,
 	}
 	if err := params.Validate(); err != nil {
-		return nil, AgentOutput{}, err
+		return nil, SpawnAgentOutput{}, err
 	}
 	tree, principal, err := r.ensureRoot(ctx, threadID)
 	if err != nil {
-		return nil, AgentOutput{}, err
+		return nil, SpawnAgentOutput{}, err
 	}
 	source := principal.Identity()
 	var result protocol.SpawnAgentResult
 	if err := r.call(
 		ctx, protocol.MethodSpawnAgent, tree.TreeID, &source, params, &result,
 	); err != nil {
-		return nil, AgentOutput{}, explainAgentError(err)
+		return nil, SpawnAgentOutput{}, explainAgentError(err)
 	}
 	if err := validateSpawnAgentResult(result, params, principal.ControllerID, tree.TreeID, principal.AgentID); err != nil {
-		return nil, AgentOutput{}, err
+		return nil, SpawnAgentOutput{}, err
 	}
-	output := agentOutput(result.Agent)
+	output := spawnAgentOutput(result)
 	if err := enforceOutputLimit(output, maximumDetailBytes); err != nil {
-		return nil, AgentOutput{}, err
+		return nil, SpawnAgentOutput{}, err
 	}
 	return nil, output, nil
 }
@@ -184,7 +195,7 @@ func validateSpawnAgentResult(
 	params protocol.SpawnAgentParams,
 	controllerID, treeID, parentAgentID string,
 ) error {
-	if err := result.Agent.Validate(); err != nil {
+	if err := result.Validate(); err != nil {
 		return fmt.Errorf("delegation service returned an invalid agent: %w", err)
 	}
 	if result.Agent.SpawnID != params.SpawnID ||
@@ -233,6 +244,20 @@ func agentOutput(agent protocol.AgentSummary) AgentOutput {
 		TargetDeviceID: agent.Principal.DeviceID,
 		TaskName:       agent.TaskName,
 		Status:         agent.Status,
+		FailureCode:    agent.FailureCode,
+	}
+}
+
+func spawnAgentOutput(result protocol.SpawnAgentResult) SpawnAgentOutput {
+	agent := result.Agent
+	return SpawnAgentOutput{
+		SpawnID:        agent.SpawnID,
+		AgentID:        agent.Principal.AgentID,
+		ParentAgentID:  agent.Principal.ParentAgentID,
+		TargetDeviceID: agent.Principal.DeviceID,
+		TaskName:       agent.TaskName,
+		Status:         agent.Status,
+		Outcome:        result.Outcome,
 		FailureCode:    agent.FailureCode,
 	}
 }
