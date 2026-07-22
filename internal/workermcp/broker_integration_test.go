@@ -101,6 +101,18 @@ type integrationWorkerSpawner struct{}
 
 type integrationWorkerController struct{}
 
+type integrationWorkerLifecycleSource struct{}
+
+func (integrationWorkerLifecycleSource) WorkerRevision() uint64 { return 0 }
+
+func (integrationWorkerLifecycleSource) WorkerLifecycleChanges() <-chan struct{} { return nil }
+
+func (integrationWorkerLifecycleSource) ListWorkerLifecycles(
+	context.Context,
+) ([]protocol.WorkerLifecycleSnapshot, error) {
+	return []protocol.WorkerLifecycleSnapshot{}, nil
+}
+
 func (integrationWorkerSpawner) SpawnWorker(
 	context.Context,
 	connector.WorkerSpawnRequest,
@@ -178,18 +190,19 @@ func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 
 	runContext, cancelRun := context.WithCancel(context.Background())
 	connectorClient, err := connector.New(connector.Options{
-		BrokerURL:        "ws" + strings.TrimPrefix(httpServer.URL, "http"),
-		ControllerID:     controllerID,
-		DeviceID:         deviceID,
-		DeviceName:       "mailbox-integration-peer",
-		AuthMode:         config.AuthModeNone,
-		RuntimeVersion:   "mailbox-integration-test",
-		OperatingSystem:  "linux",
-		Architecture:     "amd64",
-		ReconnectMin:     5 * time.Millisecond,
-		ReconnectMax:     10 * time.Millisecond,
-		WorkerSpawner:    integrationWorkerSpawner{},
-		WorkerController: integrationWorkerController{},
+		BrokerURL:             "ws" + strings.TrimPrefix(httpServer.URL, "http"),
+		ControllerID:          controllerID,
+		DeviceID:              deviceID,
+		DeviceName:            "mailbox-integration-peer",
+		AuthMode:              config.AuthModeNone,
+		RuntimeVersion:        "mailbox-integration-test",
+		OperatingSystem:       "linux",
+		Architecture:          "amd64",
+		ReconnectMin:          5 * time.Millisecond,
+		ReconnectMax:          10 * time.Millisecond,
+		WorkerSpawner:         integrationWorkerSpawner{},
+		WorkerController:      integrationWorkerController{},
+		WorkerLifecycleSource: integrationWorkerLifecycleSource{},
 	})
 	if err != nil {
 		cancelRun()

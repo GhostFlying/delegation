@@ -76,6 +76,12 @@ type WorkerController interface {
 	InterruptWorker(context.Context, WorkerInterruptRequest) (protocol.WorkerOperationResult, error)
 }
 
+type WorkerLifecycleSource interface {
+	WorkerRevision() uint64
+	WorkerLifecycleChanges() <-chan struct{}
+	ListWorkerLifecycles(context.Context) ([]protocol.WorkerLifecycleSnapshot, error)
+}
+
 type Options struct {
 	BrokerURL                string
 	AllowInsecureNonLoopback bool
@@ -93,6 +99,7 @@ type Options struct {
 	ReportError              func(error)
 	WorkerSpawner            WorkerSpawner
 	WorkerController         WorkerController
+	WorkerLifecycleSource    WorkerLifecycleSource
 }
 
 type Status struct {
@@ -101,6 +108,7 @@ type Status struct {
 	RegistryRevision  uint64
 	HeartbeatInterval time.Duration
 	Features          []string
+	WorkerRevision    uint64
 }
 
 type RPCError struct {
@@ -123,6 +131,7 @@ type Client struct {
 	reportError      func(error)
 	workerSpawner    WorkerSpawner
 	workerController WorkerController
+	workerLifecycle  WorkerLifecycleSource
 	running          atomic.Bool
 
 	mu      sync.RWMutex
@@ -155,12 +164,16 @@ func New(options Options) (*Client, error) {
 	if workerController == nil {
 		return nil, errors.New("connector worker controller is required")
 	}
+	if options.WorkerLifecycleSource == nil {
+		return nil, errors.New("connector worker lifecycle source is required")
+	}
 	features := []string{
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
+		protocol.FeatureWorkerLifecycle,
 	}
 	hello := protocol.Hello{
 		ControllerID:   options.ControllerID,
@@ -225,6 +238,7 @@ func New(options Options) (*Client, error) {
 		reportError:      reportError,
 		workerSpawner:    options.WorkerSpawner,
 		workerController: workerController,
+		workerLifecycle:  options.WorkerLifecycleSource,
 		updates:          make(chan struct{}),
 	}, nil
 }
@@ -325,15 +339,30 @@ func (c *Client) runSession(ctx context.Context) (bool, error) {
 	}
 	connection.SetReadLimit(protocol.MaxMessageSize)
 	current := newSession(c, connection)
-	helloResult, err := current.bootstrap(connectContext, c.hello)
+	hello := c.hello
+	hello.WorkerRevision = c.workerLifecycle.WorkerRevision()
+	if err := hello.Validate(); err != nil {
+		current.close(err)
+		return false, fmt.Errorf("connector worker lifecycle: %w", err)
+	}
+	helloResult, err := current.bootstrap(connectContext, hello)
 	if err != nil {
 		current.close(err)
 		return false, err
 	}
+	go current.readLoop()
+	appliedRevision, err := current.syncWorkerLifecycles(
+		connectContext, helloResult.WorkerAppliedRevision, hello.WorkerRevision,
+	)
+	if err != nil {
+		current.close(err)
+		return false, err
+	}
+	helloResult.WorkerAppliedRevision = appliedRevision
 	c.publish(current, helloResult)
 	defer c.unpublish(current)
-	go current.readLoop()
 	go current.heartbeatLoop(helloResult.HeartbeatIntervalMS)
+	go current.workerLifecycleLoop(appliedRevision)
 	select {
 	case <-ctx.Done():
 		current.close(ctx.Err())
@@ -351,6 +380,7 @@ func (c *Client) publish(current *session, result protocol.HelloResult) {
 		RegistryRevision:  result.Revision,
 		HeartbeatInterval: time.Duration(result.HeartbeatIntervalMS) * time.Millisecond,
 		Features:          slices.Clone(result.Features),
+		WorkerRevision:    result.WorkerAppliedRevision,
 	}
 	c.notifyLocked()
 	c.mu.Unlock()
@@ -371,6 +401,14 @@ func (c *Client) updateRevision(current *session, revision uint64) {
 	c.mu.Lock()
 	if c.session == current {
 		c.status.RegistryRevision = revision
+	}
+	c.mu.Unlock()
+}
+
+func (c *Client) updateWorkerRevision(current *session, revision uint64) {
+	c.mu.Lock()
+	if c.session == current {
+		c.status.WorkerRevision = revision
 	}
 	c.mu.Unlock()
 }
@@ -436,11 +474,15 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 		protocol.FeatureMailbox,
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
+		protocol.FeatureWorkerLifecycle,
 	}
 	for _, feature := range required {
 		if !slices.Contains(result.Features, feature) {
 			return fmt.Errorf("broker does not support required feature %q", feature)
 		}
+	}
+	if result.WorkerAppliedRevision > hello.WorkerRevision {
+		return errors.New("broker worker lifecycle cursor is ahead of the peer")
 	}
 	return nil
 }

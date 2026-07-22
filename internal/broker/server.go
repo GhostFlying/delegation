@@ -64,6 +64,8 @@ type Registry interface {
 	GetAgentOperation(context.Context, control.PrincipalIdentity, string) (store.AgentOperationReceipt, error)
 	FinishAgentOperation(context.Context, store.AgentOperationKey, protocol.AgentOperationOutcome, string, time.Time) (store.AgentOperationReceipt, error)
 	QueueAgentMessageAndFinishOperation(context.Context, store.AgentOperationKey, string, time.Time) (store.AgentOperationReceipt, store.MailboxDelivery, error)
+	ClaimWorkerLifecycleSession(context.Context, store.WorkerLifecycleSessionClaim) (uint64, error)
+	ApplyWorkerLifecyclePage(context.Context, store.WorkerLifecyclePageApply) (protocol.SyncWorkerLifecycleResult, error)
 }
 
 type Options struct {
@@ -89,18 +91,20 @@ type Server struct {
 	context           context.Context
 	cancel            context.CancelFunc
 
-	mu               sync.Mutex
-	connections      map[string]*session
-	peers            map[*websocket.Conn]struct{}
-	pendingHellos    int
-	deviceHellos     map[string]int
-	helloLimit       int
-	deviceHelloLimit int
-	closed           bool
-	handlers         sync.WaitGroup
-	background       sync.WaitGroup
-	mailboxNotifier  *mailboxNotifier
-	agentOperations  *agentOperationQueue
+	mu                sync.Mutex
+	connections       map[string]*session
+	latestRevisions   map[string]uint64
+	peers             map[*websocket.Conn]struct{}
+	pendingHellos     int
+	deviceHellos      map[string]int
+	helloLimit        int
+	deviceHelloLimit  int
+	closed            bool
+	handlers          sync.WaitGroup
+	background        sync.WaitGroup
+	mailboxNotifier   *mailboxNotifier
+	lifecycleNotifier *treeNotifier
+	agentOperations   *agentOperationQueue
 
 	retryMu              sync.Mutex
 	offlineRetries       map[string]uint64
@@ -124,6 +128,10 @@ type session struct {
 	deviceID      string
 	credentialMAC *store.CredentialMAC
 	revision      atomic.Uint64
+	workerInitial uint64
+	workerHigh    atomic.Uint64
+	workerApplied atomic.Uint64
+	workerReady   atomic.Bool
 	asyncSem      chan struct{}
 	async         sync.WaitGroup
 	asyncMu       sync.Mutex
@@ -217,11 +225,13 @@ func New(options Options) (*Server, error) {
 		now:                  now,
 		reportError:          reportError,
 		connections:          map[string]*session{},
+		latestRevisions:      map[string]uint64{},
 		peers:                map[*websocket.Conn]struct{}{},
 		deviceHellos:         map[string]int{},
 		helloLimit:           maximumPendingHellos,
 		deviceHelloLimit:     maximumDeviceHellos,
 		mailboxNotifier:      newMailboxNotifier(),
+		lifecycleNotifier:    newTreeNotifier(),
 		agentOperations:      newAgentOperationQueue(),
 		offlineRetries:       map[string]uint64{},
 		offlineRetryWake:     make(chan struct{}, 1),
@@ -508,6 +518,7 @@ func (s *Server) acceptHello(
 		protocol.FeatureMailbox,
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
+		protocol.FeatureWorkerLifecycle,
 	} {
 		if !slices.Contains(hello.Features, feature) {
 			_ = s.writeError(ctx, connection, envelope, protocol.ErrorInvalidParams, "peer does not support required protocol features")
@@ -533,6 +544,7 @@ func (s *Server) acceptHello(
 		_ = s.writeError(ctx, connection, envelope, protocol.ErrorUnavailable, "broker unavailable")
 		return nil, err
 	}
+	s.recordDeviceLease(device.DeviceID, device.Revision)
 	current := &session{
 		server:        s,
 		connection:    connection,
@@ -545,6 +557,38 @@ func (s *Server) acceptHello(
 		done:          make(chan struct{}),
 	}
 	current.revision.Store(device.Revision)
+	current.workerInitial = hello.WorkerRevision
+	current.workerHigh.Store(hello.WorkerRevision)
+	appliedRevision, err := s.registry.ClaimWorkerLifecycleSession(
+		ctx,
+		store.WorkerLifecycleSessionClaim{
+			Session:        current.workerLifecycleSession(),
+			WorkerRevision: hello.WorkerRevision,
+		},
+	)
+	if err != nil {
+		s.releaseLease(current)
+		if errors.Is(err, store.ErrWorkerLifecyclePeerBehind) {
+			_ = s.writeError(
+				ctx,
+				connection,
+				envelope,
+				protocol.ErrorConflict,
+				"peer worker revision is behind broker state",
+			)
+			return nil, err
+		}
+		_ = s.writeError(
+			ctx,
+			connection,
+			envelope,
+			protocol.ErrorUnavailable,
+			"broker failed to initialize worker lifecycle sync",
+		)
+		return nil, &internalError{operation: "claim worker lifecycle session", err: err}
+	}
+	current.workerApplied.Store(appliedRevision)
+	current.workerReady.Store(appliedRevision == hello.WorkerRevision)
 	result := protocol.HelloResult{
 		ConnectionID: connectionID,
 		Features: []string{
@@ -553,9 +597,11 @@ func (s *Server) acceptHello(
 			protocol.FeatureMailbox,
 			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
+			protocol.FeatureWorkerLifecycle,
 		},
-		HeartbeatIntervalMS: s.heartbeatInterval.Milliseconds(),
-		Revision:            device.Revision,
+		HeartbeatIntervalMS:   s.heartbeatInterval.Milliseconds(),
+		Revision:              device.Revision,
+		WorkerAppliedRevision: appliedRevision,
 	}
 	if err := s.writeResult(ctx, connection, envelope, result); err != nil {
 		s.releaseLease(current)
@@ -582,11 +628,31 @@ func (s *Server) activate(current *session) (*session, bool) {
 		return nil, false
 	}
 	previous := s.connections[current.deviceID]
+	if s.latestRevisions[current.deviceID] > current.revision.Load() {
+		return previous, false
+	}
 	if previous != nil && previous.revision.Load() > current.revision.Load() {
 		return previous, false
 	}
 	s.connections[current.deviceID] = current
 	return previous, true
+}
+
+func (s *Server) recordDeviceLease(deviceID string, revision uint64) {
+	var replaced *session
+	s.mu.Lock()
+	if revision > s.latestRevisions[deviceID] {
+		s.latestRevisions[deviceID] = revision
+	}
+	current := s.connections[deviceID]
+	if current != nil && current.revision.Load() < s.latestRevisions[deviceID] {
+		delete(s.connections, deviceID)
+		replaced = current
+	}
+	s.mu.Unlock()
+	if replaced != nil {
+		_ = replaced.connection.CloseNow()
+	}
 }
 
 func (s *Server) deactivate(current *session) {
@@ -761,6 +827,8 @@ func (s *session) handleEnvelope(
 		return false, s.handleListAgents(ctx, envelope)
 	case protocol.MethodSendAgent, protocol.MethodFollowupAgent, protocol.MethodInterruptAgent:
 		return false, s.startAgentOperation(ctx, sessionContext, envelope)
+	case protocol.MethodSyncWorkerLifecycle:
+		return false, s.handleSyncWorkerLifecycle(ctx, envelope)
 	}
 	if envelope.Method != protocol.MethodHeartbeat {
 		return false, s.writeError(ctx, envelope, protocol.ErrorMethodNotFound, "method not found")
@@ -787,6 +855,21 @@ func (s *session) handleEnvelope(
 		return false, &internalError{operation: "heartbeat device", err: err}
 	}
 	s.revision.Store(device.Revision)
+	if _, err := s.server.registry.ClaimWorkerLifecycleSession(
+		ctx,
+		store.WorkerLifecycleSessionClaim{
+			Session:        s.workerLifecycleSession(),
+			WorkerRevision: s.workerHigh.Load(),
+		},
+	); err != nil {
+		_ = s.writeError(
+			ctx,
+			envelope,
+			protocol.ErrorUnavailable,
+			"broker failed to renew worker lifecycle sync",
+		)
+		return false, &internalError{operation: "renew worker lifecycle session", err: err}
+	}
 	if err := s.writeResult(ctx, envelope, protocol.HeartbeatResult{
 		Revision: device.Revision, ServerTime: now.UTC().Unix(),
 	}); err != nil {

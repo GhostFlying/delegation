@@ -166,6 +166,9 @@ func runConnectorServiceWithProviderEnvironment(
 		Token:                    token,
 		WorkerSpawner:            workerManager,
 		WorkerController:         workerManager,
+		WorkerLifecycleSource: managedWorkerLifecycleSource{
+			host: workers, controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
+		},
 		ReportError: func(err error) {
 			_ = writeStderr("delegation: connector reconnecting: %v\n", err)
 		},

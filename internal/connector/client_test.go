@@ -121,6 +121,7 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 			protocol.FeatureMailbox,
 			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
+			protocol.FeatureWorkerLifecycle,
 		},
 	}
 	if _, err := fixture.registry.RegisterTrustedDevice(
@@ -275,6 +276,7 @@ func TestConnectorRequiresEveryBrokerFeatureBeforePublishingReadiness(t *testing
 		protocol.FeatureMailbox,
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
+		protocol.FeatureWorkerLifecycle,
 	}
 	for _, missing := range required {
 		t.Run(missing, func(t *testing.T) {
@@ -698,15 +700,16 @@ func TestConnectorDoesNotFollowRedirectWithBearerToken(t *testing.T) {
 
 func TestConnectorValidatesStaticOptionsAndOfflineCalls(t *testing.T) {
 	base := Options{
-		BrokerURL:       "wss://broker.example.test/v1/connect",
-		ControllerID:    connectorTestControllerID,
-		DeviceID:        connectorTestDeviceID,
-		DeviceName:      "builder",
-		AuthMode:        config.AuthModeNone,
-		RuntimeVersion:  "0.1.0-alpha.0.m1.1",
-		OperatingSystem: "linux",
-		Architecture:    "amd64",
-		WorkerSpawner:   testWorkerSpawner{},
+		BrokerURL:             "wss://broker.example.test/v1/connect",
+		ControllerID:          connectorTestControllerID,
+		DeviceID:              connectorTestDeviceID,
+		DeviceName:            "builder",
+		AuthMode:              config.AuthModeNone,
+		RuntimeVersion:        "0.1.0-alpha.0.m1.1",
+		OperatingSystem:       "linux",
+		Architecture:          "amd64",
+		WorkerSpawner:         testWorkerSpawner{},
+		WorkerLifecycleSource: testWorkerSpawner{},
 	}
 	client, err := New(base)
 	if err != nil {
@@ -740,6 +743,11 @@ func TestConnectorValidatesStaticOptionsAndOfflineCalls(t *testing.T) {
 	if _, err := New(invalid); err == nil || !strings.Contains(err.Error(), "worker controller") {
 		t.Fatalf("connector accepted a spawn-only worker manager: %v", err)
 	}
+	invalid = base
+	invalid.WorkerLifecycleSource = nil
+	if _, err := New(invalid); err == nil || !strings.Contains(err.Error(), "lifecycle source") {
+		t.Fatalf("connector accepted a missing worker lifecycle source: %v", err)
+	}
 }
 
 func TestConnectorAmbientProxyPolicy(t *testing.T) {
@@ -757,6 +765,7 @@ func TestConnectorAmbientProxyPolicy(t *testing.T) {
 			OperatingSystem:          "linux",
 			Architecture:             "amd64",
 			WorkerSpawner:            testWorkerSpawner{},
+			WorkerLifecycleSource:    testWorkerSpawner{},
 		}
 		plaintext, err := New(base)
 		if err != nil {
@@ -888,7 +897,7 @@ func newTestClient(
 		DeviceName: "builder", AuthMode: authMode, Token: token,
 		RuntimeVersion: "0.1.0-alpha.0.m1.1", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
-		WorkerSpawner: testWorkerSpawner{},
+		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: testWorkerSpawner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -899,6 +908,16 @@ func newTestClient(
 type testWorkerSpawner struct{}
 
 type spawnOnlyWorkerSpawner struct{}
+
+func (testWorkerSpawner) WorkerRevision() uint64 { return 0 }
+
+func (testWorkerSpawner) WorkerLifecycleChanges() <-chan struct{} { return nil }
+
+func (testWorkerSpawner) ListWorkerLifecycles(
+	context.Context,
+) ([]protocol.WorkerLifecycleSnapshot, error) {
+	return []protocol.WorkerLifecycleSnapshot{}, nil
+}
 
 func (spawnOnlyWorkerSpawner) SpawnWorker(
 	context.Context,
@@ -1036,6 +1055,7 @@ func newFakeBroker(t *testing.T, afterHello func(*websocket.Conn)) *httptest.Ser
 		protocol.FeatureMailbox,
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
+		protocol.FeatureWorkerLifecycle,
 	}, afterHello)
 }
 

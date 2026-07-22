@@ -238,6 +238,7 @@ func TestHelloRequiresEveryPeerFeatureBeforeRegistryMutation(t *testing.T) {
 		protocol.FeatureMailbox,
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
+		protocol.FeatureWorkerLifecycle,
 	}
 	for _, missing := range required {
 		t.Run(missing, func(t *testing.T) {
@@ -893,6 +894,7 @@ func hello() protocol.Hello {
 			protocol.FeatureMailbox,
 			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
+			protocol.FeatureWorkerLifecycle,
 		},
 	}
 }
