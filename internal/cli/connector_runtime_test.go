@@ -275,6 +275,7 @@ func TestPeerWorkerAuthorizerRequiresMatchingActiveReservation(t *testing.T) {
 		ParentAgentID:  principal.ParentAgentID,
 		DeviceID:       principal.DeviceID,
 		TaskName:       "authorization test",
+		PromptDigest:   strings.Repeat("0", 64),
 		WorkspacePath:  filepath.Join(t.TempDir(), "workspace"),
 		ProfileVersion: 1,
 	}, 1, time.Unix(100, 0))
@@ -288,7 +289,20 @@ func TestPeerWorkerAuthorizerRequiresMatchingActiveReservation(t *testing.T) {
 	if _, err := state.BeginWorkerStart(ctx, worker.WorkerKey, 1, time.Unix(101, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if err := authorizer.AuthorizeWorker(ctx, principal); err != nil {
+	if err := authorizer.AuthorizeWorker(ctx, principal); err == nil {
+		t.Fatal("authorizer accepted a starting worker before MCP preflight")
+	}
+	if _, err := state.RestoreWorkerPendingAfterUnsent(
+		ctx,
+		worker.WorkerKey,
+		time.Unix(102, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := authorizer.AuthorizeWorker(ctx, principal); err == nil {
+		t.Fatal("authorizer accepted a pending worker")
+	}
+	if _, err := state.BeginWorkerStart(ctx, worker.WorkerKey, 1, time.Unix(103, 0)); err != nil {
 		t.Fatal(err)
 	}
 	wrongParent := principal
@@ -296,7 +310,40 @@ func TestPeerWorkerAuthorizerRequiresMatchingActiveReservation(t *testing.T) {
 	if err := authorizer.AuthorizeWorker(ctx, wrongParent); err == nil {
 		t.Fatal("authorizer accepted a mismatched parent")
 	}
-	if _, err := state.FailWorker(ctx, worker.WorkerKey, "startup_failed", time.Unix(102, 0)); err != nil {
+	if _, err := state.AttachWorkerThread(
+		ctx,
+		worker.WorkerKey,
+		"123e4567-e89b-42d3-a456-426614174214",
+		time.Unix(104, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := authorizer.AuthorizeWorker(ctx, principal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.MarkWorkerReady(ctx, worker.WorkerKey, time.Unix(104, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.MarkWorkerRunning(
+		ctx,
+		worker.WorkerKey,
+		"123e4567-e89b-42d3-a456-426614174215",
+		time.Unix(105, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.RecoverWorkers(
+		ctx,
+		runtimeControllerID,
+		runtimeDeviceID,
+		time.Unix(106, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := authorizer.AuthorizeWorker(ctx, principal); err == nil {
+		t.Fatal("authorizer accepted an interrupted worker")
+	}
+	if _, err := state.FailWorker(ctx, worker.WorkerKey, "startup_failed", time.Unix(107, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if err := authorizer.AuthorizeWorker(ctx, principal); err == nil {

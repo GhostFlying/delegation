@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -28,12 +29,15 @@ var (
 type WorkerStatus string
 
 const (
-	WorkerReserved WorkerStatus = "reserved"
-	WorkerStarting WorkerStatus = "starting"
-	WorkerReady    WorkerStatus = "ready"
-	WorkerRunning  WorkerStatus = "running"
-	WorkerIdle     WorkerStatus = "idle"
-	WorkerFailed   WorkerStatus = "failed"
+	WorkerReserved    WorkerStatus = "reserved"
+	WorkerPending     WorkerStatus = "pending"
+	WorkerStarting    WorkerStatus = "starting"
+	WorkerPreflight   WorkerStatus = "preflight"
+	WorkerReady       WorkerStatus = "ready"
+	WorkerRunning     WorkerStatus = "running"
+	WorkerIdle        WorkerStatus = "idle"
+	WorkerInterrupted WorkerStatus = "interrupted"
+	WorkerFailed      WorkerStatus = "failed"
 )
 
 type WorkerKey struct {
@@ -47,10 +51,12 @@ type WorkerReservation struct {
 	ParentAgentID  string
 	DeviceID       string
 	TaskName       string
+	PromptDigest   string
 	WorkspacePath  string
 	CodexThreadID  string
 	ProfileVersion int
 	Status         WorkerStatus
+	RetryTarget    WorkerStatus
 	ActiveTurnID   string
 	FailureCode    string
 	CreatedAt      int64
@@ -63,8 +69,33 @@ func (s *PeerStore) ReserveWorker(
 	maxActive int,
 	observedAt time.Time,
 ) (WorkerReservation, error) {
+	return s.reserveWorker(ctx, reservation, maxActive, observedAt, WorkerReserved)
+}
+
+// ReserveWorkerStart atomically creates a reservation in starting state. It
+// prevents cancellation or storage failure between slot acquisition and the
+// first lifecycle transition from leaving a reserved slot behind.
+func (s *PeerStore) ReserveWorkerStart(
+	ctx context.Context,
+	reservation WorkerReservation,
+	maxActive int,
+	observedAt time.Time,
+) (WorkerReservation, error) {
+	return s.reserveWorker(ctx, reservation, maxActive, observedAt, WorkerStarting)
+}
+
+func (s *PeerStore) reserveWorker(
+	ctx context.Context,
+	reservation WorkerReservation,
+	maxActive int,
+	observedAt time.Time,
+	initialStatus WorkerStatus,
+) (WorkerReservation, error) {
 	if err := validateNewWorkerReservation(reservation); err != nil {
 		return WorkerReservation{}, err
+	}
+	if initialStatus != WorkerReserved && initialStatus != WorkerStarting {
+		return WorkerReservation{}, errors.New("initial worker status is invalid")
 	}
 	if maxActive < 1 {
 		return WorkerReservation{}, errors.New("maxActive must be positive")
@@ -73,7 +104,10 @@ func (s *PeerStore) ReserveWorker(
 	if err != nil {
 		return WorkerReservation{}, err
 	}
-	reservation.Status = WorkerReserved
+	reservation.Status = initialStatus
+	if initialStatus == WorkerStarting {
+		reservation.RetryTarget = WorkerPending
+	}
 	reservation.CreatedAt = timestamp
 	reservation.UpdatedAt = timestamp
 
@@ -84,7 +118,15 @@ func (s *PeerStore) ReserveWorker(
 			if !sameWorkerReservation(stored, reservation) {
 				return ErrWorkerReservationConflict
 			}
-			return nil
+			if stored.Status == initialStatus {
+				return nil
+			}
+			return fmt.Errorf(
+				"%w: existing worker is %s, requested initial state is %s",
+				ErrWorkerTransition,
+				stored.Status,
+				initialStatus,
+			)
 		}
 		if !errors.Is(err, ErrNotFound) {
 			return err
@@ -95,8 +137,8 @@ func (s *PeerStore) ReserveWorker(
 		if _, err := connection.ExecContext(ctx, `
 INSERT INTO worker_reservations(
     controller_id, tree_id, agent_id, parent_agent_id, device_id,
-    task_name, workspace_path, profile_version, status, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	task_name, prompt_digest, workspace_path, profile_version, status, retry_target, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 			reservation.ControllerID,
 			reservation.TreeID,
@@ -104,9 +146,11 @@ INSERT INTO worker_reservations(
 			reservation.ParentAgentID,
 			reservation.DeviceID,
 			reservation.TaskName,
+			reservation.PromptDigest,
 			reservation.WorkspacePath,
 			reservation.ProfileVersion,
 			reservation.Status,
+			reservation.RetryTarget,
 			reservation.CreatedAt,
 			reservation.UpdatedAt,
 		); err != nil {
@@ -126,8 +170,48 @@ func (s *PeerStore) BeginWorkerStart(
 ) (WorkerReservation, error) {
 	return s.transitionWorker(ctx, key, maxActive, observedAt, []WorkerStatus{
 		WorkerReserved,
+		WorkerPending,
 		WorkerIdle,
+		WorkerInterrupted,
 	}, WorkerStarting, "", "")
+}
+
+// RestoreWorkerPendingAfterUnsent preserves an initial worker for an
+// idempotent retry without consuming an active worker slot.
+func (s *PeerStore) RestoreWorkerPendingAfterUnsent(
+	ctx context.Context,
+	key WorkerKey,
+	observedAt time.Time,
+) (WorkerReservation, error) {
+	return s.transitionWorker(
+		ctx,
+		key,
+		0,
+		observedAt,
+		[]WorkerStatus{WorkerStarting, WorkerPreflight, WorkerReady},
+		WorkerPending,
+		"",
+		"",
+	)
+}
+
+// RestoreWorkerIdleAfterUnsent makes a follow-up retryable after its
+// thread/resume, MCP preflight, or turn/start request was never written.
+func (s *PeerStore) RestoreWorkerIdleAfterUnsent(
+	ctx context.Context,
+	key WorkerKey,
+	observedAt time.Time,
+) (WorkerReservation, error) {
+	return s.transitionWorker(
+		ctx,
+		key,
+		0,
+		observedAt,
+		[]WorkerStatus{WorkerStarting, WorkerPreflight, WorkerReady},
+		WorkerIdle,
+		"",
+		"",
+	)
 }
 
 func (s *PeerStore) AttachWorkerThread(
@@ -145,8 +229,25 @@ func (s *PeerStore) AttachWorkerThread(
 		0,
 		observedAt,
 		[]WorkerStatus{WorkerStarting},
-		WorkerReady,
+		WorkerPreflight,
 		threadID,
+		"",
+	)
+}
+
+func (s *PeerStore) MarkWorkerReady(
+	ctx context.Context,
+	key WorkerKey,
+	observedAt time.Time,
+) (WorkerReservation, error) {
+	return s.transitionWorker(
+		ctx,
+		key,
+		0,
+		observedAt,
+		[]WorkerStatus{WorkerPreflight},
+		WorkerReady,
+		"",
 		"",
 	)
 }
@@ -182,7 +283,7 @@ func (s *PeerStore) MarkWorkerIdle(
 		key,
 		0,
 		observedAt,
-		[]WorkerStatus{WorkerRunning, WorkerReady},
+		[]WorkerStatus{WorkerRunning, WorkerReady, WorkerInterrupted},
 		WorkerIdle,
 		"",
 		"",
@@ -206,7 +307,7 @@ func (s *PeerStore) FailWorker(
 		key,
 		0,
 		observedAt,
-		[]WorkerStatus{WorkerReserved, WorkerStarting, WorkerReady, WorkerRunning},
+		[]WorkerStatus{WorkerReserved, WorkerPending, WorkerStarting, WorkerPreflight, WorkerReady, WorkerRunning, WorkerInterrupted},
 		WorkerFailed,
 		"",
 		failureCode,
@@ -267,6 +368,9 @@ func (s *PeerStore) transitionWorker(
 	if err := key.Validate(); err != nil {
 		return WorkerReservation{}, err
 	}
+	if to == WorkerInterrupted {
+		return WorkerReservation{}, errors.New("interrupted workers require recovery-specific state")
+	}
 	timestamp, err := unixTime(observedAt, "observedAt")
 	if err != nil {
 		return WorkerReservation{}, err
@@ -283,7 +387,7 @@ func (s *PeerStore) transitionWorker(
 		if !slices.Contains(from, worker.Status) {
 			return fmt.Errorf("%w: cannot move from %s to %s", ErrWorkerTransition, worker.Status, to)
 		}
-		if to == WorkerReady {
+		if to == WorkerPreflight {
 			owner, ownerErr := queryWorkerByThread(ctx, connection, key.ControllerID, threadID)
 			if ownerErr == nil && owner.WorkerKey != key {
 				return ErrWorkerReservationConflict
@@ -292,7 +396,8 @@ func (s *PeerStore) transitionWorker(
 				return ownerErr
 			}
 		}
-		if to == WorkerStarting && worker.Status == WorkerIdle {
+		if to == WorkerStarting &&
+			(worker.Status == WorkerPending || worker.Status == WorkerIdle || worker.Status == WorkerInterrupted) {
 			if maxActive < 1 {
 				return errors.New("maxActive must be positive")
 			}
@@ -300,33 +405,57 @@ func (s *PeerStore) transitionWorker(
 				return err
 			}
 		}
-		if timestamp < worker.UpdatedAt {
-			return errors.New("observedAt precedes the stored worker update")
+		if (to == WorkerPending || to == WorkerIdle) &&
+			(worker.Status == WorkerStarting || worker.Status == WorkerPreflight || worker.Status == WorkerReady) &&
+			worker.RetryTarget != to {
+			return fmt.Errorf(
+				"%w: worker retry target is %s, cannot restore to %s",
+				ErrWorkerTransition,
+				worker.RetryTarget,
+				to,
+			)
 		}
+		timestamp = max(timestamp, worker.UpdatedAt)
+		fromStatus := worker.Status
 		worker.Status = to
 		worker.UpdatedAt = timestamp
 		worker.FailureCode = ""
 		switch to {
-		case WorkerReady:
+		case WorkerStarting:
+			switch fromStatus {
+			case WorkerReserved, WorkerPending:
+				worker.RetryTarget = WorkerPending
+			case WorkerIdle, WorkerInterrupted:
+				worker.RetryTarget = WorkerIdle
+			}
+			worker.ActiveTurnID = ""
+		case WorkerPreflight:
 			worker.CodexThreadID = threadID
 			worker.ActiveTurnID = ""
+		case WorkerReady:
+			worker.ActiveTurnID = ""
 		case WorkerRunning:
+			worker.RetryTarget = ""
 			worker.ActiveTurnID = detail
 		case WorkerIdle:
+			worker.RetryTarget = ""
 			worker.ActiveTurnID = ""
 		case WorkerFailed:
+			worker.RetryTarget = ""
 			worker.ActiveTurnID = ""
 			worker.FailureCode = detail
-		case WorkerReserved, WorkerStarting:
+		case WorkerReserved, WorkerPending:
+			worker.RetryTarget = ""
 			worker.ActiveTurnID = ""
 		}
 		if _, err := connection.ExecContext(ctx, `
 UPDATE worker_reservations SET
-    codex_thread_id = ?, status = ?, active_turn_id = ?, failure_code = ?, updated_at = ?
+    codex_thread_id = ?, status = ?, retry_target = ?, active_turn_id = ?, failure_code = ?, updated_at = ?
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 `,
 			worker.CodexThreadID,
 			worker.Status,
+			worker.RetryTarget,
 			worker.ActiveTurnID,
 			worker.FailureCode,
 			worker.UpdatedAt,
@@ -343,13 +472,15 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 
 func transitionAlreadyApplied(worker WorkerReservation, threadID, detail string) bool {
 	switch worker.Status {
-	case WorkerReady:
+	case WorkerPreflight:
 		return worker.CodexThreadID == threadID
+	case WorkerReady:
+		return true
 	case WorkerRunning:
 		return worker.ActiveTurnID == detail
 	case WorkerFailed:
 		return worker.FailureCode == detail
-	case WorkerReserved, WorkerStarting, WorkerIdle:
+	case WorkerReserved, WorkerPending, WorkerStarting, WorkerIdle:
 		return true
 	default:
 		return false
@@ -360,7 +491,7 @@ func requireWorkerSlot(ctx context.Context, queryer rowQueryer, maxActive int) e
 	var active int
 	if err := queryer.QueryRowContext(ctx, `
 SELECT count(*) FROM worker_reservations
-WHERE status IN ('reserved', 'starting', 'ready', 'running')
+WHERE status IN ('reserved', 'starting', 'preflight', 'ready', 'running')
 `).Scan(&active); err != nil {
 		return fmt.Errorf("count active worker reservations: %w", err)
 	}
@@ -392,8 +523,8 @@ WHERE controller_id = ? AND codex_thread_id = ?
 
 const workerSelect = `
 SELECT controller_id, tree_id, agent_id, parent_agent_id, device_id,
-       task_name, workspace_path, codex_thread_id, profile_version,
-       status, active_turn_id, failure_code, created_at, updated_at
+	   task_name, prompt_digest, workspace_path, codex_thread_id, profile_version,
+       status, retry_target, active_turn_id, failure_code, created_at, updated_at
 FROM worker_reservations
 `
 
@@ -406,10 +537,12 @@ func scanWorker(scanner rowScanner) (WorkerReservation, error) {
 		&worker.ParentAgentID,
 		&worker.DeviceID,
 		&worker.TaskName,
+		&worker.PromptDigest,
 		&worker.WorkspacePath,
 		&worker.CodexThreadID,
 		&worker.ProfileVersion,
 		&worker.Status,
+		&worker.RetryTarget,
 		&worker.ActiveTurnID,
 		&worker.FailureCode,
 		&worker.CreatedAt,
@@ -459,6 +592,12 @@ func (w WorkerReservation) Validate() error {
 	if strings.TrimSpace(w.TaskName) == "" || len(w.TaskName) > maximumWorkerTaskName {
 		return fmt.Errorf("taskName must contain from 1 through %d bytes", maximumWorkerTaskName)
 	}
+	if decoded, err := hex.DecodeString(w.PromptDigest); err != nil || len(decoded) != 32 {
+		return errors.New("promptDigest must be a lowercase SHA-256 digest")
+	}
+	if w.PromptDigest != strings.ToLower(w.PromptDigest) {
+		return errors.New("promptDigest must be a lowercase SHA-256 digest")
+	}
 	if !filepath.IsAbs(w.WorkspacePath) || len(w.WorkspacePath) > maximumWorkspacePath {
 		return errors.New("workspacePath must be a bounded absolute path")
 	}
@@ -482,20 +621,44 @@ func (w WorkerReservation) Validate() error {
 		return err
 	}
 	switch w.Status {
-	case WorkerReserved, WorkerStarting:
+	case WorkerReserved:
+		if w.CodexThreadID != "" || w.RetryTarget != "" || w.ActiveTurnID != "" || w.FailureCode != "" {
+			return errors.New("worker lifecycle details do not match its status")
+		}
+	case WorkerPending:
 		if w.ActiveTurnID != "" || w.FailureCode != "" {
 			return errors.New("worker lifecycle details do not match its status")
 		}
+		if w.RetryTarget != "" {
+			return errors.New("worker lifecycle details do not match its status")
+		}
+	case WorkerStarting:
+		if (w.RetryTarget != WorkerPending && w.RetryTarget != WorkerIdle) ||
+			w.ActiveTurnID != "" || w.FailureCode != "" {
+			return errors.New("worker lifecycle details do not match its status")
+		}
+	case WorkerPreflight:
+		if w.CodexThreadID == "" ||
+			(w.RetryTarget != WorkerPending && w.RetryTarget != WorkerIdle) ||
+			w.ActiveTurnID != "" || w.FailureCode != "" {
+			return errors.New("worker lifecycle details do not match its status")
+		}
 	case WorkerReady, WorkerIdle:
-		if w.CodexThreadID == "" || w.ActiveTurnID != "" || w.FailureCode != "" {
+		if w.CodexThreadID == "" || w.ActiveTurnID != "" || w.FailureCode != "" ||
+			(w.Status == WorkerReady && w.RetryTarget != WorkerPending && w.RetryTarget != WorkerIdle) ||
+			(w.Status == WorkerIdle && w.RetryTarget != "") {
 			return errors.New("worker lifecycle details do not match its status")
 		}
 	case WorkerRunning:
-		if w.CodexThreadID == "" || w.ActiveTurnID == "" || w.FailureCode != "" {
+		if w.CodexThreadID == "" || w.ActiveTurnID == "" || w.FailureCode != "" || w.RetryTarget != "" {
+			return errors.New("worker lifecycle details do not match its status")
+		}
+	case WorkerInterrupted:
+		if w.CodexThreadID == "" || w.FailureCode == "" || w.RetryTarget != "" {
 			return errors.New("worker lifecycle details do not match its status")
 		}
 	case WorkerFailed:
-		if w.ActiveTurnID != "" || w.FailureCode == "" {
+		if w.ActiveTurnID != "" || w.FailureCode == "" || w.RetryTarget != "" {
 			return errors.New("worker lifecycle details do not match its status")
 		}
 	}
@@ -506,7 +669,7 @@ func (w WorkerReservation) Validate() error {
 }
 
 func validateNewWorkerReservation(reservation WorkerReservation) error {
-	if reservation.Status != "" || reservation.CodexThreadID != "" ||
+	if reservation.Status != "" || reservation.RetryTarget != "" || reservation.CodexThreadID != "" ||
 		reservation.ActiveTurnID != "" || reservation.FailureCode != "" ||
 		reservation.CreatedAt != 0 || reservation.UpdatedAt != 0 {
 		return errors.New("new worker reservation must not contain lifecycle state")
@@ -524,7 +687,7 @@ func validateFailureCode(code string) error {
 
 func (s WorkerStatus) valid() bool {
 	switch s {
-	case WorkerReserved, WorkerStarting, WorkerReady, WorkerRunning, WorkerIdle, WorkerFailed:
+	case WorkerReserved, WorkerPending, WorkerStarting, WorkerPreflight, WorkerReady, WorkerRunning, WorkerIdle, WorkerInterrupted, WorkerFailed:
 		return true
 	default:
 		return false
@@ -536,6 +699,7 @@ func sameWorkerReservation(stored, requested WorkerReservation) bool {
 		stored.ParentAgentID == requested.ParentAgentID &&
 		stored.DeviceID == requested.DeviceID &&
 		stored.TaskName == requested.TaskName &&
+		stored.PromptDigest == requested.PromptDigest &&
 		stored.WorkspacePath == requested.WorkspacePath &&
 		stored.ProfileVersion == requested.ProfileVersion
 }

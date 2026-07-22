@@ -154,9 +154,10 @@ func (a peerWorkerAuthorizer) AuthorizeWorker(
 		return errors.New("worker principal does not match its reservation")
 	}
 	switch worker.Status {
-	case store.WorkerStarting, store.WorkerReady, store.WorkerRunning, store.WorkerIdle:
+	case store.WorkerPreflight, store.WorkerReady, store.WorkerRunning, store.WorkerIdle:
 		return nil
-	case store.WorkerReserved, store.WorkerFailed:
+	case store.WorkerReserved, store.WorkerPending, store.WorkerStarting,
+		store.WorkerInterrupted, store.WorkerFailed:
 		return errors.New("worker reservation is not active")
 	default:
 		return errors.New("worker reservation has an unsupported status")

@@ -4,23 +4,25 @@ import "fmt"
 
 const (
 	peerStoreApplicationID = 0x444c4750 // "DLGP"
-	peerSchemaVersion      = 1
+	peerSchemaVersion      = 4
 )
 
-var peerSchemaV1 = fmt.Sprintf(`
+var peerSchemaCurrent = fmt.Sprintf(`
 CREATE TABLE worker_reservations (
     controller_id TEXT NOT NULL,
     tree_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
-    parent_agent_id TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    task_name TEXT NOT NULL,
-    workspace_path TEXT NOT NULL,
+	parent_agent_id TEXT NOT NULL,
+	device_id TEXT NOT NULL,
+	task_name TEXT NOT NULL,
+	prompt_digest TEXT NOT NULL,
+	workspace_path TEXT NOT NULL,
     codex_thread_id TEXT NOT NULL DEFAULT '',
     profile_version INTEGER NOT NULL CHECK (profile_version > 0),
     status TEXT NOT NULL CHECK (
-        status IN ('reserved', 'starting', 'ready', 'running', 'idle', 'failed')
+		status IN ('reserved', 'pending', 'starting', 'preflight', 'ready', 'running', 'idle', 'interrupted', 'failed')
     ),
+	retry_target TEXT NOT NULL DEFAULT '' CHECK (retry_target IN ('', 'pending', 'idle')),
     active_turn_id TEXT NOT NULL DEFAULT '',
     failure_code TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL CHECK (created_at >= 0),

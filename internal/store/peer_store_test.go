@@ -54,6 +54,23 @@ func TestPeerStoreRejectsBrokerSchema(t *testing.T) {
 	}
 }
 
+func TestPeerStoreRejectsEarlierPreReleaseSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "peer.sqlite3")
+	peer, err := OpenPeer(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.db.Exec("PRAGMA user_version = 1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenPeer(context.Background(), path); err == nil {
+		t.Fatal("OpenPeer accepted an earlier pre-release schema")
+	}
+}
+
 func TestPeerLeaseIsExclusiveAndDoesNotOpenState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "peer.sqlite3")
 	first, err := AcquirePeerLease(path)

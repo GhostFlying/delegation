@@ -101,7 +101,7 @@ SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'
 		if objectCount != 0 {
 			return unsupportedPeerSchemaIdentity(identity)
 		}
-		if _, err := connection.ExecContext(ctx, peerSchemaV1); err != nil {
+		if _, err := connection.ExecContext(ctx, peerSchemaCurrent); err != nil {
 			return fmt.Errorf("create peer state schema: %w", err)
 		}
 		return nil
