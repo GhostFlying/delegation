@@ -62,9 +62,14 @@ jobs:
           set -euo pipefail
           codex --version | grep -F 'codex-cli 0.144.1'
           go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/delegation" ./cmd/delegation
+          test_pattern='^TestManagedWorkerUsesEnvOnlyProviderAndColdResume$'
+          if [[ "$RUNNER_OS" == 'Linux' ]]; then
+            test_pattern='^(TestCodexPeerTopology|TestManagedWorkerUsesEnvOnlyProviderAndColdResume)$'
+          fi
           DELEGATION_E2E_BINARY="$RUNNER_TEMP/delegation" \
             CODEX_BINARY="$(command -v codex)" \
-            go test -tags=integration -run '^TestManagedWorkerUsesEnvOnlyProviderAndColdResume$' \
+            go test -tags=integration \
+              -run "$test_pattern" \
               -count=1 -v ./tests/codex_peer_e2e
       - name: Test managed worker mock E2E
         if: runner.os == 'Windows'

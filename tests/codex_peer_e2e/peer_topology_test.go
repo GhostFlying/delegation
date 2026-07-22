@@ -39,6 +39,10 @@ type execResult struct {
 }
 
 func TestCodexPeerTopology(t *testing.T) {
+	if os.Getenv(managedAdmissionHelperEnvironment) == "1" {
+		runManagedAdmissionHelper(t)
+		return
+	}
 	delegationBinary := requiredExecutable(t, "DELEGATION_E2E_BINARY")
 	codexBinary := requiredExecutable(t, "CODEX_BINARY")
 	repoRoot := repositoryRoot(t)
@@ -77,14 +81,18 @@ func TestCodexPeerTopology(t *testing.T) {
 			"credential", "issue", "--config", brokerConfig,
 			"--device-id", deviceIDs[current.label], "--out", tokenPath, "--json",
 		)
-		run(t, commandEnv(current), delegationBinary,
+		setupArgs := []string{
 			"setup", "peer", "--config", current.configPath,
 			"--controller-id", networkID, "--device-id", deviceIDs[current.label],
-			"--device-name", "peer-"+strings.ToLower(current.label),
-			"--broker-url", "ws://"+brokerAddress+"/v1/connect",
+			"--device-name", "peer-" + strings.ToLower(current.label),
+			"--broker-url", "ws://" + brokerAddress + "/v1/connect",
 			"--auth-mode", "token", "--token-file", tokenPath,
 			"--codex-binary", codexBinary, "--json",
-		)
+		}
+		if current.label == "C" {
+			setupArgs = append(setupArgs, "--max-worker-slots", "2")
+		}
+		run(t, commandEnv(current), delegationBinary, setupArgs...)
 		startService(t, commandEnv(current), delegationBinary, current.configPath)
 	}
 	waitForCount(t, statePath, "SELECT count(*) FROM devices WHERE online = 1", 3)
@@ -144,17 +152,27 @@ func TestCodexPeerTopology(t *testing.T) {
 			t.Fatalf("peer %s local bridge sockets = %v, error %v", current.label, matches, err)
 		}
 	}
-	t.Run("managed dispatch", func(t *testing.T) {
-		testManagedDispatch(t, peers[0], peers[2], statePath, results["A"].threadID)
+	t.Run("managed admission", func(t *testing.T) {
+		testManagedAdmission(
+			t,
+			peers[0],
+			peers[1],
+			peers[2],
+			statePath,
+			results["A"].threadID,
+			results["B"].threadID,
+			mock,
+		)
 	})
 	assertCount(t, statePath, "SELECT count(*) FROM trees", 4)
 	assertPrincipalDistribution(t, statePath, map[string]int{
 		deviceIDs["A"]: 2,
 		deviceIDs["B"]: 1,
-		deviceIDs["C"]: 2,
+		deviceIDs["C"]: 4,
 	})
 	mock.verify(t, []string{
-		"lazy", "a1", "b1", "c1", "a2", "a1-resume", "cross-conflict", workerDispatchCase,
+		"lazy", "a1", "b1", "c1", "a2", "a1-resume", "cross-conflict",
+		workerAdmissionA, workerAdmissionB, workerAdmissionRetry,
 	})
 }
 

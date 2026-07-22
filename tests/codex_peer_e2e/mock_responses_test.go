@@ -16,9 +16,17 @@ import (
 )
 
 type mockResponses struct {
-	mu     sync.Mutex
-	calls  map[string]int
-	errors []string
+	mu           sync.Mutex
+	calls        map[string]int
+	errors       []string
+	workerBlocks map[string]*workerResponseBlock
+}
+
+type workerResponseBlock struct {
+	started     chan struct{}
+	release     chan struct{}
+	startedOnce sync.Once
+	releaseOnce sync.Once
 }
 
 func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -37,11 +45,12 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		m.fail(writer, errors.New("model request did not contain a known acceptance case"))
 		return
 	}
-	if testCase == workerDispatchCase {
+	if strings.HasPrefix(testCase, "worker-") {
 		key := "worker/" + testCase
 		m.mu.Lock()
 		call := m.calls[key]
 		m.calls[key] = call + 1
+		block := m.workerBlocks[testCase]
 		m.mu.Unlock()
 		if call != 0 {
 			m.record(fmt.Errorf("case %s received model call %d", key, call+1))
@@ -52,7 +61,11 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 				m.record(fmt.Errorf("case %s exposed root tool %s: %s", key, forbidden, encodedTools))
 			}
 		}
-		writeFinalResponse(writer, key)
+		if block == nil {
+			writeFinalResponse(writer, key)
+			return
+		}
+		writeBlockedFinalResponse(writer, request, key, block)
 		return
 	}
 	if deviceIDs[peerLabel] == "" {
@@ -134,9 +147,10 @@ func requestCase(body map[string]any) string {
 	data, _ := json.Marshal(body)
 	text := string(data)
 	for _, testCase := range []string{
-		workerDispatchCase, "cross-conflict", "a1-resume", "lazy", "a1", "b1", "c1", "a2",
+		workerAdmissionA, workerAdmissionB, workerAdmissionRetry,
+		"cross-conflict", "a1-resume", "lazy", "a1", "b1", "c1", "a2",
 	} {
-		if testCase == workerDispatchCase && strings.Contains(text, "delegation-worker-case="+testCase) {
+		if strings.HasPrefix(testCase, "worker-") && strings.Contains(text, "delegation-worker-case="+testCase) {
 			return testCase
 		}
 		suffix := strings.ReplaceAll(testCase, "-", "_")
@@ -325,6 +339,34 @@ func writeFinalResponse(writer http.ResponseWriter, key string) {
 	)
 }
 
+func writeBlockedFinalResponse(
+	writer http.ResponseWriter,
+	request *http.Request,
+	key string,
+	block *workerResponseBlock,
+) {
+	writer.Header().Set("Content-Type", "text/event-stream")
+	writeSSE(writer, map[string]any{
+		"type": "response.created", "response": map[string]any{"id": "resp-" + key + "-2"},
+	})
+	if flusher, ok := writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	block.startedOnce.Do(func() { close(block.started) })
+	select {
+	case <-request.Context().Done():
+		return
+	case <-block.release:
+	}
+	writeSSE(writer,
+		map[string]any{"type": "response.output_item.done", "item": map[string]any{
+			"type": "message", "role": "assistant", "id": "msg-" + key,
+			"content": []map[string]any{{"type": "output_text", "text": finalText}},
+		}},
+		completedEvent("resp-"+key+"-2"),
+	)
+}
+
 func completedEvent(id string) map[string]any {
 	return map[string]any{"type": "response.completed", "response": map[string]any{
 		"id": id,
@@ -364,7 +406,7 @@ func (m *mockResponses) verify(t *testing.T, cases []string) {
 	for _, testCase := range cases {
 		want := 3
 		label := strings.ToUpper(testCase[:1])
-		if testCase == workerDispatchCase {
+		if strings.HasPrefix(testCase, "worker-") {
 			label, want = "worker", 1
 		} else if testCase == "lazy" {
 			label, want = "A", 1
@@ -376,6 +418,19 @@ func (m *mockResponses) verify(t *testing.T, cases []string) {
 		if got := m.calls[label+"/"+testCase]; got != want {
 			t.Fatalf("model calls for %s/%s = %d, want %d", label, testCase, got, want)
 		}
+	}
+}
+
+func (m *mockResponses) blockWorker(testCase string) (<-chan struct{}, func()) {
+	block := &workerResponseBlock{started: make(chan struct{}), release: make(chan struct{})}
+	m.mu.Lock()
+	if m.workerBlocks == nil {
+		m.workerBlocks = make(map[string]*workerResponseBlock)
+	}
+	m.workerBlocks[testCase] = block
+	m.mu.Unlock()
+	return block.started, func() {
+		block.releaseOnce.Do(func() { close(block.release) })
 	}
 }
 
