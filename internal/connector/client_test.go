@@ -734,6 +734,12 @@ func TestConnectorValidatesStaticOptionsAndOfflineCalls(t *testing.T) {
 	if _, err := New(invalid); err == nil {
 		t.Fatal("connector accepted token auth without a token")
 	}
+	invalid = base
+	invalid.WorkerSpawner = spawnOnlyWorkerSpawner{}
+	invalid.WorkerController = nil
+	if _, err := New(invalid); err == nil || !strings.Contains(err.Error(), "worker controller") {
+		t.Fatalf("connector accepted a spawn-only worker manager: %v", err)
+	}
 }
 
 func TestConnectorAmbientProxyPolicy(t *testing.T) {
@@ -892,6 +898,15 @@ func newTestClient(
 
 type testWorkerSpawner struct{}
 
+type spawnOnlyWorkerSpawner struct{}
+
+func (spawnOnlyWorkerSpawner) SpawnWorker(
+	context.Context,
+	WorkerSpawnRequest,
+) (protocol.SpawnWorkerResult, error) {
+	return protocol.SpawnWorkerResult{}, errors.New("not used")
+}
+
 func (testWorkerSpawner) SpawnWorker(
 	_ context.Context,
 	request WorkerSpawnRequest,
@@ -906,6 +921,42 @@ func (testWorkerSpawner) SpawnWorker(
 			connectorTestDeviceID,
 		).Identity(),
 		Status: protocol.AgentSpawnStarted,
+	}, nil
+}
+
+func (testWorkerSpawner) SendWorker(
+	_ context.Context,
+	request WorkerSendRequest,
+) (protocol.WorkerOperationResult, error) {
+	return protocol.WorkerOperationResult{
+		OperationID: request.Params.MessageID,
+		AgentID:     request.Params.AgentID,
+		Action:      protocol.AgentOperationSend,
+		Outcome:     protocol.AgentOperationOutcomeQueued,
+	}, nil
+}
+
+func (testWorkerSpawner) FollowupWorker(
+	_ context.Context,
+	request WorkerFollowupRequest,
+) (protocol.WorkerOperationResult, error) {
+	return protocol.WorkerOperationResult{
+		OperationID: request.Params.OperationID,
+		AgentID:     request.Params.AgentID,
+		Action:      protocol.AgentOperationFollowup,
+		Outcome:     protocol.AgentOperationOutcomeStarted,
+	}, nil
+}
+
+func (testWorkerSpawner) InterruptWorker(
+	_ context.Context,
+	request WorkerInterruptRequest,
+) (protocol.WorkerOperationResult, error) {
+	return protocol.WorkerOperationResult{
+		OperationID: request.Params.OperationID,
+		AgentID:     request.Params.AgentID,
+		Action:      protocol.AgentOperationInterrupt,
+		Outcome:     protocol.AgentOperationOutcomeInterrupted,
 	}, nil
 }
 

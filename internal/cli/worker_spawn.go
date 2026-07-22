@@ -12,9 +12,21 @@ import (
 )
 
 type managedWorkerSpawner struct {
-	host         *workerhost.Host
+	host         managedWorkerHost
+	state        managedWorkerState
 	controllerID string
 	deviceID     string
+}
+
+type managedWorkerHost interface {
+	Spawn(context.Context, workerhost.SpawnRequest) (workerhost.StartedTurn, error)
+	Send(context.Context, workerhost.SendRequest) (workerhost.OperationResult, error)
+	Followup(context.Context, workerhost.FollowupRequest) (workerhost.OperationResult, error)
+	Interrupt(context.Context, workerhost.InterruptRequest) (workerhost.OperationResult, error)
+}
+
+type managedWorkerState interface {
+	GetWorker(context.Context, store.WorkerKey) (store.WorkerReservation, error)
 }
 
 func (s managedWorkerSpawner) SpawnWorker(

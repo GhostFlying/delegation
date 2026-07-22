@@ -48,8 +48,32 @@ type WorkerSpawnRequest struct {
 	Params protocol.SpawnWorkerParams
 }
 
+type WorkerSendRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.SendWorkerParams
+}
+
+type WorkerFollowupRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.FollowupWorkerParams
+}
+
+type WorkerInterruptRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.InterruptWorkerParams
+}
+
 type WorkerSpawner interface {
 	SpawnWorker(context.Context, WorkerSpawnRequest) (protocol.SpawnWorkerResult, error)
+}
+
+type WorkerController interface {
+	SendWorker(context.Context, WorkerSendRequest) (protocol.WorkerOperationResult, error)
+	FollowupWorker(context.Context, WorkerFollowupRequest) (protocol.WorkerOperationResult, error)
+	InterruptWorker(context.Context, WorkerInterruptRequest) (protocol.WorkerOperationResult, error)
 }
 
 type Options struct {
@@ -68,6 +92,7 @@ type Options struct {
 	Dial                     DialFunc
 	ReportError              func(error)
 	WorkerSpawner            WorkerSpawner
+	WorkerController         WorkerController
 }
 
 type Status struct {
@@ -88,16 +113,17 @@ func (e *RPCError) Error() string {
 }
 
 type Client struct {
-	endpoint      string
-	hello         protocol.Hello
-	token         *tokenfile.Token
-	reconnectMin  time.Duration
-	reconnectMax  time.Duration
-	dial          DialFunc
-	httpClient    *http.Client
-	reportError   func(error)
-	workerSpawner WorkerSpawner
-	running       atomic.Bool
+	endpoint         string
+	hello            protocol.Hello
+	token            *tokenfile.Token
+	reconnectMin     time.Duration
+	reconnectMax     time.Duration
+	dial             DialFunc
+	httpClient       *http.Client
+	reportError      func(error)
+	workerSpawner    WorkerSpawner
+	workerController WorkerController
+	running          atomic.Bool
 
 	mu      sync.RWMutex
 	session *session
@@ -121,6 +147,13 @@ func New(options Options) (*Client, error) {
 	}
 	if options.WorkerSpawner == nil {
 		return nil, errors.New("connector worker spawner is required")
+	}
+	workerController := options.WorkerController
+	if workerController == nil {
+		workerController, _ = options.WorkerSpawner.(WorkerController)
+	}
+	if workerController == nil {
+		return nil, errors.New("connector worker controller is required")
 	}
 	features := []string{
 		protocol.FeatureDeviceRegistry,
@@ -189,9 +222,10 @@ func New(options Options) (*Client, error) {
 		httpClient: &http.Client{Transport: httpTransport, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}},
-		reportError:   reportError,
-		workerSpawner: options.WorkerSpawner,
-		updates:       make(chan struct{}),
+		reportError:      reportError,
+		workerSpawner:    options.WorkerSpawner,
+		workerController: workerController,
+		updates:          make(chan struct{}),
 	}, nil
 }
 

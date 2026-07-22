@@ -99,11 +99,49 @@ type toolCallOutcome struct {
 
 type integrationWorkerSpawner struct{}
 
+type integrationWorkerController struct{}
+
 func (integrationWorkerSpawner) SpawnWorker(
 	context.Context,
 	connector.WorkerSpawnRequest,
 ) (protocol.SpawnWorkerResult, error) {
 	return protocol.SpawnWorkerResult{}, errors.New("worker spawning is outside this mailbox test")
+}
+
+func (integrationWorkerController) SendWorker(
+	_ context.Context,
+	request connector.WorkerSendRequest,
+) (protocol.WorkerOperationResult, error) {
+	return protocol.WorkerOperationResult{
+		OperationID: request.Params.MessageID,
+		AgentID:     request.Params.AgentID,
+		Action:      protocol.AgentOperationSend,
+		Outcome:     protocol.AgentOperationOutcomeQueued,
+	}, nil
+}
+
+func (integrationWorkerController) FollowupWorker(
+	_ context.Context,
+	request connector.WorkerFollowupRequest,
+) (protocol.WorkerOperationResult, error) {
+	return protocol.WorkerOperationResult{
+		OperationID: request.Params.OperationID,
+		AgentID:     request.Params.AgentID,
+		Action:      protocol.AgentOperationFollowup,
+		Outcome:     protocol.AgentOperationOutcomeStarted,
+	}, nil
+}
+
+func (integrationWorkerController) InterruptWorker(
+	_ context.Context,
+	request connector.WorkerInterruptRequest,
+) (protocol.WorkerOperationResult, error) {
+	return protocol.WorkerOperationResult{
+		OperationID: request.Params.OperationID,
+		AgentID:     request.Params.AgentID,
+		Action:      protocol.AgentOperationInterrupt,
+		Outcome:     protocol.AgentOperationOutcomeInterrupted,
+	}, nil
 }
 
 func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
@@ -140,17 +178,18 @@ func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 
 	runContext, cancelRun := context.WithCancel(context.Background())
 	connectorClient, err := connector.New(connector.Options{
-		BrokerURL:       "ws" + strings.TrimPrefix(httpServer.URL, "http"),
-		ControllerID:    controllerID,
-		DeviceID:        deviceID,
-		DeviceName:      "mailbox-integration-peer",
-		AuthMode:        config.AuthModeNone,
-		RuntimeVersion:  "mailbox-integration-test",
-		OperatingSystem: "linux",
-		Architecture:    "amd64",
-		ReconnectMin:    5 * time.Millisecond,
-		ReconnectMax:    10 * time.Millisecond,
-		WorkerSpawner:   integrationWorkerSpawner{},
+		BrokerURL:        "ws" + strings.TrimPrefix(httpServer.URL, "http"),
+		ControllerID:     controllerID,
+		DeviceID:         deviceID,
+		DeviceName:       "mailbox-integration-peer",
+		AuthMode:         config.AuthModeNone,
+		RuntimeVersion:   "mailbox-integration-test",
+		OperatingSystem:  "linux",
+		Architecture:     "amd64",
+		ReconnectMin:     5 * time.Millisecond,
+		ReconnectMax:     10 * time.Millisecond,
+		WorkerSpawner:    integrationWorkerSpawner{},
+		WorkerController: integrationWorkerController{},
 	})
 	if err != nil {
 		cancelRun()

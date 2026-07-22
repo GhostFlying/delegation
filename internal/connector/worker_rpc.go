@@ -1,0 +1,244 @@
+package connector
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/GhostFlying/delegation/internal/protocol"
+)
+
+func (s *session) handleBrokerRequest(request protocol.Envelope) error {
+	switch request.Method {
+	case protocol.MethodSpawnWorker:
+		return s.handleSpawnWorkerRequest(request)
+	case protocol.MethodSendWorker:
+		return s.handleSendWorkerRequest(request)
+	case protocol.MethodFollowupWorker:
+		return s.handleFollowupWorkerRequest(request)
+	case protocol.MethodInterruptWorker:
+		return s.handleInterruptWorkerRequest(request)
+	default:
+		return s.writeError(request, protocol.ErrorMethodNotFound, "method not found")
+	}
+}
+
+func (s *session) handleSpawnWorkerRequest(request protocol.Envelope) error {
+	if err := validateBrokerWorkerRequest(request); err != nil {
+		return s.writeError(request, protocol.ErrorInvalidRequest, "invalid worker spawn request")
+	}
+	params, err := protocol.DecodePayload[protocol.SpawnWorkerParams](request.Payload)
+	if err != nil || params.Validate() != nil {
+		return s.writeError(request, protocol.ErrorInvalidParams, "invalid worker spawn payload")
+	}
+	source := *request.Source
+	return s.startInbound(request, func(ctx context.Context) {
+		result, operationErr := s.client.workerSpawner.SpawnWorker(ctx, WorkerSpawnRequest{
+			TreeID: request.TreeID, Source: source, Params: params,
+		})
+		if operationErr != nil {
+			s.client.reportError(fmt.Errorf("handle broker worker spawn: %w", operationErr))
+			if writeErr := s.writeError(request, protocol.ErrorUnavailable, "peer worker dispatch failed"); writeErr != nil {
+				s.close(writeErr)
+			}
+			return
+		}
+		if resultErr := validateWorkerSpawnResult(result, request, params, s.client.hello.DeviceID); resultErr != nil {
+			s.client.reportError(resultErr)
+			if writeErr := s.writeError(request, protocol.ErrorInternal, "peer returned an invalid worker result"); writeErr != nil {
+				s.close(writeErr)
+				return
+			}
+			s.close(resultErr)
+			return
+		}
+		if writeErr := s.writeResult(request, result); writeErr != nil {
+			s.close(writeErr)
+		}
+	})
+}
+
+func (s *session) handleSendWorkerRequest(request protocol.Envelope) error {
+	if err := validateBrokerWorkerRequest(request); err != nil {
+		return s.writeError(request, protocol.ErrorInvalidRequest, "invalid worker send request")
+	}
+	params, err := protocol.DecodePayload[protocol.SendWorkerParams](request.Payload)
+	if err != nil || params.Validate() != nil {
+		return s.writeError(request, protocol.ErrorInvalidParams, "invalid worker send payload")
+	}
+	source := *request.Source
+	if s.client.workerController == nil {
+		return s.writeError(request, protocol.ErrorUnavailable, "peer worker control is unavailable")
+	}
+	return s.startInbound(request, func(ctx context.Context) {
+		result, operationErr := s.client.workerController.SendWorker(ctx, WorkerSendRequest{
+			TreeID: request.TreeID, Source: source, Params: params,
+		})
+		s.finishWorkerOperationRequest(
+			request,
+			params.MessageID,
+			params.AgentID,
+			protocol.AgentOperationSend,
+			result,
+			operationErr,
+		)
+	})
+}
+
+func (s *session) handleFollowupWorkerRequest(request protocol.Envelope) error {
+	if err := validateBrokerWorkerRequest(request); err != nil {
+		return s.writeError(request, protocol.ErrorInvalidRequest, "invalid worker follow-up request")
+	}
+	params, err := protocol.DecodePayload[protocol.FollowupWorkerParams](request.Payload)
+	if err != nil || params.Validate() != nil {
+		return s.writeError(request, protocol.ErrorInvalidParams, "invalid worker follow-up payload")
+	}
+	source := *request.Source
+	if s.client.workerController == nil {
+		return s.writeError(request, protocol.ErrorUnavailable, "peer worker control is unavailable")
+	}
+	return s.startInbound(request, func(ctx context.Context) {
+		result, operationErr := s.client.workerController.FollowupWorker(ctx, WorkerFollowupRequest{
+			TreeID: request.TreeID, Source: source, Params: params,
+		})
+		s.finishWorkerOperationRequest(
+			request,
+			params.OperationID,
+			params.AgentID,
+			protocol.AgentOperationFollowup,
+			result,
+			operationErr,
+		)
+	})
+}
+
+func (s *session) handleInterruptWorkerRequest(request protocol.Envelope) error {
+	if err := validateBrokerWorkerRequest(request); err != nil {
+		return s.writeError(request, protocol.ErrorInvalidRequest, "invalid worker interrupt request")
+	}
+	params, err := protocol.DecodePayload[protocol.InterruptWorkerParams](request.Payload)
+	if err != nil || params.Validate() != nil {
+		return s.writeError(request, protocol.ErrorInvalidParams, "invalid worker interrupt payload")
+	}
+	source := *request.Source
+	if s.client.workerController == nil {
+		return s.writeError(request, protocol.ErrorUnavailable, "peer worker control is unavailable")
+	}
+	return s.startInbound(request, func(ctx context.Context) {
+		result, operationErr := s.client.workerController.InterruptWorker(ctx, WorkerInterruptRequest{
+			TreeID: request.TreeID, Source: source, Params: params,
+		})
+		s.finishWorkerOperationRequest(
+			request,
+			params.OperationID,
+			params.AgentID,
+			protocol.AgentOperationInterrupt,
+			result,
+			operationErr,
+		)
+	})
+}
+
+func validateBrokerWorkerRequest(request protocol.Envelope) error {
+	if request.TreeID == "" || request.Source == nil || request.Source.ParentAgentID != "" {
+		return errors.New("worker request source is not a tree root")
+	}
+	if err := request.Source.Validate(); err != nil {
+		return err
+	}
+	if request.Source.ControllerID != request.ControllerID || request.Source.TreeID != request.TreeID {
+		return errors.New("worker request source does not match the envelope")
+	}
+	return nil
+}
+
+func (s *session) startInbound(request protocol.Envelope, run func(context.Context)) error {
+	select {
+	case s.inboundSem <- struct{}{}:
+	default:
+		return s.writeError(request, protocol.ErrorUnavailable, "peer worker dispatch is busy")
+	}
+	s.inboundMu.Lock()
+	if _, duplicate := s.inbound[request.RequestID]; duplicate {
+		s.inboundMu.Unlock()
+		<-s.inboundSem
+		return errors.New("broker reused an active requestId")
+	}
+	s.inbound[request.RequestID] = struct{}{}
+	s.inboundMu.Unlock()
+	go func() {
+		defer func() {
+			s.inboundMu.Lock()
+			delete(s.inbound, request.RequestID)
+			s.inboundMu.Unlock()
+			<-s.inboundSem
+		}()
+		run(s.context)
+	}()
+	return nil
+}
+
+func (s *session) finishWorkerOperationRequest(
+	request protocol.Envelope,
+	operationID, agentID string,
+	action protocol.AgentOperationAction,
+	result protocol.WorkerOperationResult,
+	operationErr error,
+) {
+	resultErr := validateWorkerOperationResult(result, operationID, agentID, action)
+	if operationErr != nil {
+		s.client.reportError(fmt.Errorf("handle broker worker %s: %w", action, operationErr))
+		if resultErr != nil || result.Outcome == protocol.AgentOperationOutcomePending {
+			if writeErr := s.writeError(request, protocol.ErrorUnavailable, "peer worker operation failed"); writeErr != nil {
+				s.close(writeErr)
+			}
+			return
+		}
+	}
+	if resultErr != nil {
+		s.client.reportError(resultErr)
+		if writeErr := s.writeError(request, protocol.ErrorInternal, "peer returned an invalid worker result"); writeErr != nil {
+			s.close(writeErr)
+			return
+		}
+		s.close(resultErr)
+		return
+	}
+	if writeErr := s.writeResult(request, result); writeErr != nil {
+		s.close(writeErr)
+	}
+}
+
+func validateWorkerOperationResult(
+	result protocol.WorkerOperationResult,
+	operationID, agentID string,
+	action protocol.AgentOperationAction,
+) error {
+	if err := result.Validate(); err != nil {
+		return fmt.Errorf("worker manager returned an invalid operation result: %w", err)
+	}
+	if result.OperationID != operationID || result.AgentID != agentID || result.Action != action {
+		return errors.New("worker manager returned a mismatched operation result")
+	}
+	return nil
+}
+
+func validateWorkerSpawnResult(
+	result protocol.SpawnWorkerResult,
+	request protocol.Envelope,
+	params protocol.SpawnWorkerParams,
+	deviceID string,
+) error {
+	if err := result.Validate(); err != nil {
+		return fmt.Errorf("worker spawner returned an invalid result: %w", err)
+	}
+	if request.Source == nil || result.SpawnID != params.SpawnID ||
+		result.Principal.ControllerID != request.ControllerID ||
+		result.Principal.TreeID != request.TreeID ||
+		result.Principal.AgentID != params.AgentID ||
+		result.Principal.ParentAgentID != request.Source.AgentID ||
+		result.Principal.DeviceID != deviceID {
+		return errors.New("worker spawner returned a mismatched result")
+	}
+	return nil
+}

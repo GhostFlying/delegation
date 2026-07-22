@@ -152,6 +152,10 @@ func runConnectorServiceWithProviderEnvironment(
 	defer func() {
 		resultErr = errors.Join(resultErr, closeWorkerHost(workers, 30*time.Second))
 	}()
+	workerManager := managedWorkerSpawner{
+		host: workers, state: peerState,
+		controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
+	}
 	client, err := connector.New(connector.Options{
 		BrokerURL:                cfg.Broker.URL,
 		AllowInsecureNonLoopback: cfg.Broker.AllowInsecureNonLoopback,
@@ -160,9 +164,8 @@ func runConnectorServiceWithProviderEnvironment(
 		DeviceName:               cfg.DeviceName,
 		AuthMode:                 cfg.Broker.Auth.Mode,
 		Token:                    token,
-		WorkerSpawner: managedWorkerSpawner{
-			host: workers, controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
-		},
+		WorkerSpawner:            workerManager,
+		WorkerController:         workerManager,
 		ReportError: func(err error) {
 			_ = writeStderr("delegation: connector reconnecting: %v\n", err)
 		},

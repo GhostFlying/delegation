@@ -38,6 +38,44 @@ type basicDispatchSpawner struct {
 	calls    atomic.Int32
 }
 
+type agentRPCWorkerController struct{}
+
+func (agentRPCWorkerController) SendWorker(
+	_ context.Context,
+	request connector.WorkerSendRequest,
+) (protocol.WorkerOperationResult, error) {
+	return protocol.WorkerOperationResult{
+		OperationID: request.Params.MessageID,
+		AgentID:     request.Params.AgentID,
+		Action:      protocol.AgentOperationSend,
+		Outcome:     protocol.AgentOperationOutcomeQueued,
+	}, nil
+}
+
+func (agentRPCWorkerController) FollowupWorker(
+	_ context.Context,
+	request connector.WorkerFollowupRequest,
+) (protocol.WorkerOperationResult, error) {
+	return protocol.WorkerOperationResult{
+		OperationID: request.Params.OperationID,
+		AgentID:     request.Params.AgentID,
+		Action:      protocol.AgentOperationFollowup,
+		Outcome:     protocol.AgentOperationOutcomeStarted,
+	}, nil
+}
+
+func (agentRPCWorkerController) InterruptWorker(
+	_ context.Context,
+	request connector.WorkerInterruptRequest,
+) (protocol.WorkerOperationResult, error) {
+	return protocol.WorkerOperationResult{
+		OperationID: request.Params.OperationID,
+		AgentID:     request.Params.AgentID,
+		Action:      protocol.AgentOperationInterrupt,
+		Outcome:     protocol.AgentOperationOutcomeInterrupted,
+	}, nil
+}
+
 func (s *basicDispatchSpawner) SpawnWorker(
 	_ context.Context,
 	request connector.WorkerSpawnRequest,
@@ -90,17 +128,18 @@ func TestAgentRPCSelfDispatchIsDurableIdempotentAndNonBlocking(t *testing.T) {
 	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
 	spawner := &selfDispatchSpawner{}
 	client, err := connector.New(connector.Options{
-		BrokerURL:       strings.Replace(harness.httpServer.URL, "http://", "ws://", 1) + ConnectPath,
-		ControllerID:    brokerTestControllerID,
-		DeviceID:        brokerTestDeviceID,
-		DeviceName:      "self-dispatch-peer",
-		AuthMode:        config.AuthModeNone,
-		RuntimeVersion:  "agent-rpc-test",
-		OperatingSystem: "linux",
-		Architecture:    "amd64",
-		ReconnectMin:    5 * time.Millisecond,
-		ReconnectMax:    10 * time.Millisecond,
-		WorkerSpawner:   spawner,
+		BrokerURL:        strings.Replace(harness.httpServer.URL, "http://", "ws://", 1) + ConnectPath,
+		ControllerID:     brokerTestControllerID,
+		DeviceID:         brokerTestDeviceID,
+		DeviceName:       "self-dispatch-peer",
+		AuthMode:         config.AuthModeNone,
+		RuntimeVersion:   "agent-rpc-test",
+		OperatingSystem:  "linux",
+		Architecture:     "amd64",
+		ReconnectMin:     5 * time.Millisecond,
+		ReconnectMax:     10 * time.Millisecond,
+		WorkerSpawner:    spawner,
+		WorkerController: agentRPCWorkerController{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -461,18 +500,19 @@ func startAgentRPCConnectorWithAuth(
 ) *connector.Client {
 	t.Helper()
 	client, err := connector.New(connector.Options{
-		BrokerURL:       strings.Replace(harness.httpServer.URL, "http://", "ws://", 1) + ConnectPath,
-		ControllerID:    brokerTestControllerID,
-		DeviceID:        deviceID,
-		DeviceName:      "agent-rpc-peer",
-		AuthMode:        authMode,
-		Token:           token,
-		RuntimeVersion:  "agent-rpc-test",
-		OperatingSystem: "linux",
-		Architecture:    "amd64",
-		ReconnectMin:    5 * time.Millisecond,
-		ReconnectMax:    10 * time.Millisecond,
-		WorkerSpawner:   spawner,
+		BrokerURL:        strings.Replace(harness.httpServer.URL, "http://", "ws://", 1) + ConnectPath,
+		ControllerID:     brokerTestControllerID,
+		DeviceID:         deviceID,
+		DeviceName:       "agent-rpc-peer",
+		AuthMode:         authMode,
+		Token:            token,
+		RuntimeVersion:   "agent-rpc-test",
+		OperatingSystem:  "linux",
+		Architecture:     "amd64",
+		ReconnectMin:     5 * time.Millisecond,
+		ReconnectMax:     10 * time.Millisecond,
+		WorkerSpawner:    spawner,
+		WorkerController: agentRPCWorkerController{},
 	})
 	if err != nil {
 		t.Fatal(err)
