@@ -14,6 +14,7 @@ const (
 	workerProfileVersion    = 1
 	workerPermissionProfile = "delegation-worker"
 	windowsWorkerProfile    = ":danger-full-access"
+	rootPluginEnabledConfig = "plugins.delegation@delegation.enabled"
 	workerServerName        = "delegation_worker"
 	workerSource            = "delegation_worker"
 	workerMCPTimeout        = 10
@@ -29,6 +30,7 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 	config["features.multi_agent"] = false
 	config["features.multi_agent_v2"] = false
 	config["features.enable_fanout"] = false
+	config[rootPluginEnabledConfig] = false
 	filesystem := map[string]any{
 		":minimal":         "read",
 		":workspace_roots": map[string]any{".": "read"},

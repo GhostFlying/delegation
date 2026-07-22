@@ -1380,6 +1380,7 @@ func assertManagedProfile(
 	t.Helper()
 	for _, key := range []string{
 		"features.plugins", "features.multi_agent", "features.multi_agent_v2", "features.enable_fanout",
+		rootPluginEnabledConfig,
 	} {
 		if config[key] != false {
 			t.Fatalf("managed config %s = %#v", key, config[key])
