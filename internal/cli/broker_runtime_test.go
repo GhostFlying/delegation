@@ -520,6 +520,7 @@ func sendRuntimeHello(t *testing.T, connection *websocket.Conn, deviceID string)
 		Features: []string{
 			protocol.FeatureDeviceRegistry,
 			protocol.FeatureFullDuplexRPC,
+			protocol.FeatureMailbox,
 			protocol.FeaturePeerRoot,
 		},
 	})

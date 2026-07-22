@@ -30,6 +30,7 @@ func TestValidateIDRejectsMalformedValues(t *testing.T) {
 		"123e4567-e89b-42d3-a456-42661417400",
 		"123e4567_e89b-42d3-a456-426614174000",
 		"123e4567-e89b-42d3-a456-42661417400z",
+		"123E4567-E89B-42D3-A456-426614174000",
 	} {
 		if err := ValidateID(value); err == nil {
 			t.Fatalf("ValidateID(%q) succeeded", value)

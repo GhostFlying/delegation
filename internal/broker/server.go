@@ -35,6 +35,9 @@ const (
 	maximumPendingHellos     = 64
 	maximumDeviceHellos      = 2
 	defaultOfflineRetry      = time.Second
+	rootMailboxWaitHeadroom  = 16
+	maximumAsyncMailboxWaits = config.MaximumWorkerSlots + rootMailboxWaitHeadroom
+	mailboxRequestTimeout    = 30 * time.Second
 )
 
 type Registry interface {
@@ -48,6 +51,8 @@ type Registry interface {
 	AuthorizePrincipal(context.Context, control.PrincipalIdentity, control.Capability) (control.Principal, error)
 	ListDevices(context.Context, string, store.DevicePageRequest) (store.DevicePage, error)
 	DescribeDevice(context.Context, string, string) (store.DeviceRecord, error)
+	SendMailboxMessage(context.Context, control.Principal, protocol.MessageTarget, string, string, time.Time) (store.MailboxDelivery, error)
+	ReadMailbox(context.Context, control.Principal, uint64, int) (protocol.WaitMailboxResult, error)
 }
 
 type Options struct {
@@ -83,6 +88,7 @@ type Server struct {
 	closed           bool
 	handlers         sync.WaitGroup
 	background       sync.WaitGroup
+	mailboxNotifier  *mailboxNotifier
 
 	retryMu              sync.Mutex
 	offlineRetries       map[string]uint64
@@ -106,6 +112,8 @@ type session struct {
 	deviceID      string
 	credentialMAC *store.CredentialMAC
 	revision      atomic.Uint64
+	asyncSem      chan struct{}
+	async         sync.WaitGroup
 }
 
 type internalError struct {
@@ -174,6 +182,7 @@ func New(options Options) (*Server, error) {
 		deviceHellos:         map[string]int{},
 		helloLimit:           maximumPendingHellos,
 		deviceHelloLimit:     maximumDeviceHellos,
+		mailboxNotifier:      newMailboxNotifier(),
 		offlineRetries:       map[string]uint64{},
 		offlineRetryWake:     make(chan struct{}, 1),
 		offlineRetryInterval: defaultOfflineRetry,
@@ -456,6 +465,7 @@ func (s *Server) acceptHello(
 	for _, feature := range []string{
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
+		protocol.FeatureMailbox,
 		protocol.FeaturePeerRoot,
 	} {
 		if !slices.Contains(hello.Features, feature) {
@@ -488,6 +498,7 @@ func (s *Server) acceptHello(
 		connectionID:  connectionID,
 		deviceID:      device.DeviceID,
 		credentialMAC: authority.credentialMAC,
+		asyncSem:      make(chan struct{}, maximumAsyncMailboxWaits),
 	}
 	current.revision.Store(device.Revision)
 	result := protocol.HelloResult{
@@ -495,6 +506,7 @@ func (s *Server) acceptHello(
 		Features: []string{
 			protocol.FeatureDeviceRegistry,
 			protocol.FeatureFullDuplexRPC,
+			protocol.FeatureMailbox,
 			protocol.FeaturePeerRoot,
 		},
 		HeartbeatIntervalMS: s.heartbeatInterval.Milliseconds(),
@@ -622,13 +634,18 @@ func (s *Server) retryOfflinePass() bool {
 }
 
 func (s *session) run(ctx context.Context) error {
+	sessionContext, cancelSession := context.WithCancel(ctx)
+	defer func() {
+		cancelSession()
+		s.async.Wait()
+	}()
 	deadline := time.Now().Add(s.server.heartbeatInterval * 3)
 	for {
 		messageContext, cancel := context.WithDeadline(ctx, deadline)
 		envelope, err := readEnvelope(messageContext, s.connection)
 		if err == nil {
 			var renewed bool
-			renewed, err = s.handleEnvelope(messageContext, envelope)
+			renewed, err = s.handleEnvelope(messageContext, sessionContext, envelope)
 			if renewed {
 				deadline = time.Now().Add(s.server.heartbeatInterval * 3)
 			}
@@ -640,7 +657,11 @@ func (s *session) run(ctx context.Context) error {
 	}
 }
 
-func (s *session) handleEnvelope(ctx context.Context, envelope protocol.Envelope) (bool, error) {
+func (s *session) handleEnvelope(
+	ctx context.Context,
+	sessionContext context.Context,
+	envelope protocol.Envelope,
+) (bool, error) {
 	if !validPeerDirection(envelope) {
 		return false, errors.New("connection used an invalid request direction")
 	}
@@ -679,6 +700,10 @@ func (s *session) handleEnvelope(ctx context.Context, envelope protocol.Envelope
 		return false, s.handleListDevices(ctx, envelope)
 	case protocol.MethodDescribeDevice:
 		return false, s.handleDescribeDevice(ctx, envelope)
+	case protocol.MethodSendMessage:
+		return false, s.handleSendMessage(ctx, envelope)
+	case protocol.MethodWaitMailbox:
+		return false, s.startMailboxWait(ctx, sessionContext, envelope)
 	}
 	if envelope.Method != protocol.MethodHeartbeat {
 		return false, s.server.writeError(ctx, s.connection, envelope, protocol.ErrorMethodNotFound, "method not found")
@@ -711,6 +736,39 @@ func (s *session) handleEnvelope(ctx context.Context, envelope protocol.Envelope
 		return false, err
 	}
 	return true, nil
+}
+
+func (s *session) startMailboxWait(
+	responseContext context.Context,
+	sessionContext context.Context,
+	request protocol.Envelope,
+) error {
+	select {
+	case s.asyncSem <- struct{}{}:
+	default:
+		return s.server.writeError(
+			responseContext,
+			s.connection,
+			request,
+			protocol.ErrorUnavailable,
+			"too many pending mailbox waits",
+		)
+	}
+	s.async.Add(1)
+	go func() {
+		defer s.async.Done()
+		defer func() { <-s.asyncSem }()
+		ctx, cancel := context.WithTimeout(sessionContext, mailboxRequestTimeout)
+		defer cancel()
+		if err := s.handleWaitMailbox(ctx, request); err != nil && !isContextError(err) {
+			var internal *internalError
+			if errors.As(err, &internal) {
+				s.server.reportError(internal)
+			}
+			_ = s.connection.CloseNow()
+		}
+	}()
+	return nil
 }
 
 func (s *session) validateAuthority(ctx context.Context) error {

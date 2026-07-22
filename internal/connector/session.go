@@ -134,7 +134,10 @@ func (s *session) call(
 		return nil, err
 	}
 	if err := s.writeData(ctx, data); err != nil {
-		s.removePending(requestID)
+		if !s.removePending(requestID) {
+			result := <-pending.result
+			return result.payload, result.err
+		}
 		var notStarted *writeNotStartedError
 		if errors.As(err, &notStarted) {
 			return nil, notStarted.err
@@ -142,12 +145,25 @@ func (s *session) call(
 		s.close(fmt.Errorf("write broker request: %w", err))
 		return nil, err
 	}
+	return s.waitForCall(ctx, requestID, pending)
+}
+
+func (s *session) waitForCall(
+	ctx context.Context,
+	requestID string,
+	pending pendingCall,
+) (json.RawMessage, error) {
 	select {
 	case result := <-pending.result:
 		return result.payload, result.err
 	case <-ctx.Done():
-		s.removePending(requestID)
-		return nil, ctx.Err()
+		if s.removePending(requestID) {
+			return nil, ctx.Err()
+		}
+		// complete or close already claimed the pending call. Its buffered
+		// response is authoritative even if cancellation became ready first.
+		result := <-pending.result
+		return result.payload, result.err
 	}
 }
 
@@ -255,10 +271,14 @@ func (s *session) addPending(requestID string, pending pendingCall) error {
 	return nil
 }
 
-func (s *session) removePending(requestID string) {
+func (s *session) removePending(requestID string) bool {
 	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if _, found := s.pending[requestID]; !found {
+		return false
+	}
 	delete(s.pending, requestID)
-	s.pendingMu.Unlock()
+	return true
 }
 
 func (s *session) writeError(request protocol.Envelope, code int, message string) error {

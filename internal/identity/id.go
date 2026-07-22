@@ -31,7 +31,7 @@ func ValidateID(value string) error {
 			}
 			continue
 		}
-		if !strings.ContainsRune("0123456789abcdefABCDEF", char) {
+		if !strings.ContainsRune("0123456789abcdef", char) {
 			return errors.New("must be a UUID")
 		}
 	}

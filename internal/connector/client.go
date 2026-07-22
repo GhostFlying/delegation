@@ -107,7 +107,12 @@ func New(options Options) (*Client, error) {
 	if options.Architecture == "" {
 		options.Architecture = runtime.GOARCH
 	}
-	features := []string{protocol.FeatureDeviceRegistry, protocol.FeatureFullDuplexRPC, protocol.FeaturePeerRoot}
+	features := []string{
+		protocol.FeatureDeviceRegistry,
+		protocol.FeatureFullDuplexRPC,
+		protocol.FeatureMailbox,
+		protocol.FeaturePeerRoot,
+	}
 	hello := protocol.Hello{
 		ControllerID:   options.ControllerID,
 		DeviceID:       options.DeviceID,
@@ -377,6 +382,7 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 	required := []string{
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
+		protocol.FeatureMailbox,
 		protocol.FeaturePeerRoot,
 	}
 	for _, feature := range required {

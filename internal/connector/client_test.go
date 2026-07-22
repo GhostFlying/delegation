@@ -34,6 +34,50 @@ const (
 	connectorTestConnectionID = "123e4567-e89b-42d3-a456-426614174204"
 )
 
+func TestCanceledCallReturnsAlreadyClaimedResult(t *testing.T) {
+	tests := map[string]callResult{
+		"response": {payload: json.RawMessage(`{"accepted":true}`)},
+		"failure":  {err: errors.New("claimed broker failure")},
+	}
+	for name, claimed := range tests {
+		t.Run(name, func(t *testing.T) {
+			const requestID = "c_123e4567-e89b-42d3-a456-426614174299"
+			pending := pendingCall{result: make(chan callResult, 1)}
+			session := &session{pending: map[string]pendingCall{requestID: pending}}
+			if !session.removePending(requestID) {
+				t.Fatal("test did not claim pending call")
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			done := make(chan callResult, 1)
+			go func() {
+				payload, err := session.waitForCall(ctx, requestID, pending)
+				done <- callResult{payload: payload, err: err}
+			}()
+			select {
+			case result := <-done:
+				t.Fatalf("claimed call returned before its result was delivered: %#v", result)
+			case <-time.After(20 * time.Millisecond):
+			}
+			pending.result <- claimed
+			select {
+			case result := <-done:
+				if !bytes.Equal(result.payload, claimed.payload) || !errors.Is(result.err, claimed.err) {
+					t.Fatalf(
+						"claimed call result = %s, %v; want %s, %v",
+						result.payload,
+						result.err,
+						claimed.payload,
+						claimed.err,
+					)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("claimed call did not return after its result was delivered")
+			}
+		})
+	}
+}
+
 type brokerFixture struct {
 	registry    *store.Store
 	server      *broker.Server
@@ -73,6 +117,7 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 		Features: []string{
 			protocol.FeatureDeviceRegistry,
 			protocol.FeatureFullDuplexRPC,
+			protocol.FeatureMailbox,
 			protocol.FeaturePeerRoot,
 		},
 	}
@@ -130,6 +175,7 @@ func TestConnectorRequiresEveryBrokerFeatureBeforePublishingReadiness(t *testing
 	required := []string{
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
+		protocol.FeatureMailbox,
 		protocol.FeaturePeerRoot,
 	}
 	for _, missing := range required {
@@ -791,6 +837,7 @@ func newFakeBroker(t *testing.T, afterHello func(*websocket.Conn)) *httptest.Ser
 	return newFakeBrokerWithFeatures(t, []string{
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
+		protocol.FeatureMailbox,
 		protocol.FeaturePeerRoot,
 	}, afterHello)
 }

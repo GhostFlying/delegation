@@ -8,7 +8,7 @@ import (
 
 const storeApplicationID = 0x444c4754 // "DLGT"
 
-var schemaV1 = fmt.Sprintf(`
+var schemaCurrent = fmt.Sprintf(`
 CREATE TABLE credentials (
     controller_id TEXT NOT NULL,
     device_id TEXT NOT NULL,
@@ -70,6 +70,58 @@ CREATE TABLE principals (
 CREATE INDEX principals_by_parent
     ON principals(controller_id, tree_id, parent_agent_id);
 
+CREATE TABLE mailboxes (
+    controller_id TEXT NOT NULL,
+    tree_id TEXT NOT NULL,
+    recipient_agent_id TEXT NOT NULL,
+    last_sequence INTEGER NOT NULL CHECK (last_sequence >= 0),
+    PRIMARY KEY (controller_id, tree_id, recipient_agent_id),
+    FOREIGN KEY (controller_id, tree_id, recipient_agent_id)
+        REFERENCES principals(controller_id, tree_id, agent_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE mailbox_messages (
+    controller_id TEXT NOT NULL,
+    tree_id TEXT NOT NULL,
+    recipient_agent_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    message_id TEXT NOT NULL UNIQUE,
+    source_agent_id TEXT NOT NULL,
+    source_parent_agent_id TEXT NOT NULL,
+    source_device_id TEXT NOT NULL,
+    message TEXT NOT NULL CHECK (
+        length(CAST(message AS BLOB)) BETWEEN 1 AND 1024
+    ),
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    PRIMARY KEY (controller_id, tree_id, recipient_agent_id, sequence),
+    FOREIGN KEY (controller_id, tree_id, recipient_agent_id)
+        REFERENCES mailboxes(controller_id, tree_id, recipient_agent_id) ON DELETE CASCADE,
+    FOREIGN KEY (controller_id, tree_id, source_agent_id)
+        REFERENCES principals(controller_id, tree_id, agent_id)
+) STRICT;
+
+CREATE TABLE mailbox_receipts (
+    controller_id TEXT NOT NULL,
+    tree_id TEXT NOT NULL,
+    recipient_agent_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    message_id TEXT NOT NULL PRIMARY KEY,
+    source_agent_id TEXT NOT NULL,
+    source_parent_agent_id TEXT NOT NULL,
+    source_device_id TEXT NOT NULL,
+    message TEXT NOT NULL CHECK (
+        length(CAST(message AS BLOB)) BETWEEN 1 AND 1024
+    ),
+    UNIQUE (controller_id, tree_id, recipient_agent_id, sequence),
+    FOREIGN KEY (controller_id, tree_id, recipient_agent_id)
+        REFERENCES mailboxes(controller_id, tree_id, recipient_agent_id) ON DELETE CASCADE,
+    FOREIGN KEY (controller_id, tree_id, source_agent_id)
+        REFERENCES principals(controller_id, tree_id, agent_id)
+) STRICT;
+
+CREATE INDEX mailbox_receipts_by_recipient
+    ON mailbox_receipts(controller_id, tree_id, recipient_agent_id, sequence);
+
 PRAGMA application_id = %d;
 PRAGMA user_version = %d;
 `, storeApplicationID, schemaVersion)
@@ -100,7 +152,7 @@ SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'
 		if objectCount != 0 {
 			return unsupportedSchemaIdentity(identity)
 		}
-		if _, err := connection.ExecContext(ctx, schemaV1); err != nil {
+		if _, err := connection.ExecContext(ctx, schemaCurrent); err != nil {
 			return fmt.Errorf("create broker state schema: %w", err)
 		}
 		return nil

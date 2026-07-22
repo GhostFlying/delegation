@@ -80,6 +80,7 @@ const (
 const (
 	FeatureDeviceRegistry = "deviceRegistryV1"
 	FeatureFullDuplexRPC  = "fullDuplexRpcV1"
+	FeatureMailbox        = "mailboxV1"
 	FeaturePeerRoot       = "peerRootV1"
 )
 
