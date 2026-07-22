@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
@@ -28,12 +28,59 @@ jobs:
           go-version: 1.26.5
           check-latest: false
           cache: true
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
+        with:
+          node-version: 24.15.0
       - name: Verify Go toolchain
         run: go env GOVERSION
       - name: Test
         run: go test ./...
       - name: Vet
         run: go vet ./...
+      - name: Prepare Linux sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bubblewrap
+          command -v bwrap
+          bwrap --version
+          if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+            # The hosted runner is ephemeral; Codex's bwrap policy is the boundary under test.
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          fi
+          bwrap --unshare-user --unshare-net --ro-bind / / /bin/true
+      - name: Install pinned Codex runtime
+        run: npm install --global '@openai/codex@0.144.1'
+      - name: Test managed worker mock E2E
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          codex --version | grep -F 'codex-cli 0.144.1'
+          go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/delegation" ./cmd/delegation
+          DELEGATION_E2E_BINARY="$RUNNER_TEMP/delegation" \
+            CODEX_BINARY="$(command -v codex)" \
+            go test -tags=integration -run '^TestManagedWorkerUsesEnvOnlyProviderAndColdResume$' \
+              -count=1 -v ./tests/codex_peer_e2e
+      - name: Test managed worker mock E2E
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $delegation = Join-Path $env:RUNNER_TEMP 'delegation.exe'
+          $codex = (Get-Command codex.cmd -CommandType Application -ErrorAction Stop).Path
+          $versionOutput = @(& $codex --version)
+          if ($versionOutput -notcontains 'codex-cli 0.144.1') {
+            throw 'unexpected Codex version'
+          }
+          go build -trimpath -buildvcs=false -o $delegation ./cmd/delegation
+          $env:DELEGATION_E2E_BINARY = $delegation
+          $env:CODEX_BINARY = $codex
+          go test -tags=integration -run '^TestManagedWorkerUsesEnvOnlyProviderAndColdResume$' `
+            -count=1 -v ./tests/codex_peer_e2e
       - name: Test macOS LaunchAgent round trip
         if: runner.os == 'macOS'
         shell: bash
@@ -108,6 +155,12 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: go test -run '^$' -exec /bin/true ./...
+      - name: Compile integration and live tests
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go test -tags='integration live' -run '^$' -exec /bin/true ./...
 
   plugin-contract:
     name: Plugin contract
@@ -207,6 +260,21 @@ jobs:
           assert Path(added["installedPath"]).name == added["version"]
           assert (snapshot / "plugins/delegation/VERSION").read_text().strip() == base_version
           PY
+      - name: Prepare Linux sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bubblewrap
+          command -v bwrap
+          bwrap --version
+          if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+            # The hosted runner is ephemeral; Codex's bwrap policy is the boundary under test.
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          fi
+          bwrap --unshare-user --unshare-net --ro-bind / / /bin/true
       - name: Test three isolated Codex peers
         shell: bash
         run: |

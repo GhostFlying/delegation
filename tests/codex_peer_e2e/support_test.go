@@ -19,7 +19,11 @@ import (
 )
 
 func commandEnv(current peer) []string {
-	return append(os.Environ(), "HOME="+current.home, "DELEGATION_HOME="+current.delegationHome)
+	environment := append(os.Environ(), "HOME="+current.home, "DELEGATION_HOME="+current.delegationHome)
+	if current.managedConfig != "" {
+		environment = append(environment, "DELEGATION_CODEX_CONFIG_JSON="+current.managedConfig)
+	}
+	return environment
 }
 
 func run(t *testing.T, environment []string, binary string, args ...string) (string, string) {

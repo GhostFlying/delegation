@@ -29,6 +29,7 @@ type peer struct {
 	codexHome      string
 	delegationHome string
 	configPath     string
+	managedConfig  string
 }
 
 type execResult struct {
@@ -157,6 +158,16 @@ func createPeers(t *testing.T, root, modelURL string) []peer {
 			delegationHome: filepath.Join(base, "d"),
 		}
 		current.configPath = filepath.Join(current.delegationHome, "peer.json")
+		current.managedConfig = fmt.Sprintf(`{
+				"model":"gpt-5.2",
+				"model_provider":"delegation_mock",
+				"model_providers.delegation_mock":{
+					"name":"Delegation acceptance mock",
+					"base_url":%q,
+					"wire_api":"responses",
+					"requires_openai_auth":false
+				}
+			}`, modelURL+"/v1")
 		for _, directory := range []string{current.home, current.codexHome, current.delegationHome} {
 			if err := os.MkdirAll(directory, 0o700); err != nil {
 				t.Fatal(err)
