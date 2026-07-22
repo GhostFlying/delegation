@@ -269,6 +269,100 @@ func TestAgentOperationTerminalReplayIsStable(t *testing.T) {
 	}
 }
 
+func TestQueuedAgentMessageAndReceiptCommitAtomically(t *testing.T) {
+	registry, root := prepareAgentSpawnStore(t)
+	agent := startOperationAgent(t, registry, root, agentOperationAgentID, "queued_target")
+	message := "queued message"
+	pending, err := registry.BeginAgentOperation(context.Background(), AgentOperationIntent{
+		Source:        root.Identity(),
+		OperationID:   agentOperationID,
+		AgentID:       agent.Agent.Principal.AgentID,
+		Action:        protocol.AgentOperationSend,
+		PayloadDigest: sha256.Sum256([]byte(message)),
+	}, time.Unix(20, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, delivery, err := registry.QueueAgentMessageAndFinishOperation(
+		context.Background(), pending.Key, message, time.Unix(30, 0),
+	)
+	if err != nil || queued.Outcome != protocol.AgentOperationOutcomeQueued ||
+		delivery.RecipientAgentID != agent.Agent.Principal.AgentID || delivery.Sequence != 1 {
+		t.Fatalf("queued receipt = %#v, delivery = %#v, error %v", queued, delivery, err)
+	}
+	worker := control.NewWorkerPrincipal(
+		agent.Agent.Principal.ControllerID,
+		agent.Agent.Principal.TreeID,
+		agent.Agent.Principal.AgentID,
+		agent.Agent.Principal.ParentAgentID,
+		agent.Agent.Principal.DeviceID,
+	)
+	page, err := registry.ReadMailbox(context.Background(), worker, 0, 1)
+	if err != nil || len(page.Messages) != 1 || page.Messages[0].MessageID != agentOperationID ||
+		page.Messages[0].Message != message {
+		t.Fatalf("queued mailbox page = %#v, error %v", page, err)
+	}
+	if _, err := registry.ReadMailbox(
+		context.Background(), worker, delivery.Sequence, 1,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.db.ExecContext(
+		context.Background(), "DELETE FROM mailbox_receipts WHERE message_id = ?", agentOperationID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	replayed, replayDelivery, err := registry.QueueAgentMessageAndFinishOperation(
+		context.Background(), pending.Key, message, time.Unix(40, 0),
+	)
+	if err != nil || !reflect.DeepEqual(replayed, queued) || replayDelivery != (MailboxDelivery{}) {
+		t.Fatalf("queued replay = %#v, delivery = %#v, error %v", replayed, replayDelivery, err)
+	}
+	empty, err := registry.ReadMailbox(
+		context.Background(), worker, delivery.Sequence, 1,
+	)
+	if err != nil || len(empty.Messages) != 0 || empty.NextCursor != delivery.Sequence {
+		t.Fatalf("mailbox after receipt pruning = %#v, error %v", empty, err)
+	}
+}
+
+func TestQueuedAgentMessageConflictRollsBackTerminalReceipt(t *testing.T) {
+	registry, root := prepareAgentSpawnStore(t)
+	agent := startOperationAgent(t, registry, root, agentOperationAgentID, "conflict_target")
+	message := "intended queued message"
+	pending, err := registry.BeginAgentOperation(context.Background(), AgentOperationIntent{
+		Source:        root.Identity(),
+		OperationID:   agentOperationID,
+		AgentID:       agent.Agent.Principal.AgentID,
+		Action:        protocol.AgentOperationSend,
+		PayloadDigest: sha256.Sum256([]byte(message)),
+	}, time.Unix(20, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.SendMailboxMessage(
+		context.Background(),
+		root,
+		protocol.MessageTarget{Kind: protocol.MessageTargetAgent, AgentID: agent.Agent.Principal.AgentID},
+		agentOperationID,
+		"conflicting mailbox payload",
+		time.Unix(21, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := registry.QueueAgentMessageAndFinishOperation(
+		context.Background(), pending.Key, message, time.Unix(30, 0),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting queue error = %v, want ErrConflict", err)
+	}
+	stored, err := registry.GetAgentOperation(
+		context.Background(), root.Identity(), pending.Key.OperationID,
+	)
+	if err != nil || stored.Outcome != protocol.AgentOperationOutcomePending {
+		t.Fatalf("receipt after mailbox rollback = %#v, error %v", stored, err)
+	}
+}
+
 func startOperationAgent(
 	t *testing.T,
 	registry *Store,

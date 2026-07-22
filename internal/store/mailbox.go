@@ -59,122 +59,134 @@ func (s *Store) SendMailboxMessage(
 
 	var delivery MailboxDelivery
 	err = s.withImmediateTransaction(ctx, func(connection *sql.Conn) error {
-		storedSource, err := queryPrincipal(
-			ctx, connection, source.ControllerID, source.TreeID, source.AgentID,
+		delivery, err = sendMailboxMessageTx(
+			ctx, connection, source, target, messageID, message, timestamp,
 		)
-		if err != nil || !storedSource.Matches(source.Identity()) {
-			if err != nil && !errors.Is(err, ErrNotFound) {
-				return err
-			}
-			return ErrAuthorizationDenied
+		return err
+	})
+	return delivery, err
+}
+
+func sendMailboxMessageTx(
+	ctx context.Context,
+	connection *sql.Conn,
+	source control.Principal,
+	target protocol.MessageTarget,
+	messageID, message string,
+	timestamp int64,
+) (MailboxDelivery, error) {
+	storedSource, err := queryPrincipal(
+		ctx, connection, source.ControllerID, source.TreeID, source.AgentID,
+	)
+	if err != nil || !storedSource.Matches(source.Identity()) {
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return MailboxDelivery{}, err
 		}
-		recipientAgentID, err := resolveMessageRecipient(ctx, connection, storedSource, target)
-		if err != nil {
-			return err
-		}
-		if _, err := queryPrincipal(
-			ctx, connection, source.ControllerID, source.TreeID, recipientAgentID,
-		); err != nil {
-			return err
-		}
-		existing, found, err := findMailboxDelivery(
-			ctx, connection, source, recipientAgentID, messageID, message,
-		)
-		if err != nil {
-			return err
-		}
-		if found {
-			delivery = existing
-			return nil
-		}
-		if _, err := connection.ExecContext(ctx, `
+		return MailboxDelivery{}, ErrAuthorizationDenied
+	}
+	recipientAgentID, err := resolveMessageRecipient(ctx, connection, storedSource, target)
+	if err != nil {
+		return MailboxDelivery{}, err
+	}
+	if _, err := queryPrincipal(
+		ctx, connection, source.ControllerID, source.TreeID, recipientAgentID,
+	); err != nil {
+		return MailboxDelivery{}, err
+	}
+	existing, found, err := findMailboxDelivery(
+		ctx, connection, source, recipientAgentID, messageID, message,
+	)
+	if err != nil {
+		return MailboxDelivery{}, err
+	}
+	if found {
+		return existing, nil
+	}
+	if _, err := connection.ExecContext(ctx, `
 INSERT INTO mailboxes(controller_id, tree_id, recipient_agent_id, last_sequence)
 VALUES (?, ?, ?, 0)
 ON CONFLICT(controller_id, tree_id, recipient_agent_id) DO NOTHING
 `, source.ControllerID, source.TreeID, recipientAgentID); err != nil {
-			return fmt.Errorf("initialize mailbox: %w", err)
-		}
-		var pending int
-		if err := connection.QueryRowContext(ctx, `
+		return MailboxDelivery{}, fmt.Errorf("initialize mailbox: %w", err)
+	}
+	var pending int
+	if err := connection.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM mailbox_messages
 WHERE controller_id = ? AND tree_id = ? AND recipient_agent_id = ?
 `, source.ControllerID, source.TreeID, recipientAgentID).Scan(&pending); err != nil {
-			return fmt.Errorf("count pending mailbox messages: %w", err)
-		}
-		if pending >= maximumPendingMailboxMessages {
-			return ErrMailboxFull
-		}
-		var lastSequence int64
-		if err := connection.QueryRowContext(ctx, `
+		return MailboxDelivery{}, fmt.Errorf("count pending mailbox messages: %w", err)
+	}
+	if pending >= maximumPendingMailboxMessages {
+		return MailboxDelivery{}, ErrMailboxFull
+	}
+	var lastSequence int64
+	if err := connection.QueryRowContext(ctx, `
 SELECT last_sequence FROM mailboxes
 WHERE controller_id = ? AND tree_id = ? AND recipient_agent_id = ?
 `, source.ControllerID, source.TreeID, recipientAgentID).Scan(&lastSequence); err != nil {
-			return fmt.Errorf("load mailbox sequence: %w", err)
-		}
-		if lastSequence == math.MaxInt64 {
-			return ErrMailboxSequenceExhausted
-		}
-		sequence := lastSequence + 1
-		if err := pruneAcknowledgedMailboxReceipts(
-			ctx,
-			connection,
-			source.ControllerID,
-			source.TreeID,
-			recipientAgentID,
-		); err != nil {
-			return err
-		}
-		if _, err := connection.ExecContext(ctx, `
+		return MailboxDelivery{}, fmt.Errorf("load mailbox sequence: %w", err)
+	}
+	if lastSequence == math.MaxInt64 {
+		return MailboxDelivery{}, ErrMailboxSequenceExhausted
+	}
+	sequence := lastSequence + 1
+	if err := pruneAcknowledgedMailboxReceipts(
+		ctx,
+		connection,
+		source.ControllerID,
+		source.TreeID,
+		recipientAgentID,
+	); err != nil {
+		return MailboxDelivery{}, err
+	}
+	if _, err := connection.ExecContext(ctx, `
 UPDATE mailboxes SET last_sequence = ?
 WHERE controller_id = ? AND tree_id = ? AND recipient_agent_id = ? AND last_sequence = ?
 `, sequence, source.ControllerID, source.TreeID, recipientAgentID, lastSequence); err != nil {
-			return fmt.Errorf("advance mailbox sequence: %w", err)
-		}
-		if _, err := connection.ExecContext(ctx, `
+		return MailboxDelivery{}, fmt.Errorf("advance mailbox sequence: %w", err)
+	}
+	if _, err := connection.ExecContext(ctx, `
 INSERT INTO mailbox_receipts(
     controller_id, tree_id, recipient_agent_id, sequence, message_id,
     source_agent_id, source_parent_agent_id, source_device_id, message
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
-			source.ControllerID,
-			source.TreeID,
-			recipientAgentID,
-			sequence,
-			messageID,
-			source.AgentID,
-			source.ParentAgentID,
-			source.DeviceID,
-			message,
-		); err != nil {
-			return fmt.Errorf("record mailbox message receipt: %w", err)
-		}
-		if _, err := connection.ExecContext(ctx, `
+		source.ControllerID,
+		source.TreeID,
+		recipientAgentID,
+		sequence,
+		messageID,
+		source.AgentID,
+		source.ParentAgentID,
+		source.DeviceID,
+		message,
+	); err != nil {
+		return MailboxDelivery{}, fmt.Errorf("record mailbox message receipt: %w", err)
+	}
+	if _, err := connection.ExecContext(ctx, `
 INSERT INTO mailbox_messages(
     controller_id, tree_id, recipient_agent_id, sequence, message_id,
     source_agent_id, source_parent_agent_id, source_device_id, message, created_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
-			source.ControllerID,
-			source.TreeID,
-			recipientAgentID,
-			sequence,
-			messageID,
-			source.AgentID,
-			source.ParentAgentID,
-			source.DeviceID,
-			message,
-			timestamp,
-		); err != nil {
-			return fmt.Errorf("enqueue mailbox message: %w", err)
-		}
-		delivery = MailboxDelivery{
-			RecipientAgentID: recipientAgentID,
-			MessageID:        messageID,
-			Sequence:         uint64(sequence),
-		}
-		return nil
-	})
-	return delivery, err
+		source.ControllerID,
+		source.TreeID,
+		recipientAgentID,
+		sequence,
+		messageID,
+		source.AgentID,
+		source.ParentAgentID,
+		source.DeviceID,
+		message,
+		timestamp,
+	); err != nil {
+		return MailboxDelivery{}, fmt.Errorf("enqueue mailbox message: %w", err)
+	}
+	return MailboxDelivery{
+		RecipientAgentID: recipientAgentID,
+		MessageID:        messageID,
+		Sequence:         uint64(sequence),
+	}, nil
 }
 
 func pruneAcknowledgedMailboxReceipts(

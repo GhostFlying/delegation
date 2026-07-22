@@ -159,35 +159,135 @@ func (s *Store) FinishAgentOperation(
 		if err != nil {
 			return err
 		}
-		if err := outcome.Validate(receipt.Action, failureCode); err != nil {
+		receipt, err = finishAgentOperationTx(
+			ctx, connection, receipt, outcome, failureCode, timestamp,
+		)
+		return err
+	})
+	return receipt, err
+}
+
+// QueueAgentMessageAndFinishOperation commits the worker mailbox delivery and
+// the corresponding terminal operation receipt as one durable state change.
+func (s *Store) QueueAgentMessageAndFinishOperation(
+	ctx context.Context,
+	key AgentOperationKey,
+	message string,
+	observedAt time.Time,
+) (AgentOperationReceipt, MailboxDelivery, error) {
+	if err := key.Validate(); err != nil {
+		return AgentOperationReceipt{}, MailboxDelivery{}, err
+	}
+	if err := protocol.ValidateMailboxMessage(message); err != nil {
+		return AgentOperationReceipt{}, MailboxDelivery{}, err
+	}
+	timestamp, err := unixTime(observedAt, "observedAt")
+	if err != nil {
+		return AgentOperationReceipt{}, MailboxDelivery{}, err
+	}
+	digest := sha256.Sum256([]byte(message))
+	var (
+		receipt  AgentOperationReceipt
+		delivery MailboxDelivery
+	)
+	err = s.withImmediateTransaction(ctx, func(connection *sql.Conn) error {
+		receipt, err = queryAgentOperationReceipt(ctx, connection, key)
+		if err != nil {
 			return err
 		}
-		if receipt.Outcome == outcome {
-			if receipt.FailureCode != failureCode {
-				return fmt.Errorf("%w: agent operation terminal result differs", ErrConflict)
-			}
+		if receipt.Action != protocol.AgentOperationSend || receipt.PayloadDigest != digest {
+			return fmt.Errorf("%w: queued message does not match agent operation", ErrConflict)
+		}
+		if receipt.Outcome == protocol.AgentOperationOutcomeQueued {
 			return nil
 		}
 		if receipt.Outcome != protocol.AgentOperationOutcomePending {
 			return fmt.Errorf("%w: agent operation already has a terminal result", ErrConflict)
 		}
-		if timestamp < receipt.CreatedAt {
-			return errors.New("observedAt precedes agent operation creation")
+		source, err := queryPrincipal(
+			ctx, connection, key.ControllerID, key.TreeID, key.SourceAgentID,
+		)
+		if err != nil {
+			return err
 		}
-		if _, err := connection.ExecContext(ctx, `
+		if err := authorizeAgentOperationSource(ctx, connection, source.Identity()); err != nil {
+			return err
+		}
+		delivery, err = sendMailboxMessageTx(
+			ctx,
+			connection,
+			source,
+			protocol.MessageTarget{Kind: protocol.MessageTargetAgent, AgentID: receipt.AgentID},
+			key.OperationID,
+			message,
+			timestamp,
+		)
+		if err != nil {
+			return err
+		}
+		receipt, err = finishAgentOperationTx(
+			ctx,
+			connection,
+			receipt,
+			protocol.AgentOperationOutcomeQueued,
+			"",
+			timestamp,
+		)
+		return err
+	})
+	return receipt, delivery, err
+}
+
+func finishAgentOperationTx(
+	ctx context.Context,
+	connection *sql.Conn,
+	receipt AgentOperationReceipt,
+	outcome protocol.AgentOperationOutcome,
+	failureCode string,
+	timestamp int64,
+) (AgentOperationReceipt, error) {
+	if err := outcome.Validate(receipt.Action, failureCode); err != nil {
+		return AgentOperationReceipt{}, err
+	}
+	if receipt.Outcome == outcome {
+		if receipt.FailureCode != failureCode {
+			return AgentOperationReceipt{}, fmt.Errorf(
+				"%w: agent operation terminal result differs", ErrConflict,
+			)
+		}
+		return receipt, nil
+	}
+	if receipt.Outcome != protocol.AgentOperationOutcomePending {
+		return AgentOperationReceipt{}, fmt.Errorf(
+			"%w: agent operation already has a terminal result", ErrConflict,
+		)
+	}
+	if timestamp < receipt.CreatedAt {
+		return AgentOperationReceipt{}, errors.New("observedAt precedes agent operation creation")
+	}
+	result, err := connection.ExecContext(ctx, `
 UPDATE agent_operation_receipts
 SET outcome = ?, failure_code = ?, updated_at = ?
 WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND operation_id = ?
-`, outcome, failureCode, timestamp, key.ControllerID, key.TreeID, key.SourceAgentID,
-			key.OperationID); err != nil {
-			return fmt.Errorf("finish agent operation: %w", err)
-		}
-		receipt.Outcome = outcome
-		receipt.FailureCode = failureCode
-		receipt.UpdatedAt = timestamp
-		return nil
-	})
-	return receipt, err
+  AND outcome = ?
+`, outcome, failureCode, timestamp, receipt.Key.ControllerID, receipt.Key.TreeID,
+		receipt.Key.SourceAgentID, receipt.Key.OperationID, protocol.AgentOperationOutcomePending)
+	if err != nil {
+		return AgentOperationReceipt{}, fmt.Errorf("finish agent operation: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return AgentOperationReceipt{}, fmt.Errorf("count finished agent operations: %w", err)
+	}
+	if updated != 1 {
+		return AgentOperationReceipt{}, fmt.Errorf(
+			"%w: agent operation changed while finishing", ErrConflict,
+		)
+	}
+	receipt.Outcome = outcome
+	receipt.FailureCode = failureCode
+	receipt.UpdatedAt = timestamp
+	return receipt, nil
 }
 
 func (k AgentOperationKey) Validate() error {
