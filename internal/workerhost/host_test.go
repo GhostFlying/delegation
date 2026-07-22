@@ -1292,6 +1292,10 @@ func newTestHostWithStateSetup(
 			t.Fatal(err)
 		}
 	}
+	workspaceRoot, err := filepath.EvalSymlinks(workspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	state, err := store.OpenPeer(context.Background(), filepath.Join(root, "state", "peer.sqlite3"))
 	if err != nil {
 		t.Fatal(err)

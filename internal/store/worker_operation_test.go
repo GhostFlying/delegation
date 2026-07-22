@@ -12,7 +12,7 @@ import (
 
 func TestWorkerOperationReceiptsAreDurableAndIdempotent(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "peer.sqlite3")
+	path := filepath.Join(t.TempDir(), "state", "peer.sqlite3")
 	state, err := OpenPeer(ctx, path)
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +107,7 @@ func TestWorkerOperationReceiptsAreDurableAndIdempotent(t *testing.T) {
 
 func TestWorkerOperationReceiptsRejectChangedReplay(t *testing.T) {
 	ctx := context.Background()
-	state, err := OpenPeer(ctx, filepath.Join(t.TempDir(), "peer.sqlite3"))
+	state, err := OpenPeer(ctx, filepath.Join(t.TempDir(), "state", "peer.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestWorkerOperationReceiptsRejectChangedReplay(t *testing.T) {
 
 func TestWorkerOperationFailureIsStable(t *testing.T) {
 	ctx := context.Background()
-	state, err := OpenPeer(ctx, filepath.Join(t.TempDir(), "peer.sqlite3"))
+	state, err := OpenPeer(ctx, filepath.Join(t.TempDir(), "state", "peer.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
 	}
