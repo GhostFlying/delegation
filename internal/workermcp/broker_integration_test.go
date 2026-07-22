@@ -176,7 +176,7 @@ func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 		ControllerID:      controllerID,
 		AuthMode:          config.AuthModeNone,
 		Registry:          registry,
-		HeartbeatInterval: 100 * time.Millisecond,
+		HeartbeatInterval: time.Hour,
 	})
 	if err != nil {
 		registryStore.Close()

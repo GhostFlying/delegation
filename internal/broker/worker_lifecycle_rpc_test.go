@@ -167,9 +167,7 @@ func TestReplacementHandshakeImmediatelyFencesDispatchToPriorSession(t *testing.
 	}
 	defer prior.CloseNow()
 	sendHello(t, prior)
-	if harness.server.connection(brokerTestDeviceID) == nil {
-		t.Fatal("prior session was not dispatchable before replacement")
-	}
+	waitForBrokerConnectionState(t, harness.server, brokerTestDeviceID, true)
 
 	blocked := &blockingLifecycleClaimRegistry{
 		Store: harness.registry, started: make(chan struct{}), release: make(chan struct{}),

@@ -160,7 +160,7 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 }
 
 func TestCanceledMailboxWaitsReleaseBrokerCapacity(t *testing.T) {
-	fixture := newBrokerFixture(t, config.AuthModeNone, 500*time.Millisecond)
+	fixture := newBrokerFixture(t, config.AuthModeNone, maximumHeartbeat)
 	client := newTestClient(t, fixture.url(), config.AuthModeNone, nil)
 	clientContext, stopClient := context.WithCancel(context.Background())
 	clientDone := runClient(client, clientContext)
