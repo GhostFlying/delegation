@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 
+	"github.com/GhostFlying/delegation/internal/codexcommand"
+	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/pathguard"
@@ -243,7 +244,13 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if err := ensureConfigAvailable(resolvedConfig); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := pathguard.ValidatePeerAuthority(resolvedConfig, resolvedState, auth.TokenFile); err != nil {
+	if err := pathguard.ValidatePeerRuntimeAuthority(
+		resolvedConfig,
+		resolvedState,
+		auth.TokenFile,
+		resolvedCodexHome,
+		resolvedWorkspaceRoot,
+	); err != nil {
 		return writeError(stderr, err)
 	}
 	if err := store.ValidatePath(resolvedState); err != nil {
@@ -257,15 +264,49 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if err := writeInsecureTransportWarning(stderr, cfg); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := prepareManagedDirectory(resolvedCodexHome, "worker CODEX_HOME"); err != nil {
+	if err := delegationconfig.PrepareWrite(resolvedConfig); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := prepareManagedDirectory(resolvedWorkspaceRoot, "worker workspace root"); err != nil {
+	if err := codexconfig.ValidateManagedHome(resolvedCodexHome); err != nil {
+		return writeError(stderr, err)
+	}
+	var preparedDirectories []string
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		for index := len(preparedDirectories) - 1; index >= 0; index-- {
+			_ = os.Remove(preparedDirectories[index])
+		}
+	}()
+	codexHomeCreated, err := prepareManagedDirectory(resolvedCodexHome, "worker CODEX_HOME")
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	if codexHomeCreated {
+		preparedDirectories = append(preparedDirectories, resolvedCodexHome)
+	}
+	workspaceCreated, err := prepareManagedDirectory(resolvedWorkspaceRoot, "worker workspace root")
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	if workspaceCreated {
+		preparedDirectories = append(preparedDirectories, resolvedWorkspaceRoot)
+	}
+	if err := pathguard.ValidatePeerRuntimeAuthority(
+		resolvedConfig,
+		resolvedState,
+		auth.TokenFile,
+		resolvedCodexHome,
+		resolvedWorkspaceRoot,
+	); err != nil {
 		return writeError(stderr, err)
 	}
 	if err := delegationconfig.WriteNew(resolvedConfig, cfg); err != nil {
 		return writeError(stderr, err)
 	}
+	committed = true
 	return writeSetupResult(stdout, stderr, setupResult{
 		Role:          cfg.Role,
 		ConfigPath:    resolvedConfig,
@@ -389,46 +430,23 @@ func writeSetupResult(stdout, stderr io.Writer, result setupResult, jsonOutput b
 }
 
 func resolveExecutable(name string) (string, error) {
-	if name == "" {
-		return "", errors.New("Codex executable is required")
-	}
-	resolved, err := exec.LookPath(name)
+	resolved, err := codexcommand.Resolve(name)
 	if err != nil {
 		return "", err
 	}
-	resolved, err = filepath.Abs(resolved)
-	if err != nil {
-		return "", err
-	}
-	resolved, err = filepath.EvalSymlinks(resolved)
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", err
-	}
-	if !info.Mode().IsRegular() {
-		return "", errors.New("Codex executable must be a regular file")
-	}
-	return resolved, nil
+	return resolved.CommandPath, nil
 }
 
-func prepareManagedDirectory(path, description string) error {
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", description, err)
+func prepareManagedDirectory(path, description string) (bool, error) {
+	_, statErr := os.Lstat(path)
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect %s: %w", description, statErr)
 	}
-	if err := os.Chmod(path, 0o700); err != nil {
-		return fmt.Errorf("protect %s: %w", description, err)
+	created := errors.Is(statErr, os.ErrNotExist)
+	if err := delegationconfig.PreparePrivateDirectory(path); err != nil {
+		return false, fmt.Errorf("prepare %s: %w", description, err)
 	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("inspect %s: %w", description, err)
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s must resolve to a directory", description)
-	}
-	return nil
+	return created, nil
 }
 
 func writeError(stderr io.Writer, err error) int {

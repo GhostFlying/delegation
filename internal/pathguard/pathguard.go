@@ -28,6 +28,94 @@ func ValidatePeerAuthority(configPath, statePath, tokenPath string) error {
 			}
 		}
 	}
+	for _, file := range files {
+		if err := requireSingleLink(file); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidatePeerRuntimeAuthority extends the file authority check to managed
+// directories whose aliases or containment would expose peer authority or
+// merge independent runtime namespaces.
+func ValidatePeerRuntimeAuthority(
+	configPath, statePath, tokenPath, codexHome, workspaceRoot string,
+) error {
+	if err := ValidatePeerAuthority(configPath, statePath, tokenPath); err != nil {
+		return err
+	}
+	files := peerAuthorityFiles(configPath, statePath, tokenPath)
+	directories := []namedPath{
+		{name: "worker CODEX_HOME", path: codexHome},
+		{name: "worker workspace root", path: workspaceRoot},
+	}
+	for _, directory := range directories {
+		for _, file := range files {
+			conflicts, err := pathWithin(file.path, directory.path)
+			if err != nil {
+				return err
+			}
+			if conflicts {
+				return fmt.Errorf("%s must not be inside %s", file.name, directory.name)
+			}
+		}
+	}
+	workspaceInsideHome, err := pathWithin(workspaceRoot, codexHome)
+	if err != nil {
+		return err
+	}
+	homeInsideWorkspace, err := pathWithin(codexHome, workspaceRoot)
+	if err != nil {
+		return err
+	}
+	if workspaceInsideHome || homeInsideWorkspace {
+		return errors.New("worker workspace root and worker CODEX_HOME must not contain one another")
+	}
+	return nil
+}
+
+// ValidatePeerServiceEnvironment prevents provider credentials from aliasing
+// peer authority files or living inside a directory exposed to managed Codex.
+func ValidatePeerServiceEnvironment(
+	environmentPath, configPath, statePath, tokenPath, codexHome, workspaceRoot string,
+) error {
+	if !filepath.IsAbs(environmentPath) {
+		return errors.New("peer service environment path must be absolute")
+	}
+	if err := ValidatePeerRuntimeAuthority(
+		configPath,
+		statePath,
+		tokenPath,
+		codexHome,
+		workspaceRoot,
+	); err != nil {
+		return err
+	}
+	for _, authority := range peerAuthorityFiles(configPath, statePath, tokenPath) {
+		conflicts, err := equivalent(environmentPath, authority.path)
+		if err != nil {
+			return err
+		}
+		if conflicts {
+			return fmt.Errorf("peer service environment path conflicts with %s", authority.name)
+		}
+	}
+	for _, directory := range []namedPath{
+		{name: "worker CODEX_HOME", path: codexHome},
+		{name: "worker workspace root", path: workspaceRoot},
+	} {
+		contained, err := pathWithin(environmentPath, directory.path)
+		if err != nil {
+			return err
+		}
+		if contained {
+			return fmt.Errorf("peer service environment must not be inside %s", directory.name)
+		}
+	}
+	if err := requireSingleLink(namedPath{name: "peer service environment", path: environmentPath}); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -116,8 +204,78 @@ func equivalent(first, second string) (bool, error) {
 	return firstErr == nil && secondErr == nil && os.SameFile(firstInfo, secondInfo), nil
 }
 
+func requireSingleLink(file namedPath) error {
+	canonical, err := canonicalFuturePath(file.path)
+	if err != nil {
+		return err
+	}
+	opened, err := os.Open(canonical)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect hard-link count for %s: %w", file.name, err)
+	}
+	defer opened.Close()
+	info, err := opened.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect hard-link count for %s: %w", file.name, err)
+	}
+	count, err := openedFileLinkCount(opened, info)
+	if err != nil {
+		return fmt.Errorf("inspect hard-link count for %s: %w", file.name, err)
+	}
+	if count != 1 {
+		return fmt.Errorf("%s has unexpected hard-link count %d; expected 1", file.name, count)
+	}
+	return nil
+}
+
 func canonicalFuturePath(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", errors.New("guarded path must be absolute")
+	}
+	if hasParentComponent(path) {
+		return "", errors.New("guarded path must not contain parent path components")
+	}
 	return resolveFuturePath(filepath.Clean(path), 0)
+}
+
+func hasParentComponent(path string) bool {
+	for _, component := range strings.FieldsFunc(path, func(char rune) bool {
+		return char == rune(filepath.Separator) || filepath.Separator == '\\' && char == '/'
+	}) {
+		if component == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func pathWithin(candidate, directory string) (bool, error) {
+	canonicalCandidate, err := canonicalFuturePath(candidate)
+	if err != nil {
+		return false, err
+	}
+	canonicalDirectory, err := canonicalFuturePath(directory)
+	if err != nil {
+		return false, err
+	}
+	separator := string(filepath.Separator)
+	if strings.EqualFold(canonicalCandidate, canonicalDirectory) ||
+		strings.HasPrefix(strings.ToLower(canonicalCandidate), strings.ToLower(canonicalDirectory+separator)) {
+		return true, nil
+	}
+	if !strings.EqualFold(filepath.VolumeName(canonicalCandidate), filepath.VolumeName(canonicalDirectory)) {
+		return false, nil
+	}
+	relative, err := filepath.Rel(canonicalDirectory, canonicalCandidate)
+	if err != nil {
+		return false, fmt.Errorf("compare guarded paths: %w", err)
+	}
+	return relative == "." || relative != ".." &&
+		!strings.HasPrefix(relative, ".."+separator) &&
+		!filepath.IsAbs(relative), nil
 }
 
 func resolveFuturePath(path string, followedLinks int) (string, error) {

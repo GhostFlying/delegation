@@ -15,6 +15,15 @@ import (
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
 
+func testCodexBinary(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestSetupBroker(t *testing.T) {
 	dir := privateTestDirectory(t)
 	configPath := filepath.Join(dir, "config.json")
@@ -150,13 +159,12 @@ func TestSetupBrokerRejectsUnusableStateWithoutSideEffects(t *testing.T) {
 
 func TestSetupPeerWithoutAuthentication(t *testing.T) {
 	configPath := privateTestPath(t, "peer.json")
-	codexHome := filepath.Join(filepath.Dir(configPath), "worker-codex")
-	workspaceRoot := filepath.Join(filepath.Dir(configPath), "worker-workspaces")
+	// Keep the managed roots outside the protected config hierarchy so this
+	// exercises their independent platform security setup.
+	codexHome := filepath.Join(t.TempDir(), "worker-codex")
+	workspaceRoot := filepath.Join(t.TempDir(), "worker-workspaces")
 	statePath := filepath.Join(filepath.Dir(configPath), "state", "peer.sqlite3")
-	codexBinary, err := filepath.Abs(os.Args[0])
-	if err != nil {
-		t.Fatal(err)
-	}
+	codexBinary := testCodexBinary(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	args := []string{
@@ -205,6 +213,137 @@ func TestSetupPeerWithoutAuthentication(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(codexHome, "config.toml")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("setup created a managed Codex config file: %v", err)
 	}
+	for description, path := range map[string]string{
+		"managed CODEX_HOME": codexHome,
+		"workspace root":     workspaceRoot,
+	} {
+		if err := delegationconfig.PreparePrivateDirectory(path); err != nil {
+			t.Fatalf("%s is not protected independently: %v", description, err)
+		}
+	}
+}
+
+func TestSetupPeerRejectsMissingCodexBinary(t *testing.T) {
+	configPath := privateTestPath(t, "peer.json")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "peer",
+		"--config", configPath,
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--device-name", "missing-codex",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+		"--codex-binary", filepath.Join(t.TempDir(), "missing-codex"),
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "resolve Codex executable") {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("setup wrote config for a missing Codex binary: %v", err)
+	}
+}
+
+func TestSetupPeerRejectsPrepopulatedManagedCodexHome(t *testing.T) {
+	configPath := privateTestPath(t, "peer.json")
+	codexHome := filepath.Join(t.TempDir(), "managed-codex")
+	if err := os.Mkdir(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "peer",
+		"--config", configPath,
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--device-name", "prepopulated-home",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+		"--codex-binary", testCodexBinary(t),
+		"--codex-home", codexHome,
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "auth.json") {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("setup wrote config for prepopulated managed home: %v", err)
+	}
+}
+
+func TestSetupPeerRollsBackNewManagedHomeWhenWorkspacePreparationFails(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config", "peer.json")
+	codexHome := filepath.Join(root, "worker-codex")
+	blockedParent := filepath.Join(root, "blocked")
+	if err := os.WriteFile(blockedParent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceRoot := filepath.Join(blockedParent, "worker-workspaces")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "peer",
+		"--config", configPath,
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--device-name", "rollback-test",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+		"--codex-binary", testCodexBinary(t),
+		"--codex-home", codexHome,
+		"--workspace-root", workspaceRoot,
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("setup accepted an unusable workspace root; stderr = %q", stderr.String())
+	}
+	for _, path := range []string{configPath, codexHome} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("setup left %s after rollback: %v", path, err)
+		}
+	}
+}
+
+func TestSetupPeerRejectsManagedDirectoryAndStateCollisions(t *testing.T) {
+	codexBinary := testCodexBinary(t)
+	for _, test := range []struct {
+		name                    string
+		state, codex, workspace string
+	}{
+		{name: "state is CODEX_HOME", state: "collision", codex: "collision", workspace: "workspaces"},
+		{name: "state is workspace", state: "collision", codex: "codex", workspace: "collision"},
+		{name: "managed directories match", state: "state/peer.sqlite3", codex: "collision", workspace: "collision"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			configPath := filepath.Join(root, "peer.json")
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Run([]string{
+				"setup", "peer",
+				"--config", configPath,
+				"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+				"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+				"--device-name", "collision-test",
+				"--broker-url", "wss://broker.example.test",
+				"--auth-mode", "none",
+				"--codex-binary", codexBinary,
+				"--state", filepath.Join(root, test.state),
+				"--codex-home", filepath.Join(root, test.codex),
+				"--workspace-root", filepath.Join(root, test.workspace),
+			}, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("setup accepted colliding paths; stderr = %q", stderr.String())
+			}
+			if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("setup wrote config after collision: %v", err)
+			}
+		})
+	}
 }
 
 func TestSetupPeerNoneAuthExplainsTrustDomain(t *testing.T) {
@@ -219,6 +358,7 @@ func TestSetupPeerNoneAuthExplainsTrustDomain(t *testing.T) {
 		"--device-name", "peer",
 		"--broker-url", "wss://broker.example.test",
 		"--auth-mode", "none",
+		"--codex-binary", testCodexBinary(t),
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
@@ -244,6 +384,7 @@ func TestSetupPeerWithoutAuthenticationGeneratesDeviceID(t *testing.T) {
 		"--device-name", "local-worker",
 		"--broker-url", "wss://broker.example.test",
 		"--auth-mode", "none",
+		"--codex-binary", testCodexBinary(t),
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("setup code = %d, want 0; stderr = %q", code, stderr.String())
@@ -275,6 +416,7 @@ func TestSetupTokenAuthenticationRequiresDeviceID(t *testing.T) {
 				"--device-name", "managed-device",
 				"--broker-url", "wss://broker.example.test",
 				"--token-file", tokenPath,
+				"--codex-binary", testCodexBinary(t),
 			}, &stdout, &stderr)
 			if code == 0 || !strings.Contains(stderr.String(), "--device-id is required in token mode") {
 				t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
@@ -303,6 +445,7 @@ func TestSetupPeerWithTokenAuthentication(t *testing.T) {
 		"--device-name", "macos-builder",
 		"--broker-url", "wss://broker.example.test",
 		"--token-file", tokenPath,
+		"--codex-binary", testCodexBinary(t),
 	}
 
 	if code := Run(args, &stdout, &stderr); code != 0 {
@@ -331,6 +474,7 @@ func TestSetupClientRequiresAcknowledgementForRemotePlaintext(t *testing.T) {
 					"--device-name", "managed-device",
 					"--broker-url", "ws://broker.example.test:8787",
 					"--auth-mode", authMode,
+					"--codex-binary", testCodexBinary(t),
 				}
 				if authMode == "token" {
 					tokenPath := filepath.Join(dir, role+".token")
@@ -387,6 +531,7 @@ func TestSetupClientWarningFailureDoesNotCreateConfig(t *testing.T) {
 		"--broker-url", "ws://broker.example.test:8787",
 		"--auth-mode", "none",
 		"--allow-insecure-nonloopback",
+		"--codex-binary", testCodexBinary(t),
 	}, &stdout, setupFailingWriter{})
 
 	if code == 0 {

@@ -26,3 +26,13 @@ func TestValidateBrokerAuthorityRejectsRootRelativeParentSymlink(t *testing.T) {
 		t.Fatalf("ValidateBrokerAuthority() error = %v", err)
 	}
 }
+
+func TestPathWithinTreatsDifferentVolumesAsDisjoint(t *testing.T) {
+	contained, err := pathWithin(`C:\delegation\peer.sqlite3`, `D:\delegation\workspaces`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contained {
+		t.Fatal("pathWithin treated different Windows volumes as containment")
+	}
+}

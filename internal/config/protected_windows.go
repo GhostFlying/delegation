@@ -65,6 +65,61 @@ func holdConfigDirectory(path string) (*securefs.Root, error) {
 	return directory, nil
 }
 
+func protectPrivateDirectory(path string) error {
+	if err := validateLocalConfigVolume(path); err != nil {
+		return err
+	}
+	descriptor, err := privateDirectorySecurityDescriptor()
+	if err != nil {
+		return err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		return err
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	directory, err := securefs.OpenRoot(path, func(file *os.File) error {
+		if err := winlocalpath.ValidateDirectory(file); err != nil {
+			return err
+		}
+		return windows.SetSecurityInfo(
+			windows.Handle(file.Fd()),
+			windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|
+				windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			owner,
+			nil,
+			dacl,
+			nil,
+		)
+	})
+	if err != nil {
+		return fmt.Errorf("set private directory security descriptor: %w", err)
+	}
+	return directory.Close()
+}
+
+func holdPrivateDirectory(path string) (*securefs.Root, error) {
+	return holdConfigDirectory(path)
+}
+
+func privateDirectorySecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
+	sid, err := currentConfigUserSID()
+	if err != nil {
+		return nil, err
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(
+		"O:" + sid.String() + "D:P(A;OICI;GA;;;" + sid.String() + ")",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build private directory security descriptor: %w", err)
+	}
+	return descriptor, nil
+}
+
 func createConfigTemp(directory *securefs.Root) (string, *os.File, error) {
 	for range 100 {
 		suffix, err := randomConfigSuffix()

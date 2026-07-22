@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/GhostFlying/delegation/internal/securefs"
 )
+
+const maximumProtectedReadSize = 1 << 20
 
 type CommittedError struct {
 	Err error
@@ -90,6 +93,58 @@ func PrepareWrite(path string) error {
 		return err
 	}
 	return directoryLease.Close()
+}
+
+// PreparePrivateDirectory creates and validates a current-user-owned directory
+// using the same platform protections as the config authority.
+func PreparePrivateDirectory(path string) error {
+	if !filepath.IsAbs(path) {
+		return errors.New("private directory path must be absolute")
+	}
+	if err := createDirectoriesDurably(path); err != nil {
+		return fmt.Errorf("create private directory: %w", err)
+	}
+	if err := protectPrivateDirectory(path); err != nil {
+		return fmt.Errorf("protect private directory: %w", err)
+	}
+	return ValidatePrivateDirectory(path)
+}
+
+// ValidatePrivateDirectory non-mutatingly verifies the current-user authority
+// established by PreparePrivateDirectory.
+func ValidatePrivateDirectory(path string) error {
+	if !filepath.IsAbs(path) {
+		return errors.New("private directory path must be absolute")
+	}
+	directoryLease, err := holdPrivateDirectory(path)
+	if err != nil {
+		return err
+	}
+	return directoryLease.Close()
+}
+
+// ReadProtectedFile reads a bounded current-user-only regular file through the
+// same no-alias authority checks used for Delegation configuration.
+func ReadProtectedFile(path string, maximumBytes int) ([]byte, error) {
+	if maximumBytes < 1 || maximumBytes > maximumProtectedReadSize {
+		return nil, fmt.Errorf("protected file limit must be from 1 through %d bytes", maximumProtectedReadSize)
+	}
+	file, err := openProtectedConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, int64(maximumBytes)+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("read protected file: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close protected file: %w", closeErr)
+	}
+	if len(data) > maximumBytes {
+		return nil, fmt.Errorf("protected file exceeds %d-byte limit", maximumBytes)
+	}
+	return data, nil
 }
 
 func prepareWrite(path string) (*securefs.Root, string, error) {

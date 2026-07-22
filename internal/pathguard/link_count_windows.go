@@ -1,0 +1,18 @@
+//go:build windows
+
+package pathguard
+
+import (
+	"fmt"
+	"os"
+
+	"golang.org/x/sys/windows"
+)
+
+func openedFileLinkCount(file *os.File, _ os.FileInfo) (uint64, error) {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err != nil {
+		return 0, fmt.Errorf("read file information: %w", err)
+	}
+	return uint64(info.NumberOfLinks), nil
+}

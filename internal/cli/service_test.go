@@ -22,6 +22,7 @@ func TestConnectorServiceStopsBeforeBindingWhenPreCanceled(t *testing.T) {
 		"--device-name", "worker",
 		"--broker-url", "wss://broker.example.test",
 		"--auth-mode", "none",
+		"--codex-binary", testCodexBinary(t),
 	}, &setupOutput, &setupError); code != 0 {
 		t.Fatalf("setup code = %d, want 0; stderr = %q", code, setupError.String())
 	}

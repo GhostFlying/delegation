@@ -32,6 +32,50 @@ func holdConfigDirectory(path string) (*securefs.Root, error) {
 	return directory, nil
 }
 
+func protectPrivateDirectory(path string) error {
+	directory, err := securefs.OpenRoot(path, func(opened *os.File) error {
+		if _, err := inspectOwnedPrivateDirectory(opened); err != nil {
+			return err
+		}
+		return opened.Chmod(0o700)
+	})
+	if err != nil {
+		return err
+	}
+	return directory.Close()
+}
+
+func holdPrivateDirectory(path string) (*securefs.Root, error) {
+	if err := validateConfigDirectory(path); err != nil {
+		return nil, err
+	}
+	return securefs.OpenRoot(path, func(directory *os.File) error {
+		info, err := inspectOwnedPrivateDirectory(directory)
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm() != 0o700 {
+			return errors.New("private directory must have mode 0700")
+		}
+		return nil
+	})
+}
+
+func inspectOwnedPrivateDirectory(directory *os.File) (os.FileInfo, error) {
+	info, err := directory.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect opened private directory: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, errors.New("private directory must be a directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return nil, errors.New("private directory must be owned by the current user")
+	}
+	return info, nil
+}
+
 func validateConfigDirectoryHandle(directory *os.File) error {
 	info, err := directory.Stat()
 	if err != nil {

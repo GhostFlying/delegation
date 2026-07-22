@@ -54,6 +54,227 @@ func TestValidatePeerAuthorityRejectsStateSidecarAliases(t *testing.T) {
 	}
 }
 
+func TestValidatePeerRuntimeAuthorityRejectsFileDirectoryAliases(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "peer.json")
+	statePath := filepath.Join(root, "peer.sqlite3")
+	tokenPath := filepath.Join(root, "peer.token")
+	codexHome := filepath.Join(root, "codex")
+	workspaceRoot := filepath.Join(root, "workspaces")
+	if err := ValidatePeerRuntimeAuthority(
+		configPath,
+		statePath,
+		tokenPath,
+		codexHome,
+		workspaceRoot,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for name, paths := range map[string][2]string{
+		"state and CODEX_HOME":    {statePath, statePath},
+		"token and workspace":     {codexHome, tokenPath},
+		"managed directories":     {codexHome, codexHome},
+		"state WAL and workspace": {codexHome, statePath + "-wal"},
+		"workspace inside home":   {codexHome, filepath.Join(codexHome, "workspaces")},
+		"home inside workspace":   {filepath.Join(workspaceRoot, "codex"), workspaceRoot},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidatePeerRuntimeAuthority(
+				configPath,
+				statePath,
+				tokenPath,
+				paths[0],
+				paths[1],
+			); err == nil {
+				t.Fatal("ValidatePeerRuntimeAuthority accepted an alias")
+			}
+		})
+	}
+}
+
+func TestValidatePeerRuntimeAuthorityRejectsAuthorityInsideManagedDirectories(t *testing.T) {
+	root := t.TempDir()
+	codexHome := filepath.Join(root, "codex")
+	workspaceRoot := filepath.Join(root, "workspaces")
+	for name, paths := range map[string]struct {
+		config string
+		state  string
+		token  string
+	}{
+		"configuration inside CODEX_HOME": {
+			config: filepath.Join(codexHome, "peer.json"),
+			state:  filepath.Join(root, "state", "peer.sqlite3"),
+		},
+		"state inside workspace": {
+			config: filepath.Join(root, "peer.json"),
+			state:  filepath.Join(workspaceRoot, "state", "peer.sqlite3"),
+		},
+		"token inside CODEX_HOME": {
+			config: filepath.Join(root, "peer.json"),
+			state:  filepath.Join(root, "state", "peer.sqlite3"),
+			token:  filepath.Join(codexHome, "peer.token"),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidatePeerRuntimeAuthority(
+				paths.config,
+				paths.state,
+				paths.token,
+				codexHome,
+				workspaceRoot,
+			)
+			if err == nil {
+				t.Fatal("ValidatePeerRuntimeAuthority accepted managed authority")
+			}
+		})
+	}
+}
+
+func TestValidatePeerRuntimeAuthorityRejectsParentComponentsBeforeResolvingLinks(t *testing.T) {
+	root := t.TempDir()
+	workspaceRoot := filepath.Join(root, "workspaces")
+	child := filepath.Join(workspaceRoot, "child")
+	if err := os.MkdirAll(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(child, alias); err != nil {
+		t.Skipf("creating a directory symlink is unavailable: %v", err)
+	}
+	err := ValidatePeerRuntimeAuthority(
+		filepath.Join(root, "peer.json"),
+		alias+string(filepath.Separator)+".."+string(filepath.Separator)+"peer.sqlite3",
+		filepath.Join(root, "peer.token"),
+		filepath.Join(root, "codex"),
+		workspaceRoot,
+	)
+	if err == nil || !strings.Contains(err.Error(), "parent path components") {
+		t.Fatalf("ValidatePeerRuntimeAuthority() error = %v", err)
+	}
+}
+
+func TestValidatePeerServiceEnvironmentRejectsAuthorityAndManagedDirectoryAliases(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "peer.json")
+	statePath := filepath.Join(root, "state", "peer.sqlite3")
+	tokenPath := filepath.Join(root, "secrets", "peer.token")
+	codexHome := filepath.Join(root, "codex")
+	workspaceRoot := filepath.Join(root, "workspaces")
+	environmentPath := filepath.Join(root, "secrets", "peer.env")
+	if err := ValidatePeerServiceEnvironment(
+		environmentPath,
+		configPath,
+		statePath,
+		tokenPath,
+		codexHome,
+		workspaceRoot,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for name, candidate := range map[string]string{
+		"configuration":    configPath,
+		"state sidecar":    statePath + "-wal",
+		"CODEX_HOME":       filepath.Join(codexHome, "peer.env"),
+		"workspace":        filepath.Join(workspaceRoot, "nested", "peer.env"),
+		"case folded file": filepath.Join(root, "SECRETS", "PEER.TOKEN"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidatePeerServiceEnvironment(
+				candidate,
+				configPath,
+				statePath,
+				tokenPath,
+				codexHome,
+				workspaceRoot,
+			); err == nil {
+				t.Fatal("ValidatePeerServiceEnvironment accepted a conflicting path")
+			}
+		})
+	}
+}
+
+func TestValidatePeerServiceEnvironmentRejectsHardLinkedAuthority(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "peer.json")
+	environmentPath := filepath.Join(root, "peer.env")
+	if err := os.WriteFile(configPath, []byte("authority"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(configPath, environmentPath); err != nil {
+		t.Skipf("creating a hard link is unavailable: %v", err)
+	}
+	err := ValidatePeerServiceEnvironment(
+		environmentPath,
+		configPath,
+		filepath.Join(root, "peer.sqlite3"),
+		filepath.Join(root, "peer.token"),
+		filepath.Join(root, "codex"),
+		filepath.Join(root, "workspaces"),
+	)
+	if err == nil || !strings.Contains(err.Error(), "peer configuration") {
+		t.Fatalf("ValidatePeerServiceEnvironment() error = %v", err)
+	}
+}
+
+func TestValidatePeerRuntimeAuthorityRejectsHardLinkHiddenInWorkspace(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "secrets", "peer.json")
+	workspaceRoot := filepath.Join(root, "workspaces")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("authority"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(configPath, filepath.Join(workspaceRoot, "peer.json")); err != nil {
+		t.Skipf("creating a hard link is unavailable: %v", err)
+	}
+
+	err := ValidatePeerRuntimeAuthority(
+		configPath,
+		filepath.Join(root, "state", "peer.sqlite3"),
+		filepath.Join(root, "secrets", "peer.token"),
+		filepath.Join(root, "codex"),
+		workspaceRoot,
+	)
+	if err == nil || !strings.Contains(err.Error(), "peer configuration has unexpected hard-link count 2") {
+		t.Fatalf("ValidatePeerRuntimeAuthority() error = %v", err)
+	}
+}
+
+func TestValidatePeerServiceEnvironmentRejectsHardLinkHiddenInWorkspace(t *testing.T) {
+	root := t.TempDir()
+	environmentPath := filepath.Join(root, "secrets", "peer.env")
+	workspaceRoot := filepath.Join(root, "workspaces")
+	if err := os.MkdirAll(filepath.Dir(environmentPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(environmentPath, []byte("GATEWAY_KEY=secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(environmentPath, filepath.Join(workspaceRoot, "provider.env")); err != nil {
+		t.Skipf("creating a hard link is unavailable: %v", err)
+	}
+
+	err := ValidatePeerServiceEnvironment(
+		environmentPath,
+		filepath.Join(root, "peer.json"),
+		filepath.Join(root, "state", "peer.sqlite3"),
+		filepath.Join(root, "secrets", "peer.token"),
+		filepath.Join(root, "codex"),
+		workspaceRoot,
+	)
+	if err == nil || !strings.Contains(err.Error(), "peer service environment has unexpected hard-link count 2") {
+		t.Fatalf("ValidatePeerServiceEnvironment() error = %v", err)
+	}
+}
+
 func TestValidateBrokerAuthorityRejectsAliases(t *testing.T) {
 	t.Run("case folded master token", func(t *testing.T) {
 		root := t.TempDir()

@@ -230,6 +230,7 @@ func TestConnectorAuthorityIsReadBeforeRuntimeSideEffects(t *testing.T) {
 		"--broker-url", "wss://broker.example.test",
 		"--auth-mode", "token",
 		"--token-file", tokenPath,
+		"--codex-binary", testCodexBinary(t),
 	}, &stdout, &stderr); code != 0 {
 		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
 	}
@@ -319,6 +320,7 @@ func setupConnectorRuntimeTest(
 		"--device-name", deviceName,
 		"--broker-url", brokerURL,
 		"--auth-mode", "none",
+		"--codex-binary", testCodexBinary(t),
 	}, &stdout, &stderr); code != 0 {
 		t.Fatalf("setup peer code = %d, stderr = %q", code, stderr.String())
 	}
