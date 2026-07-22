@@ -48,6 +48,7 @@ type fakeRootBackend struct {
 	spawnResult     *protocol.SpawnAgentResult
 	agentsResult    *protocol.ListAgentsResult
 	operationResult *protocol.AgentOperationResult
+	waitResults     []protocol.WaitAgentResult
 }
 
 type cancelRootBackend struct {
@@ -89,6 +90,12 @@ func (b *fakeRootBackend) Call(
 	spawnResult := b.spawnResult
 	agentsResult := b.agentsResult
 	operationResult := b.operationResult
+	var waitResult *protocol.WaitAgentResult
+	if method == protocol.MethodWaitAgent && len(b.waitResults) != 0 {
+		copy := b.waitResults[0]
+		b.waitResults = b.waitResults[1:]
+		waitResult = &copy
+	}
 	b.mu.Unlock()
 	if err != nil {
 		return err
@@ -179,6 +186,16 @@ func (b *fakeRootBackend) Call(
 			OperationID: input.OperationID, AgentID: input.AgentID,
 			Action: protocol.AgentOperationInterrupt, Outcome: protocol.AgentOperationOutcomeInterrupted,
 		}
+	case protocol.MethodWaitAgent:
+		input := params.(protocol.WaitAgentParams)
+		if waitResult != nil {
+			*result.(*protocol.WaitAgentResult) = *waitResult
+			break
+		}
+		*result.(*protocol.WaitAgentResult) = protocol.WaitAgentResult{
+			Messages: []protocol.MailboxMessage{}, Activities: []protocol.AgentLifecycleActivity{},
+			NextMailboxCursor: input.MailboxCursor, NextLifecycleCursor: input.LifecycleCursor,
+		}
 	default:
 		return fmt.Errorf("unexpected method %q", method)
 	}
@@ -199,21 +216,25 @@ func TestRootMCPListsStaticToolsAndBindsThread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 7 ||
+	if len(tools.Tools) != 8 ||
 		tools.Tools[0].Name != ToolDescribeDevice || tools.Tools[1].Name != ToolFollowupTask ||
 		tools.Tools[2].Name != ToolInterruptAgent || tools.Tools[3].Name != ToolListAgents ||
 		tools.Tools[4].Name != ToolListDevices || tools.Tools[5].Name != ToolSendMessage ||
-		tools.Tools[6].Name != ToolSpawnAgent {
+		tools.Tools[6].Name != ToolSpawnAgent || tools.Tools[7].Name != ToolWaitAgent {
 		t.Fatalf("root tools = %#v", tools.Tools)
 	}
 	for _, tool := range tools.Tools {
 		mutating := tool.Name == ToolSpawnAgent || tool.Name == ToolSendMessage ||
 			tool.Name == ToolFollowupTask || tool.Name == ToolInterruptAgent
-		if tool.Annotations == nil || !tool.Annotations.IdempotentHint ||
+		consuming := tool.Name == ToolWaitAgent
+		if tool.Annotations == nil ||
+			tool.Annotations.IdempotentHint != !consuming ||
 			tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint ||
 			tool.Annotations.OpenWorldHint == nil ||
 			(mutating && (tool.Annotations.ReadOnlyHint || !*tool.Annotations.OpenWorldHint)) ||
-			(!mutating && (!tool.Annotations.ReadOnlyHint || *tool.Annotations.OpenWorldHint)) {
+			(consuming && (tool.Annotations.ReadOnlyHint || *tool.Annotations.OpenWorldHint)) ||
+			(!mutating && !consuming &&
+				(!tool.Annotations.ReadOnlyHint || *tool.Annotations.OpenWorldHint)) {
 			t.Fatalf("tool annotations for %s = %#v", tool.Name, tool.Annotations)
 		}
 		assertToolSchema(t, tool)
@@ -681,6 +702,12 @@ func assertToolSchema(t *testing.T, tool *mcp.Tool) {
 				message.MaxLength == nil || *message.MaxLength != wantMaximum {
 				t.Fatalf("%s input schema = %s", tool.Name, data)
 			}
+		}
+	case ToolWaitAgent:
+		timeout := schema.Properties["timeout_seconds"]
+		if timeout.Minimum == nil || *timeout.Minimum != 1 || timeout.Maximum == nil ||
+			*timeout.Maximum != maximumAgentWaitSeconds {
+			t.Fatalf("wait_agent input schema = %s", data)
 		}
 	default:
 		t.Fatalf("unexpected tool %q", tool.Name)

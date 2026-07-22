@@ -25,8 +25,7 @@ delegation with an unrelated remote environment without telling the user.
 ## Prepare And Spawn
 
 Proceed only when the installed runtime exposes `spawn_agent` and `list_agents`. Report the
-installed checkpoint boundary instead of pretending unavailable lifecycle or workspace tools
-exist.
+installed checkpoint boundary instead of pretending unavailable workspace tools exist.
 
 1. Generate a fresh UUID `spawn_id` for the logical dispatch. Call `spawn_agent` with that ID, the
    selected `target_device_id`, a unique lowercase `task_name`, and a self-contained `message`.
@@ -43,9 +42,11 @@ fetch all required public inputs itself.
 
 ## Collaborate
 
-Use root-side message, follow-up, wait, and interrupt tools only when the installed runtime actually
-exposes them. The initial M2 dispatch checkpoint exposes spawn and agent listing but not those
-lifecycle controls; report the spawned status and do not claim that later collaboration happened.
+Use `send_message` to steer a running worker or queue a message for an idle worker. Use
+`followup_task` to start a new turn only when the worker is idle, and `interrupt_agent` to stop an
+active turn. `wait_agent` consumes bounded lifecycle and worker-message pages; call it again
+immediately while `has_more` is true before concluding that no unread result remains. Reuse the
+same operation ID only when retrying the exact same logical action.
 
 Remote workers do not receive the peer roster and cannot recursively delegate in v0. A managed
 worker thread permanently remains a worker; opening its history does not promote it to a root. Start

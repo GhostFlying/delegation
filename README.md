@@ -7,8 +7,8 @@ tasks and managed workers.
 The project is being delivered in reviewed milestones. M0 provides the plugin, skills, native
 runtime bootstrap, and release foundation. M1 provides the broker and persistent registry. M1.1
 makes every device an equal peer and exposes root MCP discovery from any user-created Codex task.
-M2 runs isolated managed Codex threads on selected peers; its first checkpoint provides durable
-spawn and agent discovery. Git workspace transport remains M3 work.
+M2 runs isolated managed Codex threads on selected peers with durable spawn, agent discovery,
+message, follow-up, interrupt, and wait controls. Git workspace transport remains M3 work.
 
 ## Install The Plugin
 
@@ -192,10 +192,12 @@ inventing another spawn ID. Use `list_agents` to inspect the current tree's rece
 failure codes. Task names identify agents within a root tree and cannot be reused for another
 spawn.
 
-This M2 checkpoint starts workers in an empty managed workspace. It does not yet expose root-side
-message, follow-up, interrupt, or wait tools; those lifecycle controls are the next M2 checkpoint.
-Repository synchronization and change artifacts arrive in M3. Do not claim that a worker received
-the root repository until workspace transport reports that explicitly.
+This M2 checkpoint starts workers in an empty managed workspace. Use `send_message` to steer a
+running worker or queue a message for an idle worker, `followup_task` to start a new turn for an idle
+worker, and `interrupt_agent` to stop an active turn. `wait_agent` returns bounded lifecycle and
+worker-message pages; call it again immediately while `has_more` is true before concluding that the
+result is complete. Repository synchronization and change artifacts arrive in M3. Do not claim
+that a worker received the root repository until workspace transport reports that explicitly.
 
 ## License
 

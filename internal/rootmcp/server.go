@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
@@ -25,6 +26,7 @@ const (
 	ToolSendMessage    = "send_message"
 	ToolFollowupTask   = "followup_task"
 	ToolInterruptAgent = "interrupt_agent"
+	ToolWaitAgent      = "wait_agent"
 	maximumDevicePage  = 4
 	listFeatureLimit   = 0
 	maximumListBytes   = 4 * 1024
@@ -32,7 +34,7 @@ const (
 	bridgeCallTimeout  = 15 * time.Second
 	agentCallTimeout   = 135 * time.Second
 	uuidPattern        = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
-	serverInstructions = "Delegation exposes the live peer registry and managed agents for this root task. Use list_devices for bounded summaries, then describe_device before selecting a target. Choose an online peer whose OS, architecture, and features fit the work; isCurrentDevice identifies a valid self-target. Call spawn_agent with a fresh spawn_id and a self-contained task. Use list_agents for durable dispatch receipts. Agent-control targets accept an agent UUID, task_name, or /root/task_name. Supply a fresh message_id or operation_id for each logical action; retry an uncertain result with the same ID and exactly the same arguments. send_message delivers to a running or idle agent, followup_task starts a new turn for an idle agent, and interrupt_agent stops its active turn."
+	serverInstructions = "Delegation exposes the live peer registry and managed agents for this root task. Use list_devices for bounded summaries, then describe_device before selecting a target. Choose an online peer whose OS, architecture, and features fit the work; isCurrentDevice identifies a valid self-target. Call spawn_agent with a fresh spawn_id and a self-contained task. Use list_agents for durable dispatch receipts and wait_agent for new lifecycle activity or worker messages; call wait_agent again immediately while has_more is true. Agent-control targets accept an agent UUID, task_name, or /root/task_name. Supply a fresh message_id or operation_id for each logical action; retry an uncertain result with the same ID and exactly the same arguments. send_message delivers to a running or idle agent, followup_task starts a new turn for an idle agent, and interrupt_agent stops its active turn."
 )
 
 type Backend interface {
@@ -43,6 +45,9 @@ type Root struct {
 	backend      Backend
 	controllerID string
 	deviceID     string
+	waitMu       sync.Mutex
+	waitStates   map[string]*agentWaitState
+	waitUse      uint64
 }
 
 type ListDevicesInput struct {
@@ -101,7 +106,14 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 	if err != nil {
 		return nil, err
 	}
-	root := &Root{backend: backend, controllerID: controllerID, deviceID: deviceID}
+	waitInputSchema, err := agentWaitInputSchema()
+	if err != nil {
+		return nil, err
+	}
+	root := &Root{
+		backend: backend, controllerID: controllerID, deviceID: deviceID,
+		waitStates: make(map[string]*agentWaitState),
+	}
 	server := mcp.NewServer(
 		&mcp.Implementation{
 			Name: "delegation", Title: "Delegation", Version: buildinfo.Version,
@@ -160,6 +172,13 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 		Annotations: mutatingAnnotations(),
 		InputSchema: interruptInputSchema,
 	}, root.interruptAgent)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        ToolWaitAgent,
+		Title:       "Wait for delegation agents",
+		Description: "Wait for new managed-agent lifecycle activity or worker messages in this root task.",
+		Annotations: consumingAnnotations(),
+		InputSchema: waitInputSchema,
+	}, root.waitAgent)
 	return server, nil
 }
 
@@ -408,7 +427,8 @@ func (r *Root) call(
 func isAgentCall(method string) bool {
 	switch method {
 	case protocol.MethodSpawnAgent, protocol.MethodSendAgent,
-		protocol.MethodFollowupAgent, protocol.MethodInterruptAgent:
+		protocol.MethodFollowupAgent, protocol.MethodInterruptAgent,
+		protocol.MethodWaitAgent:
 		return true
 	default:
 		return false
@@ -468,5 +488,15 @@ func mutatingAnnotations() *mcp.ToolAnnotations {
 		IdempotentHint:  true,
 		DestructiveHint: &no,
 		OpenWorldHint:   &yes,
+	}
+}
+
+func consumingAnnotations() *mcp.ToolAnnotations {
+	no := false
+	return &mcp.ToolAnnotations{
+		ReadOnlyHint:    false,
+		IdempotentHint:  false,
+		DestructiveHint: &no,
+		OpenWorldHint:   &no,
 	}
 }
