@@ -49,9 +49,11 @@ CREATE TABLE trees (
     tree_id TEXT NOT NULL,
     root_agent_id TEXT NOT NULL,
     root_device_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+	created_at INTEGER NOT NULL CHECK (created_at >= 0),
 	last_agent_sequence INTEGER NOT NULL DEFAULT 0
 		CHECK (last_agent_sequence BETWEEN 0 AND 256),
+	last_lifecycle_sequence INTEGER NOT NULL DEFAULT 0
+		CHECK (last_lifecycle_sequence >= 0),
     PRIMARY KEY (controller_id, external_thread_id),
     UNIQUE (controller_id, tree_id)
 ) STRICT;
@@ -138,6 +140,49 @@ CREATE TABLE agent_operation_receipts (
 
 CREATE INDEX agent_operation_receipts_by_agent
 	ON agent_operation_receipts(controller_id, tree_id, agent_id, created_at, operation_id);
+
+CREATE TABLE peer_worker_sync_cursors (
+	controller_id TEXT NOT NULL,
+	device_id TEXT NOT NULL,
+	active_connection_id TEXT NOT NULL CHECK (length(active_connection_id) = 36),
+	active_lease_revision INTEGER NOT NULL CHECK (active_lease_revision > 0),
+	applied_revision INTEGER NOT NULL CHECK (applied_revision >= 0),
+	PRIMARY KEY (controller_id, device_id),
+	FOREIGN KEY (controller_id, device_id)
+		REFERENCES devices(controller_id, device_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE agent_lifecycle_states (
+	controller_id TEXT NOT NULL,
+	tree_id TEXT NOT NULL,
+	agent_id TEXT NOT NULL,
+	target_device_id TEXT NOT NULL,
+	target_revision INTEGER NOT NULL CHECK (target_revision > 0),
+	phase TEXT NOT NULL CHECK (
+		phase IN ('reserved', 'pending', 'starting', 'preflight', 'ready',
+		          'running', 'idle', 'interrupted', 'failed')
+	),
+	failure_code TEXT NOT NULL CHECK (
+		length(CAST(failure_code AS BLOB)) <= 64 AND
+		((phase = 'failed' AND length(failure_code) > 0) OR
+		 (phase != 'failed' AND failure_code = ''))
+	),
+	lifecycle_sequence INTEGER NOT NULL CHECK (lifecycle_sequence > 0),
+	observed_at INTEGER NOT NULL CHECK (observed_at >= 0),
+	PRIMARY KEY (controller_id, tree_id, agent_id),
+	UNIQUE (controller_id, tree_id, lifecycle_sequence),
+	FOREIGN KEY (controller_id, target_device_id)
+		REFERENCES devices(controller_id, device_id),
+	FOREIGN KEY (controller_id, tree_id)
+		REFERENCES trees(controller_id, tree_id) ON DELETE CASCADE,
+	FOREIGN KEY (controller_id, tree_id, agent_id)
+		REFERENCES principals(controller_id, tree_id, agent_id) ON DELETE CASCADE,
+	FOREIGN KEY (controller_id, tree_id, agent_id)
+		REFERENCES agent_spawn_receipts(controller_id, tree_id, agent_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX agent_lifecycle_states_by_tree_sequence
+	ON agent_lifecycle_states(controller_id, tree_id, lifecycle_sequence);
 
 CREATE TABLE mailboxes (
     controller_id TEXT NOT NULL,

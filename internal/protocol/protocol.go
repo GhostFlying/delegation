@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"strings"
 
@@ -69,22 +70,23 @@ const (
 )
 
 const (
-	MethodHello           = "protocol.hello"
-	MethodHeartbeat       = "protocol.heartbeat"
-	MethodRegistrySummary = "registry.summary"
-	MethodCancelRequest   = "request.cancel"
-	MethodEnsureRootTree  = "tree.ensure_root"
-	MethodListDevices     = "device.list"
-	MethodDescribeDevice  = "device.describe"
-	MethodSpawnAgent      = "agent.spawn"
-	MethodListAgents      = "agent.list"
-	MethodSendAgent       = "agent.send"
-	MethodFollowupAgent   = "agent.followup"
-	MethodInterruptAgent  = "agent.interrupt"
-	MethodSpawnWorker     = "worker.spawn"
-	MethodSendWorker      = "worker.send"
-	MethodFollowupWorker  = "worker.followup"
-	MethodInterruptWorker = "worker.interrupt"
+	MethodHello               = "protocol.hello"
+	MethodHeartbeat           = "protocol.heartbeat"
+	MethodRegistrySummary     = "registry.summary"
+	MethodCancelRequest       = "request.cancel"
+	MethodEnsureRootTree      = "tree.ensure_root"
+	MethodListDevices         = "device.list"
+	MethodDescribeDevice      = "device.describe"
+	MethodSpawnAgent          = "agent.spawn"
+	MethodListAgents          = "agent.list"
+	MethodSendAgent           = "agent.send"
+	MethodFollowupAgent       = "agent.followup"
+	MethodInterruptAgent      = "agent.interrupt"
+	MethodSpawnWorker         = "worker.spawn"
+	MethodSendWorker          = "worker.send"
+	MethodFollowupWorker      = "worker.followup"
+	MethodInterruptWorker     = "worker.interrupt"
+	MethodSyncWorkerLifecycle = "worker.lifecycle.sync"
 )
 
 type CancelRequestParams struct {
@@ -102,11 +104,12 @@ func (p CancelRequestParams) Validate() error {
 }
 
 const (
-	FeatureDeviceRegistry = "deviceRegistryV1"
-	FeatureFullDuplexRPC  = "fullDuplexRpcV1"
-	FeatureMailbox        = "mailboxV1"
-	FeatureWorkerDispatch = "managedWorkerDispatchV1"
-	FeaturePeerRoot       = "peerRootV1"
+	FeatureDeviceRegistry  = "deviceRegistryV1"
+	FeatureFullDuplexRPC   = "fullDuplexRpcV1"
+	FeatureMailbox         = "mailboxV1"
+	FeatureWorkerDispatch  = "managedWorkerDispatchV1"
+	FeatureWorkerLifecycle = "workerLifecycleV1"
+	FeaturePeerRoot        = "peerRootV1"
 )
 
 var methodPattern = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,63}$`)
@@ -280,6 +283,7 @@ type Hello struct {
 	RuntimeVersion string   `json:"runtimeVersion"`
 	Features       []string `json:"features"`
 	Cursor         uint64   `json:"cursor"`
+	WorkerRevision uint64   `json:"workerRevision"`
 }
 
 func (h Hello) Descriptor() control.DeviceDescriptor {
@@ -296,14 +300,21 @@ func (h Hello) Descriptor() control.DeviceDescriptor {
 }
 
 func (h Hello) Validate() error {
-	return h.Descriptor().Validate()
+	if err := h.Descriptor().Validate(); err != nil {
+		return err
+	}
+	if h.WorkerRevision > math.MaxInt64 {
+		return errors.New("workerRevision exceeds the supported range")
+	}
+	return nil
 }
 
 type HelloResult struct {
-	ConnectionID        string   `json:"connectionId"`
-	Features            []string `json:"features"`
-	HeartbeatIntervalMS int64    `json:"heartbeatIntervalMs"`
-	Revision            uint64   `json:"revision"`
+	ConnectionID          string   `json:"connectionId"`
+	Features              []string `json:"features"`
+	HeartbeatIntervalMS   int64    `json:"heartbeatIntervalMs"`
+	Revision              uint64   `json:"revision"`
+	WorkerAppliedRevision uint64   `json:"workerAppliedRevision"`
 }
 
 type Heartbeat struct{}
