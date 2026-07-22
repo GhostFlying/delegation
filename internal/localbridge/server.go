@@ -21,7 +21,7 @@ const (
 	maximumConcurrentWaitCalls    = config.MaximumWorkerSlots + rootMailboxWaitHeadroom
 	maximumConcurrentControlCalls = 32
 	maximumConcurrentCalls        = maximumConcurrentWaitCalls + maximumConcurrentControlCalls
-	localCallTimeout              = 30 * time.Second
+	localCallTimeout              = 130 * time.Second
 )
 
 type Backend interface {
@@ -252,6 +252,7 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 			return nil, &protocol.Error{Code: protocol.ErrorForbidden, Message: "managed worker thread cannot create a root tree"}
 		}
 	case protocol.MethodListDevices, protocol.MethodDescribeDevice,
+		protocol.MethodSpawnAgent, protocol.MethodListAgents,
 		protocol.MethodSendMessage, protocol.MethodWaitMailbox:
 		if request.TreeID == "" || request.Source == nil {
 			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "request requires a principal"}

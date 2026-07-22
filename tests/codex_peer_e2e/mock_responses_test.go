@@ -23,7 +23,7 @@ type mockResponses struct {
 
 func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	peerLabel := request.Header.Get("x-delegation-test-peer")
-	if request.Method != http.MethodPost || request.URL.Path != "/v1/responses" || deviceIDs[peerLabel] == "" {
+	if request.Method != http.MethodPost || request.URL.Path != "/v1/responses" {
 		m.fail(writer, fmt.Errorf("unexpected model request %s %s for peer %q", request.Method, request.URL.Path, peerLabel))
 		return
 	}
@@ -35,6 +35,28 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	testCase := requestCase(body)
 	if testCase == "" {
 		m.fail(writer, errors.New("model request did not contain a known acceptance case"))
+		return
+	}
+	if testCase == workerDispatchCase {
+		key := "worker/" + testCase
+		m.mu.Lock()
+		call := m.calls[key]
+		m.calls[key] = call + 1
+		m.mu.Unlock()
+		if call != 0 {
+			m.record(fmt.Errorf("case %s received model call %d", key, call+1))
+		}
+		encodedTools, _ := json.Marshal(body["tools"])
+		for _, forbidden := range []string{"spawn_agent", "list_agents", "list_devices", "describe_device"} {
+			if bytes.Contains(encodedTools, []byte(forbidden)) {
+				m.record(fmt.Errorf("case %s exposed root tool %s: %s", key, forbidden, encodedTools))
+			}
+		}
+		writeFinalResponse(writer, key)
+		return
+	}
+	if deviceIDs[peerLabel] == "" {
+		m.fail(writer, fmt.Errorf("unexpected model peer %q", peerLabel))
 		return
 	}
 	key := peerLabel + "/" + testCase
@@ -111,7 +133,12 @@ func decodeRequest(request *http.Request) (map[string]any, error) {
 func requestCase(body map[string]any) string {
 	data, _ := json.Marshal(body)
 	text := string(data)
-	for _, testCase := range []string{"cross-conflict", "a1-resume", "lazy", "a1", "b1", "c1", "a2"} {
+	for _, testCase := range []string{
+		workerDispatchCase, "cross-conflict", "a1-resume", "lazy", "a1", "b1", "c1", "a2",
+	} {
+		if testCase == workerDispatchCase && strings.Contains(text, "delegation-worker-case="+testCase) {
+			return testCase
+		}
 		suffix := strings.ReplaceAll(testCase, "-", "_")
 		if strings.Contains(text, "delegation-e2e-case="+testCase) ||
 			strings.Contains(text, "search-"+suffix) || strings.Contains(text, "call-"+suffix) {
@@ -337,7 +364,9 @@ func (m *mockResponses) verify(t *testing.T, cases []string) {
 	for _, testCase := range cases {
 		want := 3
 		label := strings.ToUpper(testCase[:1])
-		if testCase == "lazy" {
+		if testCase == workerDispatchCase {
+			label, want = "worker", 1
+		} else if testCase == "lazy" {
 			label, want = "A", 1
 		} else if strings.HasPrefix(testCase, "a") {
 			label = "A"

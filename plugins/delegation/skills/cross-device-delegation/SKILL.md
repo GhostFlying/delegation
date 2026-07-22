@@ -15,33 +15,37 @@ Delegation MCP instructions contain no peer roster. Call `list_devices` for curr
 then `describe_device` for the full advertised feature list and current presence details. Match the
 task against reported OS, architecture, runtime and protocol versions, features, and online state.
 Use `isCurrentDevice` to recognize the local peer; self-targeting is valid once spawn exists and
-creates a separate managed worker. M1.1 does not report arbitrary toolchains, hardware, tags, or
-capacity; do not infer them from a peer name. Ask the user for missing placement facts or validate them explicitly once worker
-execution exists.
+creates a separate managed worker. Delegation does not report arbitrary toolchains, hardware, tags,
+or capacity; do not infer them from a peer name. Ask the user for missing placement facts or have a
+worker validate them explicitly.
 
 If Delegation tools are unavailable, use `$delegation-setup`; do not replace cross-device
 delegation with an unrelated remote environment without telling the user.
 
 ## Prepare And Spawn
 
-Proceed only when the installed runtime exposes the tools below. M1.1 exposes peer discovery but
-does not yet expose worker or workspace tools; report that milestone boundary instead of pretending
-to delegate.
+Proceed only when the installed runtime exposes `spawn_agent` and `list_agents`. Report the
+installed checkpoint boundary instead of pretending unavailable lifecycle or workspace tools
+exist.
 
-1. Use `sync_workspace` from the trusted root workspace when the task needs repository content.
-   Confirm the selected device, explicit Git URL, HEAD, transfer strategy, and warnings before
-   spawning work.
-2. Call `spawn_agent` with the selected peer, prepared workspace, a short task name, and a
-   self-contained task description. Include the requested output, validation command, and relevant
-   platform constraint; do not send the whole root transcript.
-3. Keep unrelated subtasks local. Spawn multiple remote workers only when their work is independent.
+1. Generate a fresh UUID `spawn_id` for the logical dispatch. Call `spawn_agent` with that ID, the
+   selected `target_device_id`, a unique lowercase `task_name`, and a self-contained `message`.
+   Include the requested output, validation command, and relevant platform constraint; do not send
+   the whole root transcript.
+2. Treat `pending` as an indeterminate delivery result. Retry with the same spawn ID and exactly the
+   same arguments. Never create a second agent merely because the first response was lost.
+3. Use `list_agents` to inspect durable status. Keep unrelated subtasks local and spawn multiple
+   workers only when their work is independent.
+
+The current M2 checkpoint starts workers in an empty managed workspace. Do not delegate repository
+work that requires local files until workspace synchronization is available, unless the task can
+fetch all required public inputs itself.
 
 ## Collaborate
 
-Use `send_message` to steer a running worker. Use `followup_task` when an idle worker must resume and
-start another turn. Use `wait_agent` to collect worker messages and completion; messages remain in
-the mailbox when the root task is not waiting. Use `interrupt_agent` only when continuing would be
-wasteful or unsafe.
+Use root-side message, follow-up, wait, and interrupt tools only when the installed runtime actually
+exposes them. The initial M2 dispatch checkpoint exposes spawn and agent listing but not those
+lifecycle controls; report the spawned status and do not claim that later collaboration happened.
 
 Remote workers do not receive the peer roster and cannot recursively delegate in v0. A managed
 worker thread permanently remains a worker; opening its history does not promote it to a root. Start

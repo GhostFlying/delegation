@@ -48,8 +48,10 @@ func TestRootMCPInitializesOfflineWithoutReadingDeviceToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 2 || tools.Tools[0].Name != rootmcp.ToolDescribeDevice ||
-		tools.Tools[1].Name != rootmcp.ToolListDevices {
+	if len(tools.Tools) != 4 || tools.Tools[0].Name != rootmcp.ToolDescribeDevice ||
+		tools.Tools[1].Name != rootmcp.ToolListAgents ||
+		tools.Tools[2].Name != rootmcp.ToolListDevices ||
+		tools.Tools[3].Name != rootmcp.ToolSpawnAgent {
 		t.Fatalf("root MCP tools = %#v", tools.Tools)
 	}
 	if err := session.Close(); err != nil {
@@ -154,7 +156,7 @@ func TestRootMCPStdioProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list root MCP process tools: %v; stderr = %q", err, stderr.String())
 	}
-	if len(tools.Tools) != 2 {
+	if len(tools.Tools) != 4 {
 		t.Fatalf("root MCP process tools = %#v", tools.Tools)
 	}
 	if err := session.Close(); err != nil {

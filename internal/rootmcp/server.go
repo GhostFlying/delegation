@@ -20,13 +20,16 @@ import (
 const (
 	ToolListDevices    = "list_devices"
 	ToolDescribeDevice = "describe_device"
+	ToolSpawnAgent     = "spawn_agent"
+	ToolListAgents     = "list_agents"
 	maximumDevicePage  = 4
 	listFeatureLimit   = 0
 	maximumListBytes   = 4 * 1024
 	maximumDetailBytes = 8 * 1024
 	bridgeCallTimeout  = 15 * time.Second
+	spawnCallTimeout   = 135 * time.Second
 	uuidPattern        = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
-	serverInstructions = "Delegation exposes the live peer registry for this root task. Use list_devices for bounded summaries, then describe_device before selecting a candidate when advertised features matter. Choose an online peer whose OS, architecture, and features fit the work. isCurrentDevice identifies this task's local peer. Registry cursors are revision-bound; restart listing without a cursor if the registry changed."
+	serverInstructions = "Delegation exposes the live peer registry and managed agents for this root task. Use list_devices for bounded summaries, then describe_device before selecting a target. Choose an online peer whose OS, architecture, and features fit the work; isCurrentDevice identifies a valid self-target. Call spawn_agent with a fresh spawn_id and a self-contained task. A pending result is uncertain, not failed: retry with the same spawn_id and exactly the same arguments. Use list_agents to inspect this task's durable dispatch receipts."
 )
 
 type Backend interface {
@@ -87,6 +90,10 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 	if err != nil {
 		return nil, err
 	}
+	spawnInputSchema, listAgentsInputSchema, err := agentInputSchemas()
+	if err != nil {
+		return nil, err
+	}
 	root := &Root{backend: backend, controllerID: controllerID, deviceID: deviceID}
 	server := mcp.NewServer(
 		&mcp.Implementation{
@@ -111,6 +118,20 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 		Annotations: readOnlyAnnotations(),
 		InputSchema: describeInputSchema,
 	}, root.describeDevice)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        ToolSpawnAgent,
+		Title:       "Spawn delegation agent",
+		Description: "Start one managed Codex agent on an explicitly selected peer.",
+		Annotations: mutatingAnnotations(),
+		InputSchema: spawnInputSchema,
+	}, root.spawnAgent)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        ToolListAgents,
+		Title:       "List delegation agents",
+		Description: "List durable managed-agent dispatch receipts for this root task.",
+		Annotations: readOnlyAnnotations(),
+		InputSchema: listAgentsInputSchema,
+	}, root.listAgents)
 	return server, nil
 }
 
@@ -348,6 +369,10 @@ func (r *Root) call(
 	params, result any,
 ) error {
 	callContext, cancel := context.WithTimeout(ctx, bridgeCallTimeout)
+	if method == protocol.MethodSpawnAgent {
+		cancel()
+		callContext, cancel = context.WithTimeout(ctx, spawnCallTimeout)
+	}
 	defer cancel()
 	return r.backend.Call(callContext, method, treeID, source, params, result)
 }
@@ -394,5 +419,16 @@ func readOnlyAnnotations() *mcp.ToolAnnotations {
 		IdempotentHint:  true,
 		DestructiveHint: &no,
 		OpenWorldHint:   &no,
+	}
+}
+
+func mutatingAnnotations() *mcp.ToolAnnotations {
+	yes := true
+	no := false
+	return &mcp.ToolAnnotations{
+		ReadOnlyHint:    false,
+		IdempotentHint:  true,
+		DestructiveHint: &no,
+		OpenWorldHint:   &yes,
 	}
 }

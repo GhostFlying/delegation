@@ -42,6 +42,8 @@ type fakeRootBackend struct {
 	ensureResult   *protocol.EnsureRootTreeResult
 	listResult     *protocol.ListDevicesResult
 	describeResult *protocol.DescribeDeviceResult
+	spawnResult    *protocol.SpawnAgentResult
+	agentsResult   *protocol.ListAgentsResult
 }
 
 type cancelRootBackend struct {
@@ -80,6 +82,8 @@ func (b *fakeRootBackend) Call(
 	ensureResult := b.ensureResult
 	listResult := b.listResult
 	describeResult := b.describeResult
+	spawnResult := b.spawnResult
+	agentsResult := b.agentsResult
 	b.mu.Unlock()
 	if err != nil {
 		return err
@@ -120,6 +124,26 @@ func (b *fakeRootBackend) Call(
 			Revision: 8,
 			Device:   testDevice(params.(protocol.DescribeDeviceParams).DeviceID, 24),
 		}
+	case protocol.MethodSpawnAgent:
+		if spawnResult != nil {
+			*result.(*protocol.SpawnAgentResult) = *spawnResult
+			break
+		}
+		input := params.(protocol.SpawnAgentParams)
+		*result.(*protocol.SpawnAgentResult) = protocol.SpawnAgentResult{
+			Agent: testAgent(input.SpawnID, input.TargetDeviceID, input.TaskName, 1),
+		}
+	case protocol.MethodListAgents:
+		if agentsResult != nil {
+			*result.(*protocol.ListAgentsResult) = *agentsResult
+			break
+		}
+		input := params.(protocol.ListAgentsParams)
+		*result.(*protocol.ListAgentsResult) = protocol.ListAgentsResult{
+			Agents: []protocol.AgentSummary{
+				testAgent(rootMCPThreadID, rootMCPWorkerID, "windows_build", input.AfterSequence+1),
+			},
+		}
 	default:
 		return fmt.Errorf("unexpected method %q", method)
 	}
@@ -132,7 +156,7 @@ func (b *fakeRootBackend) snapshot() []rootMCPCall {
 	return append([]rootMCPCall(nil), b.calls...)
 }
 
-func TestRootMCPListsStaticReadOnlyToolsAndBindsThread(t *testing.T) {
+func TestRootMCPListsStaticToolsAndBindsThread(t *testing.T) {
 	backend := &fakeRootBackend{}
 	ctx, clientSession, closeSessions := connectRootMCP(t, backend)
 	defer closeSessions()
@@ -140,14 +164,17 @@ func TestRootMCPListsStaticReadOnlyToolsAndBindsThread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 2 ||
-		tools.Tools[0].Name != ToolDescribeDevice || tools.Tools[1].Name != ToolListDevices {
+	if len(tools.Tools) != 4 ||
+		tools.Tools[0].Name != ToolDescribeDevice || tools.Tools[1].Name != ToolListAgents ||
+		tools.Tools[2].Name != ToolListDevices || tools.Tools[3].Name != ToolSpawnAgent {
 		t.Fatalf("root tools = %#v", tools.Tools)
 	}
 	for _, tool := range tools.Tools {
-		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint ||
+		if tool.Annotations == nil || !tool.Annotations.IdempotentHint ||
 			tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint ||
-			tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint {
+			tool.Annotations.OpenWorldHint == nil ||
+			(tool.Name == ToolSpawnAgent && (tool.Annotations.ReadOnlyHint || !*tool.Annotations.OpenWorldHint)) ||
+			(tool.Name != ToolSpawnAgent && (!tool.Annotations.ReadOnlyHint || *tool.Annotations.OpenWorldHint)) {
 			t.Fatalf("tool annotations for %s = %#v", tool.Name, tool.Annotations)
 		}
 		assertToolSchema(t, tool)
@@ -214,6 +241,47 @@ func TestRootMCPListsStaticReadOnlyToolsAndBindsThread(t *testing.T) {
 			*calls[index].source != rootResult(rootMCPThreadID).Principal.Identity() {
 			t.Fatalf("authorized call %d = %#v", index, calls[index])
 		}
+	}
+}
+
+func TestRootMCPSpawnsAndListsDurableAgents(t *testing.T) {
+	backend := &fakeRootBackend{}
+	ctx, clientSession, closeSessions := connectRootMCP(t, backend)
+	defer closeSessions()
+	spawned := callTool(t, ctx, clientSession, ToolSpawnAgent, rootMCPThreadID, map[string]any{
+		"spawn_id":         rootMCPThreadID,
+		"target_device_id": rootMCPWorkerID,
+		"task_name":        "windows_build",
+		"message":          "Run the Windows build and report the exact result.",
+	})
+	if spawned.IsError {
+		t.Fatalf("spawn_agent result = %#v", spawned)
+	}
+	var agent AgentOutput
+	decodeStructured(t, spawned.StructuredContent, &agent)
+	if agent.SpawnID != rootMCPThreadID || agent.AgentID != rootMCPWorkerID ||
+		agent.ParentAgentID != rootMCPAgentID || agent.TargetDeviceID != rootMCPWorkerID ||
+		agent.TaskName != "windows_build" || agent.Status != protocol.AgentSpawnStarted {
+		t.Fatalf("spawn_agent output = %#v", agent)
+	}
+	listed := callTool(t, ctx, clientSession, ToolListAgents, rootMCPThreadID, map[string]any{"limit": 1})
+	if listed.IsError {
+		t.Fatalf("list_agents result = %#v", listed)
+	}
+	var page ListAgentsOutput
+	decodeStructured(t, listed.StructuredContent, &page)
+	if len(page.Agents) != 1 || page.Agents[0].TaskName != "windows_build" {
+		t.Fatalf("list_agents output = %#v", page)
+	}
+	calls := backend.snapshot()
+	if len(calls) != 4 || calls[1].method != protocol.MethodSpawnAgent ||
+		calls[3].method != protocol.MethodListAgents {
+		t.Fatalf("agent backend calls = %#v", calls)
+	}
+	spawnParams := calls[1].params.(protocol.SpawnAgentParams)
+	if spawnParams.Message != "Run the Windows build and report the exact result." ||
+		calls[1].source == nil || *calls[1].source != rootResult(rootMCPThreadID).Principal.Identity() {
+		t.Fatalf("spawn backend call = %#v", calls[1])
 	}
 }
 
@@ -430,7 +498,7 @@ func TestValidateListResultRejectsRevisionSkew(t *testing.T) {
 
 func TestRootMCPOutputIsBounded(t *testing.T) {
 	if maximumDevicePage > 4 || listFeatureLimit != 0 || maximumListBytes > 4*1024 ||
-		maximumDetailBytes > 8*1024 || len(serverInstructions) > 512 {
+		maximumDetailBytes > 8*1024 || maximumAgentListBytes > 16*1024 || len(serverInstructions) > 1024 {
 		t.Fatalf(
 			"root MCP bounds = page %d, features %d, list %d bytes, detail %d bytes, instructions %d bytes",
 			maximumDevicePage, listFeatureLimit, maximumListBytes, maximumDetailBytes,
@@ -530,6 +598,26 @@ func assertToolSchema(t *testing.T, tool *mcp.Tool) {
 		}
 		if matched, err := regexp.MatchString(deviceID.Pattern, strings.ToUpper(rootMCPDeviceID)); err != nil || matched {
 			t.Fatalf("describe_device schema accepted uppercase UUID: %s", data)
+		}
+	case ToolListAgents:
+		limit := schema.Properties["limit"]
+		cursor := schema.Properties["cursor"]
+		if limit.Minimum == nil || *limit.Minimum != 1 || limit.Maximum == nil ||
+			*limit.Maximum != protocol.MaximumAgentPage || cursor.MaxLength == nil ||
+			*cursor.MaxLength != base64.RawURLEncoding.EncodedLen(maximumCursorBytes) || cursor.Pattern == "" {
+			t.Fatalf("list_agents input schema = %s", data)
+		}
+	case ToolSpawnAgent:
+		spawnID := schema.Properties["spawn_id"]
+		targetID := schema.Properties["target_device_id"]
+		taskName := schema.Properties["task_name"]
+		message := schema.Properties["message"]
+		if spawnID.MinLength == nil || *spawnID.MinLength != 36 || spawnID.MaxLength == nil ||
+			*spawnID.MaxLength != 36 || spawnID.Pattern != uuidPattern ||
+			targetID.Pattern != uuidPattern || taskName.MaxLength == nil ||
+			*taskName.MaxLength != protocol.MaximumAgentTaskNameBytes || taskName.Pattern == "" ||
+			message.MaxLength == nil || *message.MaxLength != protocol.MaximumAgentPromptBytes {
+			t.Fatalf("spawn_agent input schema = %s", data)
 		}
 	default:
 		t.Fatalf("unexpected tool %q", tool.Name)
@@ -638,5 +726,17 @@ func testDevice(deviceID string, featureCount int) control.Device {
 		Online:          true,
 		LastSeenAt:      time.Unix(1, 0).Unix(),
 		Revision:        1,
+	}
+}
+
+func testAgent(spawnID, deviceID, taskName string, sequence uint64) protocol.AgentSummary {
+	return protocol.AgentSummary{
+		SpawnID: spawnID,
+		Principal: control.NewWorkerPrincipal(
+			rootMCPControllerID, rootMCPTreeID, rootMCPWorkerID, rootMCPAgentID, deviceID,
+		).Identity(),
+		TaskName: taskName,
+		Status:   protocol.AgentSpawnStarted,
+		Sequence: sequence,
 	}
 }

@@ -82,7 +82,8 @@ func TestCodexPeerTopology(t *testing.T) {
 			"--controller-id", networkID, "--device-id", deviceIDs[current.label],
 			"--device-name", "peer-"+strings.ToLower(current.label),
 			"--broker-url", "ws://"+brokerAddress+"/v1/connect",
-			"--auth-mode", "token", "--token-file", tokenPath, "--json",
+			"--auth-mode", "token", "--token-file", tokenPath,
+			"--codex-binary", codexBinary, "--json",
 		)
 		startService(t, commandEnv(current), delegationBinary, current.configPath)
 	}
@@ -143,7 +144,18 @@ func TestCodexPeerTopology(t *testing.T) {
 			t.Fatalf("peer %s local bridge sockets = %v, error %v", current.label, matches, err)
 		}
 	}
-	mock.verify(t, []string{"lazy", "a1", "b1", "c1", "a2", "a1-resume", "cross-conflict"})
+	t.Run("managed dispatch", func(t *testing.T) {
+		testManagedDispatch(t, peers[0], peers[2], statePath, results["A"].threadID)
+	})
+	assertCount(t, statePath, "SELECT count(*) FROM trees", 4)
+	assertPrincipalDistribution(t, statePath, map[string]int{
+		deviceIDs["A"]: 2,
+		deviceIDs["B"]: 1,
+		deviceIDs["C"]: 2,
+	})
+	mock.verify(t, []string{
+		"lazy", "a1", "b1", "c1", "a2", "a1-resume", "cross-conflict", workerDispatchCase,
+	})
 }
 
 func createPeers(t *testing.T, root, modelURL string) []peer {

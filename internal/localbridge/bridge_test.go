@@ -143,14 +143,35 @@ func TestControllerBridgeForwardsAllowedCalls(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if !root.OK || !list.OK {
-		t.Fatalf("bridge results = %#v, %#v", root, list)
+	var spawned result
+	if err := client.Call(
+		context.Background(), protocol.MethodSpawnAgent, bridgeTestTreeID, &source,
+		protocol.SpawnAgentParams{
+			SpawnID:        bridgeTestTreeID,
+			TargetDeviceID: bridgeTestDeviceID,
+			TaskName:       "local_build",
+			Message:        "run the local build",
+		},
+		&spawned,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var agents result
+	if err := client.Call(
+		context.Background(), protocol.MethodListAgents, bridgeTestTreeID, &source,
+		protocol.ListAgentsParams{Limit: 10}, &agents,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !root.OK || !list.OK || !spawned.OK || !agents.OK {
+		t.Fatalf("bridge results = %#v, %#v, %#v, %#v", root, list, spawned, agents)
 	}
 	calls := backend.snapshot()
-	if len(calls) != 2 || calls[0].method != protocol.MethodEnsureRootTree ||
+	if len(calls) != 4 || calls[0].method != protocol.MethodEnsureRootTree ||
 		calls[0].treeID != "" || calls[0].source != nil ||
 		calls[1].method != protocol.MethodListDevices || calls[1].treeID != bridgeTestTreeID ||
-		calls[1].source == nil || *calls[1].source != source {
+		calls[1].source == nil || *calls[1].source != source ||
+		calls[2].method != protocol.MethodSpawnAgent || calls[3].method != protocol.MethodListAgents {
 		t.Fatalf("forwarded calls = %#v", calls)
 	}
 }
@@ -257,6 +278,15 @@ func TestBridgeRequiresLocalReservationAuthorizationForWorkerCalls(t *testing.T)
 		&worker,
 		protocol.ListDevicesParams{Limit: 10},
 		&protocol.ListDevicesResult{},
+	)
+	assertRPCCode(t, err, protocol.ErrorForbidden)
+	err = client.Call(
+		context.Background(), protocol.MethodSpawnAgent, worker.TreeID, &worker,
+		protocol.SpawnAgentParams{
+			SpawnID: bridgeTestTreeID, TargetDeviceID: bridgeTestDeviceID,
+			TaskName: "recursive", Message: "do not allow this",
+		},
+		&protocol.SpawnAgentResult{},
 	)
 	assertRPCCode(t, err, protocol.ErrorForbidden)
 	if calls := backend.snapshot(); len(calls) != 0 {

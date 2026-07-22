@@ -2,12 +2,13 @@
 
 Delegation is a Codex plugin for assigning bounded work across trusted peers with different operating
 systems, toolchains, or local capabilities. Every participating device can host user-created root
-tasks and, in later milestones, managed workers.
+tasks and managed workers.
 
 The project is being delivered in reviewed milestones. M0 provides the plugin, skills, native
 runtime bootstrap, and release foundation. M1 provides the broker and persistent registry. M1.1
 makes every device an equal peer and exposes root MCP discovery from any user-created Codex task.
-Managed Codex workers and Git workspace transport remain M2 and M3 work respectively.
+M2 runs isolated managed Codex threads on selected peers; its first checkpoint provides durable
+spawn and agent discovery. Git workspace transport remains M3 work.
 
 ## Install The Plugin
 
@@ -173,8 +174,26 @@ broker token nor opens a broker connection itself. Device calls lazily bind the 
 `_meta.threadId` to a Delegation tree and the broker validates the resulting root principal and
 capabilities. Any non-managed, user-created Codex task on any peer may become a root when it first
 uses a Delegation tool. Trees remain bound to the originating peer. A managed worker thread will
-remain a worker when M2 adds it; opening its history does not promote it. M1.1 exposes discovery
-only; worker spawn, messaging, and workspace synchronization are added by later milestones.
+remain a worker; opening its history does not promote it.
+
+## Dispatch Managed Workers
+
+Call `spawn_agent` with a fresh `spawn_id` UUID, an online `target_device_id` returned by
+`list_devices`, a unique lowercase `task_name`, and a self-contained `message`. The target may be
+the current peer: self-targeting still creates a separate managed Codex thread in the connector's
+app-server. The broker persists the worker principal and dispatch receipt before contacting the
+target, so a lost response can be retried with the same spawn ID and exactly the same arguments.
+
+The returned status is `started`, `failed`, or `pending`. `pending` means the durable receipt exists
+but the broker could not establish a definitive target result; retry the exact request rather than
+inventing another spawn ID. Use `list_agents` to inspect the current tree's receipts and terminal
+failure codes. Task names identify agents within a root tree and cannot be reused for another
+spawn.
+
+This M2 checkpoint starts workers in an empty managed workspace. It does not yet expose root-side
+message, follow-up, interrupt, or wait tools; those lifecycle controls are the next M2 checkpoint.
+Repository synchronization and change artifacts arrive in M3. Do not claim that a worker received
+the root repository until workspace transport reports that explicitly.
 
 ## License
 

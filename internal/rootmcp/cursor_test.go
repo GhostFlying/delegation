@@ -24,3 +24,23 @@ func TestDeviceCursorRoundTripAndValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentCursorIsBoundToOneTree(t *testing.T) {
+	encoded, err := encodeAgentCursor(rootMCPTreeID, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := decodeAgentCursor(encoded, rootMCPTreeID)
+	if err != nil || sequence != 32 {
+		t.Fatalf("decoded agent cursor = %d, error %v", sequence, err)
+	}
+	if _, err := decodeAgentCursor(encoded, rootMCPThreadID); err == nil {
+		t.Fatal("agent cursor was accepted for another tree")
+	}
+	invalid := base64.RawURLEncoding.EncodeToString([]byte(
+		`{"treeId":"` + rootMCPTreeID + `","afterSequence":0}`,
+	))
+	if _, err := decodeAgentCursor(invalid, rootMCPTreeID); err == nil {
+		t.Fatal("agent cursor accepted a zero sequence")
+	}
+}
