@@ -26,20 +26,21 @@ import (
 )
 
 const (
-	ConnectPath              = "/v1/connect"
-	HealthServiceHeader      = "X-Delegation-Service"
-	HealthControllerHeader   = "X-Delegation-Controller-Id"
-	defaultHeartbeatInterval = 15 * time.Second
-	writeTimeout             = 10 * time.Second
-	cleanupTimeout           = 5 * time.Second
-	maximumPendingHellos     = 64
-	maximumDeviceHellos      = 2
-	defaultOfflineRetry      = time.Second
-	rootMailboxWaitHeadroom  = 16
-	maximumAsyncMailboxWaits = config.MaximumWorkerSlots + rootMailboxWaitHeadroom
-	mailboxRequestTimeout    = 30 * time.Second
-	agentSpawnRequestTimeout = 125 * time.Second
-	maximumPendingPeerCalls  = 128
+	ConnectPath                  = "/v1/connect"
+	HealthServiceHeader          = "X-Delegation-Service"
+	HealthControllerHeader       = "X-Delegation-Controller-Id"
+	defaultHeartbeatInterval     = 15 * time.Second
+	writeTimeout                 = 10 * time.Second
+	cleanupTimeout               = 5 * time.Second
+	maximumPendingHellos         = 64
+	maximumDeviceHellos          = 2
+	defaultOfflineRetry          = time.Second
+	rootMailboxWaitHeadroom      = 16
+	maximumAsyncMailboxWaits     = config.MaximumWorkerSlots + rootMailboxWaitHeadroom
+	mailboxRequestTimeout        = 30 * time.Second
+	agentSpawnRequestTimeout     = 125 * time.Second
+	agentOperationRequestTimeout = 125 * time.Second
+	maximumPendingPeerCalls      = 128
 )
 
 type Registry interface {
@@ -59,6 +60,10 @@ type Registry interface {
 	MarkAgentSpawnStarted(context.Context, store.AgentSpawnKey, time.Time) (store.AgentSpawnReceipt, error)
 	MarkAgentSpawnFailed(context.Context, store.AgentSpawnKey, string, time.Time) (store.AgentSpawnReceipt, error)
 	ListAgents(context.Context, control.PrincipalIdentity, store.AgentPageRequest) (store.AgentPage, error)
+	BeginAgentOperation(context.Context, store.AgentOperationIntent, time.Time) (store.AgentOperationReceipt, error)
+	GetAgentOperation(context.Context, control.PrincipalIdentity, string) (store.AgentOperationReceipt, error)
+	FinishAgentOperation(context.Context, store.AgentOperationKey, protocol.AgentOperationOutcome, string, time.Time) (store.AgentOperationReceipt, error)
+	QueueAgentMessageAndFinishOperation(context.Context, store.AgentOperationKey, string, time.Time) (store.AgentOperationReceipt, store.MailboxDelivery, error)
 }
 
 type Options struct {
@@ -95,6 +100,7 @@ type Server struct {
 	handlers         sync.WaitGroup
 	background       sync.WaitGroup
 	mailboxNotifier  *mailboxNotifier
+	agentOperations  *agentOperationQueue
 
 	retryMu              sync.Mutex
 	offlineRetries       map[string]uint64
@@ -216,6 +222,7 @@ func New(options Options) (*Server, error) {
 		helloLimit:           maximumPendingHellos,
 		deviceHelloLimit:     maximumDeviceHellos,
 		mailboxNotifier:      newMailboxNotifier(),
+		agentOperations:      newAgentOperationQueue(),
 		offlineRetries:       map[string]uint64{},
 		offlineRetryWake:     make(chan struct{}, 1),
 		offlineRetryInterval: defaultOfflineRetry,
@@ -752,6 +759,8 @@ func (s *session) handleEnvelope(
 		return false, s.startAgentSpawn(ctx, sessionContext, envelope)
 	case protocol.MethodListAgents:
 		return false, s.handleListAgents(ctx, envelope)
+	case protocol.MethodSendAgent, protocol.MethodFollowupAgent, protocol.MethodInterruptAgent:
+		return false, s.startAgentOperation(ctx, sessionContext, envelope)
 	}
 	if envelope.Method != protocol.MethodHeartbeat {
 		return false, s.writeError(ctx, envelope, protocol.ErrorMethodNotFound, "method not found")

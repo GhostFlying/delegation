@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -23,6 +24,7 @@ const (
 	agentRPCTargetID       = "123e4567-e89b-42d3-a456-426614174132"
 	agentRPCRemoteThreadID = "123e4567-e89b-42d3-a456-426614174133"
 	agentRPCRemoteSpawnID  = "123e4567-e89b-42d3-a456-426614174134"
+	agentRPCMessageID      = "123e4567-e89b-42d3-a456-426614174135"
 )
 
 type selfDispatchSpawner struct {
@@ -245,6 +247,111 @@ func TestAgentRPCRoutesToExplicitRemotePeer(t *testing.T) {
 			sourceSpawner.calls.Load(),
 			targetSpawner.calls.Load(),
 		)
+	}
+}
+
+func TestAgentRPCQueuesOfflineSendExactlyOnce(t *testing.T) {
+	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	sourceClient := startAgentRPCConnector(
+		t, harness, brokerTestDeviceID, &basicDispatchSpawner{deviceID: brokerTestDeviceID},
+	)
+	callContext, cancelCall := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelCall()
+	var root protocol.EnsureRootTreeResult
+	if err := sourceClient.Call(
+		callContext,
+		protocol.MethodEnsureRootTree,
+		"",
+		nil,
+		protocol.EnsureRootTreeParams{ExternalThreadID: agentRPCRemoteThreadID},
+		&root,
+	); err != nil {
+		t.Fatal(err)
+	}
+	targetDescriptor := hello().Descriptor()
+	targetDescriptor.DeviceID = agentRPCTargetID
+	targetDescriptor.Name = "offline-target"
+	if _, err := harness.registry.RegisterTrustedDevice(
+		context.Background(), targetDescriptor, time.Unix(10, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := harness.registry.BeginAgentSpawn(
+		context.Background(),
+		store.AgentSpawnIntent{
+			Source:         root.Principal.Identity(),
+			SpawnID:        agentRPCRemoteSpawnID,
+			AgentID:        agentRPCRemoteSpawnID,
+			TargetDeviceID: agentRPCTargetID,
+			TaskName:       "offline_worker",
+			PromptDigest:   sha256.Sum256([]byte("offline worker prompt")),
+		},
+		time.Unix(20, 0),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err = harness.registry.MarkAgentSpawnStarted(
+		context.Background(),
+		store.AgentSpawnKey{
+			ControllerID:  receipt.Agent.Principal.ControllerID,
+			TreeID:        receipt.Agent.Principal.TreeID,
+			SourceAgentID: receipt.Agent.Principal.ParentAgentID,
+			SpawnID:       agentRPCRemoteSpawnID,
+		},
+		time.Unix(21, 0),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := protocol.SendAgentParams{
+		AgentID:   receipt.Agent.Principal.AgentID,
+		MessageID: agentRPCMessageID,
+		Message:   "message for an offline managed worker",
+	}
+	source := root.Principal.Identity()
+	var first protocol.AgentOperationResult
+	if err := sourceClient.Call(
+		callContext, protocol.MethodSendAgent, root.Tree.TreeID, &source, params, &first,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if first.Outcome != protocol.AgentOperationOutcomeQueued ||
+		first.OperationID != params.MessageID || first.AgentID != params.AgentID {
+		t.Fatalf("offline send result = %#v", first)
+	}
+	var replay protocol.AgentOperationResult
+	if err := sourceClient.Call(
+		callContext, protocol.MethodSendAgent, root.Tree.TreeID, &source, params, &replay,
+	); err != nil || replay != first {
+		t.Fatalf("offline send replay = %#v, error %v", replay, err)
+	}
+	worker := control.NewWorkerPrincipal(
+		receipt.Agent.Principal.ControllerID,
+		receipt.Agent.Principal.TreeID,
+		receipt.Agent.Principal.AgentID,
+		receipt.Agent.Principal.ParentAgentID,
+		receipt.Agent.Principal.DeviceID,
+	)
+	mailbox, err := harness.registry.ReadMailbox(context.Background(), worker, 0, 2)
+	if err != nil || len(mailbox.Messages) != 1 ||
+		mailbox.Messages[0].MessageID != params.MessageID ||
+		mailbox.Messages[0].Message != params.Message {
+		t.Fatalf("offline worker mailbox = %#v, error %v", mailbox, err)
+	}
+	changed := params
+	changed.Message = "changed message"
+	err = sourceClient.Call(
+		callContext,
+		protocol.MethodSendAgent,
+		root.Tree.TreeID,
+		&source,
+		changed,
+		&protocol.AgentOperationResult{},
+	)
+	var rpcError *connector.RPCError
+	if !errors.As(err, &rpcError) || rpcError.Code != protocol.ErrorConflict {
+		t.Fatalf("changed offline send error = %v, want conflict", err)
 	}
 }
 
