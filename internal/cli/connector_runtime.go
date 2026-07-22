@@ -5,21 +5,65 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
+	"time"
 
+	"github.com/GhostFlying/delegation/internal/codexcommand"
+	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/pathguard"
+	"github.com/GhostFlying/delegation/internal/serviceenv"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
+	"github.com/GhostFlying/delegation/internal/workerhost"
 )
 
 func runConnectorService(
 	ctx context.Context,
 	configPath string,
 	cfg delegationconfig.Config,
+	stderr io.Writer,
+) (resultErr error) {
+	return runConnectorServiceWithProviderEnvironment(
+		ctx,
+		configPath,
+		cfg,
+		"",
+		serviceenv.LoadInherited,
+		stderr,
+	)
+}
+
+func runConnectorServiceWithEnvironmentFile(
+	ctx context.Context,
+	configPath string,
+	cfg delegationconfig.Config,
+	environmentFile string,
+	stderr io.Writer,
+) error {
+	return runConnectorServiceWithProviderEnvironment(
+		ctx,
+		configPath,
+		cfg,
+		environmentFile,
+		func() (serviceenv.Resolved, error) {
+			return serviceenv.LoadProtectedFile(environmentFile)
+		},
+		stderr,
+	)
+}
+
+func runConnectorServiceWithProviderEnvironment(
+	ctx context.Context,
+	configPath string,
+	cfg delegationconfig.Config,
+	environmentFile string,
+	loadProviderEnvironment func() (serviceenv.Resolved, error),
 	stderr io.Writer,
 ) (resultErr error) {
 	token, err := loadConnectorAuthority(configPath, cfg)
@@ -32,6 +76,18 @@ func runConnectorService(
 	if ctx.Err() != nil {
 		return nil
 	}
+	if loadProviderEnvironment == nil {
+		return errors.New("managed provider environment loader is required")
+	}
+	if environmentFile != "" {
+		if err := validatePeerServiceEnvironmentPath(configPath, environmentFile, cfg); err != nil {
+			return err
+		}
+	}
+	providerEnvironment, err := loadProviderEnvironment()
+	if err != nil {
+		return err
+	}
 	lease, err := store.AcquirePeerLease(cfg.Peer.StateFile)
 	if err != nil {
 		return err
@@ -40,9 +96,36 @@ func runConnectorService(
 	if err != nil {
 		return errors.Join(err, lease.Close())
 	}
+	closeResources := func() error {
+		return errors.Join(peerState.Close(), lease.Close())
+	}
 	defer func() {
-		resultErr = errors.Join(resultErr, peerState.Close(), lease.Close())
+		resultErr = errors.Join(resultErr, closeResources())
 	}()
+	codexLaunch, err := codexcommand.Resolve(cfg.Peer.CodexBinary)
+	if err != nil {
+		return fmt.Errorf("resolve configured Codex command: %w", err)
+	}
+	codexEnvironment := make(map[string]string, len(codexLaunch.Environment)+len(providerEnvironment.Environment))
+	for name, value := range codexLaunch.Environment {
+		codexEnvironment[name] = value
+	}
+	for name, value := range providerEnvironment.Environment {
+		codexEnvironment[name] = value
+	}
+	runtimeBinary, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve delegation executable: %w", err)
+	}
+	runtimeBinary, err = filepath.Abs(runtimeBinary)
+	if err != nil {
+		return fmt.Errorf("resolve delegation executable: %w", err)
+	}
+	if target, evalErr := filepath.EvalSymlinks(runtimeBinary); evalErr == nil {
+		runtimeBinary = target
+	} else {
+		return fmt.Errorf("resolve delegation executable: %w", evalErr)
+	}
 	var stderrMu sync.Mutex
 	writeStderr := func(format string, args ...any) error {
 		stderrMu.Lock()
@@ -65,18 +148,39 @@ func runConnectorService(
 	if err != nil {
 		return err
 	}
+	workers, err := workerhost.New(ctx, workerhost.Options{
+		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
+		PeerConfigPath: configPath, DelegationBinary: runtimeBinary,
+		CodexBinary: codexLaunch.NativePath, CodexHome: cfg.Peer.CodexHome,
+		CodexEnvironment:        codexEnvironment,
+		CodexUnsetEnvironment:   codexLaunch.UnsetEnvironment,
+		ProviderEnvironmentFile: environmentFile,
+		WorkspaceRoot:           cfg.Peer.WorkspaceRoot, MaxWorkerSlots: cfg.Peer.MaxWorkerSlots,
+		CodexConfig: providerEnvironment.Config, Store: peerState,
+		ReportError: func(err error) {
+			_ = writeStderr("delegation: managed worker host: %v\n", err)
+		},
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, closeWorkerHost(workers, 30*time.Second))
+	}()
 	endpoint, err := localbridge.Endpoint(cfg.ControllerID, cfg.DeviceID)
 	if err != nil {
 		return err
 	}
-	bridge, err := localbridge.ListenWithWorkerAuthorization(
+	bridge, err := localbridge.ListenWithAuthorization(
 		endpoint,
 		localbridge.ServiceIdentity{
 			ControllerID: cfg.ControllerID,
 			DeviceID:     cfg.DeviceID,
 		},
 		client,
-		peerWorkerAuthorizer{state: peerState, deviceID: cfg.DeviceID},
+		peerAuthorizer{
+			state: peerState, controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
+		},
 	)
 	if err != nil {
 		return err
@@ -107,6 +211,9 @@ func runConnectorService(
 		firstName = "connector"
 	case firstErr = <-bridgeDone:
 		firstName = "local bridge"
+	case <-workers.Done():
+		firstName = "managed worker host"
+		firstErr = workers.Err()
 	}
 	cancel()
 	closeErr := bridge.Close()
@@ -130,16 +237,55 @@ func runConnectorService(
 	return errors.Join(fmt.Errorf("%s stopped: %w", firstName, firstErr), closeErr, connectorErr, bridgeErr)
 }
 
-type peerWorkerAuthorizer struct {
-	state    *store.PeerStore
-	deviceID string
+type workerHostCloser interface {
+	Close(context.Context) error
 }
 
-func (a peerWorkerAuthorizer) AuthorizeWorker(
+func closeWorkerHost(host workerHostCloser, timeout time.Duration) error {
+	closeContext, cancel := context.WithTimeout(context.Background(), timeout)
+	boundedErr := host.Close(closeContext)
+	cancel()
+	if !errors.Is(boundedErr, context.DeadlineExceeded) &&
+		!errors.Is(boundedErr, context.Canceled) {
+		return boundedErr
+	}
+
+	// Host shutdown owns terminal worker-state writes. Waiting synchronously
+	// keeps the peer store and process lease alive until those writes finish;
+	// returning here would let cmd/delegation's os.Exit kill deferred cleanup.
+	terminalErr := host.Close(context.Background())
+	return errors.Join(boundedErr, terminalErr)
+}
+
+type peerAuthorizer struct {
+	state        *store.PeerStore
+	controllerID string
+	deviceID     string
+}
+
+func (a peerAuthorizer) ManagedWorkerThread(
+	ctx context.Context,
+	controllerID, externalThreadID string,
+) (bool, error) {
+	if a.state == nil || controllerID != a.controllerID {
+		return false, errors.New("root thread does not belong to this peer network")
+	}
+	_, err := a.state.WorkerForThread(ctx, controllerID, externalThreadID)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+func (a peerAuthorizer) AuthorizeWorker(
 	ctx context.Context,
 	principal control.PrincipalIdentity,
 ) error {
-	if a.state == nil || principal.ParentAgentID == "" || principal.DeviceID != a.deviceID {
+	if a.state == nil || principal.ControllerID != a.controllerID ||
+		principal.ParentAgentID == "" || principal.DeviceID != a.deviceID {
 		return errors.New("worker principal does not belong to this peer")
 	}
 	worker, err := a.state.GetWorker(ctx, store.WorkerKey{
@@ -171,8 +317,23 @@ func loadConnectorAuthority(
 	if cfg.Role != delegationconfig.RolePeer {
 		return nil, errors.New("connector runtime requires a peer configuration")
 	}
-	if err := pathguard.ValidatePeerAuthority(configPath, cfg.Peer.StateFile, cfg.Broker.Auth.TokenFile); err != nil {
+	if err := pathguard.ValidatePeerRuntimeAuthority(
+		configPath,
+		cfg.Peer.StateFile,
+		cfg.Broker.Auth.TokenFile,
+		cfg.Peer.CodexHome,
+		cfg.Peer.WorkspaceRoot,
+	); err != nil {
 		return nil, err
+	}
+	if err := delegationconfig.ValidatePrivateDirectory(cfg.Peer.CodexHome); err != nil {
+		return nil, fmt.Errorf("validate managed CODEX_HOME: %w", err)
+	}
+	if err := codexconfig.ValidateManagedHome(cfg.Peer.CodexHome); err != nil {
+		return nil, err
+	}
+	if err := delegationconfig.ValidatePrivateDirectory(cfg.Peer.WorkspaceRoot); err != nil {
+		return nil, fmt.Errorf("validate managed workspace root: %w", err)
 	}
 	if cfg.Broker.Auth.Mode == delegationconfig.AuthModeNone {
 		return nil, nil

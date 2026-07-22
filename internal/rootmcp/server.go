@@ -25,7 +25,7 @@ const (
 	maximumListBytes   = 4 * 1024
 	maximumDetailBytes = 8 * 1024
 	bridgeCallTimeout  = 15 * time.Second
-	uuidPattern        = `^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`
+	uuidPattern        = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
 	serverInstructions = "Delegation exposes the live peer registry for this root task. Use list_devices for bounded summaries, then describe_device before selecting a candidate when advertised features matter. Choose an online peer whose OS, architecture, and features fit the work. isCurrentDevice identifies this task's local peer. Registry cursors are revision-bound; restart listing without a cursor if the registry changed."
 )
 

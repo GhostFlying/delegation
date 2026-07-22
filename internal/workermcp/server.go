@@ -2,14 +2,14 @@ package workermcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -18,11 +18,14 @@ import (
 const (
 	ToolSendMessage    = "send_message"
 	ToolWaitAgent      = "wait_agent"
-	maximumMessageSize = 16 * 1024
 	maximumWaitSeconds = 25
-	maximumMailboxPage = 16
-	bridgeCallTimeout  = 30 * time.Second
-	serverInstructions = "You are a managed Delegation worker. Use send_message to report useful progress or questions to your parent or root agent. Use wait_agent only when you need a reply. This worker has no device registry, workspace sync, spawn, or agent-management authority."
+	maximumMailboxPage = 1
+	// A page contains one message capped at 1 KiB. This larger encoded bound
+	// only accommodates worst-case JSON escaping of that same bounded text.
+	maximumWaitOutput    = 8 * 1024
+	bridgeCallTimeout    = 30 * time.Second
+	lowercaseUUIDPattern = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+	serverInstructions   = "You are a managed Delegation worker. Use send_message to report useful progress or questions to your parent or root agent. Create one lowercase UUID messageId for each logical message. If send_message is unavailable or its outcome is ambiguous, retry promptly with exactly the same messageId, recipient, and message; recent identical retries resolve to the same delivery while the receipt is retained. Never create a new messageId for that logical message. Use wait_agent only when you need a reply. This worker has no device registry, workspace sync, spawn, or agent-management authority."
 )
 
 type Backend interface {
@@ -35,8 +38,9 @@ type Worker struct {
 }
 
 type SendMessageInput struct {
+	MessageID string `json:"messageId" jsonschema:"lowercase UUID chosen once for this logical message; reuse it with identical arguments after an unavailable or ambiguous result"`
 	Recipient string `json:"recipient,omitempty" jsonschema:"recipient agent: parent or root; defaults to parent"`
-	Message   string `json:"message" jsonschema:"message body to deliver"`
+	Message   string `json:"message" jsonschema:"message body to deliver; must contain from 1 through 1024 UTF-8 bytes"`
 }
 
 type SendMessageOutput struct {
@@ -81,7 +85,7 @@ func NewServer(backend Backend, principal control.PrincipalIdentity) (*mcp.Serve
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        ToolSendMessage,
 		Title:       "Send delegation message",
-		Description: "Send a reliable message to this worker's parent or root agent.",
+		Description: "Send a message to this worker's parent or root agent. Choose one lowercase UUID messageId per logical message; promptly retry unavailable or ambiguous recent calls with every argument unchanged so a retained receipt resolves to the same delivery.",
 		Annotations: mutatingAnnotations(),
 		InputSchema: sendSchema,
 	}, worker.sendMessage)
@@ -100,12 +104,13 @@ func (w *Worker) sendMessage(
 	_ *mcp.CallToolRequest,
 	input SendMessageInput,
 ) (*mcp.CallToolResult, SendMessageOutput, error) {
-	if strings.TrimSpace(input.Message) == "" || len(input.Message) > maximumMessageSize ||
-		!utf8.ValidString(input.Message) || strings.ContainsRune(input.Message, '\x00') {
-		return nil, SendMessageOutput{}, fmt.Errorf(
-			"message must contain from 1 through %d bytes of valid text",
-			maximumMessageSize,
-		)
+	params := protocol.SendMessageParams{
+		MessageID: input.MessageID,
+		Target:    protocol.MessageTarget{Kind: protocol.MessageTargetParent},
+		Message:   input.Message,
+	}
+	if err := protocol.ValidateMailboxMessage(input.Message); err != nil {
+		return nil, SendMessageOutput{}, err
 	}
 	recipient := protocol.MessageTargetParent
 	switch input.Recipient {
@@ -115,12 +120,16 @@ func (w *Worker) sendMessage(
 	default:
 		return nil, SendMessageOutput{}, errors.New("recipient must be parent or root")
 	}
-	var result protocol.SendMessageResult
-	if err := w.call(ctx, protocol.MethodSendMessage, protocol.SendMessageParams{
-		Target:  protocol.MessageTarget{Kind: recipient},
-		Message: input.Message,
-	}, &result); err != nil {
+	params.Target.Kind = recipient
+	if err := params.Validate(); err != nil {
 		return nil, SendMessageOutput{}, err
+	}
+	var result protocol.SendMessageResult
+	if err := w.call(ctx, protocol.MethodSendMessage, params, &result); err != nil {
+		return nil, SendMessageOutput{}, workerBackendError(protocol.MethodSendMessage, params.MessageID, err)
+	}
+	if result.MessageID != params.MessageID || result.Sequence == 0 {
+		return nil, SendMessageOutput{}, errors.New("delegation service returned an invalid message receipt")
 	}
 	return nil, SendMessageOutput(result), nil
 }
@@ -146,9 +155,78 @@ func (w *Worker) waitAgent(
 		TimeoutMillis: timeout * 1000,
 		Limit:         maximumMailboxPage,
 	}, &result); err != nil {
+		return nil, WaitAgentOutput{}, workerBackendError(protocol.MethodWaitMailbox, "", err)
+	}
+	if err := validateMailboxResult(result, input.Cursor, w.principal); err != nil {
 		return nil, WaitAgentOutput{}, err
 	}
-	return nil, WaitAgentOutput(result), nil
+	output := WaitAgentOutput(result)
+	data, err := json.Marshal(output)
+	if err != nil {
+		return nil, WaitAgentOutput{}, fmt.Errorf("encode worker mailbox output: %w", err)
+	}
+	if len(data) > maximumWaitOutput {
+		return nil, WaitAgentOutput{}, fmt.Errorf("worker mailbox output exceeds %d bytes", maximumWaitOutput)
+	}
+	return nil, output, nil
+}
+
+func workerBackendError(method, messageID string, err error) error {
+	var rpcError *localbridge.RPCError
+	if errors.As(err, &rpcError) {
+		switch rpcError.Code {
+		case protocol.ErrorInvalidParams:
+			return errors.New("delegation request was rejected")
+		case protocol.ErrorForbidden:
+			return errors.New("delegation worker is no longer authorized")
+		case protocol.ErrorNotFound:
+			return errors.New("delegation message recipient is unavailable")
+		case protocol.ErrorConflict:
+			if method == protocol.MethodSendMessage {
+				return fmt.Errorf("delegation messageId %s is bound to different arguments; reuse the original complete arguments for this logical message, or use a new lowercase UUID only for a genuinely new message", messageID)
+			}
+			return errors.New("delegation mailbox cursor is stale; retry wait_agent with cursor 0")
+		}
+	}
+	if method == protocol.MethodSendMessage {
+		return fmt.Errorf("delegation service unavailable; promptly retry send_message with messageId %s and the exact same recipient and message", messageID)
+	}
+	return errors.New("delegation service unavailable")
+}
+
+func validateMailboxResult(
+	result protocol.WaitMailboxResult,
+	cursor uint64,
+	principal control.PrincipalIdentity,
+) error {
+	if len(result.Messages) > maximumMailboxPage {
+		return errors.New("delegation service returned too many mailbox messages")
+	}
+	if len(result.Messages) == 0 {
+		if result.NextCursor != cursor {
+			return errors.New("delegation service advanced an empty mailbox cursor")
+		}
+		return nil
+	}
+	previous := cursor
+	for _, message := range result.Messages {
+		if err := message.Validate(); err != nil {
+			return errors.New("delegation service returned invalid mailbox message content")
+		}
+		if message.Sequence <= previous {
+			return errors.New("delegation service returned mailbox messages out of order")
+		}
+		if err := message.Source.Validate(); err != nil ||
+			message.Source.ControllerID != principal.ControllerID ||
+			message.Source.TreeID != principal.TreeID {
+			return errors.New("delegation service returned a mailbox message from another tree")
+		}
+		previous = message.Sequence
+	}
+	if result.NextCursor != previous {
+		return errors.New("delegation service returned an invalid mailbox cursor")
+	}
+	return nil
 }
 
 func (w *Worker) call(ctx context.Context, method string, params, result any) error {
@@ -165,9 +243,10 @@ func inputSchemas() (*jsonschema.Schema, *jsonschema.Schema, error) {
 	}
 	recipient := send.Properties["recipient"]
 	recipient.Enum = []any{"parent", "root"}
+	messageID := send.Properties["messageId"]
+	messageID.Pattern = lowercaseUUIDPattern
 	message := send.Properties["message"]
 	message.MinLength = jsonschema.Ptr(1)
-	message.MaxLength = jsonschema.Ptr(maximumMessageSize)
 
 	wait, err := jsonschema.For[WaitAgentInput](nil)
 	if err != nil {
@@ -193,7 +272,7 @@ func mutatingAnnotations() *mcp.ToolAnnotations {
 	no := false
 	return &mcp.ToolAnnotations{
 		ReadOnlyHint:    false,
-		IdempotentHint:  false,
+		IdempotentHint:  true,
 		DestructiveHint: &no,
 		OpenWorldHint:   &no,
 	}

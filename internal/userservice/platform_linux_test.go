@@ -16,7 +16,9 @@ func TestLinuxServiceLifecycleUsesXDGUserDirectory(t *testing.T) {
 	configHome := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 
-	result, err := Prepare(ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/config.json")
+	result, err := Prepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/config.json",
+	))
 	if err != nil || result.State != StatePrepared || result.Kind != KindSystemd {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -36,11 +38,15 @@ func TestLinuxServiceLifecycleUsesXDGUserDirectory(t *testing.T) {
 func TestLinuxBrokerAndPeerDefinitionsCoexist(t *testing.T) {
 	configHome := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", configHome)
-	broker, err := Prepare(ServiceRoleBroker, "/opt/delegation/bin/delegation", "/home/test/.delegation/broker.json")
+	broker, err := Prepare(ServiceRoleBroker, testInvocation(
+		ServiceRoleBroker, "/opt/delegation/bin/delegation", "/home/test/.delegation/broker.json",
+	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer, err := Prepare(ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/peer.json")
+	peer, err := Prepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/peer.json",
+	))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +78,7 @@ func TestLinuxInstallEnablesStartsAndVerifiesService(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, binaryPath, configPath)
+	result, err := Install(ServiceRolePeer, testInvocation(ServiceRolePeer, binaryPath, configPath))
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -107,7 +113,9 @@ func TestLinuxInstallReconcilesLostActivationResponse(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/config.json")
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/config.json",
+	))
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -143,7 +151,9 @@ func TestLinuxInstallReportsPartialActivation(t *testing.T) {
 			return userServiceCommandResult{}, nil
 		}
 	}
-	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/config.json")
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/config.json",
+	))
 	if err == nil || result.State != StateIndeterminate {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -176,7 +186,9 @@ func TestLinuxInstallRejectsShadowedOrOverriddenUnit(t *testing.T) {
 				}
 				return userServiceCommandResult{}, nil
 			}
-			result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/config.json")
+			result, err := Install(ServiceRolePeer, testInvocation(
+				ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/config.json",
+			))
 			if err == nil || result.State != StateForeignConflict {
 				t.Fatalf("Install() = %#v, %v", result, err)
 			}
@@ -203,7 +215,9 @@ func TestLinuxInstallRejectsServiceThatNeverBecomesReady(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/config.json")
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/config.json",
+	))
 	if !errors.Is(err, readinessErr) || result.State != StateIndeterminate {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -218,7 +232,9 @@ func stubLinuxServiceReadiness(t *testing.T, err error) {
 
 func TestLinuxServiceRejectsRelativeXDGConfigHome(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "relative")
-	if _, err := Prepare(ServiceRolePeer, "/opt/delegation", "/home/test/config.json"); err == nil {
+	if _, err := Prepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation", "/home/test/config.json",
+	)); err == nil {
 		t.Fatal("Prepare() accepted relative XDG_CONFIG_HOME")
 	}
 }

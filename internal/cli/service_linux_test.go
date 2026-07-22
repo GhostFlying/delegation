@@ -14,11 +14,97 @@ import (
 	"testing"
 
 	"github.com/GhostFlying/delegation/internal/broker"
+	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/userservice"
 )
 
 const serviceTestControllerID = "123e4567-e89b-42d3-a456-426614174720"
+
+const serviceTestProviderConfig = `{"model":"mock-model","model_provider":"mock","model_providers.mock":{"name":"Mock provider","base_url":"https://gateway.example.test/v1","wire_api":"responses","requires_openai_auth":false,"env_key":"GATEWAY_KEY"}}`
+
+func TestPeerServiceInstallValidatesEnvironmentBeforeWritingArtifact(t *testing.T) {
+	configPath, cfg := setupConnectorRuntimeTest(
+		t,
+		"123e4567-e89b-42d3-a456-426614174721",
+		"service-environment",
+		"wss://broker.example.test/v1/connect",
+	)
+	configHome := filepath.Join(t.TempDir(), "xdg")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	artifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdPeerUnitName)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"service", "install", "--config", configPath}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "requires --environment-file") {
+		t.Fatalf("missing environment install = %d, %q", code, stderr.String())
+	}
+	assertPathAbsent(t, artifact)
+
+	secret := "must-not-appear-in-service-output"
+	environmentPath := filepath.Join(filepath.Dir(configPath), "peer.env")
+	writePeerServiceEnvironment(t, environmentPath, strings.Join([]string{
+		codexconfig.EnvironmentVariable + "=" + serviceTestProviderConfig,
+		"GATEWAY_KEY=" + secret,
+		"EXTRA=" + secret,
+		"",
+	}, "\n"))
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"service", "install", "--config", configPath,
+		"--environment-file", environmentPath,
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "unreferenced variable \"EXTRA\"") ||
+		strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret) {
+		t.Fatalf("invalid environment install = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	assertPathAbsent(t, artifact)
+
+	managedEnvironment := filepath.Join(cfg.Peer.CodexHome, "peer.env")
+	writePeerServiceEnvironment(t, managedEnvironment, strings.Join([]string{
+		codexconfig.EnvironmentVariable + "=" + serviceTestProviderConfig,
+		"GATEWAY_KEY=" + secret,
+		"",
+	}, "\n"))
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{
+		"service", "install", "--config", configPath,
+		"--environment-file", managedEnvironment,
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "must not be inside worker CODEX_HOME") {
+		t.Fatalf("managed-home environment install = %d, %q", code, stderr.String())
+	}
+	assertPathAbsent(t, artifact)
+}
+
+func TestBrokerServiceRejectsPeerEnvironmentBeforeWritingArtifact(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "authority", "broker.json")
+	configHome := filepath.Join(root, "xdg")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	var setupOutput bytes.Buffer
+	var setupError bytes.Buffer
+	if code := Run([]string{
+		"setup", "broker", "--config", configPath, "--auth-mode", "none",
+	}, &setupOutput, &setupError); code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, setupError.String())
+	}
+	environmentPath := filepath.Join(filepath.Dir(configPath), "peer.env")
+	writePeerServiceEnvironment(t, environmentPath, "IGNORED=secret\n")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"service", "install", "--config", configPath,
+		"--environment-file", environmentPath,
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "broker service must not use --environment-file") {
+		t.Fatalf("broker environment install = %d, %q", code, stderr.String())
+	}
+	assertPathAbsent(t, filepath.Join(configHome, "systemd", "user", userservice.SystemdBrokerUnitName))
+}
 
 func TestServiceInstallActivatesSystemdUnit(t *testing.T) {
 	root := t.TempDir()
@@ -310,4 +396,18 @@ func startTestBrokerReadiness(t *testing.T) string {
 
 func (failingWriter) Write([]byte) (int, error) {
 	return 0, errors.New("closed output")
+}
+
+func writePeerServiceEnvironment(t *testing.T, path string, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertPathAbsent(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("path exists after preflight failure: %s: %v", path, err)
+	}
 }

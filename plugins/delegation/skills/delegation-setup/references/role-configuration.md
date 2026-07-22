@@ -33,5 +33,8 @@ enumerate, dispatch, impersonate, or fence a same-ID peer. Tailscale narrows rea
 means trusting the entire tailnet. This authentication warning is separate from the plaintext
 transport warning.
 
-After setup, use `service run --config <path>` for a foreground process or `service install
---config <path>` for its role-specific current-user service.
+After setup, use `service run --config <path>` for a foreground process. A peer foreground process
+loads `DELEGATION_CODEX_CONFIG_JSON` and its referenced provider credential variables from the
+current environment. To install a role-specific current-user service, use `service install
+--config <broker.json>` for a broker or `service install --config <peer.json> --environment-file
+<peer.env>` for a peer. Read the native-service reference before creating that protected file.

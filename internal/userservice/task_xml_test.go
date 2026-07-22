@@ -289,8 +289,7 @@ func testTaskDescriptor(t *testing.T) Descriptor {
 	t.Helper()
 	descriptor, err := RenderScheduledTask(
 		ServiceRolePeer,
-		`C:\Delegation\delegation.exe`,
-		`C:\Users\test\config.json`,
+		testInvocation(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`),
 		"S-1-5-21-test",
 		func(value string) string { return value },
 	)

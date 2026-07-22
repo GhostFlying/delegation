@@ -18,7 +18,9 @@ import (
 func TestDarwinServiceLifecycleUsesLaunchAgents(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	result, err := Prepare(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Prepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"),
+	))
 	if err != nil || result.State != StatePrepared || result.Kind != KindLaunchAgent {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -32,13 +34,15 @@ func TestDarwinBrokerAndPeerDefinitionsCoexist(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	broker, err := Prepare(
-		ServiceRoleBroker, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "broker.json"),
+		ServiceRoleBroker,
+		testInvocation(ServiceRoleBroker, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "broker.json")),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	peer, err := Prepare(
-		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "peer.json"),
+		ServiceRolePeer,
+		testInvocation(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "peer.json")),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +81,8 @@ func TestDarwinInstallBootstrapsEnablesAndStartsService(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	invocation := testInvocation(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, invocation)
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -129,7 +134,8 @@ func TestDarwinInstallAcceptsOnlyManagedLoadedPath(t *testing.T) {
 		}
 		return launchctlTestStatus(path, "running"), nil
 	}
-	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	invocation := testInvocation(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, invocation)
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() loaded managed path = %#v, %v", result, err)
 	}
@@ -138,7 +144,7 @@ func TestDarwinInstallAcceptsOnlyManagedLoadedPath(t *testing.T) {
 	}
 	foreign = true
 	loaded = true
-	result, err = Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err = Install(ServiceRolePeer, invocation)
 	if err == nil || result.State != StateForeignConflict {
 		t.Fatalf("Install() loaded foreign path = %#v, %v", result, err)
 	}
@@ -159,7 +165,9 @@ func TestDarwinInstallReportsPartialActivation(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"),
+	))
 	if err == nil || result.State != StateIndeterminate {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -182,7 +190,9 @@ func TestDarwinInstallReportsIdentityChangeAfterKickstart(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"),
+	))
 	if err == nil || result.State != StateForeignConflict {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -213,7 +223,9 @@ func TestDarwinInstallReconcilesLostBootstrapResponse(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"),
+	))
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -238,7 +250,9 @@ func TestDarwinInstallRejectsServiceThatNeverBecomesReady(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"),
+	))
 	if !errors.Is(err, readinessErr) || result.State != StateIndeterminate {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -257,7 +271,9 @@ func TestDarwinInstallRejectsLoadedJobThatCannotBeUnloaded(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"),
+	))
 	if err == nil || result.State != StateIndeterminate || !strings.Contains(err.Error(), "remained loaded") {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -305,7 +321,9 @@ func TestParseLaunchAgentStatusRejectsDuplicateTopLevelState(t *testing.T) {
 
 func TestDarwinServiceRejectsRelativeHome(t *testing.T) {
 	t.Setenv("HOME", "relative")
-	if _, err := Prepare(ServiceRolePeer, "/opt/delegation", "/Users/test/config.json"); err == nil {
+	if _, err := Prepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation", "/Users/test/config.json",
+	)); err == nil {
 		t.Fatal("Prepare() accepted relative HOME")
 	}
 }
@@ -347,6 +365,13 @@ func TestDarwinLaunchAgentRoundTrip(t *testing.T) {
 	})
 
 	configPath := filepath.Join(t.TempDir(), "peer.json")
+	codexHome := filepath.Join(filepath.Dir(configPath), "codex")
+	workspaceRoot := filepath.Join(filepath.Dir(configPath), "workspaces")
+	for _, path := range []string{codexHome, workspaceRoot} {
+		if err := delegationconfig.PreparePrivateDirectory(path); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg := delegationconfig.Config{
 		SchemaVersion: delegationconfig.CurrentSchemaVersion,
 		Role:          delegationconfig.RolePeer,
@@ -357,13 +382,19 @@ func TestDarwinLaunchAgentRoundTrip(t *testing.T) {
 			URL:  "ws://127.0.0.1:9",
 			Auth: delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
 		},
+		Peer: delegationconfig.PeerConfig{
+			CodexBinary: binaryPath, CodexHome: codexHome, WorkspaceRoot: workspaceRoot,
+			StateFile:      filepath.Join(filepath.Dir(configPath), "state", "peer.sqlite3"),
+			MaxWorkerSlots: 1,
+		},
 	}
 	if err := delegationconfig.WriteNew(configPath, cfg); err != nil {
 		t.Fatal(err)
 	}
+	writeIntegrationProviderEnvironment(t, configPath)
 	cleanupNeeded = true
 	for attempt := 1; attempt <= 2; attempt++ {
-		result, err := Install(ServiceRolePeer, binaryPath, configPath)
+		result, err := Install(ServiceRolePeer, testInvocation(ServiceRolePeer, binaryPath, configPath))
 		if err != nil || result.State != StateActive || result.Artifact != artifact {
 			t.Fatalf("Install() attempt %d = %#v, %v", attempt, result, err)
 		}

@@ -76,13 +76,23 @@ type Descriptor struct {
 	Content []byte
 }
 
-func RenderSystemd(role ServiceRole, binaryPath, configPath string) (Descriptor, error) {
+type Invocation struct {
+	BinaryPath      string
+	ConfigPath      string
+	EnvironmentFile string
+}
+
+func RenderSystemd(role ServiceRole, invocation Invocation) (Descriptor, error) {
 	spec, err := specFor(role)
 	if err != nil {
 		return Descriptor{}, err
 	}
-	if err := validatePOSIXPaths(binaryPath, configPath); err != nil {
+	if err := validateInvocation(role, invocation, false); err != nil {
 		return Descriptor{}, err
+	}
+	environmentArgument := ""
+	if invocation.EnvironmentFile != "" {
+		environmentArgument = " --environment-file " + systemdQuote(invocation.EnvironmentFile)
 	}
 	content := fmt.Sprintf(`# %s
 [Unit]
@@ -90,32 +100,40 @@ Description=%s
 
 [Service]
 Type=exec
-ExecStart=%s service run --config %s
+ExecStart=%s service run --config %s%s
 Restart=on-failure
 RestartSec=5
 UMask=0077
 
 [Install]
 WantedBy=default.target
-`, spec.marker, spec.description, systemdQuote(binaryPath), systemdQuote(configPath))
+`, spec.marker, spec.description, systemdQuote(invocation.BinaryPath), systemdQuote(invocation.ConfigPath), environmentArgument)
 	return Descriptor{Kind: KindSystemd, Name: spec.systemdUnit, Content: []byte(content)}, nil
 }
 
-func RenderLaunchAgent(role ServiceRole, binaryPath, configPath string) (Descriptor, error) {
+func RenderLaunchAgent(role ServiceRole, invocation Invocation) (Descriptor, error) {
 	spec, err := specFor(role)
 	if err != nil {
 		return Descriptor{}, err
 	}
-	if err := validatePOSIXPaths(binaryPath, configPath); err != nil {
+	if err := validateInvocation(role, invocation, false); err != nil {
 		return Descriptor{}, err
 	}
-	binaryXML, err := escapeXML(binaryPath)
+	binaryXML, err := escapeXML(invocation.BinaryPath)
 	if err != nil {
 		return Descriptor{}, err
 	}
-	configXML, err := escapeXML(configPath)
+	configXML, err := escapeXML(invocation.ConfigPath)
 	if err != nil {
 		return Descriptor{}, err
+	}
+	environmentXML := ""
+	if invocation.EnvironmentFile != "" {
+		escaped, err := escapeXML(invocation.EnvironmentFile)
+		if err != nil {
+			return Descriptor{}, err
+		}
+		environmentXML = fmt.Sprintf("    <string>--environment-file</string>\n    <string>%s</string>\n", escaped)
 	}
 	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -132,6 +150,7 @@ func RenderLaunchAgent(role ServiceRole, binaryPath, configPath string) (Descrip
     <string>run</string>
     <string>--config</string>
     <string>%s</string>
+%s
   </array>
   <key>Disabled</key>
   <true/>
@@ -146,13 +165,14 @@ func RenderLaunchAgent(role ServiceRole, binaryPath, configPath string) (Descrip
   <integer>5</integer>
 </dict>
 </plist>
-`, spec.launchAgent, spec.marker, binaryXML, configXML)
+`, spec.launchAgent, spec.marker, binaryXML, configXML, strings.TrimSuffix(environmentXML, "\n"))
 	return Descriptor{Kind: KindLaunchAgent, Name: spec.launchAgent, Content: []byte(content)}, nil
 }
 
 func RenderScheduledTask(
 	role ServiceRole,
-	binaryPath, configPath, userSID string,
+	invocation Invocation,
+	userSID string,
 	escapeArg func(string) string,
 ) (Descriptor, error) {
 	spec, err := specFor(role)
@@ -160,10 +180,10 @@ func RenderScheduledTask(
 		return Descriptor{}, err
 	}
 	taskPath := spec.scheduled
-	if !windowsAbsolute(binaryPath) || !windowsAbsolute(configPath) {
-		return Descriptor{}, errors.New("service binary and config paths must be absolute Windows paths")
+	if err := validateInvocation(role, invocation, true); err != nil {
+		return Descriptor{}, err
 	}
-	if err := validateTextPaths(binaryPath, configPath, taskPath); err != nil {
+	if err := validateTextPaths(taskPath); err != nil {
 		return Descriptor{}, err
 	}
 	if strings.TrimSpace(userSID) == "" || len(taskPath) < 2 || taskPath[0] != '\\' ||
@@ -171,7 +191,7 @@ func RenderScheduledTask(
 		strings.Contains(taskPath, "/") || strings.Contains(taskPath[1:], `\\`) || escapeArg == nil {
 		return Descriptor{}, errors.New("Windows user SID, absolute task path, and argument escaper are required")
 	}
-	binaryXML, err := escapeXML(binaryPath)
+	binaryXML, err := escapeXML(invocation.BinaryPath)
 	if err != nil {
 		return Descriptor{}, err
 	}
@@ -187,8 +207,11 @@ func RenderScheduledTask(
 		escapeArg("service"),
 		escapeArg("run"),
 		escapeArg("--config"),
-		escapeArg(configPath),
+		escapeArg(invocation.ConfigPath),
 	}, " ")
+	if invocation.EnvironmentFile != "" {
+		arguments += " " + escapeArg("--environment-file") + " " + escapeArg(invocation.EnvironmentFile)
+	}
 	argumentsXML, err := escapeXML(arguments)
 	if err != nil {
 		return Descriptor{}, err
@@ -237,6 +260,31 @@ func RenderScheduledTask(
 		return Descriptor{}, err
 	}
 	return Descriptor{Kind: KindScheduledTask, Name: taskPath, Content: encoded}, nil
+}
+
+func validateInvocation(role ServiceRole, invocation Invocation, windowsPaths bool) error {
+	paths := []string{invocation.BinaryPath, invocation.ConfigPath}
+	if role == ServiceRolePeer {
+		if invocation.EnvironmentFile == "" {
+			return errors.New("peer service environment file is required")
+		}
+		paths = append(paths, invocation.EnvironmentFile)
+	} else if role == ServiceRoleBroker {
+		if invocation.EnvironmentFile != "" {
+			return errors.New("broker service must not use a peer environment file")
+		}
+	} else {
+		return fmt.Errorf("unsupported service role %q", role)
+	}
+	if windowsPaths {
+		for _, candidate := range paths {
+			if !windowsAbsolute(candidate) {
+				return errors.New("service paths must be absolute Windows paths")
+			}
+		}
+		return validateTextPaths(paths...)
+	}
+	return validatePOSIXPaths(paths...)
 }
 
 func validatePOSIXPaths(paths ...string) error {

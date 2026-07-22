@@ -194,6 +194,7 @@ HOME="$runtime_user_home" "$tmp/plugin/scripts/delegation-mcp" version --json >"
 grep -F '"version":"0.1.0-alpha.0.m1.1"' "$tmp/launcher-installed-version" >/dev/null
 launcher="$tmp/plugin/scripts/delegation-mcp"
 config="$runtime_home/peer.json"
+service_environment="$runtime_home/peer.env"
 HOME="$runtime_user_home" "$launcher" setup peer \
   --controller-id 11111111-1111-4111-8111-111111111111 \
   --device-id 22222222-2222-4222-8222-222222222222 \
@@ -203,6 +204,11 @@ HOME="$runtime_user_home" "$launcher" setup peer \
   --json >"$tmp/launcher-setup"
 grep -F '"role":"peer"' "$tmp/launcher-setup" >/dev/null
 test -f "$config"
+cat >"$service_environment" <<'EOF'
+DELEGATION_CODEX_CONFIG_JSON={"model":"test","model_provider":"gateway","model_providers.gateway":{"name":"Gateway","base_url":"https://gateway.example.test/v1","wire_api":"responses","requires_openai_auth":false,"env_key":"GATEWAY_KEY"}}
+GATEWAY_KEY=fixture-credential
+EOF
+chmod 0600 "$service_environment"
 HOME="$runtime_user_home" "$launcher" doctor --config "$config" --json >"$tmp/launcher-doctor"
 grep -F '"ok":true' "$tmp/launcher-doctor" >/dev/null
 {
@@ -230,15 +236,17 @@ EOF
   service_log="$tmp/systemctl.log"
   mkdir -p "$service_config_home"
   HOME="$runtime_user_home" \
-    "$launcher" service run --config "$config" \
+    "$launcher" service run --config "$config" --environment-file "$service_environment" \
     >"$tmp/launcher-service-run-out" 2>"$tmp/launcher-service-run-err" &
   service_pid=$!
   PATH="$tmp/fake-bin:$PATH" HOME="$runtime_user_home" XDG_CONFIG_HOME="$service_config_home" \
     DELEGATION_TEST_SYSTEMCTL_LOG="$service_log" \
-    "$launcher" service install --config "$config" --json >"$tmp/launcher-service"
+    "$launcher" service install --config "$config" --environment-file "$service_environment" \
+      --json >"$tmp/launcher-service"
   grep -F '"state":"active"' "$tmp/launcher-service" >/dev/null
   grep -F '"kind":"systemdUser"' "$tmp/launcher-service" >/dev/null
   grep -F "\"artifact\":\"$service_artifact\"" "$tmp/launcher-service" >/dev/null
+  grep -F "\"environmentFile\":\"$service_environment\"" "$tmp/launcher-service" >/dev/null
   test -f "$service_artifact"
   test "$(wc -l <"$service_log")" -eq 6
   kill "$service_pid"

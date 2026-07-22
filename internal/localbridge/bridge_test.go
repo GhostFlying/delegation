@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/identity"
@@ -44,9 +45,22 @@ type fakeBackend struct {
 }
 
 type fakeWorkerAuthorizer struct {
-	mu      sync.Mutex
-	sources []control.PrincipalIdentity
-	err     error
+	mu          sync.Mutex
+	sources     []control.PrincipalIdentity
+	rootThreads []string
+	managed     bool
+	rootErr     error
+	err         error
+}
+
+func (a *fakeWorkerAuthorizer) ManagedWorkerThread(
+	_ context.Context,
+	controllerID, externalThreadID string,
+) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.rootThreads = append(a.rootThreads, controllerID+"/"+externalThreadID)
+	return a.managed, a.rootErr
 }
 
 func (a *fakeWorkerAuthorizer) AuthorizeWorker(
@@ -216,7 +230,7 @@ func TestBridgeRequiresLocalReservationAuthorizationForWorkerCalls(t *testing.T)
 		bridgeTestDeviceID,
 	).Identity()
 
-	unauthorizedClient, stopUnauthorized := startTestBridge(t, backend)
+	unauthorizedClient, stopUnauthorized := startAuthorizedTestBridge(t, backend, nil)
 	var result protocol.SendMessageResult
 	err := unauthorizedClient.Call(
 		context.Background(),
@@ -224,8 +238,9 @@ func TestBridgeRequiresLocalReservationAuthorizationForWorkerCalls(t *testing.T)
 		worker.TreeID,
 		&worker,
 		protocol.SendMessageParams{
-			Target:  protocol.MessageTarget{Kind: protocol.MessageTargetParent},
-			Message: "status",
+			MessageID: "123e4567-e89b-42d3-a456-426614174311",
+			Target:    protocol.MessageTarget{Kind: protocol.MessageTargetParent},
+			Message:   "status",
 		},
 		&result,
 	)
@@ -235,14 +250,27 @@ func TestBridgeRequiresLocalReservationAuthorizationForWorkerCalls(t *testing.T)
 	authorizer := &fakeWorkerAuthorizer{}
 	client, stop := startAuthorizedTestBridge(t, backend, authorizer)
 	defer stop()
+	err = client.Call(
+		context.Background(),
+		protocol.MethodListDevices,
+		worker.TreeID,
+		&worker,
+		protocol.ListDevicesParams{Limit: 10},
+		&protocol.ListDevicesResult{},
+	)
+	assertRPCCode(t, err, protocol.ErrorForbidden)
+	if calls := backend.snapshot(); len(calls) != 0 {
+		t.Fatalf("worker device query reached broker backend: %#v", calls)
+	}
 	if err := client.Call(
 		context.Background(),
 		protocol.MethodSendMessage,
 		worker.TreeID,
 		&worker,
 		protocol.SendMessageParams{
-			Target:  protocol.MessageTarget{Kind: protocol.MessageTargetParent},
-			Message: "status",
+			MessageID: "123e4567-e89b-42d3-a456-426614174312",
+			Target:    protocol.MessageTarget{Kind: protocol.MessageTargetParent},
+			Message:   "status",
 		},
 		&result,
 	); err != nil {
@@ -282,6 +310,151 @@ func TestBridgeRequiresLocalReservationAuthorizationForWorkerCalls(t *testing.T)
 		&protocol.SendMessageResult{},
 	)
 	assertRPCCode(t, err, protocol.ErrorForbidden)
+}
+
+func TestBridgeRejectsManagedWorkerThreadBeforeBrokerRootCreation(t *testing.T) {
+	backend := &fakeBackend{result: json.RawMessage(`{"ok":true}`)}
+	authorizer := &fakeWorkerAuthorizer{managed: true}
+	client, stop := startAuthorizedTestBridge(t, backend, authorizer)
+	defer stop()
+
+	callRoot := func() error {
+		return client.Call(
+			context.Background(),
+			protocol.MethodEnsureRootTree,
+			"",
+			nil,
+			protocol.EnsureRootTreeParams{ExternalThreadID: bridgeTestTreeID},
+			nil,
+		)
+	}
+	assertRPCCode(t, callRoot(), protocol.ErrorForbidden)
+	if calls := backend.snapshot(); len(calls) != 0 {
+		t.Fatalf("managed worker root request reached broker backend: %#v", calls)
+	}
+
+	authorizer.mu.Lock()
+	authorizer.managed = false
+	authorizer.rootErr = errors.New("peer state unavailable")
+	authorizer.mu.Unlock()
+	assertRPCCode(t, callRoot(), protocol.ErrorUnavailable)
+	if calls := backend.snapshot(); len(calls) != 0 {
+		t.Fatalf("root request with failed local authorization reached broker backend: %#v", calls)
+	}
+
+	authorizer.mu.Lock()
+	authorizer.rootErr = nil
+	authorizer.mu.Unlock()
+	if err := callRoot(); err != nil {
+		t.Fatal(err)
+	}
+	if calls := backend.snapshot(); len(calls) != 1 || calls[0].method != protocol.MethodEnsureRootTree {
+		t.Fatalf("ordinary root request calls = %#v", calls)
+	}
+	authorizer.mu.Lock()
+	rootThreads := append([]string(nil), authorizer.rootThreads...)
+	authorizer.mu.Unlock()
+	wantThread := bridgeTestControllerID + "/" + bridgeTestTreeID
+	if !reflect.DeepEqual(rootThreads, []string{wantThread, wantThread, wantThread}) {
+		t.Fatalf("root authorization calls = %#v", rootThreads)
+	}
+}
+
+type saturatedWaitBackend struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *saturatedWaitBackend) Call(
+	ctx context.Context,
+	method, _ string,
+	_ *control.PrincipalIdentity,
+	_, result any,
+) error {
+	if method == protocol.MethodWaitMailbox {
+		b.started <- struct{}{}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-b.release:
+		}
+	}
+	*result.(*json.RawMessage) = json.RawMessage(`{"ok":true}`)
+	return nil
+}
+
+func TestBridgeWorkerWaitCapacityPreservesControlHeadroom(t *testing.T) {
+	backend := &saturatedWaitBackend{
+		started: make(chan struct{}, config.MaximumWorkerSlots),
+		release: make(chan struct{}),
+	}
+	client, stop := startTestBridge(t, backend)
+	defer stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	waitDone := make(chan error, config.MaximumWorkerSlots)
+	for range config.MaximumWorkerSlots {
+		agentID, err := identity.NewID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		worker := control.NewWorkerPrincipal(
+			bridgeTestControllerID,
+			bridgeTestTreeID,
+			agentID,
+			bridgeTestAgentID,
+			bridgeTestDeviceID,
+		).Identity()
+		go func() {
+			waitDone <- client.Call(
+				ctx,
+				protocol.MethodWaitMailbox,
+				worker.TreeID,
+				&worker,
+				protocol.WaitMailboxParams{Limit: 1, TimeoutMillis: protocol.MaximumMailboxWaitMillis},
+				nil,
+			)
+		}()
+	}
+	for range config.MaximumWorkerSlots {
+		select {
+		case <-backend.started:
+		case <-ctx.Done():
+			t.Fatal("all configured worker waits did not reach the backend")
+		}
+	}
+
+	root := control.NewRootPrincipal(
+		bridgeTestControllerID, bridgeTestTreeID, bridgeTestAgentID, bridgeTestDeviceID,
+	).Identity()
+	for _, call := range []struct {
+		method string
+		params any
+	}{
+		{method: protocol.MethodListDevices, params: protocol.ListDevicesParams{Limit: 1}},
+		{method: protocol.MethodSendMessage, params: protocol.SendMessageParams{
+			MessageID: "123e4567-e89b-42d3-a456-426614174399",
+			Target:    protocol.MessageTarget{Kind: protocol.MessageTargetRoot},
+			Message:   "control remains available",
+		}},
+	} {
+		var result struct {
+			OK bool `json:"ok"`
+		}
+		if err := client.Call(ctx, call.method, root.TreeID, &root, call.params, &result); err != nil {
+			t.Fatalf("%s while worker waits occupied = %v", call.method, err)
+		}
+		if !result.OK {
+			t.Fatalf("%s result = %#v", call.method, result)
+		}
+	}
+
+	close(backend.release)
+	for range config.MaximumWorkerSlots {
+		if err := <-waitDone; err != nil {
+			t.Fatalf("worker wait release: %v", err)
+		}
+	}
 }
 
 func TestClientCancellationReachesBridgeBackend(t *testing.T) {
@@ -399,17 +572,17 @@ func TestUnsupportedLocalBridgeRequestFailsClosed(t *testing.T) {
 }
 
 func startTestBridge(t *testing.T, backend Backend) (*Client, func()) {
-	return startAuthorizedTestBridge(t, backend, nil)
+	return startAuthorizedTestBridge(t, backend, &fakeWorkerAuthorizer{})
 }
 
 func startAuthorizedTestBridge(
 	t *testing.T,
 	backend Backend,
-	authorizer WorkerAuthorizer,
+	authorizer Authorizer,
 ) (*Client, func()) {
 	t.Helper()
 	endpoint := testEndpoint(t)
-	server, err := ListenWithWorkerAuthorization(
+	server, err := ListenWithAuthorization(
 		endpoint,
 		testServiceIdentity(),
 		backend,

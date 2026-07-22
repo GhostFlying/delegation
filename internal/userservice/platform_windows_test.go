@@ -36,7 +36,9 @@ func TestWindowsInstallCreatesTaskWithoutForce(t *testing.T) {
 		return taskCommandResult{}, nil
 	}
 
-	result, err := platformPrepare(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := platformPrepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	))
 	if err != nil || result.State != StatePrepared {
 		t.Fatalf("platformInstall() = %#v, %v", result, err)
 	}
@@ -63,13 +65,15 @@ func TestWindowsBrokerAndPeerDefinitionsCoexist(t *testing.T) {
 	}
 
 	broker, err := platformPrepare(
-		ServiceRoleBroker, `C:\Delegation\delegation.exe`, `C:\Users\test\broker.json`,
+		ServiceRoleBroker,
+		testInvocation(ServiceRoleBroker, `C:\Delegation\delegation.exe`, `C:\Users\test\broker.json`),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	peer, err := platformPrepare(
-		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\peer.json`,
+		ServiceRolePeer,
+		testInvocation(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\peer.json`),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +114,9 @@ func TestWindowsInstallEnablesAndRunsTask(t *testing.T) {
 		}
 		return taskCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	))
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -146,7 +152,9 @@ func TestWindowsInstallReconcilesLostEnableResponse(t *testing.T) {
 		}
 		return taskCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	))
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -176,7 +184,9 @@ func TestWindowsInstallRejectsTaskThatNeverBecomesReady(t *testing.T) {
 		}
 		return taskCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	))
 	if !errors.Is(err, readinessErr) || result.State != StateIndeterminate {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -206,7 +216,9 @@ func TestWindowsInstallRejectsReadyEndpointWithoutRunningTask(t *testing.T) {
 		}
 		return taskCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	))
 	if err == nil || result.State != StateIndeterminate || !strings.Contains(err.Error(), "no running managed instance") {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -221,7 +233,7 @@ func TestWindowsPrepareAcceptsAnOtherwiseEquivalentEnabledTask(t *testing.T) {
 	}
 	descriptor, err := RenderScheduledTask(
 		ServiceRolePeer,
-		`C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+		testInvocation(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`),
 		sid, windows.EscapeArg,
 	)
 	if err != nil {
@@ -239,7 +251,9 @@ func TestWindowsPrepareAcceptsAnOtherwiseEquivalentEnabledTask(t *testing.T) {
 		}
 		return taskCommandResult{Output: active}, nil
 	}
-	result, err := platformPrepare(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := platformPrepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	))
 	if err != nil || result.State != StateActive {
 		t.Fatalf("platformPrepare() = %#v, %v", result, err)
 	}
@@ -254,7 +268,9 @@ func TestWindowsInstallReportsPartialActivation(t *testing.T) {
 		}
 		return taskCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	))
 	if err == nil || result.State != StateIndeterminate {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -276,7 +292,9 @@ func TestWindowsInstallRecognizesExactUTF16Task(t *testing.T) {
 		return taskCommandResult{Output: desired}, nil
 	}
 
-	result, err := platformPrepare(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := platformPrepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	))
 	if err != nil || result.State != StatePrepared {
 		t.Fatalf("platformInstall() = %#v, %v", result, err)
 	}
@@ -298,7 +316,9 @@ func TestWindowsInstallReconcilesCreateTransportError(t *testing.T) {
 		return taskCommandResult{Output: desired}, nil
 	}
 
-	result, err := platformPrepare(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := platformPrepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	))
 	if err != nil || result.State != StatePrepared {
 		t.Fatalf("platformInstall() = %#v, %v", result, err)
 	}
@@ -315,18 +335,27 @@ func TestWindowsInstallRejectsManagedDriftAndForeignSubstring(t *testing.T) {
 		if foreign {
 			return taskCommandResult{Output: []byte(`<?xml version="1.0"?><Task version="1.4" xmlns="` + taskXMLNamespace + `"><RegistrationInfo><Description>foreign ` + MarkerPeer + `</Description><URI>` + ScheduledTaskPeer + `</URI></RegistrationInfo><Triggers/><Principals/><Settings/><Actions/></Task>`)}, nil
 		}
-		descriptor, err := RenderScheduledTask(ServiceRolePeer, `C:\Other\delegation.exe`, `C:\Users\test\config.json`, "S-1-5-18", func(value string) string { return value })
+		descriptor, err := RenderScheduledTask(
+			ServiceRolePeer,
+			testInvocation(ServiceRolePeer, `C:\Other\delegation.exe`, `C:\Users\test\config.json`),
+			"S-1-5-18",
+			func(value string) string { return value },
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return taskCommandResult{Output: descriptor.Content}, nil
 	}
 
-	if result, err := platformPrepare(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`); err == nil || result.State != StatePrepared {
+	if result, err := platformPrepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	)); err == nil || result.State != StatePrepared {
 		t.Fatalf("managed drift = %#v, %v", result, err)
 	}
 	foreign = true
-	if result, err := platformPrepare(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`); err == nil || result.State != StateForeignConflict {
+	if result, err := platformPrepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	)); err == nil || result.State != StateForeignConflict {
 		t.Fatalf("foreign substring = %#v, %v", result, err)
 	}
 }
@@ -337,7 +366,9 @@ func TestWindowsInstallFailsClosedWhenCreateAndQueryFail(t *testing.T) {
 	runTaskCommand = func(args ...string) (taskCommandResult, error) {
 		return taskCommandResult{Output: []byte("denied"), ExitCode: 5}, nil
 	}
-	result, err := platformPrepare(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := platformPrepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	))
 	if err == nil || !strings.Contains(err.Error(), "exit 5") || result.State != StateIndeterminate {
 		t.Fatalf("platformInstall() = %#v, %v", result, err)
 	}
@@ -353,7 +384,9 @@ func TestWindowsInstallTreatsUnparseableQueryAsIndeterminate(t *testing.T) {
 		return taskCommandResult{Output: []byte("<Task")}, nil
 	}
 
-	result, err := platformPrepare(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	result, err := platformPrepare(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	))
 	if err == nil || result.State != StateIndeterminate {
 		t.Fatalf("platformInstall() = %#v, %v", result, err)
 	}
@@ -405,7 +438,12 @@ func TestWindowsTaskSchedulerRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	taskName := fmt.Sprintf(`\Delegation Connector Test %d`, os.Getpid())
-	descriptor, err := RenderScheduledTask(ServiceRolePeer, `C:\Windows\System32\cmd.exe`, "C:\\Windows\\Temp\\delegation-\u9a8c\u8bc1.json", sid, windows.EscapeArg)
+	descriptor, err := RenderScheduledTask(
+		ServiceRolePeer,
+		testInvocation(ServiceRolePeer, `C:\Windows\System32\cmd.exe`, "C:\\Windows\\Temp\\delegation-\u9a8c\u8bc1.json"),
+		sid,
+		windows.EscapeArg,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +525,12 @@ func TestWindowsTaskSchedulerRequiresRuntimeReadiness(t *testing.T) {
 	brokerConfig := windowsIntegrationBrokerConfig(t, root)
 	writeWindowsIntegrationConfig(t, brokerConfigPath, brokerConfig)
 	peerConfigPath := filepath.Join(root, "peer", "peer.json")
-	writeWindowsIntegrationConfig(t, peerConfigPath, windowsIntegrationPeerConfig(brokerConfig))
+	writeWindowsIntegrationConfig(
+		t,
+		peerConfigPath,
+		windowsIntegrationPeerConfig(t, root, binaryPath, brokerConfig),
+	)
+	writeIntegrationProviderEnvironment(t, peerConfigPath)
 	brokerFixture := &windowsIntegrationTaskFixture{
 		role: ServiceRoleBroker, binaryPath: binaryPath, configPath: brokerConfigPath,
 	}
@@ -560,7 +603,7 @@ func (f *windowsIntegrationTaskFixture) requireAbsent(t *testing.T) {
 
 func (f *windowsIntegrationTaskFixture) install() (Result, error) {
 	f.attempted = true
-	return Install(f.role, f.binaryPath, f.configPath)
+	return Install(f.role, testInvocation(f.role, f.binaryPath, f.configPath))
 }
 
 func (f *windowsIntegrationTaskFixture) cleanup() error {
@@ -617,7 +660,7 @@ func windowsIntegrationTaskMatches(
 	if err != nil {
 		return true, false, err
 	}
-	descriptor, err := RenderScheduledTask(role, binaryPath, configPath, sid, windows.EscapeArg)
+	descriptor, err := RenderScheduledTask(role, testInvocation(role, binaryPath, configPath), sid, windows.EscapeArg)
 	if err != nil {
 		return true, false, err
 	}
@@ -655,7 +698,19 @@ func windowsIntegrationBrokerConfig(t *testing.T, root string) delegationconfig.
 	}
 }
 
-func windowsIntegrationPeerConfig(brokerConfig delegationconfig.Config) delegationconfig.Config {
+func windowsIntegrationPeerConfig(
+	t *testing.T,
+	root, binaryPath string,
+	brokerConfig delegationconfig.Config,
+) delegationconfig.Config {
+	t.Helper()
+	codexHome := filepath.Join(root, "peer", "codex")
+	workspaceRoot := filepath.Join(root, "peer", "workspaces")
+	for _, path := range []string{codexHome, workspaceRoot} {
+		if err := delegationconfig.PreparePrivateDirectory(path); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return delegationconfig.Config{
 		SchemaVersion: delegationconfig.CurrentSchemaVersion,
 		Role:          delegationconfig.RolePeer,
@@ -665,6 +720,11 @@ func windowsIntegrationPeerConfig(brokerConfig delegationconfig.Config) delegati
 		Broker: delegationconfig.BrokerConfig{
 			URL:  "ws://" + brokerConfig.Broker.Listen + "/v1/connect",
 			Auth: delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
+		},
+		Peer: delegationconfig.PeerConfig{
+			CodexBinary: binaryPath, CodexHome: codexHome, WorkspaceRoot: workspaceRoot,
+			StateFile:      filepath.Join(root, "peer", "state", "peer.sqlite3"),
+			MaxWorkerSlots: 1,
 		},
 	}
 }

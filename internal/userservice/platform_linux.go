@@ -17,8 +17,8 @@ var runSystemctl = func(args ...string) (userServiceCommandResult, error) {
 
 var waitForLinuxServiceReady = waitForServiceReady
 
-func platformPrepare(role ServiceRole, binaryPath, configPath string) (Result, error) {
-	descriptor, err := RenderSystemd(role, binaryPath, configPath)
+func platformPrepare(role ServiceRole, invocation Invocation) (Result, error) {
+	descriptor, err := RenderSystemd(role, invocation)
 	if err != nil {
 		return Result{}, err
 	}
@@ -30,7 +30,7 @@ func platformPrepare(role ServiceRole, binaryPath, configPath string) (Result, e
 	return Result{State: state, Kind: descriptor.Kind, Artifact: path, Role: role}, err
 }
 
-func platformActivate(result Result, binaryPath, configPath string) (Result, error) {
+func platformActivate(result Result, invocation Invocation) (Result, error) {
 	if result.State != StatePrepared && result.State != StateActive {
 		return result, fmt.Errorf("cannot activate systemd user service from state %s", result.State)
 	}
@@ -41,11 +41,11 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 	reloaded, err := runSystemctl("--user", "--no-ask-password", "daemon-reload")
 	if err != nil || reloaded.ExitCode != 0 {
 		return reconcileSystemdFailure(
-			result, binaryPath, configPath,
+			result, invocation,
 			errors.Join(err, commandFailure("reload systemd user manager", reloaded)),
 		)
 	}
-	matched, err := querySystemdIdentity(result, binaryPath, configPath)
+	matched, err := querySystemdIdentity(result, invocation)
 	if err != nil {
 		result.State = StateIndeterminate
 		return result, err
@@ -59,7 +59,7 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 	)
 	if err != nil || enabled.ExitCode != 0 {
 		return reconcileSystemdFailure(
-			result, binaryPath, configPath,
+			result, invocation,
 			errors.Join(err, commandFailure("enable systemd user service", enabled)),
 		)
 	}
@@ -68,7 +68,7 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 		result.State = StateIndeterminate
 		return result, errors.Join(err, errors.New("systemd user service did not become enabled and active"))
 	}
-	matched, err = querySystemdIdentity(result, binaryPath, configPath)
+	matched, err = querySystemdIdentity(result, invocation)
 	if err != nil {
 		result.State = StateIndeterminate
 		return result, err
@@ -77,7 +77,7 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 		result.State = StateForeignConflict
 		return result, errors.New("systemd unit identity changed during activation")
 	}
-	if err := waitForLinuxServiceReady(configPath); err != nil {
+	if err := waitForLinuxServiceReady(invocation.ConfigPath); err != nil {
 		result.State = StateIndeterminate
 		return result, fmt.Errorf("systemd user service did not become ready: %w", err)
 	}
@@ -87,10 +87,10 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 
 func reconcileSystemdFailure(
 	result Result,
-	binaryPath, configPath string,
+	invocation Invocation,
 	activationErr error,
 ) (Result, error) {
-	matched, identityErr := querySystemdIdentity(result, binaryPath, configPath)
+	matched, identityErr := querySystemdIdentity(result, invocation)
 	if identityErr != nil {
 		result.State = StateIndeterminate
 		return result, errors.Join(activationErr, identityErr)
@@ -105,7 +105,7 @@ func reconcileSystemdFailure(
 		return result, errors.Join(activationErr, queryErr)
 	}
 	if enabled && active {
-		if readyErr := waitForLinuxServiceReady(configPath); readyErr != nil {
+		if readyErr := waitForLinuxServiceReady(invocation.ConfigPath); readyErr != nil {
 			result.State = StateIndeterminate
 			return result, errors.Join(activationErr, fmt.Errorf("systemd user service did not become ready: %w", readyErr))
 		}
@@ -118,8 +118,8 @@ func reconcileSystemdFailure(
 	return result, activationErr
 }
 
-func querySystemdIdentity(result Result, binaryPath, configPath string) (bool, error) {
-	descriptor, err := RenderSystemd(result.Role, binaryPath, configPath)
+func querySystemdIdentity(result Result, invocation Invocation) (bool, error) {
+	descriptor, err := RenderSystemd(result.Role, invocation)
 	if err != nil {
 		return false, err
 	}

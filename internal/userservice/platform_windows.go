@@ -32,7 +32,7 @@ var (
 	scheduledTaskRunning      = queryScheduledTaskRunning
 )
 
-func platformPrepare(role ServiceRole, binaryPath, configPath string) (Result, error) {
+func platformPrepare(role ServiceRole, invocation Invocation) (Result, error) {
 	spec, err := specFor(role)
 	if err != nil {
 		return Result{}, err
@@ -41,7 +41,7 @@ func platformPrepare(role ServiceRole, binaryPath, configPath string) (Result, e
 	if err != nil {
 		return Result{}, err
 	}
-	descriptor, err := RenderScheduledTask(role, binaryPath, configPath, sid, windows.EscapeArg)
+	descriptor, err := RenderScheduledTask(role, invocation, sid, windows.EscapeArg)
 	if err != nil {
 		return Result{}, err
 	}
@@ -110,7 +110,7 @@ func platformPrepare(role ServiceRole, binaryPath, configPath string) (Result, e
 	return result, nil
 }
 
-func platformActivate(result Result, binaryPath, configPath string) (Result, error) {
+func platformActivate(result Result, invocation Invocation) (Result, error) {
 	if result.State != StatePrepared && result.State != StateActive {
 		return result, fmt.Errorf("cannot activate scheduled task from state %s", result.State)
 	}
@@ -119,7 +119,7 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 		return result, err
 	}
 	changed, changeErr := runTaskCommand("/Change", "/TN", spec.scheduled, "/ENABLE")
-	enabled, verifyErr := scheduledTaskEnabled(result.Role, binaryPath, configPath)
+	enabled, verifyErr := scheduledTaskEnabled(result.Role, invocation)
 	if !enabled || verifyErr != nil {
 		result.State = StateIndeterminate
 		return result, errors.Join(
@@ -133,11 +133,11 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 		result.State = StateIndeterminate
 		return result, errors.Join(runErr, taskCommandFailure("start scheduled task", run))
 	}
-	if err := waitForScheduledTaskReady(configPath); err != nil {
+	if err := waitForScheduledTaskReady(invocation.ConfigPath); err != nil {
 		result.State = StateIndeterminate
 		return result, fmt.Errorf("scheduled task did not become ready: %w", err)
 	}
-	enabled, verifyErr = scheduledTaskEnabled(result.Role, binaryPath, configPath)
+	enabled, verifyErr = scheduledTaskEnabled(result.Role, invocation)
 	if !enabled || verifyErr != nil {
 		result.State = StateIndeterminate
 		return result, errors.Join(verifyErr, errors.New("scheduled task changed after it was started"))
@@ -180,7 +180,7 @@ func queryScheduledTaskRunning(role ServiceRole) (bool, error) {
 	return count > 0, nil
 }
 
-func scheduledTaskEnabled(role ServiceRole, binaryPath, configPath string) (bool, error) {
+func scheduledTaskEnabled(role ServiceRole, invocation Invocation) (bool, error) {
 	spec, err := specFor(role)
 	if err != nil {
 		return false, err
@@ -190,7 +190,7 @@ func scheduledTaskEnabled(role ServiceRole, binaryPath, configPath string) (bool
 		return false, err
 	}
 	descriptor, err := RenderScheduledTask(
-		role, binaryPath, configPath, sid, windows.EscapeArg,
+		role, invocation, sid, windows.EscapeArg,
 	)
 	if err != nil {
 		return false, err

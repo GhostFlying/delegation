@@ -139,7 +139,7 @@ func TestManagedFileRequiresStructuralOwnership(t *testing.T) {
 		t.Fatalf("foreign LaunchAgent ownership = %q, %v", state, err)
 	}
 
-	owned, err := RenderLaunchAgent(ServiceRolePeer, "/opt/delegation", "/home/test/config.json")
+	owned, err := RenderLaunchAgent(ServiceRolePeer, testInvocation(ServiceRolePeer, "/opt/delegation", "/home/test/config.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

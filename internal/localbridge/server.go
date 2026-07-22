@@ -10,49 +10,56 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
 const (
-	maximumConcurrentCalls = 32
-	localCallTimeout       = 30 * time.Second
+	rootMailboxWaitHeadroom       = 16
+	maximumConcurrentWaitCalls    = config.MaximumWorkerSlots + rootMailboxWaitHeadroom
+	maximumConcurrentControlCalls = 32
+	maximumConcurrentCalls        = maximumConcurrentWaitCalls + maximumConcurrentControlCalls
+	localCallTimeout              = 30 * time.Second
 )
 
 type Backend interface {
 	Call(context.Context, string, string, *control.PrincipalIdentity, any, any) error
 }
 
-type WorkerAuthorizer interface {
+type Authorizer interface {
+	ManagedWorkerThread(context.Context, string, string) (bool, error)
 	AuthorizeWorker(context.Context, control.PrincipalIdentity) error
 }
 
 type Server struct {
-	listener    net.Listener
-	identity    ServiceIdentity
-	backend     Backend
-	workers     WorkerAuthorizer
-	sem         chan struct{}
-	started     atomic.Bool
-	closeOnce   sync.Once
-	wait        sync.WaitGroup
-	serveDone   chan struct{}
-	mu          sync.Mutex
-	connections map[net.Conn]struct{}
-	closed      bool
-	closeErr    error
+	listener      net.Listener
+	identity      ServiceIdentity
+	backend       Backend
+	authorizer    Authorizer
+	connectionSem chan struct{}
+	waitSem       chan struct{}
+	controlSem    chan struct{}
+	started       atomic.Bool
+	closeOnce     sync.Once
+	wait          sync.WaitGroup
+	serveDone     chan struct{}
+	mu            sync.Mutex
+	connections   map[net.Conn]struct{}
+	closed        bool
+	closeErr      error
 }
 
 func Listen(endpoint string, identity ServiceIdentity, backend Backend) (*Server, error) {
-	return ListenWithWorkerAuthorization(endpoint, identity, backend, nil)
+	return ListenWithAuthorization(endpoint, identity, backend, nil)
 }
 
-func ListenWithWorkerAuthorization(
+func ListenWithAuthorization(
 	endpoint string,
 	identity ServiceIdentity,
 	backend Backend,
-	workers WorkerAuthorizer,
+	authorizer Authorizer,
 ) (*Server, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
@@ -65,9 +72,11 @@ func ListenWithWorkerAuthorization(
 		return nil, fmt.Errorf("listen on local delegation endpoint: %w", err)
 	}
 	return &Server{
-		listener: listener, identity: identity, backend: backend, workers: workers,
-		sem:       make(chan struct{}, maximumConcurrentCalls),
-		serveDone: make(chan struct{}), connections: make(map[net.Conn]struct{}),
+		listener: listener, identity: identity, backend: backend, authorizer: authorizer,
+		connectionSem: make(chan struct{}, maximumConcurrentCalls),
+		waitSem:       make(chan struct{}, maximumConcurrentWaitCalls),
+		controlSem:    make(chan struct{}, maximumConcurrentControlCalls),
+		serveDone:     make(chan struct{}), connections: make(map[net.Conn]struct{}),
 	}, nil
 }
 
@@ -88,9 +97,9 @@ func (s *Server) Serve(ctx context.Context) error {
 			return fmt.Errorf("accept local delegation connection: %w", err)
 		}
 		select {
-		case s.sem <- struct{}{}:
+		case s.connectionSem <- struct{}{}:
 			if !s.track(connection) {
-				<-s.sem
+				<-s.connectionSem
 				_ = connection.Close()
 				continue
 			}
@@ -155,7 +164,7 @@ func (s *Server) untrack(connection net.Conn) {
 
 func (s *Server) handle(serverContext context.Context, connection net.Conn) {
 	defer s.wait.Done()
-	defer func() { <-s.sem }()
+	defer func() { <-s.connectionSem }()
 	defer s.untrack(connection)
 	defer connection.Close()
 	ctx, cancel := context.WithTimeout(serverContext, localCallTimeout)
@@ -174,6 +183,12 @@ func (s *Server) handle(serverContext context.Context, connection net.Conn) {
 		connection.Close()
 		return
 	}
+	releaseCall, admitted := s.admitCall(request.Method)
+	if !admitted {
+		s.writeError(connection, request.RequestID, protocol.ErrorUnavailable, "local delegation service is busy")
+		return
+	}
+	defer releaseCall()
 	peerContext, cancelPeer := context.WithCancel(ctx)
 	peerClosed := make(chan struct{})
 	go func() {
@@ -220,6 +235,22 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		if request.TreeID != "" || request.Source != nil {
 			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid root tree request"}
 		}
+		params, err := protocol.DecodePayload[protocol.EnsureRootTreeParams](request.Payload)
+		if err != nil || params.Validate() != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidParams, Message: "invalid root tree payload"}
+		}
+		if s.authorizer == nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "local authorization unavailable"}
+		}
+		managed, err := s.authorizer.ManagedWorkerThread(
+			ctx, s.identity.ControllerID, params.ExternalThreadID,
+		)
+		if err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "local authorization unavailable"}
+		}
+		if managed {
+			return nil, &protocol.Error{Code: protocol.ErrorForbidden, Message: "managed worker thread cannot create a root tree"}
+		}
 	case protocol.MethodListDevices, protocol.MethodDescribeDevice,
 		protocol.MethodSendMessage, protocol.MethodWaitMailbox:
 		if request.TreeID == "" || request.Source == nil {
@@ -233,7 +264,10 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		return nil, &protocol.Error{Code: protocol.ErrorForbidden, Message: "principal is not local to this peer"}
 	}
 	if request.Source != nil && request.Source.ParentAgentID != "" {
-		if s.workers == nil || s.workers.AuthorizeWorker(ctx, *request.Source) != nil {
+		if request.Method != protocol.MethodSendMessage && request.Method != protocol.MethodWaitMailbox {
+			return nil, &protocol.Error{Code: protocol.ErrorForbidden, Message: "managed worker method is not allowed"}
+		}
+		if s.authorizer == nil || s.authorizer.AuthorizeWorker(ctx, *request.Source) != nil {
 			return nil, &protocol.Error{Code: protocol.ErrorForbidden, Message: "managed worker is not authorized"}
 		}
 	}
@@ -252,6 +286,19 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "delegation service unavailable"}
 	}
 	return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "delegation service failed"}
+}
+
+func (s *Server) admitCall(method string) (func(), bool) {
+	pool := s.controlSem
+	if method == protocol.MethodWaitMailbox {
+		pool = s.waitSem
+	}
+	select {
+	case pool <- struct{}{}:
+		return func() { <-pool }, true
+	default:
+		return nil, false
+	}
 }
 
 func (s *Server) writeError(connection net.Conn, replyTo string, code int, message string) {

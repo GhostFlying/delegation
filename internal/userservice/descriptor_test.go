@@ -5,12 +5,17 @@ import (
 	"encoding/binary"
 	"encoding/xml"
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
 
 func TestRenderSystemdProducesInactiveUserUnit(t *testing.T) {
-	descriptor, err := RenderSystemd(ServiceRolePeer, `/opt/${HOME}/Delegation % test/delegation`, `/home/user/${CONFIG} "quoted".json`)
+	descriptor, err := RenderSystemd(ServiceRolePeer, Invocation{
+		BinaryPath:      `/opt/${HOME}/Delegation % test/delegation`,
+		ConfigPath:      `/home/user/${CONFIG} "quoted".json`,
+		EnvironmentFile: `/home/user/${CONFIG} "quoted".env`,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,7 +23,7 @@ func TestRenderSystemdProducesInactiveUserUnit(t *testing.T) {
 		t.Fatalf("descriptor = %#v", descriptor)
 	}
 	content := string(descriptor.Content)
-	wantExec := `ExecStart="/opt/$${HOME}/Delegation %% test/delegation" service run --config "/home/user/$${CONFIG} \"quoted\".json"`
+	wantExec := `ExecStart="/opt/$${HOME}/Delegation %% test/delegation" service run --config "/home/user/$${CONFIG} \"quoted\".json" --environment-file "/home/user/$${CONFIG} \"quoted\".env"`
 	if !strings.Contains(content, wantExec) {
 		t.Fatalf("systemd unit missing escaped ExecStart %q:\n%s", wantExec, content)
 	}
@@ -28,7 +33,11 @@ func TestRenderSystemdProducesInactiveUserUnit(t *testing.T) {
 }
 
 func TestRenderLaunchAgentProducesDisabledValidXML(t *testing.T) {
-	descriptor, err := RenderLaunchAgent(ServiceRolePeer, `/Applications/Delegation & Tools/delegation`, `/Users/test/Config <one>.json`)
+	descriptor, err := RenderLaunchAgent(ServiceRolePeer, Invocation{
+		BinaryPath:      `/Applications/Delegation & Tools/delegation`,
+		ConfigPath:      `/Users/test/Config <one>.json`,
+		EnvironmentFile: `/Users/test/Provider & Keys.env`,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,6 +49,8 @@ func TestRenderLaunchAgentProducesDisabledValidXML(t *testing.T) {
 	for _, expected := range []string{
 		`<string>/Applications/Delegation &amp; Tools/delegation</string>`,
 		`<string>/Users/test/Config &lt;one&gt;.json</string>`,
+		`<string>--environment-file</string>`,
+		`<string>/Users/test/Provider &amp; Keys.env</string>`,
 		`<key>Disabled</key>`,
 		`<true/>`,
 		MarkerPeer,
@@ -51,15 +62,18 @@ func TestRenderLaunchAgentProducesDisabledValidXML(t *testing.T) {
 }
 
 func TestRenderScheduledTaskProducesDisabledValidXML(t *testing.T) {
-	escapedArguments := make([]string, 0, 4)
+	escapedArguments := make([]string, 0, 6)
 	escape := func(value string) string {
 		escapedArguments = append(escapedArguments, value)
 		return "ESC[" + value + "]"
 	}
 	descriptor, err := RenderScheduledTask(
 		ServiceRolePeer,
-		"C:\\Program Files\\Delegation \u5de5\u5177 & Tools\\delegation.exe",
-		"C:\\Users\\test\\\u914d\u7f6e One.json",
+		Invocation{
+			BinaryPath:      "C:\\Program Files\\Delegation \u5de5\u5177 & Tools\\delegation.exe",
+			ConfigPath:      "C:\\Users\\test\\\u914d\u7f6e One.json",
+			EnvironmentFile: "C:\\Users\\test\\Provider \u5bc6\u94a5.env",
+		},
 		`S-1-5-21-1000`,
 		escape,
 	)
@@ -87,7 +101,7 @@ func TestRenderScheduledTaskProducesDisabledValidXML(t *testing.T) {
 		`<URI>\Delegation Peer</URI>`,
 		`<UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>`,
 		"<Command>C:\\Program Files\\Delegation \u5de5\u5177 &amp; Tools\\delegation.exe</Command>",
-		"<Arguments>ESC[service] ESC[run] ESC[--config] ESC[C:\\Users\\test\\\u914d\u7f6e One.json]</Arguments>",
+		"<Arguments>ESC[service] ESC[run] ESC[--config] ESC[C:\\Users\\test\\\u914d\u7f6e One.json] ESC[--environment-file] ESC[C:\\Users\\test\\Provider \u5bc6\u94a5.env]</Arguments>",
 		MarkerPeer,
 	} {
 		if !strings.Contains(content, expected) {
@@ -109,7 +123,10 @@ func TestRenderScheduledTaskProducesDisabledValidXML(t *testing.T) {
 			t.Fatalf("scheduled task includes exporter-omitted default %q:\n%s", omittedDefault, content)
 		}
 	}
-	wantArguments := []string{"service", "run", "--config", "C:\\Users\\test\\\u914d\u7f6e One.json"}
+	wantArguments := []string{
+		"service", "run", "--config", "C:\\Users\\test\\\u914d\u7f6e One.json",
+		"--environment-file", "C:\\Users\\test\\Provider \u5bc6\u94a5.env",
+	}
 	if strings.Join(escapedArguments, "\x00") != strings.Join(wantArguments, "\x00") {
 		t.Fatalf("escaped arguments = %q, want %q", escapedArguments, wantArguments)
 	}
@@ -124,20 +141,25 @@ func TestRoleSpecificServiceDescriptorsDoNotCollide(t *testing.T) {
 		{
 			name: "systemd",
 			call: func(role ServiceRole) (Descriptor, error) {
-				return RenderSystemd(role, "/opt/delegation/delegation", "/home/test/.delegation/config.json")
+				return RenderSystemd(role, testInvocation(
+					role, "/opt/delegation/delegation", "/home/test/.delegation/config.json",
+				))
 			},
 		},
 		{
 			name: "launchd",
 			call: func(role ServiceRole) (Descriptor, error) {
-				return RenderLaunchAgent(role, "/opt/delegation/delegation", "/Users/test/.delegation/config.json")
+				return RenderLaunchAgent(role, testInvocation(
+					role, "/opt/delegation/delegation", "/Users/test/.delegation/config.json",
+				))
 			},
 		},
 		{
 			name: "scheduled task", scheduled: true,
 			call: func(role ServiceRole) (Descriptor, error) {
 				return RenderScheduledTask(
-					role, `C:\Delegation\delegation.exe`, `C:\Users\test\.delegation\config.json`,
+					role,
+					testInvocation(role, `C:\Delegation\delegation.exe`, `C:\Users\test\.delegation\config.json`),
 					"S-1-5-21-1000", func(value string) string { return value },
 				)
 			},
@@ -170,26 +192,59 @@ func TestRoleSpecificServiceDescriptorsDoNotCollide(t *testing.T) {
 }
 
 func TestRenderersRejectUnsafePaths(t *testing.T) {
-	if _, err := RenderSystemd(ServiceRolePeer, "relative", "/config"); err == nil {
+	if _, err := RenderSystemd(ServiceRolePeer, Invocation{
+		BinaryPath: "/binary",
+		ConfigPath: "/config",
+	}); err == nil || !strings.Contains(err.Error(), "environment file is required") {
+		t.Fatalf("RenderSystemd() missing peer environment error = %v", err)
+	}
+	if _, err := RenderLaunchAgent(ServiceRoleBroker, Invocation{
+		BinaryPath:      "/binary",
+		ConfigPath:      "/config",
+		EnvironmentFile: "/peer.env",
+	}); err == nil || !strings.Contains(err.Error(), "must not use") {
+		t.Fatalf("RenderLaunchAgent() broker environment error = %v", err)
+	}
+	if _, err := RenderSystemd(ServiceRolePeer, testInvocation(ServiceRolePeer, "relative", "/config")); err == nil {
 		t.Fatal("RenderSystemd() accepted relative binary path")
 	}
-	if _, err := RenderSystemd(ServiceRolePeer, `C:\delegation.exe`, `C:\config.json`); err == nil {
+	if _, err := RenderSystemd(ServiceRolePeer, testInvocation(ServiceRolePeer, `C:\delegation.exe`, `C:\config.json`)); err == nil {
 		t.Fatal("RenderSystemd() accepted Windows binary path")
 	}
-	if _, err := RenderLaunchAgent(ServiceRolePeer, "/binary", "/config\nline"); err == nil {
+	if _, err := RenderLaunchAgent(ServiceRolePeer, testInvocation(ServiceRolePeer, "/binary", "/config\nline")); err == nil {
 		t.Fatal("RenderLaunchAgent() accepted control character")
 	}
-	if _, err := RenderScheduledTask(ServiceRolePeer, `C:\binary.exe`, `relative`, "S-1-5-21", func(value string) string { return value }); err == nil {
+	if _, err := RenderScheduledTask(ServiceRolePeer, testInvocation(ServiceRolePeer, `C:\binary.exe`, `relative`), "S-1-5-21", func(value string) string { return value }); err == nil {
 		t.Fatal("RenderScheduledTask() accepted relative config path")
 	}
-	if _, err := RenderSystemd(ServiceRolePeer, "/binary", "/config\xff"); err == nil {
+	if _, err := RenderSystemd(ServiceRolePeer, testInvocation(ServiceRolePeer, "/binary", "/config\xff")); err == nil {
 		t.Fatal("RenderSystemd() accepted invalid UTF-8")
 	}
-	if _, err := RenderScheduledTask(ServiceRolePeer, `\\server`, `C:\config`, "S-1-5-21", func(value string) string { return value }); err == nil {
+	if _, err := RenderScheduledTask(ServiceRolePeer, testInvocation(ServiceRolePeer, `\\server`, `C:\config`), "S-1-5-21", func(value string) string { return value }); err == nil {
 		t.Fatal("RenderScheduledTask() accepted incomplete UNC binary path")
 	}
-	if _, err := RenderScheduledTask(ServiceRole("custom"), `C:\binary.exe`, `C:\config`, "S-1-5-21", func(value string) string { return value }); err == nil {
+	if _, err := RenderScheduledTask(ServiceRole("custom"), testInvocation(ServiceRole("custom"), `C:\binary.exe`, `C:\config`), "S-1-5-21", func(value string) string { return value }); err == nil {
 		t.Fatal("RenderScheduledTask() accepted an arbitrary service role")
+	}
+}
+
+func testInvocation(role ServiceRole, binaryPath, configPath string) Invocation {
+	invocation := Invocation{BinaryPath: binaryPath, ConfigPath: configPath}
+	if role == ServiceRolePeer {
+		invocation.EnvironmentFile = configPath + ".env"
+	}
+	return invocation
+}
+
+func writeIntegrationProviderEnvironment(t *testing.T, configPath string) {
+	t.Helper()
+	const provider = `{"model":"gpt-5.2","model_provider":"integration","model_providers.integration":{"name":"Native service integration","base_url":"http://127.0.0.1:9/v1","wire_api":"responses","requires_openai_auth":false}}`
+	if err := os.WriteFile(
+		configPath+".env",
+		[]byte("DELEGATION_CODEX_CONFIG_JSON="+provider+"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 

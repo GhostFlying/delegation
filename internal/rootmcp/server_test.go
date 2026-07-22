@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -526,6 +527,9 @@ func assertToolSchema(t *testing.T, tool *mcp.Tool) {
 		if deviceID.MinLength == nil || *deviceID.MinLength != 36 || deviceID.MaxLength == nil ||
 			*deviceID.MaxLength != 36 || deviceID.Pattern != uuidPattern {
 			t.Fatalf("describe_device input schema = %s", data)
+		}
+		if matched, err := regexp.MatchString(deviceID.Pattern, strings.ToUpper(rootMCPDeviceID)); err != nil || matched {
+			t.Fatalf("describe_device schema accepted uppercase UUID: %s", data)
 		}
 	default:
 		t.Fatalf("unexpected tool %q", tool.Name)

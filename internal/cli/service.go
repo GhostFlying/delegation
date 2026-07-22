@@ -13,14 +13,17 @@ import (
 	"syscall"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/pathguard"
+	"github.com/GhostFlying/delegation/internal/serviceenv"
 	"github.com/GhostFlying/delegation/internal/userservice"
 )
 
 type serviceInstallResult struct {
-	State      userservice.State `json:"state"`
-	Kind       userservice.Kind  `json:"kind"`
-	Artifact   string            `json:"artifact"`
-	ConfigPath string            `json:"configPath"`
+	State           userservice.State `json:"state"`
+	Kind            userservice.Kind  `json:"kind"`
+	Artifact        string            `json:"artifact"`
+	ConfigPath      string            `json:"configPath"`
+	EnvironmentFile string            `json:"environmentFile,omitempty"`
 }
 
 func runService(args []string, stdout, stderr io.Writer) int {
@@ -43,6 +46,11 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("delegation service install", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "broker or peer configuration file path (required)")
+	environmentFile := flags.String(
+		"environment-file",
+		"",
+		"protected peer provider environment file path (required for peer services)",
+	)
 	jsonOutput := flags.Bool("json", false, "print installation result as JSON")
 	if code := parseFlags(flags, args); code >= 0 {
 		return code
@@ -58,12 +66,33 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
+	resolvedEnvironment := ""
+	if *environmentFile != "" {
+		resolvedEnvironment, err = absolutePath(*environmentFile)
+		if err != nil {
+			return writeError(stderr, err)
+		}
+	}
 	if cfg.Role == delegationconfig.RoleBroker {
+		if resolvedEnvironment != "" {
+			return writeError(stderr, errors.New("broker service must not use --environment-file"))
+		}
 		if _, err := loadBrokerAuthority(resolvedConfig, cfg); err != nil {
 			return writeError(stderr, err)
 		}
-	} else if _, err := loadConnectorAuthority(resolvedConfig, cfg); err != nil {
-		return writeError(stderr, err)
+	} else {
+		if resolvedEnvironment == "" {
+			return writeError(stderr, errors.New("peer service install requires --environment-file"))
+		}
+		if _, err := loadConnectorAuthority(resolvedConfig, cfg); err != nil {
+			return writeError(stderr, err)
+		}
+		if err := validatePeerServiceEnvironmentPath(resolvedConfig, resolvedEnvironment, cfg); err != nil {
+			return writeError(stderr, err)
+		}
+		if _, err := serviceenv.LoadProtectedFile(resolvedEnvironment); err != nil {
+			return writeError(stderr, err)
+		}
 	}
 	serviceRole, err := configuredServiceRole(cfg.Role)
 	if err != nil {
@@ -77,15 +106,21 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
-	installed, err := userservice.Install(serviceRole, binaryPath, resolvedConfig)
+	invocation := userservice.Invocation{
+		BinaryPath:      binaryPath,
+		ConfigPath:      resolvedConfig,
+		EnvironmentFile: resolvedEnvironment,
+	}
+	installed, err := userservice.Install(serviceRole, invocation)
 	if err != nil && installed.State == "" {
 		return writeError(stderr, err)
 	}
 	result := serviceInstallResult{
-		State:      installed.State,
-		Kind:       installed.Kind,
-		Artifact:   installed.Artifact,
-		ConfigPath: resolvedConfig,
+		State:           installed.State,
+		Kind:            installed.Kind,
+		Artifact:        installed.Artifact,
+		ConfigPath:      resolvedConfig,
+		EnvironmentFile: resolvedEnvironment,
 	}
 	outputErr := writeServiceInstallResult(stdout, result, *jsonOutput)
 	if err != nil || outputErr != nil {
@@ -116,6 +151,9 @@ func writeServiceInstallResult(output io.Writer, result serviceInstallResult, js
 		fmt.Fprintf(&rendered, "kind: %s\n", result.Kind)
 		fmt.Fprintf(&rendered, "artifact: %s\n", result.Artifact)
 		fmt.Fprintf(&rendered, "config: %s\n", result.ConfigPath)
+		if result.EnvironmentFile != "" {
+			fmt.Fprintf(&rendered, "environment file: %s\n", result.EnvironmentFile)
+		}
 		if result.State == userservice.StateActive {
 			fmt.Fprintln(&rendered, "activation: enabled and started")
 		} else {
@@ -145,6 +183,7 @@ func runServiceRuntime(args []string, stderr io.Writer) int {
 	flags := flag.NewFlagSet("delegation service run", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "broker or peer configuration file path (required)")
+	environmentFile := flags.String("environment-file", "", "protected peer provider environment file path")
 	if code := parseFlags(flags, args); code >= 0 {
 		return code
 	}
@@ -159,14 +198,37 @@ func runServiceRuntime(args []string, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
+	resolvedEnvironment := ""
+	if *environmentFile != "" {
+		resolvedEnvironment, err = absolutePath(*environmentFile)
+		if err != nil {
+			return writeError(stderr, err)
+		}
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var runErr error
 	switch cfg.Role {
 	case delegationconfig.RoleBroker:
+		if resolvedEnvironment != "" {
+			return writeError(stderr, errors.New("broker service must not use --environment-file"))
+		}
 		runErr = runBrokerService(ctx, resolvedConfig, cfg, stderr, brokerRuntimeOptions{})
 	case delegationconfig.RolePeer:
-		runErr = runConnectorService(ctx, resolvedConfig, cfg, stderr)
+		if resolvedEnvironment != "" {
+			if err := validatePeerServiceEnvironmentPath(resolvedConfig, resolvedEnvironment, cfg); err != nil {
+				return writeError(stderr, err)
+			}
+			runErr = runConnectorServiceWithEnvironmentFile(
+				ctx,
+				resolvedConfig,
+				cfg,
+				resolvedEnvironment,
+				stderr,
+			)
+		} else {
+			runErr = runConnectorService(ctx, resolvedConfig, cfg, stderr)
+		}
 	default:
 		runErr = fmt.Errorf("unsupported service role %q", cfg.Role)
 	}
@@ -174,4 +236,22 @@ func runServiceRuntime(args []string, stderr io.Writer) int {
 		return writeError(stderr, runErr)
 	}
 	return 0
+}
+
+func validatePeerServiceEnvironmentPath(
+	configPath string,
+	environmentPath string,
+	cfg delegationconfig.Config,
+) error {
+	if cfg.Role != delegationconfig.RolePeer {
+		return errors.New("peer service environment requires a peer configuration")
+	}
+	return pathguard.ValidatePeerServiceEnvironment(
+		environmentPath,
+		configPath,
+		cfg.Peer.StateFile,
+		cfg.Broker.Auth.TokenFile,
+		cfg.Peer.CodexHome,
+		cfg.Peer.WorkspaceRoot,
+	)
 }

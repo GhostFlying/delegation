@@ -109,11 +109,10 @@ plugins/delegation/scripts/delegation-mcp credential revoke \
 Revocation closes access on the next broker frame and marks the peer offline. Revoked IDs remain
 tombstoned and require a new device UUID.
 
-Delegation has not published a runtime release yet. Config, broker state, wire protocol, local
-bridge, and native service definitions therefore start at peer-native format version 1 and have no
-upgrade support. Discard configuration and state created by earlier development checkouts, then run
-`setup broker` and `setup peer` again; the current runtime never converts or deletes them
-automatically.
+Delegation has not published a runtime release yet. Config, broker state, peer state, wire protocol,
+local bridge, and native service definitions are versioned independently and have no upgrade
+support. Discard configuration and state created by earlier development checkouts, then run `setup
+broker` and `setup peer` again; the current runtime never converts or deletes them automatically.
 
 Run `doctor --config <path>` after setup. Broker and peer may coexist on one device through
 `broker.json` and `peer.json`; commands that could be ambiguous require an explicit config. Install
@@ -121,8 +120,17 @@ each configured process as a separate current-user service with:
 
 ```bash
 plugins/delegation/scripts/delegation-mcp service install --config <broker.json>
-plugins/delegation/scripts/delegation-mcp service install --config <peer.json>
+plugins/delegation/scripts/delegation-mcp service install \
+  --config <peer.json> \
+  --environment-file <protected-peer.env>
 ```
+
+The peer environment file is a current-user-only file containing literal `NAME=value` lines. It
+must define `DELEGATION_CODEX_CONFIG_JSON` and exactly the provider credential variables referenced
+by that JSON; values are not shell-expanded. Keep it outside the managed worker `CODEX_HOME` and
+workspace root, and never put a broker or peer token in it. A foreground `service run --config
+<peer.json>` may inherit the same values from the current environment; add `--environment-file` to
+test the native-service source directly.
 
 Installation writes a disabled definition first, then enables, starts, and verifies it through the
 native service manager. The definitions are `delegation-broker.service` and
@@ -136,6 +144,19 @@ Linux requires a working systemd user manager. macOS uses the current GUI launch
 requires that user to have a GUI login. The Windows task uses an interactive user token and likewise
 requires a logged-in user. Runtime-path updates require explicit native service replacement.
 Windows restart-on-failure hardening is deferred to M4.
+Restart the peer service after rotating provider credentials or replacing the environment file.
+
+Managed worker process cleanup is lifecycle ownership, not an OS security boundary. On Unix-like
+hosts, a deliberately detached same-UID process is outside the M2 threat model; on macOS, an
+immediately daemonizing double-fork may reparent before it becomes discoverable to the connector.
+Windows managed workers use Codex's `:danger-full-access` permission profile in M2 because
+restricted read profiles require a separately provisioned elevated Windows sandbox. The broker and
+worker MCP capability checks constrain the normal worker principal only; they are not a security
+boundary against the worker process itself. Treat a Windows worker as fully trusted same-user code:
+it can read or modify same-user credentials, configuration, and state; use the peer credential to
+impersonate or fence that peer; and access the network without restriction. Do not delegate an
+untrusted prompt, repository, or program to a Windows peer in M2. Elevated sandbox provisioning is
+deferred until it can be installed and verified without an interactive prompt in the peer service.
 
 ## Discover Peers
 

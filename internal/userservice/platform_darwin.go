@@ -18,8 +18,8 @@ var runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
 
 var waitForDarwinServiceReady = waitForServiceReady
 
-func platformPrepare(role ServiceRole, binaryPath, configPath string) (Result, error) {
-	descriptor, err := RenderLaunchAgent(role, binaryPath, configPath)
+func platformPrepare(role ServiceRole, invocation Invocation) (Result, error) {
+	descriptor, err := RenderLaunchAgent(role, invocation)
 	if err != nil {
 		return Result{}, err
 	}
@@ -31,7 +31,7 @@ func platformPrepare(role ServiceRole, binaryPath, configPath string) (Result, e
 	return Result{State: state, Kind: descriptor.Kind, Artifact: path, Role: role}, err
 }
 
-func platformActivate(result Result, binaryPath, configPath string) (Result, error) {
+func platformActivate(result Result, invocation Invocation) (Result, error) {
 	if result.State != StatePrepared && result.State != StateActive {
 		return result, fmt.Errorf("cannot activate LaunchAgent from state %s", result.State)
 	}
@@ -39,7 +39,7 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 	if err != nil {
 		return result, err
 	}
-	matched, err := launchAgentDefinitionMatches(result, binaryPath, configPath)
+	matched, err := launchAgentDefinitionMatches(result, invocation)
 	if err != nil {
 		result.State = StateIndeterminate
 		return result, err
@@ -113,7 +113,7 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 	}
 	if loaded && printErr == nil && filepath.Clean(status.Path) == filepath.Clean(result.Artifact) &&
 		status.State == "running" {
-		matched, definitionErr := launchAgentDefinitionMatches(result, binaryPath, configPath)
+		matched, definitionErr := launchAgentDefinitionMatches(result, invocation)
 		if definitionErr != nil {
 			result.State = StateIndeterminate
 			return result, definitionErr
@@ -122,7 +122,7 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 			result.State = StateForeignConflict
 			return result, errors.New("LaunchAgent definition changed during activation")
 		}
-		if err := waitForDarwinServiceReady(configPath); err != nil {
+		if err := waitForDarwinServiceReady(invocation.ConfigPath); err != nil {
 			result.State = StateIndeterminate
 			return result, fmt.Errorf("LaunchAgent did not become ready: %w", err)
 		}
@@ -138,8 +138,8 @@ func platformActivate(result Result, binaryPath, configPath string) (Result, err
 	)
 }
 
-func launchAgentDefinitionMatches(result Result, binaryPath, configPath string) (bool, error) {
-	descriptor, err := RenderLaunchAgent(result.Role, binaryPath, configPath)
+func launchAgentDefinitionMatches(result Result, invocation Invocation) (bool, error) {
+	descriptor, err := RenderLaunchAgent(result.Role, invocation)
 	if err != nil {
 		return false, err
 	}
