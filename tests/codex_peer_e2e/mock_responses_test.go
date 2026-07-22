@@ -67,8 +67,26 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			}
 		}
 		switch testCase {
+		case workerCollaborationInitial:
+			m.handleWorkerCollaborationInitial(writer, request, body, key, call, block)
+			return
 		case workerRootMCPFollowup:
-			m.handleWorkerCollaborationFollowup(writer, body, key, call)
+			m.handleWorkerMailboxFollowup(
+				writer, body, key, testCase, call,
+				managedQueuedMessageID, managedQueuedMessage, managedFollowupReplyID, managedFollowupReply,
+			)
+			return
+		case workerCollaborationResume:
+			m.handleWorkerMailboxFollowup(
+				writer, body, key, testCase, call,
+				managedRecoveryMessageID, managedRecoveryMessage, managedRecoveryReplyID, managedRecoveryReply,
+			)
+			return
+		case workerSelfTarget:
+			if call != 0 {
+				m.record(fmt.Errorf("case %s received model call %d", key, call+1))
+			}
+			writeFinalResponse(writer, key)
 			return
 		}
 		if call != 0 {
@@ -264,15 +282,64 @@ func containsEvery(output string, expected []string) bool {
 	return true
 }
 
-func (m *mockResponses) handleWorkerCollaborationFollowup(
+func (m *mockResponses) handleWorkerCollaborationInitial(
 	writer http.ResponseWriter,
+	request *http.Request,
 	body map[string]any,
 	key string,
 	call int,
+	block *workerResponseBlock,
 ) {
-	searchID := "search_worker_root_mcp_followup"
-	waitCallID := "call_worker_root_mcp_followup_wait"
-	sendCallID := "call_worker_root_mcp_followup_send"
+	searchID := "search_worker_collaboration_initial"
+	sendCallID := "call_worker_collaboration_initial_send"
+	switch call {
+	case 0:
+		if block == nil {
+			m.fail(writer, fmt.Errorf("case %s is missing its running-turn barrier", key))
+			return
+		}
+		writeBlockedFinalResponse(writer, request, key, block)
+	case 1:
+		encoded, _ := json.Marshal(body)
+		if !bytes.Contains(encoded, []byte(managedSteerMessage)) {
+			m.record(fmt.Errorf("case %s follow-up sampling omitted steer input: %s", key, encoded))
+		}
+		writeWorkerToolSearchResponse(writer, key, searchID)
+	case 2:
+		m.validateWorkerToolSearch(body, key, searchID)
+		writeWorkerToolCallResponse(writer, key, sendCallID, "send_message", map[string]any{
+			"messageId": managedInitialReplyID,
+			"recipient": "parent",
+			"message":   managedInitialReply,
+		})
+	case 3:
+		output, err := functionOutput(body, sendCallID)
+		if err != nil {
+			m.record(fmt.Errorf("case %s: %w", key, err))
+		} else if !strings.Contains(output, managedInitialReplyID) {
+			m.record(fmt.Errorf("case %s send_message receipt omitted message ID: %s", key, output))
+		}
+		writeFinalResponse(writer, key)
+	default:
+		m.fail(writer, fmt.Errorf("case %s received unexpected model call %d", key, call+1))
+	}
+}
+
+func (m *mockResponses) handleWorkerMailboxFollowup(
+	writer http.ResponseWriter,
+	body map[string]any,
+	key string,
+	testCase string,
+	call int,
+	queuedMessageID string,
+	queuedMessage string,
+	replyMessageID string,
+	replyMessage string,
+) {
+	suffix := strings.ReplaceAll(testCase, "-", "_")
+	searchID := "search_" + suffix
+	waitCallID := "call_" + suffix + "_wait"
+	sendCallID := "call_" + suffix + "_send"
 	switch call {
 	case 0:
 		writeWorkerToolSearchResponse(writer, key, searchID)
@@ -285,20 +352,20 @@ func (m *mockResponses) handleWorkerCollaborationFollowup(
 		output, err := functionOutput(body, waitCallID)
 		if err != nil {
 			m.record(fmt.Errorf("case %s: %w", key, err))
-		} else if !strings.Contains(output, managedQueuedMessageID) ||
-			!strings.Contains(output, managedQueuedMessage) {
+		} else if !strings.Contains(output, queuedMessageID) ||
+			!strings.Contains(output, queuedMessage) {
 			m.record(fmt.Errorf("case %s wait_agent omitted queued root message: %s", key, output))
 		}
 		writeWorkerToolCallResponse(writer, key, sendCallID, "send_message", map[string]any{
-			"messageId": managedFollowupReplyID,
+			"messageId": replyMessageID,
 			"recipient": "parent",
-			"message":   managedFollowupReply,
+			"message":   replyMessage,
 		})
 	case 3:
 		output, err := functionOutput(body, sendCallID)
 		if err != nil {
 			m.record(fmt.Errorf("case %s: %w", key, err))
-		} else if !strings.Contains(output, managedFollowupReplyID) {
+		} else if !strings.Contains(output, replyMessageID) {
 			m.record(fmt.Errorf("case %s send_message receipt omitted message ID: %s", key, output))
 		}
 		writeFinalResponse(writer, key)
@@ -414,6 +481,7 @@ func requestCase(body map[string]any) string {
 		}
 	}
 	for _, testCase := range []string{
+		workerCollaborationResume, workerCollaborationInitial, workerSelfTarget,
 		workerRootMCPFollowup, workerRootMCPInitial,
 		workerAdmissionA, workerAdmissionB, workerAdmissionRetry,
 	} {
@@ -730,7 +798,8 @@ func (m *mockResponses) verify(t *testing.T, cases []string) {
 		label := strings.ToUpper(testCase[:1])
 		if strings.HasPrefix(testCase, "worker-") {
 			label, want = "worker", 1
-			if testCase == workerRootMCPFollowup {
+			if testCase == workerRootMCPFollowup || testCase == workerCollaborationResume ||
+				testCase == workerCollaborationInitial {
 				want = 4
 			}
 		} else if strings.HasPrefix(testCase, "root-mcp-") {

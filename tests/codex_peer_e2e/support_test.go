@@ -46,26 +46,54 @@ func run(t *testing.T, environment []string, binary string, args ...string) (str
 	return stdout.String(), stderr.String()
 }
 
-func startService(t *testing.T, environment []string, binary, configPath string) {
+type serviceProcess struct {
+	environment []string
+	binary      string
+	configPath  string
+	command     *exec.Cmd
+}
+
+func startService(t *testing.T, environment []string, binary, configPath string) *serviceProcess {
 	t.Helper()
-	logPath := configPath + ".service.log"
-	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	service := &serviceProcess{
+		environment: append([]string(nil), environment...), binary: binary, configPath: configPath,
+	}
+	service.start(t, os.O_TRUNC)
+	t.Cleanup(service.stop)
+	return service
+}
+
+func (s *serviceProcess) restart(t *testing.T) {
+	t.Helper()
+	s.stop()
+	s.start(t, os.O_APPEND)
+}
+
+func (s *serviceProcess) start(t *testing.T, logMode int) {
+	t.Helper()
+	log, err := os.OpenFile(s.configPath+".service.log", os.O_CREATE|os.O_WRONLY|logMode, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(binary, "service", "run", "--config", configPath)
-	command.Env = environment
+	command := exec.Command(s.binary, "service", "run", "--config", s.configPath)
+	command.Env = s.environment
 	command.Stdout = log
 	command.Stderr = log
 	if err := command.Start(); err != nil {
-		log.Close()
+		_ = log.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-		_ = log.Close()
-	})
+	_ = log.Close()
+	s.command = command
+}
+
+func (s *serviceProcess) stop() {
+	if s.command == nil {
+		return
+	}
+	_ = s.command.Process.Kill()
+	_ = s.command.Wait()
+	s.command = nil
 }
 
 func freeAddress(t *testing.T) string {
@@ -107,6 +135,42 @@ func waitForCount(t *testing.T, statePath, query string, want int) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	assertCount(t, statePath, query, want)
+}
+
+func deviceRevision(t *testing.T, statePath, deviceID string) uint64 {
+	t.Helper()
+	database := openDatabase(t, statePath)
+	defer database.Close()
+	var revision uint64
+	if err := database.QueryRow(
+		"SELECT revision FROM devices WHERE controller_id = ? AND device_id = ?",
+		networkID,
+		deviceID,
+	).Scan(&revision); err != nil {
+		t.Fatal(err)
+	}
+	return revision
+}
+
+func waitForDeviceReconnect(t *testing.T, statePath, deviceID string, previousRevision uint64) {
+	t.Helper()
+	database := openDatabase(t, statePath)
+	defer database.Close()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var revision uint64
+		var online bool
+		err := database.QueryRow(
+			"SELECT revision, online FROM devices WHERE controller_id = ? AND device_id = ?",
+			networkID,
+			deviceID,
+		).Scan(&revision, &online)
+		if err == nil && online && revision > previousRevision {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("peer %s did not reconnect after revision %d", deviceID, previousRevision)
 }
 
 func assertCount(t *testing.T, statePath, query string, want int) {
@@ -155,6 +219,14 @@ func assertRootBindings(t *testing.T, statePath string, want map[string]string) 
 
 func assertPrincipalDistribution(t *testing.T, statePath string, want map[string]int) {
 	t.Helper()
+	got := principalDistribution(t, statePath)
+	if !mapsEqual(got, want) {
+		t.Fatalf("principal distribution = %#v, want %#v", got, want)
+	}
+}
+
+func principalDistribution(t *testing.T, statePath string) map[string]int {
+	t.Helper()
 	database := openDatabase(t, statePath)
 	defer database.Close()
 	rows, err := database.Query("SELECT device_id, count(*) FROM principals GROUP BY device_id")
@@ -174,9 +246,7 @@ func assertPrincipalDistribution(t *testing.T, statePath string, want map[string
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if !mapsEqual(got, want) {
-		t.Fatalf("principal distribution = %#v, want %#v", got, want)
-	}
+	return got
 }
 
 func openDatabase(t *testing.T, statePath string) *sql.DB {

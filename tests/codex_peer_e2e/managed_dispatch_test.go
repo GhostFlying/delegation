@@ -14,6 +14,7 @@ import (
 	"time"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/protocol"
 )
@@ -41,6 +42,22 @@ const (
 	rootMCPWaitFollowup        = "root-mcp-wait-followup"
 	managedQueuedMessage       = "This queued root message must reach the resumed worker."
 	managedFollowupReply       = "The resumed worker received the queued root message."
+	managedCollaborationSpawn  = "123e4567-e89b-42d3-a456-426614174920"
+	managedSteerMessageID      = "123e4567-e89b-42d3-a456-426614174921"
+	managedRecoveryMessageID   = "123e4567-e89b-42d3-a456-426614174922"
+	managedRecoveryOperationID = "123e4567-e89b-42d3-a456-426614174923"
+	managedInitialReplyID      = "123e4567-e89b-42d3-a456-426614174924"
+	managedRecoveryReplyID     = "123e4567-e89b-42d3-a456-426614174925"
+	managedSelfSpawn           = "123e4567-e89b-42d3-a456-426614174926"
+	managedCollaborationTask   = "collaboration_worker"
+	managedSelfTask            = "self_target_worker"
+	workerCollaborationInitial = "worker-collaboration-initial"
+	workerCollaborationResume  = "worker-collaboration-resume"
+	workerSelfTarget           = "worker-self-target"
+	managedSteerMessage        = "Continue the active turn and report the collaboration result."
+	managedRecoveryMessage     = "This queued root message must survive the peer restart."
+	managedInitialReply        = "The running worker received the steered task."
+	managedRecoveryReply       = "The resumed worker received the queued root message."
 
 	managedAdmissionHelperEnvironment = "DELEGATION_ADMISSION_HELPER"
 	managedAdmissionSourceEnvironment = "DELEGATION_ADMISSION_SOURCE"
@@ -65,15 +82,20 @@ type managedSpawnReport struct {
 	Spawned protocol.SpawnAgentResult     `json:"spawned"`
 }
 
+type managedWaitCursor struct {
+	mailbox   uint64
+	lifecycle uint64
+}
+
 func testManagedAdmission(
 	t *testing.T,
 	sourceA peer,
 	sourceB peer,
 	target peer,
-	brokerStatePath string,
 	externalThreadA string,
 	externalThreadB string,
 	mock *mockResponses,
+	concurrentDispatch func(),
 ) {
 	t.Helper()
 	startedA, releaseA := mock.blockWorker(workerAdmissionA)
@@ -124,6 +146,7 @@ func testManagedAdmission(
 	}
 	waitForWorkerModelRequest(t, startedA, managedAdmissionTaskA)
 	waitForWorkerModelRequest(t, startedB, managedAdmissionTaskB)
+	concurrentDispatch()
 	rootA := prepareManagedDispatchRoot(t, sourceA, externalThreadA)
 
 	targetConfig, err := delegationconfig.Read(target.configPath)
@@ -187,7 +210,6 @@ WHERE status IN ('reserved', 'starting', 'preflight', 'ready', 'running')
 	if err != nil || replayed != startedRetry {
 		t.Fatalf("terminal admission retry = %#v, error %v", replayed, err)
 	}
-	assertAgentReceiptCount(t, brokerStatePath, 3)
 }
 
 func testManagedRootMCPFlow(
@@ -248,6 +270,194 @@ func testManagedRootMCPFlow(
 		t.Fatalf("managed thread after cold follow-up = %q, want %q", afterFollowup, managedThreadID)
 	}
 	runRootAgentCase(rootMCPWaitFollowup)
+}
+
+func testManagedCollaborationAndRecovery(
+	t *testing.T,
+	source peer,
+	selfSource peer,
+	target peer,
+	externalSourceThread string,
+	externalSelfThread string,
+	mock *mockResponses,
+	restartTarget func(),
+) {
+	t.Helper()
+	started, release := mock.blockWorker(workerCollaborationInitial)
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	targetConfig, err := delegationconfig.Read(target.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := prepareManagedDispatchRoot(t, source, externalSourceThread)
+	spawned, err := spawnManagedAgent(ctx, root, protocol.SpawnAgentParams{
+		SpawnID: managedCollaborationSpawn, TargetDeviceID: deviceIDs[target.label],
+		TaskName: managedCollaborationTask,
+		Message:  "delegation-worker-case=" + workerCollaborationInitial + " Wait for a root steer, then report to the parent.",
+	})
+	if err != nil || spawned.Outcome != protocol.AgentSpawnOutcomeStarted ||
+		spawned.Agent.Status != protocol.AgentSpawnStarted ||
+		spawned.Agent.Principal.ParentAgentID != root.root.Principal.AgentID ||
+		spawned.Agent.Principal.DeviceID != deviceIDs[target.label] {
+		t.Fatalf("collaboration spawn = %#v, error %v", spawned, err)
+	}
+	waitForWorkerModelRequest(t, started, managedCollaborationTask)
+	steered, err := runManagedAgentOperation(ctx, root, protocol.MethodSendAgent, protocol.SendAgentParams{
+		AgentID: spawned.Agent.Principal.AgentID, MessageID: managedSteerMessageID,
+		Message: managedSteerMessage,
+	})
+	assertManagedAgentOperation(
+		t, steered, err, protocol.AgentOperationSend, protocol.AgentOperationOutcomeSteered,
+		managedSteerMessageID, spawned.Agent.Principal.AgentID,
+	)
+	release()
+	cursor := &managedWaitCursor{}
+	waitForManagedRootMessage(
+		t, ctx, root, cursor, managedInitialReplyID, managedInitialReply, spawned.Agent.Principal,
+	)
+	waitForManagedWorkerIdle(
+		t,
+		targetConfig.Peer.StateFile,
+		spawned.Agent.Principal.TreeID,
+		spawned.Agent.Principal.AgentID,
+		spawned.Agent.Principal.ParentAgentID,
+		deviceIDs[target.label],
+		managedCollaborationTask,
+	)
+	managedThreadID := managedWorkerThreadID(t, targetConfig.Peer.StateFile, spawned.Agent)
+	queued, err := runManagedAgentOperation(ctx, root, protocol.MethodSendAgent, protocol.SendAgentParams{
+		AgentID: spawned.Agent.Principal.AgentID, MessageID: managedRecoveryMessageID,
+		Message: managedRecoveryMessage,
+	})
+	assertManagedAgentOperation(
+		t, queued, err, protocol.AgentOperationSend, protocol.AgentOperationOutcomeQueued,
+		managedRecoveryMessageID, spawned.Agent.Principal.AgentID,
+	)
+
+	restartTarget()
+	if afterRestart := managedWorkerThreadID(t, targetConfig.Peer.StateFile, spawned.Agent); afterRestart != managedThreadID {
+		t.Fatalf("managed thread after peer restart = %q, want %q", afterRestart, managedThreadID)
+	}
+	followedUp, err := runManagedAgentOperation(ctx, root, protocol.MethodFollowupAgent, protocol.FollowupAgentParams{
+		OperationID: managedRecoveryOperationID,
+		AgentID:     spawned.Agent.Principal.AgentID,
+		Message: "delegation-worker-case=" + workerCollaborationResume +
+			" Read the queued root message and acknowledge it.",
+	})
+	assertManagedAgentOperation(
+		t, followedUp, err, protocol.AgentOperationFollowup, protocol.AgentOperationOutcomeStarted,
+		managedRecoveryOperationID, spawned.Agent.Principal.AgentID,
+	)
+	waitForManagedRootMessage(
+		t, ctx, root, cursor, managedRecoveryReplyID, managedRecoveryReply, spawned.Agent.Principal,
+	)
+	waitForManagedWorkerIdle(
+		t,
+		targetConfig.Peer.StateFile,
+		spawned.Agent.Principal.TreeID,
+		spawned.Agent.Principal.AgentID,
+		spawned.Agent.Principal.ParentAgentID,
+		deviceIDs[target.label],
+		managedCollaborationTask,
+	)
+	if afterFollowup := managedWorkerThreadID(t, targetConfig.Peer.StateFile, spawned.Agent); afterFollowup != managedThreadID {
+		t.Fatalf("managed thread after cold follow-up = %q, want %q", afterFollowup, managedThreadID)
+	}
+
+	selfRoot := prepareManagedDispatchRoot(t, selfSource, externalSelfThread)
+	selfSpawned, err := spawnManagedAgent(ctx, selfRoot, protocol.SpawnAgentParams{
+		SpawnID: managedSelfSpawn, TargetDeviceID: deviceIDs[selfSource.label],
+		TaskName: managedSelfTask,
+		Message:  "delegation-worker-case=" + workerSelfTarget + " Complete the isolated self-target task.",
+	})
+	if err != nil || selfSpawned.Outcome != protocol.AgentSpawnOutcomeStarted ||
+		selfSpawned.Agent.Principal.AgentID == selfRoot.root.Principal.AgentID ||
+		selfSpawned.Agent.Principal.ParentAgentID != selfRoot.root.Principal.AgentID ||
+		selfSpawned.Agent.Principal.DeviceID != selfRoot.root.Principal.DeviceID ||
+		selfSpawned.Agent.Principal.TreeID != selfRoot.root.Tree.TreeID {
+		t.Fatalf("self-target spawn = %#v, root %#v, error %v", selfSpawned, selfRoot.root, err)
+	}
+	waitForManagedWorkerIdle(
+		t,
+		targetConfig.Peer.StateFile,
+		selfSpawned.Agent.Principal.TreeID,
+		selfSpawned.Agent.Principal.AgentID,
+		selfSpawned.Agent.Principal.ParentAgentID,
+		deviceIDs[selfSource.label],
+		managedSelfTask,
+	)
+	if selfThreadID := managedWorkerThreadID(t, targetConfig.Peer.StateFile, selfSpawned.Agent); selfThreadID == externalSelfThread {
+		t.Fatalf("self-target managed worker reused user thread %s", selfThreadID)
+	}
+}
+
+func runManagedAgentOperation(
+	ctx context.Context,
+	root managedDispatchRoot,
+	method string,
+	params any,
+) (protocol.AgentOperationResult, error) {
+	source := root.root.Principal.Identity()
+	var result protocol.AgentOperationResult
+	err := root.client.Call(ctx, method, root.root.Tree.TreeID, &source, params, &result)
+	return result, err
+}
+
+func assertManagedAgentOperation(
+	t *testing.T,
+	result protocol.AgentOperationResult,
+	err error,
+	action protocol.AgentOperationAction,
+	outcome protocol.AgentOperationOutcome,
+	operationID string,
+	agentID string,
+) {
+	t.Helper()
+	if err != nil || result.Validate() != nil || result.Action != action || result.Outcome != outcome ||
+		result.OperationID != operationID || result.AgentID != agentID {
+		t.Fatalf("managed agent operation = %#v, error %v; want %s/%s", result, err, action, outcome)
+	}
+}
+
+func waitForManagedRootMessage(
+	t *testing.T,
+	ctx context.Context,
+	root managedDispatchRoot,
+	cursor *managedWaitCursor,
+	messageID string,
+	message string,
+	source control.PrincipalIdentity,
+) protocol.MailboxMessage {
+	t.Helper()
+	for {
+		var result protocol.WaitAgentResult
+		rootSource := root.root.Principal.Identity()
+		err := root.client.Call(ctx, protocol.MethodWaitAgent, root.root.Tree.TreeID, &rootSource, protocol.WaitAgentParams{
+			MailboxCursor: cursor.mailbox, LifecycleCursor: cursor.lifecycle,
+			TimeoutMillis: 10_000, MessageLimit: protocol.MaximumAgentWaitMessages,
+			ActivityLimit: protocol.MaximumAgentWaitActivities,
+		}, &result)
+		if err != nil {
+			t.Fatalf("wait for managed root message %s: %v", messageID, err)
+		}
+		if result.NextMailboxCursor < cursor.mailbox || result.NextLifecycleCursor < cursor.lifecycle {
+			t.Fatalf("managed root wait cursors regressed: %#v", result)
+		}
+		cursor.mailbox = result.NextMailboxCursor
+		cursor.lifecycle = result.NextLifecycleCursor
+		for _, received := range result.Messages {
+			if received.MessageID != messageID {
+				continue
+			}
+			if received.Message != message || received.Source != source {
+				t.Fatalf("managed root message = %#v, want %q from %#v", received, message, source)
+			}
+			return received
+		}
+	}
 }
 
 func findManagedAgent(
@@ -531,13 +741,19 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 
 func assertAgentReceiptCount(t *testing.T, statePath string, want int) {
 	t.Helper()
+	count := agentReceiptCount(t, statePath)
+	if count != want {
+		t.Fatalf("managed agent receipt count = %d, want %d", count, want)
+	}
+}
+
+func agentReceiptCount(t *testing.T, statePath string) int {
+	t.Helper()
 	database := openDatabase(t, statePath)
 	defer database.Close()
 	var count int
 	if err := database.QueryRow("SELECT count(*) FROM agent_spawn_receipts").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != want {
-		t.Fatalf("managed agent receipt count = %d, want %d", count, want)
-	}
+	return count
 }

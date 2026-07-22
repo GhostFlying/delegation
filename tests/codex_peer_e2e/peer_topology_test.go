@@ -75,6 +75,7 @@ func TestCodexPeerTopology(t *testing.T) {
 	startService(t, commandEnv(peers[0]), delegationBinary, brokerConfig)
 	waitForHealth(t, "http://"+brokerAddress+"/healthz")
 
+	peerServices := make(map[string]*serviceProcess, len(peers))
 	for _, current := range peers {
 		tokenPath := filepath.Join(current.delegationHome, "secrets", "peer.token")
 		run(t, commandEnv(peers[0]), delegationBinary,
@@ -93,7 +94,7 @@ func TestCodexPeerTopology(t *testing.T) {
 			setupArgs = append(setupArgs, "--max-worker-slots", "2")
 		}
 		run(t, commandEnv(current), delegationBinary, setupArgs...)
-		startService(t, commandEnv(current), delegationBinary, current.configPath)
+		peerServices[current.label] = startService(t, commandEnv(current), delegationBinary, current.configPath)
 	}
 	waitForCount(t, statePath, "SELECT count(*) FROM devices WHERE online = 1", 3)
 	assertCount(t, statePath, "SELECT count(*) FROM trees", 0)
@@ -152,24 +153,6 @@ func TestCodexPeerTopology(t *testing.T) {
 			t.Fatalf("peer %s local bridge sockets = %v, error %v", current.label, matches, err)
 		}
 	}
-	t.Run("managed admission", func(t *testing.T) {
-		testManagedAdmission(
-			t,
-			peers[0],
-			peers[1],
-			peers[2],
-			statePath,
-			results["A"].threadID,
-			results["B"].threadID,
-			mock,
-		)
-		assertPrincipalDistribution(t, statePath, map[string]int{
-			deviceIDs["A"]: 2,
-			deviceIDs["B"]: 1,
-			deviceIDs["C"]: 4,
-		})
-		mock.verify(t, []string{workerAdmissionA, workerAdmissionB, workerAdmissionRetry})
-	})
 	t.Run("managed root MCP flow", func(t *testing.T) {
 		testManagedRootMCPFlow(
 			t,
@@ -183,6 +166,43 @@ func TestCodexPeerTopology(t *testing.T) {
 		mock.verify(t, []string{
 			rootMCPSpawn, rootMCPQueue, rootMCPFollowup, rootMCPWaitFollowup,
 			workerRootMCPInitial, workerRootMCPFollowup,
+		})
+	})
+	t.Run("managed concurrent dispatch and recovery", func(t *testing.T) {
+		expectedPrincipals := principalDistribution(t, statePath)
+		expectedPrincipals[deviceIDs["A"]] += 2
+		expectedPrincipals[deviceIDs["C"]] += 3
+		expectedReceipts := agentReceiptCount(t, statePath) + 5
+		testManagedAdmission(
+			t,
+			peers[0],
+			peers[1],
+			peers[2],
+			results["A"].threadID,
+			results["B"].threadID,
+			mock,
+			func() {
+				testManagedCollaborationAndRecovery(
+					t,
+					peers[2],
+					peers[0],
+					peers[0],
+					results["C"].threadID,
+					results["A"].threadID,
+					mock,
+					func() {
+						previousRevision := deviceRevision(t, statePath, deviceIDs["A"])
+						peerServices["A"].restart(t)
+						waitForDeviceReconnect(t, statePath, deviceIDs["A"], previousRevision)
+					},
+				)
+			},
+		)
+		assertPrincipalDistribution(t, statePath, expectedPrincipals)
+		assertAgentReceiptCount(t, statePath, expectedReceipts)
+		mock.verify(t, []string{
+			workerAdmissionA, workerAdmissionB, workerAdmissionRetry,
+			workerCollaborationInitial, workerCollaborationResume, workerSelfTarget,
 		})
 	})
 	assertCount(t, statePath, "SELECT count(*) FROM trees", 4)
