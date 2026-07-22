@@ -140,8 +140,9 @@ func (s *session) call(
 		return nil, fmt.Errorf("encode broker %s request: %w", method, err)
 	}
 	pending := pendingCall{
-		treeID: treeID, cancellable: method == protocol.MethodWaitMailbox,
-		result: make(chan callResult, 1),
+		treeID:      treeID,
+		cancellable: method == protocol.MethodWaitMailbox || method == protocol.MethodWaitAgent,
+		result:      make(chan callResult, 1),
 	}
 	if err := s.addPending(requestID, pending); err != nil {
 		return nil, err

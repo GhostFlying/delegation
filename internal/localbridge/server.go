@@ -254,7 +254,7 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 	case protocol.MethodListDevices, protocol.MethodDescribeDevice,
 		protocol.MethodSpawnAgent, protocol.MethodListAgents,
 		protocol.MethodSendAgent, protocol.MethodFollowupAgent, protocol.MethodInterruptAgent,
-		protocol.MethodSendMessage, protocol.MethodWaitMailbox:
+		protocol.MethodWaitAgent, protocol.MethodSendMessage, protocol.MethodWaitMailbox:
 		if request.TreeID == "" || request.Source == nil {
 			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "request requires a principal"}
 		}
@@ -292,7 +292,7 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 
 func (s *Server) admitCall(method string) (func(), bool) {
 	pool := s.controlSem
-	if method == protocol.MethodWaitMailbox {
+	if method == protocol.MethodWaitMailbox || method == protocol.MethodWaitAgent {
 		pool = s.waitSem
 	}
 	select {

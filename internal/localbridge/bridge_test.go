@@ -228,6 +228,12 @@ func TestBridgeForwardsRootAgentControlsAndRejectsWorkers(t *testing.T) {
 				AgentID:     bridgeTestAgentID,
 			},
 		},
+		{
+			method: protocol.MethodWaitAgent,
+			params: protocol.WaitAgentParams{
+				TimeoutMillis: 1, MessageLimit: 1, ActivityLimit: 1,
+			},
+		},
 	}
 	for _, test := range tests {
 		var result struct {
@@ -264,6 +270,12 @@ func TestBridgeForwardsRootAgentControlsAndRejectsWorkers(t *testing.T) {
 			MessageID: "123e4567-e89b-42d3-a456-426614174308",
 			Message:   "not allowed",
 		},
+		nil,
+	)
+	assertRPCCode(t, err, protocol.ErrorForbidden)
+	err = client.Call(
+		context.Background(), protocol.MethodWaitAgent, worker.TreeID, &worker,
+		protocol.WaitAgentParams{TimeoutMillis: 1, MessageLimit: 1, ActivityLimit: 1},
 		nil,
 	)
 	assertRPCCode(t, err, protocol.ErrorForbidden)
@@ -589,6 +601,9 @@ func TestBridgeWorkerWaitCapacityPreservesControlHeadroom(t *testing.T) {
 		params any
 	}{
 		{method: protocol.MethodListDevices, params: protocol.ListDevicesParams{Limit: 1}},
+		{method: protocol.MethodWaitAgent, params: protocol.WaitAgentParams{
+			MessageLimit: 1, ActivityLimit: 1,
+		}},
 		{method: protocol.MethodSendMessage, params: protocol.SendMessageParams{
 			MessageID: "123e4567-e89b-42d3-a456-426614174399",
 			Target:    protocol.MessageTarget{Kind: protocol.MessageTargetRoot},
@@ -612,6 +627,20 @@ func TestBridgeWorkerWaitCapacityPreservesControlHeadroom(t *testing.T) {
 			t.Fatalf("worker wait release: %v", err)
 		}
 	}
+}
+
+func TestBridgeAgentWaitUsesWaitCapacityPool(t *testing.T) {
+	server := &Server{
+		waitSem: make(chan struct{}, 1), controlSem: make(chan struct{}, 1),
+	}
+	release, admitted := server.admitCall(protocol.MethodWaitAgent)
+	if !admitted || len(server.waitSem) != 1 || len(server.controlSem) != 0 {
+		t.Fatalf(
+			"agent wait admission = admitted %v, wait %d, control %d",
+			admitted, len(server.waitSem), len(server.controlSem),
+		)
+	}
+	release()
 }
 
 func TestClientCancellationReachesBridgeBackend(t *testing.T) {

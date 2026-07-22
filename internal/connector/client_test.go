@@ -254,6 +254,86 @@ func TestCanceledMailboxWaitsReleaseBrokerCapacity(t *testing.T) {
 	}
 }
 
+func TestCanceledAgentWaitSendsCancellationWithoutClosingConnector(t *testing.T) {
+	waitRequestID := make(chan string, 1)
+	cancellation := make(chan protocol.CancelRequestParams, 1)
+	hold := make(chan struct{})
+	server := newFakeBroker(t, func(connection *websocket.Conn) {
+		request := readTestEnvelope(t, connection)
+		if request.Kind != protocol.KindRequest || request.Method != protocol.MethodWaitAgent {
+			t.Errorf("agent wait envelope = %#v", request)
+			return
+		}
+		waitRequestID <- request.RequestID
+		notification := readTestEnvelope(t, connection)
+		if notification.Kind != protocol.KindNotification ||
+			notification.Method != protocol.MethodCancelRequest ||
+			notification.TreeID != "" || notification.Source != nil {
+			t.Errorf("agent wait cancellation envelope = %#v", notification)
+			return
+		}
+		params, err := protocol.DecodePayload[protocol.CancelRequestParams](notification.Payload)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		cancellation <- params
+		<-hold
+	})
+	defer server.Close()
+	defer close(hold)
+	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, nil)
+	clientContext, stopClient := context.WithCancel(context.Background())
+	clientDone := runClient(client, clientContext)
+	waitReady(t, client)
+
+	source := control.NewRootPrincipal(
+		connectorTestControllerID,
+		connectorTestThreadID,
+		connectorTestWorkerID,
+		connectorTestDeviceID,
+	).Identity()
+	waitContext, cancelWait := context.WithCancel(context.Background())
+	waitDone := make(chan error, 1)
+	go func() {
+		var result protocol.WaitAgentResult
+		waitDone <- client.Call(
+			waitContext, protocol.MethodWaitAgent, connectorTestThreadID, &source,
+			protocol.WaitAgentParams{
+				TimeoutMillis: protocol.MaximumAgentWaitMillis,
+				MessageLimit:  protocol.MaximumAgentWaitMessages, ActivityLimit: protocol.MaximumAgentWaitActivities,
+			},
+			&result,
+		)
+	}()
+	var originalRequestID string
+	select {
+	case originalRequestID = <-waitRequestID:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake broker did not receive agent wait")
+	}
+	cancelWait()
+	if err := <-waitDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled agent wait error = %v", err)
+	}
+	select {
+	case params := <-cancellation:
+		if params.RequestID != originalRequestID {
+			t.Fatalf("canceled request ID = %q, want %q", params.RequestID, originalRequestID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake broker did not receive agent wait cancellation")
+	}
+	if !client.Status().Connected {
+		t.Fatal("connector closed after canceling agent wait")
+	}
+
+	stopClient()
+	if err := waitClient(clientDone); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNoneAuthPeerConnectorRegisters(t *testing.T) {
 	fixture := newBrokerFixture(t, config.AuthModeNone, 20*time.Millisecond)
 	client := newTestClient(t, fixture.url(), config.AuthModeNone, nil)
