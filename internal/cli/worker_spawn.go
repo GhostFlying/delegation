@@ -43,7 +43,7 @@ func (s managedWorkerSpawner) SpawnWorker(
 	result := protocol.SpawnWorkerResult{
 		SpawnID:   request.Params.SpawnID,
 		Principal: principal,
-		Status:    protocol.AgentSpawnPending,
+		Outcome:   protocol.AgentSpawnOutcomeIndeterminate,
 	}
 	if request.Source.ControllerID != s.controllerID || request.Source.TreeID != request.TreeID ||
 		request.Source.ParentAgentID != "" {
@@ -57,11 +57,11 @@ func (s managedWorkerSpawner) SpawnWorker(
 		Prompt:        request.Params.Message,
 	})
 	if err == nil {
-		result.Status = protocol.AgentSpawnStarted
+		result.Outcome = protocol.AgentSpawnOutcomeStarted
 		return result, nil
 	}
 	if started.Worker.Status == store.WorkerFailed {
-		result.Status = protocol.AgentSpawnFailed
+		result.Outcome = protocol.AgentSpawnOutcomeFailed
 		result.FailureCode = started.Worker.FailureCode
 		if protocol.ValidateFailureCode(result.FailureCode) != nil {
 			result.FailureCode = "worker_failed"
@@ -69,24 +69,28 @@ func (s managedWorkerSpawner) SpawnWorker(
 		return result, nil
 	}
 	if errors.Is(err, workerhost.ErrWorkerInterrupted) {
-		result.Status = protocol.AgentSpawnStarted
+		result.Outcome = protocol.AgentSpawnOutcomeStarted
 		return result, nil
 	}
-	if errors.Is(err, store.ErrWorkerBusy) || errors.Is(err, store.ErrWorkerTransition) {
+	if errors.Is(err, store.ErrWorkerBusy) {
+		result.Outcome = protocol.AgentSpawnOutcomeBusy
+		return result, nil
+	}
+	if errors.Is(err, store.ErrWorkerTransition) {
 		return result, nil
 	}
 	if errors.Is(err, workerhost.ErrMCPInjectionBlocked) {
-		result.Status = protocol.AgentSpawnFailed
+		result.Outcome = protocol.AgentSpawnOutcomeFailed
 		result.FailureCode = "mcp_injection_blocked"
 		return result, nil
 	}
 	if errors.Is(err, store.ErrWorkerReservationConflict) {
-		result.Status = protocol.AgentSpawnFailed
+		result.Outcome = protocol.AgentSpawnOutcomeFailed
 		result.FailureCode = "reservation_conflict"
 		return result, nil
 	}
 	if errors.Is(err, workerhost.ErrWorkerFailed) {
-		result.Status = protocol.AgentSpawnFailed
+		result.Outcome = protocol.AgentSpawnOutcomeFailed
 		result.FailureCode = "worker_failed"
 		return result, nil
 	}

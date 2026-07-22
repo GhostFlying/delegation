@@ -56,7 +56,7 @@ func (m *workerOperationManager) SpawnWorker(
 			request.Source.AgentID,
 			connectorTestDeviceID,
 		).Identity(),
-		Status: protocol.AgentSpawnStarted,
+		Outcome: protocol.AgentSpawnOutcomeStarted,
 	}, nil
 }
 

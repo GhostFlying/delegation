@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +26,8 @@ const (
 	agentRPCRemoteThreadID = "123e4567-e89b-42d3-a456-426614174133"
 	agentRPCRemoteSpawnID  = "123e4567-e89b-42d3-a456-426614174134"
 	agentRPCMessageID      = "123e4567-e89b-42d3-a456-426614174135"
+	agentRPCBusyThreadID   = "123e4567-e89b-42d3-a456-426614174136"
+	agentRPCBusySpawnID    = "123e4567-e89b-42d3-a456-426614174137"
 )
 
 type selfDispatchSpawner struct {
@@ -34,8 +37,15 @@ type selfDispatchSpawner struct {
 
 type basicDispatchSpawner struct {
 	deviceID string
-	status   protocol.AgentSpawnStatus
+	outcome  protocol.AgentSpawnOutcome
 	calls    atomic.Int32
+}
+
+type busyThenStartedSpawner struct {
+	mu        sync.Mutex
+	deviceID  string
+	agentIDs  []string
+	callCount int
 }
 
 type agentRPCWorkerController struct{}
@@ -93,9 +103,9 @@ func (s *basicDispatchSpawner) SpawnWorker(
 	request connector.WorkerSpawnRequest,
 ) (protocol.SpawnWorkerResult, error) {
 	s.calls.Add(1)
-	status := s.status
-	if status == "" {
-		status = protocol.AgentSpawnStarted
+	outcome := s.outcome
+	if outcome == "" {
+		outcome = protocol.AgentSpawnOutcomeStarted
 	}
 	return protocol.SpawnWorkerResult{
 		SpawnID: request.Params.SpawnID,
@@ -106,8 +116,39 @@ func (s *basicDispatchSpawner) SpawnWorker(
 			request.Source.AgentID,
 			s.deviceID,
 		).Identity(),
-		Status: status,
+		Outcome: outcome,
 	}, nil
+}
+
+func (s *busyThenStartedSpawner) SpawnWorker(
+	_ context.Context,
+	request connector.WorkerSpawnRequest,
+) (protocol.SpawnWorkerResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.callCount++
+	s.agentIDs = append(s.agentIDs, request.Params.AgentID)
+	outcome := protocol.AgentSpawnOutcomeStarted
+	if s.callCount == 1 {
+		outcome = protocol.AgentSpawnOutcomeBusy
+	}
+	return protocol.SpawnWorkerResult{
+		SpawnID: request.Params.SpawnID,
+		Principal: control.NewWorkerPrincipal(
+			brokerTestControllerID,
+			request.TreeID,
+			request.Params.AgentID,
+			request.Source.AgentID,
+			s.deviceID,
+		).Identity(),
+		Outcome: outcome,
+	}, nil
+}
+
+func (s *busyThenStartedSpawner) snapshot() (int, []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.callCount, append([]string(nil), s.agentIDs...)
 }
 
 func (s *selfDispatchSpawner) SpawnWorker(
@@ -132,7 +173,7 @@ func (s *selfDispatchSpawner) SpawnWorker(
 			request.Source.AgentID,
 			brokerTestDeviceID,
 		).Identity(),
-		Status: protocol.AgentSpawnStarted,
+		Outcome: protocol.AgentSpawnOutcomeStarted,
 	}, nil
 }
 
@@ -206,6 +247,7 @@ func TestAgentRPCSelfDispatchIsDurableIdempotentAndNonBlocking(t *testing.T) {
 		t.Fatal(err)
 	}
 	if spawned.Agent.Status != protocol.AgentSpawnStarted ||
+		spawned.Outcome != protocol.AgentSpawnOutcomeStarted ||
 		spawned.Agent.Principal.ParentAgentID != root.Principal.AgentID ||
 		spawned.Agent.Principal.DeviceID != brokerTestDeviceID || spawner.calls.Load() != 1 {
 		t.Fatalf("self-target spawn = %#v, target calls %d", spawned, spawner.calls.Load())
@@ -291,6 +333,7 @@ func TestAgentRPCRoutesToExplicitRemotePeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	if spawned.Agent.Status != protocol.AgentSpawnStarted ||
+		spawned.Outcome != protocol.AgentSpawnOutcomeStarted ||
 		spawned.Agent.Principal.DeviceID != agentRPCTargetID ||
 		targetSpawner.calls.Load() != 1 || sourceSpawner.calls.Load() != 0 {
 		t.Fatalf(
@@ -299,6 +342,150 @@ func TestAgentRPCRoutesToExplicitRemotePeer(t *testing.T) {
 			sourceSpawner.calls.Load(),
 			targetSpawner.calls.Load(),
 		)
+	}
+}
+
+func TestAgentRPCBusyAttemptRetriesOneDurablePrincipal(t *testing.T) {
+	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	sourceSpawner := &basicDispatchSpawner{deviceID: brokerTestDeviceID}
+	targetSpawner := &busyThenStartedSpawner{deviceID: agentRPCTargetID}
+	sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceSpawner)
+	startAgentRPCConnector(t, harness, agentRPCTargetID, targetSpawner)
+
+	callContext, cancelCall := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelCall()
+	var root protocol.EnsureRootTreeResult
+	if err := sourceClient.Call(
+		callContext,
+		protocol.MethodEnsureRootTree,
+		"",
+		nil,
+		protocol.EnsureRootTreeParams{ExternalThreadID: agentRPCBusyThreadID},
+		&root,
+	); err != nil {
+		t.Fatal(err)
+	}
+	params := protocol.SpawnAgentParams{
+		SpawnID: agentRPCBusySpawnID, TargetDeviceID: agentRPCTargetID,
+		TaskName: "busy_retry", Message: "retry this exact dispatch after capacity becomes available",
+	}
+	source := root.Principal.Identity()
+	var busy protocol.SpawnAgentResult
+	if err := sourceClient.Call(
+		callContext, protocol.MethodSpawnAgent, root.Tree.TreeID, &source, params, &busy,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := busy.Validate(); err != nil || busy.Outcome != protocol.AgentSpawnOutcomeBusy ||
+		busy.Agent.Status != protocol.AgentSpawnPending {
+		t.Fatalf("busy spawn = %#v, error %v", busy, err)
+	}
+
+	var started protocol.SpawnAgentResult
+	if err := sourceClient.Call(
+		callContext, protocol.MethodSpawnAgent, root.Tree.TreeID, &source, params, &started,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := started.Validate(); err != nil || started.Outcome != protocol.AgentSpawnOutcomeStarted ||
+		started.Agent.Status != protocol.AgentSpawnStarted ||
+		started.Agent.Principal != busy.Agent.Principal || started.Agent.Sequence != busy.Agent.Sequence {
+		t.Fatalf("started retry = %#v, busy %#v, error %v", started, busy, err)
+	}
+
+	var replayed protocol.SpawnAgentResult
+	if err := sourceClient.Call(
+		callContext, protocol.MethodSpawnAgent, root.Tree.TreeID, &source, params, &replayed,
+	); err != nil || replayed != started {
+		t.Fatalf("terminal spawn replay = %#v, error %v", replayed, err)
+	}
+	calls, agentIDs := targetSpawner.snapshot()
+	if calls != 2 || len(agentIDs) != 2 || agentIDs[0] != busy.Agent.Principal.AgentID ||
+		agentIDs[1] != busy.Agent.Principal.AgentID || sourceSpawner.calls.Load() != 0 {
+		t.Fatalf(
+			"busy target calls = %d, agent IDs %v, source calls %d",
+			calls,
+			agentIDs,
+			sourceSpawner.calls.Load(),
+		)
+	}
+	var agents protocol.ListAgentsResult
+	if err := sourceClient.Call(
+		callContext,
+		protocol.MethodListAgents,
+		root.Tree.TreeID,
+		&source,
+		protocol.ListAgentsParams{Limit: protocol.MaximumAgentPage},
+		&agents,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.Agents) != 1 || agents.Agents[0] != started.Agent {
+		t.Fatalf("busy retry durable agents = %#v", agents)
+	}
+}
+
+func TestAgentRPCOfflineTargetReturnsIndeterminateReceipt(t *testing.T) {
+	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	sourceClient := startAgentRPCConnector(
+		t, harness, brokerTestDeviceID, &basicDispatchSpawner{deviceID: brokerTestDeviceID},
+	)
+	targetDescriptor := hello().Descriptor()
+	targetDescriptor.DeviceID = agentRPCTargetID
+	targetDescriptor.Name = "offline-target"
+	if _, err := harness.registry.RegisterTrustedDevice(
+		context.Background(), targetDescriptor, time.Unix(10, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	callContext, cancelCall := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelCall()
+	var root protocol.EnsureRootTreeResult
+	if err := sourceClient.Call(
+		callContext,
+		protocol.MethodEnsureRootTree,
+		"",
+		nil,
+		protocol.EnsureRootTreeParams{ExternalThreadID: agentRPCRemoteThreadID},
+		&root,
+	); err != nil {
+		t.Fatal(err)
+	}
+	params := protocol.SpawnAgentParams{
+		SpawnID: agentRPCRemoteSpawnID, TargetDeviceID: agentRPCTargetID,
+		TaskName: "offline_spawn", Message: "retain one receipt until the target reconnects",
+	}
+	source := root.Principal.Identity()
+	var first protocol.SpawnAgentResult
+	if err := sourceClient.Call(
+		callContext, protocol.MethodSpawnAgent, root.Tree.TreeID, &source, params, &first,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Validate(); err != nil || first.Outcome != protocol.AgentSpawnOutcomeIndeterminate ||
+		first.Agent.Status != protocol.AgentSpawnPending {
+		t.Fatalf("offline spawn = %#v, error %v", first, err)
+	}
+	var repeated protocol.SpawnAgentResult
+	if err := sourceClient.Call(
+		callContext, protocol.MethodSpawnAgent, root.Tree.TreeID, &source, params, &repeated,
+	); err != nil || repeated != first {
+		t.Fatalf("offline spawn replay = %#v, first %#v, error %v", repeated, first, err)
+	}
+	var agents protocol.ListAgentsResult
+	if err := sourceClient.Call(
+		callContext,
+		protocol.MethodListAgents,
+		root.Tree.TreeID,
+		&source,
+		protocol.ListAgentsParams{Limit: protocol.MaximumAgentPage},
+		&agents,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.Agents) != 1 || agents.Agents[0] != first.Agent {
+		t.Fatalf("offline durable agents = %#v", agents)
 	}
 }
 
@@ -421,7 +608,7 @@ func TestAgentRPCReauthenticatesTargetBeforeDispatch(t *testing.T) {
 	sourceSpawner := &basicDispatchSpawner{deviceID: brokerTestDeviceID}
 	targetSpawner := &basicDispatchSpawner{
 		deviceID: agentRPCTargetID,
-		status:   protocol.AgentSpawnPending,
+		outcome:  protocol.AgentSpawnOutcomeIndeterminate,
 	}
 	sourceClient := startAuthenticatedAgentRPCConnector(
 		t, harness, brokerTestDeviceID, sourceSpawner, harness.deviceToken,
@@ -454,7 +641,8 @@ func TestAgentRPCReauthenticatesTargetBeforeDispatch(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if initial.Agent.Status != protocol.AgentSpawnPending || targetSpawner.calls.Load() != 1 {
+	if initial.Agent.Status != protocol.AgentSpawnPending ||
+		initial.Outcome != protocol.AgentSpawnOutcomeIndeterminate || targetSpawner.calls.Load() != 1 {
 		t.Fatalf("initial pending spawn = %#v, target calls %d", initial, targetSpawner.calls.Load())
 	}
 	if err := harness.registry.DisableCredential(

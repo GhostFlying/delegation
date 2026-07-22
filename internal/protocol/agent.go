@@ -48,6 +48,31 @@ func (s AgentSpawnStatus) Validate(failureCode string) error {
 	return nil
 }
 
+type AgentSpawnOutcome string
+
+const (
+	AgentSpawnOutcomeIndeterminate AgentSpawnOutcome = "indeterminate"
+	AgentSpawnOutcomeBusy          AgentSpawnOutcome = "busy"
+	AgentSpawnOutcomeStarted       AgentSpawnOutcome = "started"
+	AgentSpawnOutcomeFailed        AgentSpawnOutcome = "failed"
+)
+
+func (o AgentSpawnOutcome) Validate(failureCode string) error {
+	switch o {
+	case AgentSpawnOutcomeIndeterminate, AgentSpawnOutcomeBusy, AgentSpawnOutcomeStarted:
+		if failureCode != "" {
+			return errors.New("non-failed agent spawn outcome must not contain failureCode")
+		}
+	case AgentSpawnOutcomeFailed:
+		if err := ValidateFailureCode(failureCode); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported agent spawn outcome %q", o)
+	}
+	return nil
+}
+
 type SpawnAgentParams struct {
 	SpawnID        string `json:"spawnId"`
 	TargetDeviceID string `json:"targetDeviceId"`
@@ -120,13 +145,38 @@ func (a AgentSummary) Validate() error {
 }
 
 type SpawnAgentResult struct {
-	Agent AgentSummary `json:"agent"`
+	Agent   AgentSummary      `json:"agent"`
+	Outcome AgentSpawnOutcome `json:"outcome"`
+}
+
+func (r SpawnAgentResult) Validate() error {
+	if err := r.Agent.Validate(); err != nil {
+		return err
+	}
+	if err := r.Outcome.Validate(r.Agent.FailureCode); err != nil {
+		return err
+	}
+	var expectedStatus AgentSpawnStatus
+	switch r.Outcome {
+	case AgentSpawnOutcomeIndeterminate, AgentSpawnOutcomeBusy:
+		expectedStatus = AgentSpawnPending
+	case AgentSpawnOutcomeStarted:
+		expectedStatus = AgentSpawnStarted
+	case AgentSpawnOutcomeFailed:
+		expectedStatus = AgentSpawnFailed
+	default:
+		panic("validated agent spawn result has an unknown outcome")
+	}
+	if r.Agent.Status != expectedStatus {
+		return errors.New("agent spawn outcome does not match durable status")
+	}
+	return nil
 }
 
 type SpawnWorkerResult struct {
 	SpawnID     string                    `json:"spawnId"`
 	Principal   control.PrincipalIdentity `json:"principal"`
-	Status      AgentSpawnStatus          `json:"status"`
+	Outcome     AgentSpawnOutcome         `json:"outcome"`
 	FailureCode string                    `json:"failureCode"`
 }
 
@@ -140,7 +190,7 @@ func (r SpawnWorkerResult) Validate() error {
 	if r.Principal.ParentAgentID == "" {
 		return errors.New("worker principal must contain parentAgentId")
 	}
-	return r.Status.Validate(r.FailureCode)
+	return r.Outcome.Validate(r.FailureCode)
 }
 
 type ListAgentsParams struct {

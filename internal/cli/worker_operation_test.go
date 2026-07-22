@@ -32,10 +32,13 @@ const (
 type fakeManagedWorkerHost struct {
 	mu sync.Mutex
 
+	spawnRequests     []workerhost.SpawnRequest
 	sendRequests      []workerhost.SendRequest
 	followupRequests  []workerhost.FollowupRequest
 	interruptRequests []workerhost.InterruptRequest
 
+	spawnResult     workerhost.StartedTurn
+	spawnErr        error
 	sendResult      workerhost.OperationResult
 	sendErr         error
 	followupResult  workerhost.OperationResult
@@ -44,11 +47,14 @@ type fakeManagedWorkerHost struct {
 	interruptErr    error
 }
 
-func (*fakeManagedWorkerHost) Spawn(
-	context.Context,
-	workerhost.SpawnRequest,
+func (h *fakeManagedWorkerHost) Spawn(
+	_ context.Context,
+	request workerhost.SpawnRequest,
 ) (workerhost.StartedTurn, error) {
-	return workerhost.StartedTurn{}, errors.New("unexpected spawn")
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.spawnRequests = append(h.spawnRequests, request)
+	return h.spawnResult, h.spawnErr
 }
 
 func (h *fakeManagedWorkerHost) Send(
@@ -84,6 +90,42 @@ func (h *fakeManagedWorkerHost) Interrupt(
 type staticManagedWorkerState struct {
 	worker store.WorkerReservation
 	err    error
+}
+
+func TestManagedWorkerAdapterMapsSpawnAttemptOutcomes(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		outcome protocol.AgentSpawnOutcome
+	}{
+		{name: "busy", err: store.ErrWorkerBusy, outcome: protocol.AgentSpawnOutcomeBusy},
+		{name: "transition", err: store.ErrWorkerTransition, outcome: protocol.AgentSpawnOutcomeIndeterminate},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			host := &fakeManagedWorkerHost{spawnErr: test.err}
+			adapter := operationTestAdapter(host, store.WorkerReservation{})
+			result, err := adapter.SpawnWorker(context.Background(), connector.WorkerSpawnRequest{
+				TreeID: operationTestTreeID,
+				Source: operationTestRoot(),
+				Params: protocol.SpawnWorkerParams{
+					SpawnID: operationTestMessageID, AgentID: operationTestAgentID,
+					TaskName: "spawn_outcome", Message: "test the worker spawn outcome mapping",
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := result.Validate(); err != nil || result.Outcome != test.outcome {
+				t.Fatalf("spawn result = %#v, validation %v", result, err)
+			}
+			host.mu.Lock()
+			defer host.mu.Unlock()
+			if len(host.spawnRequests) != 1 || host.spawnRequests[0].AgentID != operationTestAgentID {
+				t.Fatalf("spawn host requests = %#v", host.spawnRequests)
+			}
+		})
+	}
 }
 
 func (s staticManagedWorkerState) GetWorker(

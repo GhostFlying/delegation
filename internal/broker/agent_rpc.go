@@ -60,11 +60,14 @@ func (s *session) handleSpawnAgent(ctx context.Context, request protocol.Envelop
 		return s.handleAgentStoreError(ctx, request, "begin agent spawn", err)
 	}
 	if receipt.Agent.Status != protocol.AgentSpawnPending {
-		return s.writeResult(ctx, request, protocol.SpawnAgentResult{Agent: receipt.Agent})
+		return s.writeResult(ctx, request, terminalSpawnAgentResult(receipt.Agent))
+	}
+	indeterminate := protocol.SpawnAgentResult{
+		Agent: receipt.Agent, Outcome: protocol.AgentSpawnOutcomeIndeterminate,
 	}
 	target := s.server.connection(params.TargetDeviceID)
 	if target == nil {
-		return s.writeResult(ctx, request, protocol.SpawnAgentResult{Agent: receipt.Agent})
+		return s.writeResult(ctx, request, indeterminate)
 	}
 	payload, callErr := target.callPeer(
 		ctx,
@@ -77,12 +80,12 @@ func (s *session) handleSpawnAgent(ctx context.Context, request protocol.Envelop
 		},
 	)
 	if callErr != nil {
-		return s.writeResult(ctx, request, protocol.SpawnAgentResult{Agent: receipt.Agent})
+		return s.writeResult(ctx, request, indeterminate)
 	}
 	result, err := protocol.DecodePayload[protocol.SpawnWorkerResult](payload)
 	if err != nil || validateTargetWorkerResult(result, receipt.Agent) != nil {
 		_ = target.connection.CloseNow()
-		return s.writeResult(ctx, request, protocol.SpawnAgentResult{Agent: receipt.Agent})
+		return s.writeResult(ctx, request, indeterminate)
 	}
 	key := store.AgentSpawnKey{
 		ControllerID:  request.ControllerID,
@@ -91,25 +94,29 @@ func (s *session) handleSpawnAgent(ctx context.Context, request protocol.Envelop
 		SpawnID:       params.SpawnID,
 	}
 	var updated store.AgentSpawnReceipt
-	switch result.Status {
-	case protocol.AgentSpawnPending:
-	case protocol.AgentSpawnStarted:
+	switch result.Outcome {
+	case protocol.AgentSpawnOutcomeIndeterminate:
+		return s.writeResult(ctx, request, indeterminate)
+	case protocol.AgentSpawnOutcomeBusy:
+		return s.writeResult(ctx, request, protocol.SpawnAgentResult{
+			Agent: receipt.Agent, Outcome: protocol.AgentSpawnOutcomeBusy,
+		})
+	case protocol.AgentSpawnOutcomeStarted:
 		updated, err = s.server.registry.MarkAgentSpawnStarted(ctx, key, s.server.now())
-	case protocol.AgentSpawnFailed:
+	case protocol.AgentSpawnOutcomeFailed:
 		updated, err = s.server.registry.MarkAgentSpawnFailed(
 			ctx, key, result.FailureCode, s.server.now(),
 		)
 	default:
-		panic("validated worker result has an unknown status")
+		panic("validated worker result has an unknown outcome")
 	}
 	if err != nil {
-		_ = s.writeResult(ctx, request, protocol.SpawnAgentResult{Agent: receipt.Agent})
+		_ = s.writeResult(ctx, request, indeterminate)
 		return fmt.Errorf("record agent spawn result: %w", err)
 	}
-	if result.Status != protocol.AgentSpawnPending {
-		receipt = updated
-	}
-	return s.writeResult(ctx, request, protocol.SpawnAgentResult{Agent: receipt.Agent})
+	return s.writeResult(ctx, request, protocol.SpawnAgentResult{
+		Agent: updated.Agent, Outcome: result.Outcome,
+	})
 }
 
 func (s *session) handleListAgents(ctx context.Context, request protocol.Envelope) error {
@@ -178,4 +185,12 @@ func validateTargetWorkerResult(result protocol.SpawnWorkerResult, agent protoco
 		return errors.New("target worker result does not match the durable agent identity")
 	}
 	return nil
+}
+
+func terminalSpawnAgentResult(agent protocol.AgentSummary) protocol.SpawnAgentResult {
+	outcome := protocol.AgentSpawnOutcomeStarted
+	if agent.Status == protocol.AgentSpawnFailed {
+		outcome = protocol.AgentSpawnOutcomeFailed
+	}
+	return protocol.SpawnAgentResult{Agent: agent, Outcome: outcome}
 }
