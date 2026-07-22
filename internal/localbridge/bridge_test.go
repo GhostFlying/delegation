@@ -194,6 +194,133 @@ func TestBridgeProbeRequiresExactServiceIdentity(t *testing.T) {
 	}
 }
 
+func TestBridgeForwardsRootAgentControlsAndRejectsWorkers(t *testing.T) {
+	backend := &fakeBackend{result: json.RawMessage(`{"ok":true}`)}
+	client, stop := startTestBridge(t, backend)
+	defer stop()
+	root := control.NewRootPrincipal(
+		bridgeTestControllerID, bridgeTestTreeID, bridgeTestAgentID, bridgeTestDeviceID,
+	).Identity()
+	tests := []struct {
+		method string
+		params any
+	}{
+		{
+			method: protocol.MethodSendAgent,
+			params: protocol.SendAgentParams{
+				AgentID:   bridgeTestAgentID,
+				MessageID: "123e4567-e89b-42d3-a456-426614174304",
+				Message:   "status",
+			},
+		},
+		{
+			method: protocol.MethodFollowupAgent,
+			params: protocol.FollowupAgentParams{
+				OperationID: "123e4567-e89b-42d3-a456-426614174305",
+				AgentID:     bridgeTestAgentID,
+				Message:     "continue",
+			},
+		},
+		{
+			method: protocol.MethodInterruptAgent,
+			params: protocol.InterruptAgentParams{
+				OperationID: "123e4567-e89b-42d3-a456-426614174306",
+				AgentID:     bridgeTestAgentID,
+			},
+		},
+	}
+	for _, test := range tests {
+		var result struct {
+			OK bool `json:"ok"`
+		}
+		if err := client.Call(
+			context.Background(), test.method, root.TreeID, &root, test.params, &result,
+		); err != nil {
+			t.Fatalf("root %s: %v", test.method, err)
+		}
+		if !result.OK {
+			t.Fatalf("root %s result = %#v", test.method, result)
+		}
+	}
+	calls := backend.snapshot()
+	if len(calls) != len(tests) {
+		t.Fatalf("root agent control calls = %#v", calls)
+	}
+	for index, test := range tests {
+		if calls[index].method != test.method || calls[index].source == nil ||
+			*calls[index].source != root {
+			t.Fatalf("root agent control call %d = %#v", index, calls[index])
+		}
+	}
+
+	worker := control.NewWorkerPrincipal(
+		bridgeTestControllerID, bridgeTestTreeID, bridgeTestAgentID,
+		"123e4567-e89b-42d3-a456-426614174307", bridgeTestDeviceID,
+	).Identity()
+	err := client.Call(
+		context.Background(), protocol.MethodSendAgent, worker.TreeID, &worker,
+		protocol.SendAgentParams{
+			AgentID:   bridgeTestAgentID,
+			MessageID: "123e4567-e89b-42d3-a456-426614174308",
+			Message:   "not allowed",
+		},
+		nil,
+	)
+	assertRPCCode(t, err, protocol.ErrorForbidden)
+	if calls := backend.snapshot(); len(calls) != len(tests) {
+		t.Fatalf("worker agent control reached backend: %#v", calls)
+	}
+}
+
+type deadlineBackend struct {
+	remaining chan time.Duration
+}
+
+func (b *deadlineBackend) Call(
+	ctx context.Context,
+	_ string,
+	_ string,
+	_ *control.PrincipalIdentity,
+	_ any,
+	result any,
+) error {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		b.remaining <- 0
+	} else {
+		b.remaining <- time.Until(deadline)
+	}
+	*result.(*json.RawMessage) = json.RawMessage(`{"ok":true}`)
+	return nil
+}
+
+func TestBridgeRootAgentControlHasLongCallDeadline(t *testing.T) {
+	backend := &deadlineBackend{remaining: make(chan time.Duration, 1)}
+	client, stop := startTestBridge(t, backend)
+	defer stop()
+	root := control.NewRootPrincipal(
+		bridgeTestControllerID, bridgeTestTreeID, bridgeTestAgentID, bridgeTestDeviceID,
+	).Identity()
+	var result struct {
+		OK bool `json:"ok"`
+	}
+	if err := client.Call(
+		context.Background(), protocol.MethodSendAgent, root.TreeID, &root,
+		protocol.SendAgentParams{
+			AgentID:   bridgeTestAgentID,
+			MessageID: "123e4567-e89b-42d3-a456-426614174304",
+			Message:   "status",
+		},
+		&result,
+	); err != nil {
+		t.Fatal(err)
+	}
+	remaining := <-backend.remaining
+	if remaining <= 2*time.Minute || remaining > localCallTimeout {
+		t.Fatalf("local agent control deadline = %s", remaining)
+	}
+}
+
 func TestBridgeEnforcesRoleShapeAllowlistAndErrorMapping(t *testing.T) {
 	backend := &fakeBackend{result: json.RawMessage(`{}`)}
 	client, stop := startTestBridge(t, backend)

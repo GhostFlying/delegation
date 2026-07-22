@@ -22,14 +22,17 @@ const (
 	ToolDescribeDevice = "describe_device"
 	ToolSpawnAgent     = "spawn_agent"
 	ToolListAgents     = "list_agents"
+	ToolSendMessage    = "send_message"
+	ToolFollowupTask   = "followup_task"
+	ToolInterruptAgent = "interrupt_agent"
 	maximumDevicePage  = 4
 	listFeatureLimit   = 0
 	maximumListBytes   = 4 * 1024
 	maximumDetailBytes = 8 * 1024
 	bridgeCallTimeout  = 15 * time.Second
-	spawnCallTimeout   = 135 * time.Second
+	agentCallTimeout   = 135 * time.Second
 	uuidPattern        = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
-	serverInstructions = "Delegation exposes the live peer registry and managed agents for this root task. Use list_devices for bounded summaries, then describe_device before selecting a target. Choose an online peer whose OS, architecture, and features fit the work; isCurrentDevice identifies a valid self-target. Call spawn_agent with a fresh spawn_id and a self-contained task. A pending result is uncertain, not failed: retry with the same spawn_id and exactly the same arguments. Use list_agents to inspect this task's durable dispatch receipts."
+	serverInstructions = "Delegation exposes the live peer registry and managed agents for this root task. Use list_devices for bounded summaries, then describe_device before selecting a target. Choose an online peer whose OS, architecture, and features fit the work; isCurrentDevice identifies a valid self-target. Call spawn_agent with a fresh spawn_id and a self-contained task. Use list_agents for durable dispatch receipts. Agent-control targets accept an agent UUID, task_name, or /root/task_name. Supply a fresh message_id or operation_id for each logical action; retry an uncertain result with the same ID and exactly the same arguments. send_message delivers to a running or idle agent, followup_task starts a new turn for an idle agent, and interrupt_agent stops its active turn."
 )
 
 type Backend interface {
@@ -94,6 +97,10 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 	if err != nil {
 		return nil, err
 	}
+	sendInputSchema, followupInputSchema, interruptInputSchema, err := agentControlInputSchemas()
+	if err != nil {
+		return nil, err
+	}
 	root := &Root{backend: backend, controllerID: controllerID, deviceID: deviceID}
 	server := mcp.NewServer(
 		&mcp.Implementation{
@@ -132,6 +139,27 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 		Annotations: readOnlyAnnotations(),
 		InputSchema: listAgentsInputSchema,
 	}, root.listAgents)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        ToolSendMessage,
+		Title:       "Send message to delegation agent",
+		Description: "Send or steer one message to a managed agent in this root task.",
+		Annotations: mutatingAnnotations(),
+		InputSchema: sendInputSchema,
+	}, root.sendMessage)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        ToolFollowupTask,
+		Title:       "Follow up delegation task",
+		Description: "Start a new turn for an idle managed agent in this root task.",
+		Annotations: mutatingAnnotations(),
+		InputSchema: followupInputSchema,
+	}, root.followupTask)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        ToolInterruptAgent,
+		Title:       "Interrupt delegation agent",
+		Description: "Interrupt the active turn of a managed agent in this root task.",
+		Annotations: mutatingAnnotations(),
+		InputSchema: interruptInputSchema,
+	}, root.interruptAgent)
 	return server, nil
 }
 
@@ -369,12 +397,22 @@ func (r *Root) call(
 	params, result any,
 ) error {
 	callContext, cancel := context.WithTimeout(ctx, bridgeCallTimeout)
-	if method == protocol.MethodSpawnAgent {
+	if isAgentCall(method) {
 		cancel()
-		callContext, cancel = context.WithTimeout(ctx, spawnCallTimeout)
+		callContext, cancel = context.WithTimeout(ctx, agentCallTimeout)
 	}
 	defer cancel()
 	return r.backend.Call(callContext, method, treeID, source, params, result)
+}
+
+func isAgentCall(method string) bool {
+	switch method {
+	case protocol.MethodSpawnAgent, protocol.MethodSendAgent,
+		protocol.MethodFollowupAgent, protocol.MethodInterruptAgent:
+		return true
+	default:
+		return false
+	}
 }
 
 func threadID(request *mcp.CallToolRequest) (string, error) {

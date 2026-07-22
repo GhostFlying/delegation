@@ -253,6 +253,7 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		}
 	case protocol.MethodListDevices, protocol.MethodDescribeDevice,
 		protocol.MethodSpawnAgent, protocol.MethodListAgents,
+		protocol.MethodSendAgent, protocol.MethodFollowupAgent, protocol.MethodInterruptAgent,
 		protocol.MethodSendMessage, protocol.MethodWaitMailbox:
 		if request.TreeID == "" || request.Source == nil {
 			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "request requires a principal"}

@@ -50,7 +50,7 @@ func explainAgentError(err error) error {
 	if errors.As(err, &rpcError) {
 		switch rpcError.Code {
 		case protocol.ErrorConflict:
-			return errors.New("the agent request conflicts with an existing spawn_id, task_name, or tree binding")
+			return errors.New("the agent request conflicts with an existing spawn_id, message_id, operation_id, task_name, or tree binding")
 		case protocol.ErrorNotFound:
 			return errors.New("the requested delegation agent or target device was not found")
 		case protocol.ErrorForbidden, protocol.ErrorUnauthenticated:

@@ -26,6 +26,9 @@ const (
 	rootMCPTreeID       = "123e4567-e89b-42d3-a456-426614174403"
 	rootMCPAgentID      = "123e4567-e89b-42d3-a456-426614174404"
 	rootMCPWorkerID     = "123e4567-e89b-42d3-a456-426614174405"
+	rootMCPMessageID    = "123e4567-e89b-42d3-a456-426614174406"
+	rootMCPFollowupID   = "123e4567-e89b-42d3-a456-426614174407"
+	rootMCPInterruptID  = "123e4567-e89b-42d3-a456-426614174408"
 )
 
 type rootMCPCall struct {
@@ -36,14 +39,15 @@ type rootMCPCall struct {
 }
 
 type fakeRootBackend struct {
-	mu             sync.Mutex
-	calls          []rootMCPCall
-	err            error
-	ensureResult   *protocol.EnsureRootTreeResult
-	listResult     *protocol.ListDevicesResult
-	describeResult *protocol.DescribeDeviceResult
-	spawnResult    *protocol.SpawnAgentResult
-	agentsResult   *protocol.ListAgentsResult
+	mu              sync.Mutex
+	calls           []rootMCPCall
+	err             error
+	ensureResult    *protocol.EnsureRootTreeResult
+	listResult      *protocol.ListDevicesResult
+	describeResult  *protocol.DescribeDeviceResult
+	spawnResult     *protocol.SpawnAgentResult
+	agentsResult    *protocol.ListAgentsResult
+	operationResult *protocol.AgentOperationResult
 }
 
 type cancelRootBackend struct {
@@ -84,6 +88,7 @@ func (b *fakeRootBackend) Call(
 	describeResult := b.describeResult
 	spawnResult := b.spawnResult
 	agentsResult := b.agentsResult
+	operationResult := b.operationResult
 	b.mu.Unlock()
 	if err != nil {
 		return err
@@ -144,6 +149,36 @@ func (b *fakeRootBackend) Call(
 				testAgent(rootMCPThreadID, rootMCPWorkerID, "windows_build", input.AfterSequence+1),
 			},
 		}
+	case protocol.MethodSendAgent:
+		if operationResult != nil {
+			*result.(*protocol.AgentOperationResult) = *operationResult
+			break
+		}
+		input := params.(protocol.SendAgentParams)
+		*result.(*protocol.AgentOperationResult) = protocol.AgentOperationResult{
+			OperationID: input.MessageID, AgentID: input.AgentID,
+			Action: protocol.AgentOperationSend, Outcome: protocol.AgentOperationOutcomeQueued,
+		}
+	case protocol.MethodFollowupAgent:
+		if operationResult != nil {
+			*result.(*protocol.AgentOperationResult) = *operationResult
+			break
+		}
+		input := params.(protocol.FollowupAgentParams)
+		*result.(*protocol.AgentOperationResult) = protocol.AgentOperationResult{
+			OperationID: input.OperationID, AgentID: input.AgentID,
+			Action: protocol.AgentOperationFollowup, Outcome: protocol.AgentOperationOutcomeStarted,
+		}
+	case protocol.MethodInterruptAgent:
+		if operationResult != nil {
+			*result.(*protocol.AgentOperationResult) = *operationResult
+			break
+		}
+		input := params.(protocol.InterruptAgentParams)
+		*result.(*protocol.AgentOperationResult) = protocol.AgentOperationResult{
+			OperationID: input.OperationID, AgentID: input.AgentID,
+			Action: protocol.AgentOperationInterrupt, Outcome: protocol.AgentOperationOutcomeInterrupted,
+		}
 	default:
 		return fmt.Errorf("unexpected method %q", method)
 	}
@@ -164,17 +199,21 @@ func TestRootMCPListsStaticToolsAndBindsThread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 4 ||
-		tools.Tools[0].Name != ToolDescribeDevice || tools.Tools[1].Name != ToolListAgents ||
-		tools.Tools[2].Name != ToolListDevices || tools.Tools[3].Name != ToolSpawnAgent {
+	if len(tools.Tools) != 7 ||
+		tools.Tools[0].Name != ToolDescribeDevice || tools.Tools[1].Name != ToolFollowupTask ||
+		tools.Tools[2].Name != ToolInterruptAgent || tools.Tools[3].Name != ToolListAgents ||
+		tools.Tools[4].Name != ToolListDevices || tools.Tools[5].Name != ToolSendMessage ||
+		tools.Tools[6].Name != ToolSpawnAgent {
 		t.Fatalf("root tools = %#v", tools.Tools)
 	}
 	for _, tool := range tools.Tools {
+		mutating := tool.Name == ToolSpawnAgent || tool.Name == ToolSendMessage ||
+			tool.Name == ToolFollowupTask || tool.Name == ToolInterruptAgent
 		if tool.Annotations == nil || !tool.Annotations.IdempotentHint ||
 			tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint ||
 			tool.Annotations.OpenWorldHint == nil ||
-			(tool.Name == ToolSpawnAgent && (tool.Annotations.ReadOnlyHint || !*tool.Annotations.OpenWorldHint)) ||
-			(tool.Name != ToolSpawnAgent && (!tool.Annotations.ReadOnlyHint || *tool.Annotations.OpenWorldHint)) {
+			(mutating && (tool.Annotations.ReadOnlyHint || !*tool.Annotations.OpenWorldHint)) ||
+			(!mutating && (!tool.Annotations.ReadOnlyHint || *tool.Annotations.OpenWorldHint)) {
 			t.Fatalf("tool annotations for %s = %#v", tool.Name, tool.Annotations)
 		}
 		assertToolSchema(t, tool)
@@ -618,6 +657,30 @@ func assertToolSchema(t *testing.T, tool *mcp.Tool) {
 			*taskName.MaxLength != protocol.MaximumAgentTaskNameBytes || taskName.Pattern == "" ||
 			message.MaxLength == nil || *message.MaxLength != protocol.MaximumAgentPromptBytes {
 			t.Fatalf("spawn_agent input schema = %s", data)
+		}
+	case ToolSendMessage, ToolFollowupTask, ToolInterruptAgent:
+		target := schema.Properties["target"]
+		idName := "operation_id"
+		if tool.Name == ToolSendMessage {
+			idName = "message_id"
+		}
+		id := schema.Properties[idName]
+		if target.MinLength == nil || *target.MinLength != 1 || target.MaxLength == nil ||
+			*target.MaxLength != maximumAgentTargetBytes || target.Pattern != agentTargetPattern ||
+			id.MinLength == nil || *id.MinLength != 36 || id.MaxLength == nil ||
+			*id.MaxLength != 36 || id.Pattern != uuidPattern {
+			t.Fatalf("%s input schema = %s", tool.Name, data)
+		}
+		if tool.Name != ToolInterruptAgent {
+			message := schema.Properties["message"]
+			wantMaximum := protocol.MaximumAgentPromptBytes
+			if tool.Name == ToolSendMessage {
+				wantMaximum = protocol.MaximumMailboxMessageBytes
+			}
+			if message.MinLength == nil || *message.MinLength != 1 ||
+				message.MaxLength == nil || *message.MaxLength != wantMaximum {
+				t.Fatalf("%s input schema = %s", tool.Name, data)
+			}
 		}
 	default:
 		t.Fatalf("unexpected tool %q", tool.Name)
