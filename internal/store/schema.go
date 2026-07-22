@@ -50,6 +50,8 @@ CREATE TABLE trees (
     root_agent_id TEXT NOT NULL,
     root_device_id TEXT NOT NULL,
     created_at INTEGER NOT NULL CHECK (created_at >= 0),
+	last_agent_sequence INTEGER NOT NULL DEFAULT 0
+		CHECK (last_agent_sequence BETWEEN 0 AND 256),
     PRIMARY KEY (controller_id, external_thread_id),
     UNIQUE (controller_id, tree_id)
 ) STRICT;
@@ -69,6 +71,41 @@ CREATE TABLE principals (
 
 CREATE INDEX principals_by_parent
     ON principals(controller_id, tree_id, parent_agent_id);
+
+CREATE TABLE agent_spawn_receipts (
+	controller_id TEXT NOT NULL,
+	tree_id TEXT NOT NULL,
+	sequence INTEGER NOT NULL CHECK (sequence BETWEEN 1 AND 256),
+	source_agent_id TEXT NOT NULL,
+	spawn_id TEXT NOT NULL,
+	agent_id TEXT NOT NULL,
+	target_device_id TEXT NOT NULL,
+	task_name TEXT NOT NULL CHECK (
+		length(CAST(task_name AS BLOB)) BETWEEN 1 AND 64
+	),
+	prompt_digest BLOB NOT NULL CHECK (length(prompt_digest) = 32),
+	status TEXT NOT NULL CHECK (status IN ('pending', 'started', 'failed')),
+	failure_code TEXT NOT NULL CHECK (
+		length(CAST(failure_code AS BLOB)) <= 64 AND
+		((status = 'failed' AND length(failure_code) > 0) OR
+		 (status != 'failed' AND failure_code = ''))
+	),
+	created_at INTEGER NOT NULL CHECK (created_at >= 0),
+	updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+	PRIMARY KEY (controller_id, tree_id, source_agent_id, spawn_id),
+	UNIQUE (controller_id, tree_id, sequence),
+	UNIQUE (controller_id, tree_id, agent_id),
+	UNIQUE (controller_id, tree_id, source_agent_id, task_name),
+	FOREIGN KEY (controller_id, tree_id)
+		REFERENCES trees(controller_id, tree_id) ON DELETE CASCADE,
+	FOREIGN KEY (controller_id, tree_id, source_agent_id)
+		REFERENCES principals(controller_id, tree_id, agent_id) ON DELETE CASCADE,
+	FOREIGN KEY (controller_id, tree_id, agent_id)
+		REFERENCES principals(controller_id, tree_id, agent_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX agent_spawn_receipts_by_parent_sequence
+	ON agent_spawn_receipts(controller_id, tree_id, source_agent_id, sequence);
 
 CREATE TABLE mailboxes (
     controller_id TEXT NOT NULL,

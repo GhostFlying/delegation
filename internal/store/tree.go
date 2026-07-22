@@ -119,7 +119,23 @@ func (s *Store) AuthorizePrincipal(
 		return control.Principal{}, fmt.Errorf("begin principal authorization: %w", err)
 	}
 	defer transaction.Rollback()
-	principal, err := queryPrincipal(ctx, transaction, claimed.ControllerID, claimed.TreeID, claimed.AgentID)
+	principal, err := authorizePrincipal(ctx, transaction, claimed, required)
+	if err != nil {
+		return control.Principal{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return control.Principal{}, fmt.Errorf("commit principal authorization: %w", err)
+	}
+	return principal, nil
+}
+
+func authorizePrincipal(
+	ctx context.Context,
+	queryer rowQueryer,
+	claimed control.PrincipalIdentity,
+	required control.Capability,
+) (control.Principal, error) {
+	principal, err := queryPrincipal(ctx, queryer, claimed.ControllerID, claimed.TreeID, claimed.AgentID)
 	if errors.Is(err, ErrNotFound) {
 		return control.Principal{}, ErrAuthorizationDenied
 	}
@@ -130,7 +146,7 @@ func (s *Store) AuthorizePrincipal(
 		return control.Principal{}, ErrAuthorizationDenied
 	}
 	if principal.ParentAgentID == "" {
-		tree, err := queryTreeByID(ctx, transaction, principal.ControllerID, principal.TreeID)
+		tree, err := queryTreeByID(ctx, queryer, principal.ControllerID, principal.TreeID)
 		if errors.Is(err, ErrNotFound) {
 			return control.Principal{}, ErrAuthorizationDenied
 		}
@@ -142,7 +158,7 @@ func (s *Store) AuthorizePrincipal(
 		}
 	} else {
 		var parentExists bool
-		if err := transaction.QueryRowContext(ctx, `
+		if err := queryer.QueryRowContext(ctx, `
 SELECT EXISTS(
     SELECT 1 FROM principals
     WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
@@ -156,9 +172,6 @@ SELECT EXISTS(
 	}
 	if control.Require(principal, required) != nil {
 		return control.Principal{}, ErrAuthorizationDenied
-	}
-	if err := transaction.Commit(); err != nil {
-		return control.Principal{}, fmt.Errorf("commit principal authorization: %w", err)
 	}
 	return principal, nil
 }

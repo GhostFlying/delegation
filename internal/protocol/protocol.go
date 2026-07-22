@@ -76,6 +76,9 @@ const (
 	MethodEnsureRootTree  = "tree.ensure_root"
 	MethodListDevices     = "device.list"
 	MethodDescribeDevice  = "device.describe"
+	MethodSpawnAgent      = "agent.spawn"
+	MethodListAgents      = "agent.list"
+	MethodSpawnWorker     = "worker.spawn"
 )
 
 type CancelRequestParams struct {
@@ -96,6 +99,7 @@ const (
 	FeatureDeviceRegistry = "deviceRegistryV1"
 	FeatureFullDuplexRPC  = "fullDuplexRpcV1"
 	FeatureMailbox        = "mailboxV1"
+	FeatureWorkerDispatch = "managedWorkerDispatchV1"
 	FeaturePeerRoot       = "peerRootV1"
 )
 
