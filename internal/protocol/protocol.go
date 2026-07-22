@@ -72,10 +72,25 @@ const (
 	MethodHello           = "protocol.hello"
 	MethodHeartbeat       = "protocol.heartbeat"
 	MethodRegistrySummary = "registry.summary"
+	MethodCancelRequest   = "request.cancel"
 	MethodEnsureRootTree  = "tree.ensure_root"
 	MethodListDevices     = "device.list"
 	MethodDescribeDevice  = "device.describe"
 )
+
+type CancelRequestParams struct {
+	RequestID string `json:"requestId"`
+}
+
+func (p CancelRequestParams) Validate() error {
+	if err := validateRequestID(p.RequestID); err != nil {
+		return fmt.Errorf("requestId %w", err)
+	}
+	if !strings.HasPrefix(p.RequestID, string(DirectionConnector)+"_") {
+		return errors.New("requestId must identify a connector request")
+	}
+	return nil
+}
 
 const (
 	FeatureDeviceRegistry = "deviceRegistryV1"

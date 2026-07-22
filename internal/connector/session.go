@@ -33,8 +33,10 @@ func (e *writeNotStartedError) Unwrap() error {
 }
 
 type pendingCall struct {
-	treeID string
-	result chan callResult
+	treeID      string
+	cancellable bool
+	written     bool
+	result      chan callResult
 }
 
 type session struct {
@@ -129,7 +131,10 @@ func (s *session) call(
 	if err != nil {
 		return nil, fmt.Errorf("encode broker %s request: %w", method, err)
 	}
-	pending := pendingCall{treeID: treeID, result: make(chan callResult, 1)}
+	pending := pendingCall{
+		treeID: treeID, cancellable: method == protocol.MethodWaitMailbox,
+		result: make(chan callResult, 1),
+	}
 	if err := s.addPending(requestID, pending); err != nil {
 		return nil, err
 	}
@@ -145,6 +150,7 @@ func (s *session) call(
 		s.close(fmt.Errorf("write broker request: %w", err))
 		return nil, err
 	}
+	s.markPendingWritten(requestID)
 	return s.waitForCall(ctx, requestID, pending)
 }
 
@@ -158,6 +164,11 @@ func (s *session) waitForCall(
 		return result.payload, result.err
 	case <-ctx.Done():
 		if s.removePending(requestID) {
+			if pending.cancellable {
+				if err := s.cancelRequest(requestID); err != nil {
+					s.close(fmt.Errorf("cancel broker request: %w", err))
+				}
+			}
 			return nil, ctx.Err()
 		}
 		// complete or close already claimed the pending call. Its buffered
@@ -165,6 +176,27 @@ func (s *session) waitForCall(
 		result := <-pending.result
 		return result.payload, result.err
 	}
+}
+
+func (s *session) cancelRequest(requestID string) error {
+	payload, err := json.Marshal(protocol.CancelRequestParams{RequestID: requestID})
+	if err != nil {
+		return err
+	}
+	cancellationID, err := protocol.NewRequestID(protocol.DirectionConnector)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	defer cancel()
+	return s.write(ctx, protocol.Envelope{
+		ProtocolVersion: protocol.Version,
+		Kind:            protocol.KindNotification,
+		RequestID:       cancellationID,
+		Method:          protocol.MethodCancelRequest,
+		ControllerID:    s.client.hello.ControllerID,
+		Payload:         payload,
+	})
 }
 
 func (s *session) readLoop() {
@@ -279,6 +311,17 @@ func (s *session) removePending(requestID string) bool {
 	}
 	delete(s.pending, requestID)
 	return true
+}
+
+func (s *session) markPendingWritten(requestID string) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	pending, found := s.pending[requestID]
+	if !found {
+		return
+	}
+	pending.written = true
+	s.pending[requestID] = pending
 }
 
 func (s *session) writeError(request protocol.Envelope, code int, message string) error {

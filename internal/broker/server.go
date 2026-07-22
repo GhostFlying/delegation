@@ -114,6 +114,8 @@ type session struct {
 	revision      atomic.Uint64
 	asyncSem      chan struct{}
 	async         sync.WaitGroup
+	asyncMu       sync.Mutex
+	asyncCancels  map[string]context.CancelFunc
 }
 
 type internalError struct {
@@ -499,6 +501,7 @@ func (s *Server) acceptHello(
 		deviceID:      device.DeviceID,
 		credentialMAC: authority.credentialMAC,
 		asyncSem:      make(chan struct{}, maximumAsyncMailboxWaits),
+		asyncCancels:  make(map[string]context.CancelFunc),
 	}
 	current.revision.Store(device.Revision)
 	result := protocol.HelloResult{
@@ -687,7 +690,12 @@ func (s *session) handleEnvelope(
 		return false, &internalError{operation: "reauthenticate session", err: err}
 	}
 	switch envelope.Kind {
-	case protocol.KindNotification, protocol.KindResponse:
+	case protocol.KindNotification:
+		if envelope.Method == protocol.MethodCancelRequest {
+			return false, s.handleCancelRequest(envelope)
+		}
+		return false, nil
+	case protocol.KindResponse:
 		return false, nil
 	case protocol.KindRequest:
 	default:
@@ -754,13 +762,34 @@ func (s *session) startMailboxWait(
 			"too many pending mailbox waits",
 		)
 	}
+	waitContext, cancelWait := context.WithTimeout(sessionContext, mailboxRequestTimeout)
+	cancellationContext, cancelRequest := context.WithCancel(context.Background())
+	s.asyncMu.Lock()
+	if _, exists := s.asyncCancels[request.RequestID]; exists {
+		s.asyncMu.Unlock()
+		cancelWait()
+		cancelRequest()
+		<-s.asyncSem
+		return errors.New("duplicate asynchronous requestId")
+	}
+	s.asyncCancels[request.RequestID] = cancelRequest
+	s.asyncMu.Unlock()
 	s.async.Add(1)
 	go func() {
 		defer s.async.Done()
-		defer func() { <-s.asyncSem }()
-		ctx, cancel := context.WithTimeout(sessionContext, mailboxRequestTimeout)
-		defer cancel()
-		if err := s.handleWaitMailbox(ctx, request); err != nil && !isContextError(err) {
+		defer func() {
+			s.asyncMu.Lock()
+			delete(s.asyncCancels, request.RequestID)
+			s.asyncMu.Unlock()
+			cancelRequest()
+			cancelWait()
+			<-s.asyncSem
+		}()
+		if err := s.handleWaitMailbox(
+			waitContext,
+			cancellationContext.Done(),
+			request,
+		); err != nil && !isContextError(err) {
 			var internal *internalError
 			if errors.As(err, &internal) {
 				s.server.reportError(internal)
@@ -768,6 +797,23 @@ func (s *session) startMailboxWait(
 			_ = s.connection.CloseNow()
 		}
 	}()
+	return nil
+}
+
+func (s *session) handleCancelRequest(request protocol.Envelope) error {
+	if request.TreeID != "" || request.Source != nil {
+		return errors.New("request cancellation must not contain a principal")
+	}
+	params, err := protocol.DecodePayload[protocol.CancelRequestParams](request.Payload)
+	if err != nil || params.Validate() != nil {
+		return errors.New("invalid request cancellation payload")
+	}
+	s.asyncMu.Lock()
+	cancel := s.asyncCancels[params.RequestID]
+	s.asyncMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	return nil
 }
 

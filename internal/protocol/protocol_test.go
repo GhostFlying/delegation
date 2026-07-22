@@ -91,6 +91,20 @@ func TestNewRequestIDIncludesDirectionAndUUID(t *testing.T) {
 	}
 }
 
+func TestCancelRequestParamsRequireConnectorRequest(t *testing.T) {
+	if err := (CancelRequestParams{RequestID: requestID}).Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []string{
+		"b_123e4567-e89b-42d3-a456-426614174004",
+		"not-a-request-id",
+	} {
+		if err := (CancelRequestParams{RequestID: invalid}).Validate(); err == nil {
+			t.Fatalf("CancelRequestParams accepted %q", invalid)
+		}
+	}
+}
+
 func TestProtocolErrorUsesStandardMethodNotFoundCode(t *testing.T) {
 	err := Error{Code: ErrorMethodNotFound, Message: "method not found"}
 	if validateErr := err.Validate(); validateErr != nil {

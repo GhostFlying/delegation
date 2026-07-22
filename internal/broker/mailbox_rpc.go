@@ -42,7 +42,11 @@ func (s *session) handleSendMessage(ctx context.Context, request protocol.Envelo
 	})
 }
 
-func (s *session) handleWaitMailbox(ctx context.Context, request protocol.Envelope) error {
+func (s *session) handleWaitMailbox(
+	ctx context.Context,
+	canceled <-chan struct{},
+	request protocol.Envelope,
+) error {
 	principal, authorized, err := s.authorizeMailbox(
 		ctx,
 		request,
@@ -72,6 +76,12 @@ func (s *session) handleWaitMailbox(ctx context.Context, request protocol.Envelo
 			subscription.release()
 			return s.handleMailboxStoreError(ctx, request, "read mailbox", err)
 		}
+		select {
+		case <-canceled:
+			subscription.release()
+			return context.Canceled
+		default:
+		}
 		if len(result.Messages) != 0 || params.TimeoutMillis == 0 {
 			subscription.release()
 			return s.server.writeResult(ctx, s.connection, request, result)
@@ -87,6 +97,10 @@ func (s *session) handleWaitMailbox(ctx context.Context, request protocol.Envelo
 			timer.Stop()
 			subscription.release()
 			return ctx.Err()
+		case <-canceled:
+			timer.Stop()
+			subscription.release()
+			return context.Canceled
 		case <-subscription.channel():
 			timer.Stop()
 			subscription.release()

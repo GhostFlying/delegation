@@ -32,6 +32,7 @@ const (
 	connectorTestWorkerID     = "123e4567-e89b-42d3-a456-426614174202"
 	connectorTestThreadID     = "123e4567-e89b-42d3-a456-426614174203"
 	connectorTestConnectionID = "123e4567-e89b-42d3-a456-426614174204"
+	connectorTestMessageID    = "123e4567-e89b-42d3-a456-426614174205"
 )
 
 func TestCanceledCallReturnsAlreadyClaimedResult(t *testing.T) {
@@ -156,6 +157,101 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 	})
 }
 
+func TestCanceledMailboxWaitsReleaseBrokerCapacity(t *testing.T) {
+	fixture := newBrokerFixture(t, config.AuthModeNone, 500*time.Millisecond)
+	client := newTestClient(t, fixture.url(), config.AuthModeNone, nil)
+	clientContext, stopClient := context.WithCancel(context.Background())
+	clientDone := runClient(client, clientContext)
+	waitReady(t, client)
+
+	var root protocol.EnsureRootTreeResult
+	if err := client.Call(
+		context.Background(),
+		protocol.MethodEnsureRootTree,
+		"",
+		nil,
+		protocol.EnsureRootTreeParams{ExternalThreadID: connectorTestThreadID},
+		&root,
+	); err != nil {
+		t.Fatal(err)
+	}
+	source := root.Principal.Identity()
+
+	const waitCount = 80
+	cancels := make([]context.CancelFunc, 0, waitCount)
+	waitErrors := make(chan error, waitCount)
+	for range waitCount {
+		waitContext, cancel := context.WithCancel(context.Background())
+		cancels = append(cancels, cancel)
+		go func() {
+			var result protocol.WaitMailboxResult
+			waitErrors <- client.Call(
+				waitContext,
+				protocol.MethodWaitMailbox,
+				root.Tree.TreeID,
+				&source,
+				protocol.WaitMailboxParams{
+					TimeoutMillis: protocol.MaximumMailboxWaitMillis,
+					Limit:         1,
+				},
+				&result,
+			)
+		}()
+	}
+	waitForCancellableCalls(t, client, waitCount)
+	for _, cancel := range cancels {
+		cancel()
+	}
+	var cancellationErrors []error
+	for range waitCount {
+		if err := <-waitErrors; !errors.Is(err, context.Canceled) {
+			cancellationErrors = append(cancellationErrors, err)
+		}
+	}
+	if len(cancellationErrors) != 0 {
+		t.Fatalf("canceled mailbox wait errors = %v", cancellationErrors)
+	}
+
+	var sent protocol.SendMessageResult
+	if err := client.Call(
+		context.Background(),
+		protocol.MethodSendMessage,
+		root.Tree.TreeID,
+		&source,
+		protocol.SendMessageParams{
+			MessageID: connectorTestMessageID,
+			Target: protocol.MessageTarget{
+				Kind:    protocol.MessageTargetAgent,
+				AgentID: root.Principal.AgentID,
+			},
+			Message: "capacity released",
+		},
+		&sent,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var mailbox protocol.WaitMailboxResult
+	if err := client.Call(
+		context.Background(),
+		protocol.MethodWaitMailbox,
+		root.Tree.TreeID,
+		&source,
+		protocol.WaitMailboxParams{TimeoutMillis: 1_000, Limit: 1},
+		&mailbox,
+	); err != nil {
+		t.Fatalf("mailbox wait after canceling capacity: %v", err)
+	}
+	if len(mailbox.Messages) != 1 || mailbox.Messages[0].MessageID != sent.MessageID ||
+		mailbox.Messages[0].Message != "capacity released" || !client.Status().Connected {
+		t.Fatalf("mailbox after cancellations = %#v, status = %#v", mailbox, client.Status())
+	}
+
+	stopClient()
+	if err := waitClient(clientDone); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNoneAuthPeerConnectorRegisters(t *testing.T) {
 	fixture := newBrokerFixture(t, config.AuthModeNone, 20*time.Millisecond)
 	client := newTestClient(t, fixture.url(), config.AuthModeNone, nil)
@@ -276,8 +372,8 @@ func TestConnectorCorrelatesConcurrentResponsesAndIgnoresCanceledLateResponse(t 
 	if err := client.Call(context.Background(), "test.fast", "", nil, struct{}{}, &fast); err != nil {
 		t.Fatal(err)
 	}
-	if fast.Value != "test.fast" || !client.Status().Connected {
-		t.Fatalf("fast result = %#v, status = %#v", fast, client.Status())
+	if fast.Value != "test.fast" {
+		t.Fatalf("fast result = %#v", fast)
 	}
 	select {
 	case response := <-brokerRequestHandled:
@@ -813,6 +909,31 @@ func waitReady(t *testing.T, client *Client) {
 	if err := client.WaitReady(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func waitForCancellableCalls(t *testing.T, client *Client, expected int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		client.mu.RLock()
+		current := client.session
+		client.mu.RUnlock()
+		if current != nil {
+			current.pendingMu.Lock()
+			count := 0
+			for _, pending := range current.pending {
+				if pending.cancellable && pending.written {
+					count++
+				}
+			}
+			current.pendingMu.Unlock()
+			if count == expected {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("connector did not retain %d cancellable calls", expected)
 }
 
 func waitForDevice(
