@@ -485,6 +485,34 @@ func TestHostInterruptsAmbiguousInitialTurnForExplicitFollowup(t *testing.T) {
 	}
 }
 
+func TestHostFailsClosedAfterAmbiguousThreadStart(t *testing.T) {
+	firstApplication := newFakeApplication()
+	firstApplication.threadStartErr = context.DeadlineExceeded
+	secondApplication := newFakeApplication()
+	host, state, _ := newTestHost(t, 1, firstApplication, secondApplication)
+	request := SpawnRequest{
+		TreeID: testTreeID, AgentID: "123e4567-e89b-42d3-a456-426614174448",
+		ParentAgentID: testParentID, TaskName: "ambiguous thread", Prompt: "must run once",
+	}
+	started, err := host.Spawn(context.Background(), request)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Spawn() error = %v, want deadline exceeded", err)
+	}
+	failed := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerFailed)
+	if failed.FailureCode != "thread_start_ambiguous" || failed.CodexThreadID != "" {
+		t.Fatalf("ambiguous thread worker = %#v", failed)
+	}
+	if _, err := host.Spawn(context.Background(), request); !errors.Is(err, ErrWorkerFailed) {
+		t.Fatalf("retry Spawn() error = %v, want ErrWorkerFailed", err)
+	}
+	if got := len(firstApplication.snapshot().starts); got != 1 {
+		t.Fatalf("first app-server thread/start calls = %d, want 1", got)
+	}
+	if got := len(secondApplication.snapshot().starts); got != 0 {
+		t.Fatalf("replacement app-server thread/start calls = %d, want 0", got)
+	}
+}
+
 func TestHostPersistsFailedTurnOutcome(t *testing.T) {
 	application := newFakeApplication()
 	application.completeBeforeReturn = true

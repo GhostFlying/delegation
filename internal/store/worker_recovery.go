@@ -11,6 +11,7 @@ import (
 
 const (
 	workerStartupInterruptedFailure     = "app_server_interrupted"
+	workerThreadStartAmbiguousFailure   = "thread_start_ambiguous"
 	workerTurnStartInterruptedFailure   = "turn_start_interrupted"
 	workerRunningTurnInterruptedFailure = "turn_interrupted"
 )
@@ -73,7 +74,27 @@ ORDER BY created_at, tree_id, agent_id
 				worker.RetryTarget = ""
 				worker.ActiveTurnID = ""
 				worker.FailureCode = workerTurnStartInterruptedFailure
-			case WorkerStarting, WorkerPreflight:
+			case WorkerStarting:
+				worker.ActiveTurnID = ""
+				if worker.CodexThreadID == "" {
+					// An initial thread/start may have reached Codex before the
+					// connector stopped. Without the returned thread ID, retrying
+					// would create a second managed thread and leave the first one
+					// outside the permanent worker-thread guard.
+					worker.Status = WorkerFailed
+					worker.RetryTarget = ""
+					worker.FailureCode = workerThreadStartAmbiguousFailure
+					break
+				}
+				switch worker.RetryTarget {
+				case WorkerPending, WorkerIdle:
+					worker.Status = worker.RetryTarget
+					worker.RetryTarget = ""
+					worker.FailureCode = ""
+				default:
+					return fmt.Errorf("unexpected retry target %q", worker.RetryTarget)
+				}
+			case WorkerPreflight:
 				worker.ActiveTurnID = ""
 				switch worker.RetryTarget {
 				case WorkerPending, WorkerIdle:

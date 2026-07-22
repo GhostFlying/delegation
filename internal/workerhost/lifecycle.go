@@ -35,7 +35,8 @@ func (h *Host) startNewThread(
 			return StartedTurn{Worker: restored}, nil, restoreErr
 		}
 		if h.shouldRetire(client, err) {
-			return StartedTurn{Worker: worker}, h.retireClient(client, err), err
+			failureErr := h.failWorker(worker.WorkerKey, "thread_start_ambiguous", err)
+			return StartedTurn{Worker: worker}, h.retireClient(client, failureErr), failureErr
 		}
 		return StartedTurn{Worker: worker}, nil,
 			h.failWorker(worker.WorkerKey, "thread_start_failed", err)
@@ -46,7 +47,8 @@ func (h *Host) startNewThread(
 	}
 	worker, err = h.state.AttachWorkerThread(ctx, worker.WorkerKey, result.Thread.ID, time.Now())
 	if err != nil {
-		return StartedTurn{Worker: worker}, h.retireClient(client, err), err
+		failureErr := h.failWorker(worker.WorkerKey, "thread_start_ambiguous", err)
+		return StartedTurn{Worker: worker}, h.retireClient(client, failureErr), failureErr
 	}
 	if err := h.verifyWorkerMCP(ctx, client, worker.CodexThreadID); err != nil {
 		if errors.Is(err, appserver.ErrRequestNotWritten) {

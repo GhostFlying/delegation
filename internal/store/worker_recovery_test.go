@@ -140,7 +140,7 @@ func TestRecoverWorkersPreservesRetryIntentAndAmbiguousTurns(t *testing.T) {
 		activeTurn  bool
 	}{
 		"reserved":           {status: WorkerFailed, failureCode: workerStartupInterruptedFailure},
-		"starting initial":   {status: WorkerPending},
+		"starting initial":   {status: WorkerFailed, failureCode: workerThreadStartAmbiguousFailure},
 		"preflight initial":  {status: WorkerPending},
 		"starting followup":  {status: WorkerIdle},
 		"preflight followup": {status: WorkerIdle},
