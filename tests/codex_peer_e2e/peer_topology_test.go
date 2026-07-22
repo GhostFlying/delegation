@@ -163,16 +163,31 @@ func TestCodexPeerTopology(t *testing.T) {
 			results["B"].threadID,
 			mock,
 		)
+		assertPrincipalDistribution(t, statePath, map[string]int{
+			deviceIDs["A"]: 2,
+			deviceIDs["B"]: 1,
+			deviceIDs["C"]: 4,
+		})
+		mock.verify(t, []string{workerAdmissionA, workerAdmissionB, workerAdmissionRetry})
+	})
+	t.Run("managed root MCP flow", func(t *testing.T) {
+		testManagedRootMCPFlow(
+			t,
+			peers[2],
+			peers[0],
+			results["C"].threadID,
+			codexBinary,
+			delegationBinary,
+			repoRoot,
+		)
+		mock.verify(t, []string{
+			rootMCPSpawn, rootMCPQueue, rootMCPFollowup, rootMCPWaitFollowup,
+			workerRootMCPInitial, workerRootMCPFollowup,
+		})
 	})
 	assertCount(t, statePath, "SELECT count(*) FROM trees", 4)
-	assertPrincipalDistribution(t, statePath, map[string]int{
-		deviceIDs["A"]: 2,
-		deviceIDs["B"]: 1,
-		deviceIDs["C"]: 4,
-	})
 	mock.verify(t, []string{
 		"lazy", "a1", "b1", "c1", "a2", "a1-resume", "cross-conflict",
-		workerAdmissionA, workerAdmissionB, workerAdmissionRetry,
 	})
 }
 
@@ -213,6 +228,9 @@ sandbox_mode = "read-only"
 
 [features]
 plugins = true
+
+[plugins."delegation@delegation".mcp_servers.delegation]
+default_tools_approval_mode = "approve"
 
 [model_providers.delegation_mock]
 name = "Delegation acceptance mock"

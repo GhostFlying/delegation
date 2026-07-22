@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,13 @@ type workerResponseBlock struct {
 	release     chan struct{}
 	startedOnce sync.Once
 	releaseOnce sync.Once
+}
+
+type rootAgentScript struct {
+	tool           string
+	query          string
+	arguments      map[string]any
+	expectedOutput []string
 }
 
 func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -52,14 +60,19 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		m.calls[key] = call + 1
 		block := m.workerBlocks[testCase]
 		m.mu.Unlock()
-		if call != 0 {
-			m.record(fmt.Errorf("case %s received model call %d", key, call+1))
-		}
 		encodedTools, _ := json.Marshal(body["tools"])
 		for _, forbidden := range []string{"spawn_agent", "list_agents", "list_devices", "describe_device"} {
 			if bytes.Contains(encodedTools, []byte(forbidden)) {
 				m.record(fmt.Errorf("case %s exposed root tool %s: %s", key, forbidden, encodedTools))
 			}
+		}
+		switch testCase {
+		case workerRootMCPFollowup:
+			m.handleWorkerCollaborationFollowup(writer, body, key, call)
+			return
+		}
+		if call != 0 {
+			m.record(fmt.Errorf("case %s received model call %d", key, call+1))
 		}
 		if block == nil {
 			writeFinalResponse(writer, key)
@@ -82,6 +95,10 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			m.record(fmt.Errorf("lazy case received model call %d", call+1))
 		}
 		writeFinalResponse(writer, key)
+		return
+	}
+	if script, ok := rootAgentScriptFor(testCase); ok {
+		m.handleRootAgentScript(writer, body, peerLabel, key, testCase, call, script)
 		return
 	}
 	suffix := strings.ReplaceAll(testCase, "-", "_")
@@ -126,6 +143,246 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	writeFinalResponse(writer, key)
 }
 
+func rootAgentScriptFor(testCase string) (rootAgentScript, bool) {
+	switch testCase {
+	case rootMCPSpawn:
+		return rootAgentScript{
+			tool: "spawn_agent", query: "delegation spawn managed agent on peer",
+			arguments: map[string]any{
+				"spawn_id": managedRootMCPSpawn, "target_device_id": deviceIDs["A"],
+				"task_name": managedRootMCPTask,
+				"message":   "delegation-worker-case=" + workerRootMCPInitial + " Complete the initial turn.",
+			},
+			expectedOutput: []string{managedRootMCPSpawn, managedRootMCPTask, "started"},
+		}, true
+	case rootMCPQueue:
+		return rootAgentScript{
+			tool: "send_message", query: "delegation send message to idle managed agent",
+			arguments: map[string]any{
+				"target": managedRootMCPTask, "message_id": managedQueuedMessageID,
+				"message": managedQueuedMessage,
+			},
+			expectedOutput: []string{managedQueuedMessageID, "queued"},
+		}, true
+	case rootMCPFollowup:
+		return rootAgentScript{
+			tool: "followup_task", query: "delegation follow up idle managed agent",
+			arguments: map[string]any{
+				"target": managedRootMCPTask, "operation_id": managedFollowupOperationID,
+				"message": "delegation-worker-case=" + workerRootMCPFollowup +
+					" Read the queued root message and acknowledge it.",
+			},
+			expectedOutput: []string{managedFollowupOperationID, "started"},
+		}, true
+	case rootMCPWaitFollowup:
+		return rootAgentScript{
+			tool: "wait_agent", query: "delegation wait managed agent messages",
+			arguments:      map[string]any{"timeout_seconds": 20},
+			expectedOutput: []string{managedFollowupReplyID, managedFollowupReply},
+		}, true
+	default:
+		return rootAgentScript{}, false
+	}
+}
+
+func (m *mockResponses) handleRootAgentScript(
+	writer http.ResponseWriter,
+	body map[string]any,
+	peerLabel string,
+	key string,
+	testCase string,
+	call int,
+	script rootAgentScript,
+) {
+	if peerLabel != "C" {
+		m.record(fmt.Errorf("case %s ran on peer %q, want C", key, peerLabel))
+	}
+	suffix := strings.ReplaceAll(testCase, "-", "_")
+	searchID := "search-" + suffix
+	callID := "call-" + suffix
+	switch call {
+	case 0:
+		writeToolSearchQueryResponse(writer, key, searchID, script.query)
+	case 1:
+		m.validateRootToolSearch(body, key, searchID, script.tool)
+		writeRootToolCallResponse(writer, key, callID, script.tool, script.arguments)
+	case 2:
+		output, err := functionOutput(body, callID)
+		if err != nil {
+			m.record(fmt.Errorf("case %s: %w", key, err))
+			writeFinalResponse(writer, key)
+			return
+		}
+		m.validateRootToolOutput(key, output, script.expectedOutput)
+		writeFinalResponse(writer, key)
+	default:
+		m.fail(writer, fmt.Errorf("case %s received unexpected model call %d", key, call+1))
+	}
+}
+
+func (m *mockResponses) validateRootToolSearch(
+	body map[string]any,
+	key string,
+	searchID string,
+	tool string,
+) {
+	searchOutput, err := callOutputItem(body, "tool_search_output", searchID)
+	if err != nil {
+		m.record(fmt.Errorf("case %s: %w", key, err))
+		return
+	}
+	namespaces, err := toolSearchNamespaces(searchOutput)
+	if err != nil {
+		m.record(fmt.Errorf("case %s: %w", key, err))
+		return
+	}
+	if tools, found := namespaces["mcp__delegation_worker"]; found {
+		m.record(fmt.Errorf("case %s root tool search exposed worker namespace: %v", key, tools))
+	}
+	tools, found := namespaces["mcp__delegation"]
+	if !found {
+		m.record(fmt.Errorf("case %s root tool search omitted mcp__delegation: %v", key, namespaces))
+		return
+	}
+	if !slices.Contains(tools, tool) {
+		m.record(fmt.Errorf("case %s root tool search omitted %s: %v", key, tool, tools))
+	}
+}
+
+func (m *mockResponses) validateRootToolOutput(key, output string, expected []string) {
+	if !containsEvery(output, expected) {
+		m.record(fmt.Errorf("case %s root tool output = %s, want markers %v", key, output, expected))
+	}
+}
+
+func containsEvery(output string, expected []string) bool {
+	for _, value := range expected {
+		if !strings.Contains(output, value) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *mockResponses) handleWorkerCollaborationFollowup(
+	writer http.ResponseWriter,
+	body map[string]any,
+	key string,
+	call int,
+) {
+	searchID := "search_worker_root_mcp_followup"
+	waitCallID := "call_worker_root_mcp_followup_wait"
+	sendCallID := "call_worker_root_mcp_followup_send"
+	switch call {
+	case 0:
+		writeWorkerToolSearchResponse(writer, key, searchID)
+	case 1:
+		m.validateWorkerToolSearch(body, key, searchID)
+		writeWorkerToolCallResponse(writer, key, waitCallID, "wait_agent", map[string]any{
+			"cursor": 0, "timeoutSeconds": 2,
+		})
+	case 2:
+		output, err := functionOutput(body, waitCallID)
+		if err != nil {
+			m.record(fmt.Errorf("case %s: %w", key, err))
+		} else if !strings.Contains(output, managedQueuedMessageID) ||
+			!strings.Contains(output, managedQueuedMessage) {
+			m.record(fmt.Errorf("case %s wait_agent omitted queued root message: %s", key, output))
+		}
+		writeWorkerToolCallResponse(writer, key, sendCallID, "send_message", map[string]any{
+			"messageId": managedFollowupReplyID,
+			"recipient": "parent",
+			"message":   managedFollowupReply,
+		})
+	case 3:
+		output, err := functionOutput(body, sendCallID)
+		if err != nil {
+			m.record(fmt.Errorf("case %s: %w", key, err))
+		} else if !strings.Contains(output, managedFollowupReplyID) {
+			m.record(fmt.Errorf("case %s send_message receipt omitted message ID: %s", key, output))
+		}
+		writeFinalResponse(writer, key)
+	default:
+		m.fail(writer, fmt.Errorf("case %s received unexpected model call %d", key, call+1))
+	}
+}
+
+func (m *mockResponses) validateWorkerToolSearch(body map[string]any, key, searchID string) {
+	searchOutput, err := callOutputItem(body, "tool_search_output", searchID)
+	if err != nil {
+		m.record(fmt.Errorf("case %s: %w", key, err))
+		return
+	}
+	namespaces, err := toolSearchNamespaces(searchOutput)
+	if err != nil {
+		m.record(fmt.Errorf("case %s: %w", key, err))
+		return
+	}
+	names, found := namespaces["mcp__delegation_worker"]
+	if len(namespaces) != 1 || !found {
+		m.record(fmt.Errorf("case %s worker tool search namespaces = %v, want only mcp__delegation_worker", key, namespaces))
+		return
+	}
+	want := map[string]bool{
+		"send_message": false,
+		"wait_agent":   false,
+	}
+	for _, name := range names {
+		if _, ok := want[name]; !ok {
+			m.record(fmt.Errorf("case %s worker tool search exposed unexpected tool %s", key, name))
+			continue
+		}
+		want[name] = true
+	}
+	for name, found := range want {
+		if !found {
+			m.record(fmt.Errorf("case %s worker tool search omitted %s: %v", key, name, names))
+		}
+	}
+	if len(names) != len(want) {
+		m.record(fmt.Errorf("case %s worker tool search returned %d tools, want %d: %v", key, len(names), len(want), names))
+	}
+}
+
+func toolSearchNamespaces(output map[string]any) (map[string][]string, error) {
+	tools, ok := output["tools"].([]any)
+	if !ok {
+		return nil, errors.New("tool_search_output tools is not an array")
+	}
+	namespaces := make(map[string][]string, len(tools))
+	for _, value := range tools {
+		namespace, ok := value.(map[string]any)
+		if !ok || namespace["type"] != "namespace" {
+			return nil, fmt.Errorf("tool_search_output contains a non-namespace tool: %#v", value)
+		}
+		name, ok := namespace["name"].(string)
+		if !ok || name == "" {
+			return nil, fmt.Errorf("tool_search_output contains an unnamed namespace: %#v", value)
+		}
+		if _, duplicate := namespaces[name]; duplicate {
+			return nil, fmt.Errorf("tool_search_output repeats namespace %s", name)
+		}
+		values, ok := namespace["tools"].([]any)
+		if !ok {
+			return nil, fmt.Errorf("tool_search_output namespace %s tools is not an array", name)
+		}
+		names := make([]string, 0, len(values))
+		for _, value := range values {
+			tool, ok := value.(map[string]any)
+			if !ok || tool["type"] != "function" {
+				return nil, fmt.Errorf("tool_search_output namespace %s contains a non-function tool: %#v", name, value)
+			}
+			toolName, ok := tool["name"].(string)
+			if !ok || toolName == "" {
+				return nil, fmt.Errorf("tool_search_output namespace %s contains an unnamed tool: %#v", name, value)
+			}
+			names = append(names, toolName)
+		}
+		namespaces[name] = names
+	}
+	return namespaces, nil
+}
+
 func decodeRequest(request *http.Request) (map[string]any, error) {
 	var reader io.Reader = io.LimitReader(request.Body, 16<<20)
 	if request.Header.Get("Content-Encoding") == "gzip" {
@@ -147,15 +404,20 @@ func requestCase(body map[string]any) string {
 	data, _ := json.Marshal(body)
 	text := string(data)
 	for _, testCase := range []string{
-		workerAdmissionA, workerAdmissionB, workerAdmissionRetry,
+		rootMCPWaitFollowup, rootMCPFollowup, rootMCPQueue, rootMCPSpawn,
 		"cross-conflict", "a1-resume", "lazy", "a1", "b1", "c1", "a2",
 	} {
-		if strings.HasPrefix(testCase, "worker-") && strings.Contains(text, "delegation-worker-case="+testCase) {
-			return testCase
-		}
 		suffix := strings.ReplaceAll(testCase, "-", "_")
 		if strings.Contains(text, "delegation-e2e-case="+testCase) ||
 			strings.Contains(text, "search-"+suffix) || strings.Contains(text, "call-"+suffix) {
+			return testCase
+		}
+	}
+	for _, testCase := range []string{
+		workerRootMCPFollowup, workerRootMCPInitial,
+		workerAdmissionA, workerAdmissionB, workerAdmissionRetry,
+	} {
+		if strings.Contains(text, "delegation-worker-case="+testCase) {
 			return testCase
 		}
 	}
@@ -328,6 +590,66 @@ func writeToolSearchResponse(writer http.ResponseWriter, key, searchID string) {
 	)
 }
 
+func writeToolSearchQueryResponse(writer http.ResponseWriter, key, searchID, query string) {
+	writeSSE(writer,
+		map[string]any{"type": "response.created", "response": map[string]any{"id": "resp-" + key + "-search"}},
+		map[string]any{"type": "response.output_item.done", "item": map[string]any{
+			"type": "tool_search_call", "call_id": searchID, "execution": "client",
+			"arguments": map[string]any{"query": query, "limit": 8},
+		}},
+		completedEvent("resp-"+key+"-search"),
+	)
+}
+
+func writeRootToolCallResponse(
+	writer http.ResponseWriter,
+	key string,
+	callID string,
+	name string,
+	arguments map[string]any,
+) {
+	encoded, _ := json.Marshal(arguments)
+	writeSSE(writer,
+		map[string]any{"type": "response.created", "response": map[string]any{"id": "resp-" + key + "-" + name}},
+		map[string]any{"type": "response.output_item.done", "item": map[string]any{
+			"type": "function_call", "call_id": callID,
+			"namespace": "mcp__delegation", "name": name, "arguments": string(encoded),
+		}},
+		completedEvent("resp-"+key+"-"+name),
+	)
+}
+
+func writeWorkerToolSearchResponse(writer http.ResponseWriter, key, searchID string) {
+	writeSSE(writer,
+		map[string]any{"type": "response.created", "response": map[string]any{"id": "resp-" + key + "-search"}},
+		map[string]any{"type": "response.output_item.done", "item": map[string]any{
+			"type": "tool_search_call", "call_id": searchID, "execution": "client",
+			"arguments": map[string]any{
+				"query": "delegation worker send_message wait_agent parent mailbox", "limit": 8,
+			},
+		}},
+		completedEvent("resp-"+key+"-search"),
+	)
+}
+
+func writeWorkerToolCallResponse(
+	writer http.ResponseWriter,
+	key string,
+	callID string,
+	name string,
+	arguments map[string]any,
+) {
+	encoded, _ := json.Marshal(arguments)
+	writeSSE(writer,
+		map[string]any{"type": "response.created", "response": map[string]any{"id": "resp-" + key + "-" + name}},
+		map[string]any{"type": "response.output_item.done", "item": map[string]any{
+			"type": "function_call", "call_id": callID,
+			"namespace": "mcp__delegation_worker", "name": name, "arguments": string(encoded),
+		}},
+		completedEvent("resp-"+key+"-"+name),
+	)
+}
+
 func writeFinalResponse(writer http.ResponseWriter, key string) {
 	writeSSE(writer,
 		map[string]any{"type": "response.created", "response": map[string]any{"id": "resp-" + key + "-2"}},
@@ -408,6 +730,11 @@ func (m *mockResponses) verify(t *testing.T, cases []string) {
 		label := strings.ToUpper(testCase[:1])
 		if strings.HasPrefix(testCase, "worker-") {
 			label, want = "worker", 1
+			if testCase == workerRootMCPFollowup {
+				want = 4
+			}
+		} else if strings.HasPrefix(testCase, "root-mcp-") {
+			label = "C"
 		} else if testCase == "lazy" {
 			label, want = "A", 1
 		} else if strings.HasPrefix(testCase, "a") {

@@ -28,6 +28,19 @@ const (
 	workerAdmissionA           = "worker-admission-a"
 	workerAdmissionB           = "worker-admission-b"
 	workerAdmissionRetry       = "worker-admission-retry"
+	managedRootMCPSpawn        = "123e4567-e89b-42d3-a456-426614174913"
+	managedQueuedMessageID     = "123e4567-e89b-42d3-a456-426614174915"
+	managedFollowupOperationID = "123e4567-e89b-42d3-a456-426614174916"
+	managedFollowupReplyID     = "123e4567-e89b-42d3-a456-426614174918"
+	managedRootMCPTask         = "root_mcp_worker"
+	workerRootMCPInitial       = "worker-root-mcp-initial"
+	workerRootMCPFollowup      = "worker-root-mcp-followup"
+	rootMCPSpawn               = "root-mcp-spawn"
+	rootMCPQueue               = "root-mcp-queue"
+	rootMCPFollowup            = "root-mcp-followup"
+	rootMCPWaitFollowup        = "root-mcp-wait-followup"
+	managedQueuedMessage       = "This queued root message must reach the resumed worker."
+	managedFollowupReply       = "The resumed worker received the queued root message."
 
 	managedAdmissionHelperEnvironment = "DELEGATION_ADMISSION_HELPER"
 	managedAdmissionSourceEnvironment = "DELEGATION_ADMISSION_SOURCE"
@@ -175,6 +188,89 @@ WHERE status IN ('reserved', 'starting', 'preflight', 'ready', 'running')
 		t.Fatalf("terminal admission retry = %#v, error %v", replayed, err)
 	}
 	assertAgentReceiptCount(t, brokerStatePath, 3)
+}
+
+func testManagedRootMCPFlow(
+	t *testing.T,
+	source peer,
+	target peer,
+	externalSourceThread string,
+	codexBinary string,
+	delegationBinary string,
+	repositoryRoot string,
+) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	targetConfig, err := delegationconfig.Read(target.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runRootAgentCase := func(testCase string) {
+		result := runCodex(
+			t, source, codexBinary, delegationBinary, repositoryRoot, testCase, externalSourceThread,
+		)
+		if result.threadID != externalSourceThread {
+			t.Fatalf("root MCP case %s resumed thread %q, want %q", testCase, result.threadID, externalSourceThread)
+		}
+	}
+	runRootAgentCase(rootMCPSpawn)
+	root := prepareManagedDispatchRoot(t, source, externalSourceThread)
+	agent := findManagedAgent(t, ctx, root, managedRootMCPTask)
+	if agent.Status != protocol.AgentSpawnStarted ||
+		agent.Principal.ParentAgentID != root.root.Principal.AgentID ||
+		agent.Principal.DeviceID != deviceIDs[target.label] {
+		t.Fatalf("root MCP managed agent = %#v", agent)
+	}
+	waitForManagedWorkerIdle(
+		t,
+		targetConfig.Peer.StateFile,
+		agent.Principal.TreeID,
+		agent.Principal.AgentID,
+		agent.Principal.ParentAgentID,
+		deviceIDs[target.label],
+		managedRootMCPTask,
+	)
+	managedThreadID := managedWorkerThreadID(t, targetConfig.Peer.StateFile, agent)
+	runRootAgentCase(rootMCPQueue)
+	runRootAgentCase(rootMCPFollowup)
+	waitForManagedWorkerIdle(
+		t,
+		targetConfig.Peer.StateFile,
+		agent.Principal.TreeID,
+		agent.Principal.AgentID,
+		agent.Principal.ParentAgentID,
+		deviceIDs[target.label],
+		managedRootMCPTask,
+	)
+	if afterFollowup := managedWorkerThreadID(t, targetConfig.Peer.StateFile, agent); afterFollowup != managedThreadID {
+		t.Fatalf("managed thread after cold follow-up = %q, want %q", afterFollowup, managedThreadID)
+	}
+	runRootAgentCase(rootMCPWaitFollowup)
+}
+
+func findManagedAgent(
+	t *testing.T,
+	ctx context.Context,
+	root managedDispatchRoot,
+	taskName string,
+) protocol.AgentSummary {
+	t.Helper()
+	source := root.root.Principal.Identity()
+	var result protocol.ListAgentsResult
+	if err := root.client.Call(ctx, protocol.MethodListAgents, root.root.Tree.TreeID, &source, protocol.ListAgentsParams{
+		Limit: protocol.MaximumAgentPage,
+	}, &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range result.Agents {
+		if agent.TaskName == taskName {
+			return agent
+		}
+	}
+	t.Fatalf("managed agent %s was not listed: %#v", taskName, result)
+	return protocol.AgentSummary{}
 }
 
 func runManagedAdmissionHelper(t *testing.T) {
@@ -392,6 +488,24 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal(fmt.Errorf("managed worker %s did not become idle on target peer", agentID))
+}
+
+func managedWorkerThreadID(t *testing.T, statePath string, agent protocol.AgentSummary) string {
+	t.Helper()
+	database := openDatabase(t, statePath)
+	defer database.Close()
+	var threadID string
+	if err := database.QueryRow(`
+SELECT codex_thread_id
+FROM worker_reservations
+WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
+`, networkID, agent.Principal.TreeID, agent.Principal.AgentID).Scan(&threadID); err != nil {
+		t.Fatal(err)
+	}
+	if threadID == "" {
+		t.Fatalf("managed worker %s does not have a Codex thread", agent.Principal.AgentID)
+	}
+	return threadID
 }
 
 func assertWorkerReservationCount(
