@@ -15,7 +15,7 @@ func (s *session) handleListDevices(ctx context.Context, request protocol.Envelo
 	}
 	params, err := protocol.DecodePayload[protocol.ListDevicesParams](request.Payload)
 	if err != nil || params.Validate(store.MaximumDevicePage) != nil {
-		return s.server.writeError(ctx, s.connection, request, protocol.ErrorInvalidParams, "invalid device list payload")
+		return s.writeError(ctx, request, protocol.ErrorInvalidParams, "invalid device list payload")
 	}
 	page, err := s.server.registry.ListDevices(ctx, s.server.controllerID, store.DevicePageRequest{
 		AfterDeviceID:    params.AfterDeviceID,
@@ -23,7 +23,7 @@ func (s *session) handleListDevices(ctx context.Context, request protocol.Envelo
 		ExpectedRevision: params.ExpectedRevision,
 	})
 	if err == nil {
-		return s.server.writeResult(ctx, s.connection, request, protocol.ListDevicesResult{
+		return s.writeResult(ctx, request, protocol.ListDevicesResult{
 			Revision: page.Revision, Devices: page.Devices, NextCursor: page.NextCursor,
 		})
 	}
@@ -31,9 +31,9 @@ func (s *session) handleListDevices(ctx context.Context, request protocol.Envelo
 		return err
 	}
 	if errors.Is(err, store.ErrRevisionChanged) {
-		return s.server.writeError(ctx, s.connection, request, protocol.ErrorConflict, "device registry changed; restart pagination")
+		return s.writeError(ctx, request, protocol.ErrorConflict, "device registry changed; restart pagination")
 	}
-	_ = s.server.writeError(ctx, s.connection, request, protocol.ErrorUnavailable, "broker unavailable")
+	_ = s.writeError(ctx, request, protocol.ErrorUnavailable, "broker unavailable")
 	return &internalError{operation: "list devices", err: err}
 }
 
@@ -43,11 +43,11 @@ func (s *session) handleDescribeDevice(ctx context.Context, request protocol.Env
 	}
 	params, err := protocol.DecodePayload[protocol.DescribeDeviceParams](request.Payload)
 	if err != nil || params.Validate() != nil {
-		return s.server.writeError(ctx, s.connection, request, protocol.ErrorInvalidParams, "invalid device describe payload")
+		return s.writeError(ctx, request, protocol.ErrorInvalidParams, "invalid device describe payload")
 	}
 	record, err := s.server.registry.DescribeDevice(ctx, s.server.controllerID, params.DeviceID)
 	if err == nil {
-		return s.server.writeResult(ctx, s.connection, request, protocol.DescribeDeviceResult{
+		return s.writeResult(ctx, request, protocol.DescribeDeviceResult{
 			Revision: record.RegistryRevision, Device: record.Device,
 		})
 	}
@@ -55,18 +55,18 @@ func (s *session) handleDescribeDevice(ctx context.Context, request protocol.Env
 		return err
 	}
 	if errors.Is(err, store.ErrNotFound) {
-		return s.server.writeError(ctx, s.connection, request, protocol.ErrorNotFound, "device not found")
+		return s.writeError(ctx, request, protocol.ErrorNotFound, "device not found")
 	}
-	_ = s.server.writeError(ctx, s.connection, request, protocol.ErrorUnavailable, "broker unavailable")
+	_ = s.writeError(ctx, request, protocol.ErrorUnavailable, "broker unavailable")
 	return &internalError{operation: "describe device", err: err}
 }
 
 func (s *session) authorizeDeviceRead(ctx context.Context, request protocol.Envelope) (bool, error) {
 	if request.TreeID == "" || request.Source == nil {
-		return false, s.server.writeError(ctx, s.connection, request, protocol.ErrorInvalidRequest, "device registry request requires a principal")
+		return false, s.writeError(ctx, request, protocol.ErrorInvalidRequest, "device registry request requires a principal")
 	}
 	if request.Source.DeviceID != s.deviceID {
-		return false, s.server.writeError(ctx, s.connection, request, protocol.ErrorForbidden, "device registry access denied")
+		return false, s.writeError(ctx, request, protocol.ErrorForbidden, "device registry access denied")
 	}
 	_, err := s.server.registry.AuthorizePrincipal(ctx, *request.Source, control.CapabilityDeviceRead)
 	if err == nil {
@@ -76,8 +76,8 @@ func (s *session) authorizeDeviceRead(ctx context.Context, request protocol.Enve
 		return false, err
 	}
 	if errors.Is(err, store.ErrAuthorizationDenied) {
-		return false, s.server.writeError(ctx, s.connection, request, protocol.ErrorForbidden, "device registry access denied")
+		return false, s.writeError(ctx, request, protocol.ErrorForbidden, "device registry access denied")
 	}
-	_ = s.server.writeError(ctx, s.connection, request, protocol.ErrorUnavailable, "broker unavailable")
+	_ = s.writeError(ctx, request, protocol.ErrorUnavailable, "broker unavailable")
 	return false, &internalError{operation: "authorize device registry read", err: err}
 }

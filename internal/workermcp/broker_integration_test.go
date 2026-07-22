@@ -97,6 +97,15 @@ type toolCallOutcome struct {
 	err    error
 }
 
+type integrationWorkerSpawner struct{}
+
+func (integrationWorkerSpawner) SpawnWorker(
+	context.Context,
+	connector.WorkerSpawnRequest,
+) (protocol.SpawnWorkerResult, error) {
+	return protocol.SpawnWorkerResult{}, errors.New("worker spawning is outside this mailbox test")
+}
+
 func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 	controllerID := newIntegrationID(t)
 	deviceID := newIntegrationID(t)
@@ -141,6 +150,7 @@ func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 		Architecture:    "amd64",
 		ReconnectMin:    5 * time.Millisecond,
 		ReconnectMax:    10 * time.Millisecond,
+		WorkerSpawner:   integrationWorkerSpawner{},
 	})
 	if err != nil {
 		cancelRun()

@@ -133,21 +133,6 @@ func runConnectorServiceWithProviderEnvironment(
 		_, err := fmt.Fprintf(stderr, format, args...)
 		return err
 	}
-	client, err := connector.New(connector.Options{
-		BrokerURL:                cfg.Broker.URL,
-		AllowInsecureNonLoopback: cfg.Broker.AllowInsecureNonLoopback,
-		ControllerID:             cfg.ControllerID,
-		DeviceID:                 cfg.DeviceID,
-		DeviceName:               cfg.DeviceName,
-		AuthMode:                 cfg.Broker.Auth.Mode,
-		Token:                    token,
-		ReportError: func(err error) {
-			_ = writeStderr("delegation: connector reconnecting: %v\n", err)
-		},
-	})
-	if err != nil {
-		return err
-	}
 	workers, err := workerhost.New(ctx, workerhost.Options{
 		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
 		PeerConfigPath: configPath, DelegationBinary: runtimeBinary,
@@ -167,6 +152,24 @@ func runConnectorServiceWithProviderEnvironment(
 	defer func() {
 		resultErr = errors.Join(resultErr, closeWorkerHost(workers, 30*time.Second))
 	}()
+	client, err := connector.New(connector.Options{
+		BrokerURL:                cfg.Broker.URL,
+		AllowInsecureNonLoopback: cfg.Broker.AllowInsecureNonLoopback,
+		ControllerID:             cfg.ControllerID,
+		DeviceID:                 cfg.DeviceID,
+		DeviceName:               cfg.DeviceName,
+		AuthMode:                 cfg.Broker.Auth.Mode,
+		Token:                    token,
+		WorkerSpawner: managedWorkerSpawner{
+			host: workers, controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
+		},
+		ReportError: func(err error) {
+			_ = writeStderr("delegation: connector reconnecting: %v\n", err)
+		},
+	})
+	if err != nil {
+		return err
+	}
 	endpoint, err := localbridge.Endpoint(cfg.ControllerID, cfg.DeviceID)
 	if err != nil {
 		return err

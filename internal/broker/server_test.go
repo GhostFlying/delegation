@@ -236,6 +236,7 @@ func TestHelloRequiresEveryPeerFeatureBeforeRegistryMutation(t *testing.T) {
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,
+		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
 	}
 	for _, missing := range required {
@@ -890,6 +891,7 @@ func hello() protocol.Hello {
 			protocol.FeatureDeviceRegistry,
 			protocol.FeatureFullDuplexRPC,
 			protocol.FeatureMailbox,
+			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
 		},
 	}

@@ -42,6 +42,16 @@ var (
 
 type DialFunc func(context.Context, string, *websocket.DialOptions) (*websocket.Conn, *http.Response, error)
 
+type WorkerSpawnRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.SpawnWorkerParams
+}
+
+type WorkerSpawner interface {
+	SpawnWorker(context.Context, WorkerSpawnRequest) (protocol.SpawnWorkerResult, error)
+}
+
 type Options struct {
 	BrokerURL                string
 	AllowInsecureNonLoopback bool
@@ -57,6 +67,7 @@ type Options struct {
 	ReconnectMax             time.Duration
 	Dial                     DialFunc
 	ReportError              func(error)
+	WorkerSpawner            WorkerSpawner
 }
 
 type Status struct {
@@ -77,15 +88,16 @@ func (e *RPCError) Error() string {
 }
 
 type Client struct {
-	endpoint     string
-	hello        protocol.Hello
-	token        *tokenfile.Token
-	reconnectMin time.Duration
-	reconnectMax time.Duration
-	dial         DialFunc
-	httpClient   *http.Client
-	reportError  func(error)
-	running      atomic.Bool
+	endpoint      string
+	hello         protocol.Hello
+	token         *tokenfile.Token
+	reconnectMin  time.Duration
+	reconnectMax  time.Duration
+	dial          DialFunc
+	httpClient    *http.Client
+	reportError   func(error)
+	workerSpawner WorkerSpawner
+	running       atomic.Bool
 
 	mu      sync.RWMutex
 	session *session
@@ -107,10 +119,14 @@ func New(options Options) (*Client, error) {
 	if options.Architecture == "" {
 		options.Architecture = runtime.GOARCH
 	}
+	if options.WorkerSpawner == nil {
+		return nil, errors.New("connector worker spawner is required")
+	}
 	features := []string{
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,
+		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
 	}
 	hello := protocol.Hello{
@@ -173,8 +189,9 @@ func New(options Options) (*Client, error) {
 		httpClient: &http.Client{Transport: httpTransport, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}},
-		reportError: reportError,
-		updates:     make(chan struct{}),
+		reportError:   reportError,
+		workerSpawner: options.WorkerSpawner,
+		updates:       make(chan struct{}),
 	}, nil
 }
 
@@ -383,6 +400,7 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,
+		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
 	}
 	for _, feature := range required {

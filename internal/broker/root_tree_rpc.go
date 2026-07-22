@@ -10,11 +10,11 @@ import (
 
 func (s *session) handleEnsureRootTree(ctx context.Context, request protocol.Envelope) error {
 	if request.TreeID != "" || request.Source != nil {
-		return s.server.writeError(ctx, s.connection, request, protocol.ErrorInvalidRequest, "invalid root tree request")
+		return s.writeError(ctx, request, protocol.ErrorInvalidRequest, "invalid root tree request")
 	}
 	params, err := protocol.DecodePayload[protocol.EnsureRootTreeParams](request.Payload)
 	if err != nil || params.Validate() != nil {
-		return s.server.writeError(ctx, s.connection, request, protocol.ErrorInvalidParams, "invalid root tree payload")
+		return s.writeError(ctx, request, protocol.ErrorInvalidParams, "invalid root tree payload")
 	}
 	tree, principal, err := s.server.registry.EnsureRootTree(
 		ctx,
@@ -24,7 +24,7 @@ func (s *session) handleEnsureRootTree(ctx context.Context, request protocol.Env
 		s.server.now(),
 	)
 	if err == nil {
-		return s.server.writeResult(ctx, s.connection, request, protocol.EnsureRootTreeResult{
+		return s.writeResult(ctx, request, protocol.EnsureRootTreeResult{
 			Tree: tree, Principal: principal,
 		})
 	}
@@ -32,8 +32,8 @@ func (s *session) handleEnsureRootTree(ctx context.Context, request protocol.Env
 		return err
 	}
 	if errors.Is(err, store.ErrConflict) {
-		return s.server.writeError(ctx, s.connection, request, protocol.ErrorConflict, "root tree binding conflicts with existing state")
+		return s.writeError(ctx, request, protocol.ErrorConflict, "root tree binding conflicts with existing state")
 	}
-	_ = s.server.writeError(ctx, s.connection, request, protocol.ErrorUnavailable, "broker unavailable")
+	_ = s.writeError(ctx, request, protocol.ErrorUnavailable, "broker unavailable")
 	return &internalError{operation: "ensure root tree", err: err}
 }

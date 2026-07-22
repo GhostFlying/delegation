@@ -119,6 +119,7 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 			protocol.FeatureDeviceRegistry,
 			protocol.FeatureFullDuplexRPC,
 			protocol.FeatureMailbox,
+			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
 		},
 	}
@@ -272,6 +273,7 @@ func TestConnectorRequiresEveryBrokerFeatureBeforePublishingReadiness(t *testing
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,
+		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
 	}
 	for _, missing := range required {
@@ -704,6 +706,7 @@ func TestConnectorValidatesStaticOptionsAndOfflineCalls(t *testing.T) {
 		RuntimeVersion:  "0.1.0-alpha.0.m1.1",
 		OperatingSystem: "linux",
 		Architecture:    "amd64",
+		WorkerSpawner:   testWorkerSpawner{},
 	}
 	client, err := New(base)
 	if err != nil {
@@ -747,6 +750,7 @@ func TestConnectorAmbientProxyPolicy(t *testing.T) {
 			RuntimeVersion:           "0.1.0-alpha.0.m1.1",
 			OperatingSystem:          "linux",
 			Architecture:             "amd64",
+			WorkerSpawner:            testWorkerSpawner{},
 		}
 		plaintext, err := New(base)
 		if err != nil {
@@ -878,11 +882,31 @@ func newTestClient(
 		DeviceName: "builder", AuthMode: authMode, Token: token,
 		RuntimeVersion: "0.1.0-alpha.0.m1.1", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
+		WorkerSpawner: testWorkerSpawner{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return client
+}
+
+type testWorkerSpawner struct{}
+
+func (testWorkerSpawner) SpawnWorker(
+	_ context.Context,
+	request WorkerSpawnRequest,
+) (protocol.SpawnWorkerResult, error) {
+	return protocol.SpawnWorkerResult{
+		SpawnID: request.Params.SpawnID,
+		Principal: control.NewWorkerPrincipal(
+			connectorTestControllerID,
+			request.TreeID,
+			request.Params.AgentID,
+			request.Source.AgentID,
+			connectorTestDeviceID,
+		).Identity(),
+		Status: protocol.AgentSpawnStarted,
+	}, nil
 }
 
 func runClient(client *Client, ctx context.Context) <-chan error {
@@ -959,6 +983,7 @@ func newFakeBroker(t *testing.T, afterHello func(*websocket.Conn)) *httptest.Ser
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,
+		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
 	}, afterHello)
 }

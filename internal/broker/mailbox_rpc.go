@@ -21,8 +21,8 @@ func (s *session) handleSendMessage(ctx context.Context, request protocol.Envelo
 	}
 	params, err := protocol.DecodePayload[protocol.SendMessageParams](request.Payload)
 	if err != nil || params.Validate() != nil {
-		return s.server.writeError(
-			ctx, s.connection, request, protocol.ErrorInvalidParams, "invalid message payload",
+		return s.writeError(
+			ctx, request, protocol.ErrorInvalidParams, "invalid message payload",
 		)
 	}
 	delivery, err := s.server.registry.SendMailboxMessage(
@@ -36,7 +36,7 @@ func (s *session) handleSendMessage(ctx context.Context, request protocol.Envelo
 		treeID:       principal.TreeID,
 		agentID:      delivery.RecipientAgentID,
 	})
-	return s.server.writeResult(ctx, s.connection, request, protocol.SendMessageResult{
+	return s.writeResult(ctx, request, protocol.SendMessageResult{
 		MessageID: delivery.MessageID,
 		Sequence:  delivery.Sequence,
 	})
@@ -57,8 +57,8 @@ func (s *session) handleWaitMailbox(
 	}
 	params, err := protocol.DecodePayload[protocol.WaitMailboxParams](request.Payload)
 	if err != nil || params.Validate() != nil {
-		return s.server.writeError(
-			ctx, s.connection, request, protocol.ErrorInvalidParams, "invalid mailbox wait payload",
+		return s.writeError(
+			ctx, request, protocol.ErrorInvalidParams, "invalid mailbox wait payload",
 		)
 	}
 	key := mailboxKey{
@@ -84,12 +84,12 @@ func (s *session) handleWaitMailbox(
 		}
 		if len(result.Messages) != 0 || params.TimeoutMillis == 0 {
 			subscription.release()
-			return s.server.writeResult(ctx, s.connection, request, result)
+			return s.writeResult(ctx, request, result)
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			subscription.release()
-			return s.server.writeResult(ctx, s.connection, request, result)
+			return s.writeResult(ctx, request, result)
 		}
 		timer := time.NewTimer(remaining)
 		select {
@@ -106,7 +106,7 @@ func (s *session) handleWaitMailbox(
 			subscription.release()
 		case <-timer.C:
 			subscription.release()
-			return s.server.writeResult(ctx, s.connection, request, result)
+			return s.writeResult(ctx, request, result)
 		}
 	}
 }
@@ -117,13 +117,13 @@ func (s *session) authorizeMailbox(
 	workerCapability control.Capability,
 ) (control.Principal, bool, error) {
 	if request.TreeID == "" || request.Source == nil {
-		return control.Principal{}, false, s.server.writeError(
-			ctx, s.connection, request, protocol.ErrorInvalidRequest, "mailbox request requires a principal",
+		return control.Principal{}, false, s.writeError(
+			ctx, request, protocol.ErrorInvalidRequest, "mailbox request requires a principal",
 		)
 	}
 	if request.Source.DeviceID != s.deviceID {
-		return control.Principal{}, false, s.server.writeError(
-			ctx, s.connection, request, protocol.ErrorForbidden, "mailbox access denied",
+		return control.Principal{}, false, s.writeError(
+			ctx, request, protocol.ErrorForbidden, "mailbox access denied",
 		)
 	}
 	required := control.CapabilityMessageTree
@@ -138,12 +138,12 @@ func (s *session) authorizeMailbox(
 		return control.Principal{}, false, err
 	}
 	if errors.Is(err, store.ErrAuthorizationDenied) {
-		return control.Principal{}, false, s.server.writeError(
-			ctx, s.connection, request, protocol.ErrorForbidden, "mailbox access denied",
+		return control.Principal{}, false, s.writeError(
+			ctx, request, protocol.ErrorForbidden, "mailbox access denied",
 		)
 	}
-	_ = s.server.writeError(
-		ctx, s.connection, request, protocol.ErrorUnavailable, "broker unavailable",
+	_ = s.writeError(
+		ctx, request, protocol.ErrorUnavailable, "broker unavailable",
 	)
 	return control.Principal{}, false, &internalError{operation: "authorize mailbox access", err: err}
 }
@@ -158,32 +158,32 @@ func (s *session) handleMailboxStoreError(
 		return err
 	}
 	if errors.Is(err, store.ErrAuthorizationDenied) {
-		return s.server.writeError(
-			ctx, s.connection, request, protocol.ErrorForbidden, "mailbox access denied",
+		return s.writeError(
+			ctx, request, protocol.ErrorForbidden, "mailbox access denied",
 		)
 	}
 	if errors.Is(err, store.ErrNotFound) {
-		return s.server.writeError(
-			ctx, s.connection, request, protocol.ErrorNotFound, "message target not found",
+		return s.writeError(
+			ctx, request, protocol.ErrorNotFound, "message target not found",
 		)
 	}
 	if errors.Is(err, store.ErrMailboxCursorAhead) {
-		return s.server.writeError(
-			ctx, s.connection, request, protocol.ErrorConflict, "mailbox cursor is ahead of stored messages",
+		return s.writeError(
+			ctx, request, protocol.ErrorConflict, "mailbox cursor is ahead of stored messages",
 		)
 	}
 	if errors.Is(err, store.ErrConflict) {
-		return s.server.writeError(
-			ctx, s.connection, request, protocol.ErrorConflict, "messageId conflicts with an existing message",
+		return s.writeError(
+			ctx, request, protocol.ErrorConflict, "messageId conflicts with an existing message",
 		)
 	}
 	if errors.Is(err, store.ErrMailboxFull) {
-		return s.server.writeError(
-			ctx, s.connection, request, protocol.ErrorUnavailable, "mailbox pending message quota exceeded",
+		return s.writeError(
+			ctx, request, protocol.ErrorUnavailable, "mailbox pending message quota exceeded",
 		)
 	}
-	_ = s.server.writeError(
-		ctx, s.connection, request, protocol.ErrorUnavailable, "broker unavailable",
+	_ = s.writeError(
+		ctx, request, protocol.ErrorUnavailable, "broker unavailable",
 	)
 	return &internalError{operation: operation, err: err}
 }

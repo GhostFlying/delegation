@@ -38,6 +38,8 @@ const (
 	rootMailboxWaitHeadroom  = 16
 	maximumAsyncMailboxWaits = config.MaximumWorkerSlots + rootMailboxWaitHeadroom
 	mailboxRequestTimeout    = 30 * time.Second
+	agentSpawnRequestTimeout = 125 * time.Second
+	maximumPendingPeerCalls  = 128
 )
 
 type Registry interface {
@@ -53,6 +55,10 @@ type Registry interface {
 	DescribeDevice(context.Context, string, string) (store.DeviceRecord, error)
 	SendMailboxMessage(context.Context, control.Principal, protocol.MessageTarget, string, string, time.Time) (store.MailboxDelivery, error)
 	ReadMailbox(context.Context, control.Principal, uint64, int) (protocol.WaitMailboxResult, error)
+	BeginAgentSpawn(context.Context, store.AgentSpawnIntent, time.Time) (store.AgentSpawnReceipt, error)
+	MarkAgentSpawnStarted(context.Context, store.AgentSpawnKey, time.Time) (store.AgentSpawnReceipt, error)
+	MarkAgentSpawnFailed(context.Context, store.AgentSpawnKey, string, time.Time) (store.AgentSpawnReceipt, error)
+	ListAgents(context.Context, control.PrincipalIdentity, store.AgentPageRequest) (store.AgentPage, error)
 }
 
 type Options struct {
@@ -116,6 +122,31 @@ type session struct {
 	async         sync.WaitGroup
 	asyncMu       sync.Mutex
 	asyncCancels  map[string]context.CancelFunc
+	writeMu       sync.Mutex
+	pendingMu     sync.Mutex
+	pending       map[string]peerPendingCall
+	finishOnce    sync.Once
+	done          chan struct{}
+	closeErr      error
+}
+
+type peerCallResult struct {
+	payload json.RawMessage
+	err     error
+}
+
+type peerPendingCall struct {
+	treeID string
+	result chan peerCallResult
+}
+
+type peerRPCError struct {
+	code    int
+	message string
+}
+
+func (e *peerRPCError) Error() string {
+	return fmt.Sprintf("peer RPC %d: %s", e.code, e.message)
 }
 
 type internalError struct {
@@ -468,6 +499,7 @@ func (s *Server) acceptHello(
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,
+		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
 	} {
 		if !slices.Contains(hello.Features, feature) {
@@ -502,6 +534,8 @@ func (s *Server) acceptHello(
 		credentialMAC: authority.credentialMAC,
 		asyncSem:      make(chan struct{}, maximumAsyncMailboxWaits),
 		asyncCancels:  make(map[string]context.CancelFunc),
+		pending:       make(map[string]peerPendingCall),
+		done:          make(chan struct{}),
 	}
 	current.revision.Store(device.Revision)
 	result := protocol.HelloResult{
@@ -510,6 +544,7 @@ func (s *Server) acceptHello(
 			protocol.FeatureDeviceRegistry,
 			protocol.FeatureFullDuplexRPC,
 			protocol.FeatureMailbox,
+			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
 		},
 		HeartbeatIntervalMS: s.heartbeatInterval.Milliseconds(),
@@ -636,10 +671,11 @@ func (s *Server) retryOfflinePass() bool {
 	return pending
 }
 
-func (s *session) run(ctx context.Context) error {
+func (s *session) run(ctx context.Context) (resultErr error) {
 	sessionContext, cancelSession := context.WithCancel(ctx)
 	defer func() {
 		cancelSession()
+		s.finish(resultErr)
 		s.async.Wait()
 	}()
 	deadline := time.Now().Add(s.server.heartbeatInterval * 3)
@@ -670,14 +706,14 @@ func (s *session) handleEnvelope(
 	}
 	if envelope.ControllerID != s.server.controllerID {
 		if envelope.Kind == protocol.KindRequest {
-			_ = s.server.writeError(ctx, s.connection, envelope, protocol.ErrorForbidden, "controller mismatch")
+			_ = s.writeError(ctx, envelope, protocol.ErrorForbidden, "controller mismatch")
 		}
 		return false, errors.New("connection sent a mismatched controllerId")
 	}
 	if err := s.validateAuthority(ctx); err != nil {
 		if registrationDenied(err) {
 			if envelope.Kind == protocol.KindRequest {
-				_ = s.server.writeError(ctx, s.connection, envelope, protocol.ErrorForbidden, "session credential is no longer valid")
+				_ = s.writeError(ctx, envelope, protocol.ErrorForbidden, "session credential is no longer valid")
 			}
 			return false, err
 		}
@@ -685,7 +721,7 @@ func (s *session) handleEnvelope(
 			return false, err
 		}
 		if envelope.Kind == protocol.KindRequest {
-			_ = s.server.writeError(ctx, s.connection, envelope, protocol.ErrorUnavailable, "broker unavailable")
+			_ = s.writeError(ctx, envelope, protocol.ErrorUnavailable, "broker unavailable")
 		}
 		return false, &internalError{operation: "reauthenticate session", err: err}
 	}
@@ -696,7 +732,7 @@ func (s *session) handleEnvelope(
 		}
 		return false, nil
 	case protocol.KindResponse:
-		return false, nil
+		return false, s.completePeerCall(envelope)
 	case protocol.KindRequest:
 	default:
 		return false, errors.New("connection sent an unsupported envelope kind")
@@ -712,15 +748,19 @@ func (s *session) handleEnvelope(
 		return false, s.handleSendMessage(ctx, envelope)
 	case protocol.MethodWaitMailbox:
 		return false, s.startMailboxWait(ctx, sessionContext, envelope)
+	case protocol.MethodSpawnAgent:
+		return false, s.startAgentSpawn(ctx, sessionContext, envelope)
+	case protocol.MethodListAgents:
+		return false, s.handleListAgents(ctx, envelope)
 	}
 	if envelope.Method != protocol.MethodHeartbeat {
-		return false, s.server.writeError(ctx, s.connection, envelope, protocol.ErrorMethodNotFound, "method not found")
+		return false, s.writeError(ctx, envelope, protocol.ErrorMethodNotFound, "method not found")
 	}
 	if envelope.TreeID != "" || envelope.Source != nil {
-		return false, s.server.writeError(ctx, s.connection, envelope, protocol.ErrorInvalidRequest, "invalid heartbeat request")
+		return false, s.writeError(ctx, envelope, protocol.ErrorInvalidRequest, "invalid heartbeat request")
 	}
 	if _, err := protocol.DecodePayload[protocol.Heartbeat](envelope.Payload); err != nil {
-		return false, s.server.writeError(ctx, s.connection, envelope, protocol.ErrorInvalidParams, "invalid heartbeat payload")
+		return false, s.writeError(ctx, envelope, protocol.ErrorInvalidParams, "invalid heartbeat payload")
 	}
 	now := s.server.now()
 	device, err := s.server.registry.HeartbeatDevice(
@@ -728,17 +768,17 @@ func (s *session) handleEnvelope(
 	)
 	if err != nil {
 		if leaseConflict(err) {
-			_ = s.server.writeError(ctx, s.connection, envelope, protocol.ErrorConflict, "device lease is stale")
+			_ = s.writeError(ctx, envelope, protocol.ErrorConflict, "device lease is stale")
 			return false, err
 		}
 		if isContextError(err) {
 			return false, err
 		}
-		_ = s.server.writeError(ctx, s.connection, envelope, protocol.ErrorUnavailable, "broker unavailable")
+		_ = s.writeError(ctx, envelope, protocol.ErrorUnavailable, "broker unavailable")
 		return false, &internalError{operation: "heartbeat device", err: err}
 	}
 	s.revision.Store(device.Revision)
-	if err := s.server.writeResult(ctx, s.connection, envelope, protocol.HeartbeatResult{
+	if err := s.writeResult(ctx, envelope, protocol.HeartbeatResult{
 		Revision: device.Revision, ServerTime: now.UTC().Unix(),
 	}); err != nil {
 		return false, err
@@ -754,9 +794,8 @@ func (s *session) startMailboxWait(
 	select {
 	case s.asyncSem <- struct{}{}:
 	default:
-		return s.server.writeError(
+		return s.writeError(
 			responseContext,
-			s.connection,
 			request,
 			protocol.ErrorUnavailable,
 			"too many pending mailbox waits",
@@ -864,6 +903,177 @@ func readEnvelope(ctx context.Context, connection *websocket.Conn) (protocol.Env
 		return protocol.Envelope{}, errors.New("broker accepts only text WebSocket messages")
 	}
 	return protocol.Read(bytes.NewReader(data))
+}
+
+func (s *session) callPeer(
+	ctx context.Context,
+	method, treeID string,
+	source control.PrincipalIdentity,
+	params any,
+) (json.RawMessage, error) {
+	if err := s.validateAuthority(ctx); err != nil {
+		if registrationDenied(err) {
+			_ = s.connection.CloseNow()
+		}
+		return nil, fmt.Errorf("authorize peer %s request: %w", method, err)
+	}
+	payload, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("encode peer %s request: %w", method, err)
+	}
+	requestID, err := protocol.NewRequestID(protocol.DirectionBroker)
+	if err != nil {
+		return nil, err
+	}
+	request := protocol.Envelope{
+		ProtocolVersion: protocol.Version,
+		Kind:            protocol.KindRequest,
+		RequestID:       requestID,
+		Method:          method,
+		ControllerID:    s.server.controllerID,
+		TreeID:          treeID,
+		Source:          &source,
+		Payload:         payload,
+	}
+	pending := peerPendingCall{treeID: treeID, result: make(chan peerCallResult, 1)}
+	if err := s.addPeerCall(requestID, pending); err != nil {
+		return nil, err
+	}
+	if err := s.writeEnvelope(ctx, request); err != nil {
+		s.removePeerCall(requestID)
+		return nil, fmt.Errorf("write peer %s request: %w", method, err)
+	}
+	select {
+	case result := <-pending.result:
+		return result.payload, result.err
+	case <-ctx.Done():
+		if s.removePeerCall(requestID) {
+			return nil, ctx.Err()
+		}
+		result := <-pending.result
+		return result.payload, result.err
+	}
+}
+
+func (s *session) addPeerCall(requestID string, pending peerPendingCall) error {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	select {
+	case <-s.done:
+		if s.closeErr != nil {
+			return s.closeErr
+		}
+		return errors.New("peer session closed")
+	default:
+	}
+	if len(s.pending) >= maximumPendingPeerCalls {
+		return errors.New("peer session has too many pending calls")
+	}
+	s.pending[requestID] = pending
+	return nil
+}
+
+func (s *session) removePeerCall(requestID string) bool {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if _, found := s.pending[requestID]; !found {
+		return false
+	}
+	delete(s.pending, requestID)
+	return true
+}
+
+func (s *session) completePeerCall(response protocol.Envelope) error {
+	if response.Source != nil || !strings.HasPrefix(response.ReplyTo, string(protocol.DirectionBroker)+"_") {
+		return errors.New("peer response is invalid")
+	}
+	s.pendingMu.Lock()
+	pending, found := s.pending[response.ReplyTo]
+	if !found {
+		s.pendingMu.Unlock()
+		return nil
+	}
+	if response.TreeID != pending.treeID {
+		s.pendingMu.Unlock()
+		return errors.New("peer response treeId does not match its request")
+	}
+	delete(s.pending, response.ReplyTo)
+	s.pendingMu.Unlock()
+	result := peerCallResult{payload: response.Payload}
+	if response.Error != nil {
+		result.err = &peerRPCError{code: response.Error.Code, message: response.Error.Message}
+	}
+	pending.result <- result
+	return nil
+}
+
+func (s *session) finish(err error) {
+	s.finishOnce.Do(func() {
+		if err == nil {
+			err = errors.New("peer session closed")
+		}
+		s.pendingMu.Lock()
+		s.closeErr = err
+		for requestID, pending := range s.pending {
+			delete(s.pending, requestID)
+			pending.result <- peerCallResult{err: err}
+		}
+		close(s.done)
+		s.pendingMu.Unlock()
+	})
+}
+
+func (s *session) writeResult(ctx context.Context, request protocol.Envelope, result any) error {
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("encode broker result: %w", err)
+	}
+	requestID, err := protocol.NewRequestID(protocol.DirectionBroker)
+	if err != nil {
+		return err
+	}
+	return s.writeEnvelope(ctx, protocol.Envelope{
+		ProtocolVersion: protocol.Version,
+		Kind:            protocol.KindResponse,
+		RequestID:       requestID,
+		ReplyTo:         request.RequestID,
+		ControllerID:    s.server.controllerID,
+		TreeID:          request.TreeID,
+		Payload:         payload,
+	})
+}
+
+func (s *session) writeError(
+	ctx context.Context,
+	request protocol.Envelope,
+	code int,
+	message string,
+) error {
+	requestID, err := protocol.NewRequestID(protocol.DirectionBroker)
+	if err != nil {
+		return err
+	}
+	return s.writeEnvelope(ctx, protocol.Envelope{
+		ProtocolVersion: protocol.Version,
+		Kind:            protocol.KindResponse,
+		RequestID:       requestID,
+		ReplyTo:         request.RequestID,
+		ControllerID:    s.server.controllerID,
+		TreeID:          request.TreeID,
+		Error:           &protocol.Error{Code: code, Message: message},
+	})
+}
+
+func (s *session) writeEnvelope(ctx context.Context, envelope protocol.Envelope) error {
+	data, err := protocol.Marshal(envelope)
+	if err != nil {
+		return err
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	writeContext, cancel := context.WithTimeout(ctx, writeTimeout)
+	defer cancel()
+	return s.connection.Write(writeContext, websocket.MessageText, data)
 }
 
 func (s *Server) writeResult(

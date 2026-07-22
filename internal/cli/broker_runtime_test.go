@@ -521,6 +521,7 @@ func sendRuntimeHello(t *testing.T, connection *websocket.Conn, deviceID string)
 			protocol.FeatureDeviceRegistry,
 			protocol.FeatureFullDuplexRPC,
 			protocol.FeatureMailbox,
+			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
 		},
 	})

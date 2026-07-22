@@ -50,11 +50,19 @@ type session struct {
 	errMu              sync.Mutex
 	closeErr           error
 	heartbeatSucceeded atomic.Bool
+	inboundSem         chan struct{}
+	inboundMu          sync.Mutex
+	inbound            map[string]struct{}
+	context            context.Context
+	cancel             context.CancelFunc
 }
 
 func newSession(client *Client, connection *websocket.Conn) *session {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &session{
 		client: client, connection: connection, pending: map[string]pendingCall{}, done: make(chan struct{}),
+		inboundSem: make(chan struct{}, maximumPendingCalls), inbound: make(map[string]struct{}),
+		context: ctx, cancel: cancel,
 	}
 }
 
@@ -222,7 +230,7 @@ func (s *session) readLoop() {
 				return
 			}
 		case protocol.KindRequest:
-			if err := s.writeError(envelope, protocol.ErrorMethodNotFound, "method not found"); err != nil {
+			if err := s.handleBrokerRequest(envelope); err != nil {
 				s.close(err)
 				return
 			}
@@ -233,6 +241,87 @@ func (s *session) readLoop() {
 			return
 		}
 	}
+}
+
+func (s *session) handleBrokerRequest(request protocol.Envelope) error {
+	if request.Method != protocol.MethodSpawnWorker {
+		return s.writeError(request, protocol.ErrorMethodNotFound, "method not found")
+	}
+	if request.TreeID == "" || request.Source == nil || request.Source.ParentAgentID != "" {
+		return s.writeError(request, protocol.ErrorInvalidRequest, "invalid worker spawn request")
+	}
+	if s.client.workerSpawner == nil {
+		return s.writeError(request, protocol.ErrorUnavailable, "peer worker dispatch is unavailable")
+	}
+	params, err := protocol.DecodePayload[protocol.SpawnWorkerParams](request.Payload)
+	if err != nil || params.Validate() != nil {
+		return s.writeError(request, protocol.ErrorInvalidParams, "invalid worker spawn payload")
+	}
+	select {
+	case s.inboundSem <- struct{}{}:
+	default:
+		return s.writeError(request, protocol.ErrorUnavailable, "peer worker dispatch is busy")
+	}
+	s.inboundMu.Lock()
+	if _, duplicate := s.inbound[request.RequestID]; duplicate {
+		s.inboundMu.Unlock()
+		<-s.inboundSem
+		return errors.New("broker reused an active requestId")
+	}
+	s.inbound[request.RequestID] = struct{}{}
+	s.inboundMu.Unlock()
+	source := *request.Source
+	go func() {
+		defer func() {
+			s.inboundMu.Lock()
+			delete(s.inbound, request.RequestID)
+			s.inboundMu.Unlock()
+			<-s.inboundSem
+		}()
+		result, err := s.client.workerSpawner.SpawnWorker(s.context, WorkerSpawnRequest{
+			TreeID: request.TreeID, Source: source, Params: params,
+		})
+		if err != nil {
+			s.client.reportError(fmt.Errorf("handle broker worker spawn: %w", err))
+			if writeErr := s.writeError(request, protocol.ErrorUnavailable, "peer worker dispatch failed"); writeErr != nil {
+				s.close(writeErr)
+			}
+			return
+		}
+		if err := validateWorkerSpawnResult(result, request, params, s.client.hello.DeviceID); err != nil {
+			s.client.reportError(err)
+			if writeErr := s.writeError(request, protocol.ErrorInternal, "peer returned an invalid worker result"); writeErr != nil {
+				s.close(writeErr)
+				return
+			}
+			s.close(err)
+			return
+		}
+		if err := s.writeResult(request, result); err != nil {
+			s.close(err)
+		}
+	}()
+	return nil
+}
+
+func validateWorkerSpawnResult(
+	result protocol.SpawnWorkerResult,
+	request protocol.Envelope,
+	params protocol.SpawnWorkerParams,
+	deviceID string,
+) error {
+	if err := result.Validate(); err != nil {
+		return fmt.Errorf("worker spawner returned an invalid result: %w", err)
+	}
+	if request.Source == nil || result.SpawnID != params.SpawnID ||
+		result.Principal.ControllerID != request.ControllerID ||
+		result.Principal.TreeID != request.TreeID ||
+		result.Principal.AgentID != params.AgentID ||
+		result.Principal.ParentAgentID != request.Source.AgentID ||
+		result.Principal.DeviceID != deviceID {
+		return errors.New("worker spawner returned a mismatched result")
+	}
+	return nil
 }
 
 func (s *session) heartbeatLoop(intervalMS int64) {
@@ -340,6 +429,26 @@ func (s *session) writeError(request protocol.Envelope, code int, message string
 	})
 }
 
+func (s *session) writeResult(request protocol.Envelope, result any) error {
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	requestID, err := protocol.NewRequestID(protocol.DirectionConnector)
+	if err != nil {
+		return err
+	}
+	return s.write(context.Background(), protocol.Envelope{
+		ProtocolVersion: protocol.Version,
+		Kind:            protocol.KindResponse,
+		RequestID:       requestID,
+		ReplyTo:         request.RequestID,
+		ControllerID:    s.client.hello.ControllerID,
+		TreeID:          request.TreeID,
+		Payload:         payload,
+	})
+}
+
 func (s *session) write(ctx context.Context, envelope protocol.Envelope) error {
 	data, err := protocol.Marshal(envelope)
 	if err != nil {
@@ -367,6 +476,7 @@ func (s *session) close(err error) {
 		s.errMu.Lock()
 		s.closeErr = err
 		s.errMu.Unlock()
+		s.cancel()
 		s.pendingMu.Lock()
 		for requestID, pending := range s.pending {
 			delete(s.pending, requestID)
