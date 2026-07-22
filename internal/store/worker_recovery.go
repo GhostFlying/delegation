@@ -64,6 +64,10 @@ ORDER BY created_at, tree_id, agent_id
 		for index := range recovered {
 			worker := &recovered[index]
 			worker.UpdatedAt = max(timestamp, worker.UpdatedAt)
+			worker.Revision, err = nextWorkerRevision(ctx, connection)
+			if err != nil {
+				return err
+			}
 			switch worker.Status {
 			case WorkerRunning:
 				worker.Status = WorkerInterrupted
@@ -114,13 +118,14 @@ ORDER BY created_at, tree_id, agent_id
 			}
 			if _, err := connection.ExecContext(ctx, `
 UPDATE worker_reservations SET
-	status = ?, retry_target = ?, active_turn_id = ?, failure_code = ?, updated_at = ?
+		status = ?, retry_target = ?, active_turn_id = ?, failure_code = ?, revision = ?, updated_at = ?
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 `,
 				worker.Status,
 				worker.RetryTarget,
 				worker.ActiveTurnID,
 				worker.FailureCode,
+				worker.Revision,
 				worker.UpdatedAt,
 				worker.ControllerID,
 				worker.TreeID,

@@ -59,6 +59,7 @@ type WorkerReservation struct {
 	RetryTarget    WorkerStatus
 	ActiveTurnID   string
 	FailureCode    string
+	Revision       uint64
 	CreatedAt      int64
 	UpdatedAt      int64
 }
@@ -134,11 +135,15 @@ func (s *PeerStore) reserveWorker(
 		if err := requireWorkerSlot(ctx, connection, maxActive); err != nil {
 			return err
 		}
+		reservation.Revision, err = nextWorkerRevision(ctx, connection)
+		if err != nil {
+			return err
+		}
 		if _, err := connection.ExecContext(ctx, `
 INSERT INTO worker_reservations(
     controller_id, tree_id, agent_id, parent_agent_id, device_id,
-	task_name, prompt_digest, workspace_path, profile_version, status, retry_target, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	task_name, prompt_digest, workspace_path, profile_version, status, retry_target, revision, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 			reservation.ControllerID,
 			reservation.TreeID,
@@ -151,6 +156,7 @@ INSERT INTO worker_reservations(
 			reservation.ProfileVersion,
 			reservation.Status,
 			reservation.RetryTarget,
+			reservation.Revision,
 			reservation.CreatedAt,
 			reservation.UpdatedAt,
 		); err != nil {
@@ -419,6 +425,10 @@ func (s *PeerStore) transitionWorker(
 		fromStatus := worker.Status
 		worker.Status = to
 		worker.UpdatedAt = timestamp
+		worker.Revision, err = nextWorkerRevision(ctx, connection)
+		if err != nil {
+			return err
+		}
 		worker.FailureCode = ""
 		switch to {
 		case WorkerStarting:
@@ -450,7 +460,7 @@ func (s *PeerStore) transitionWorker(
 		}
 		if _, err := connection.ExecContext(ctx, `
 UPDATE worker_reservations SET
-    codex_thread_id = ?, status = ?, retry_target = ?, active_turn_id = ?, failure_code = ?, updated_at = ?
+    codex_thread_id = ?, status = ?, retry_target = ?, active_turn_id = ?, failure_code = ?, revision = ?, updated_at = ?
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 `,
 			worker.CodexThreadID,
@@ -458,6 +468,7 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 			worker.RetryTarget,
 			worker.ActiveTurnID,
 			worker.FailureCode,
+			worker.Revision,
 			worker.UpdatedAt,
 			worker.ControllerID,
 			worker.TreeID,
@@ -485,6 +496,20 @@ func transitionAlreadyApplied(worker WorkerReservation, threadID, detail string)
 	default:
 		return false
 	}
+}
+
+func nextWorkerRevision(ctx context.Context, connection *sql.Conn) (uint64, error) {
+	var revision uint64
+	if err := connection.QueryRowContext(ctx, `
+UPDATE peer_metadata SET worker_revision = worker_revision + 1
+WHERE singleton = 1 AND worker_revision < 9223372036854775807
+RETURNING worker_revision
+`).Scan(&revision); errors.Is(err, sql.ErrNoRows) {
+		return 0, errors.New("worker revision is exhausted")
+	} else if err != nil {
+		return 0, fmt.Errorf("allocate worker revision: %w", err)
+	}
+	return revision, nil
 }
 
 func requireWorkerSlot(ctx context.Context, queryer rowQueryer, maxActive int) error {
@@ -524,7 +549,7 @@ WHERE controller_id = ? AND codex_thread_id = ?
 const workerSelect = `
 SELECT controller_id, tree_id, agent_id, parent_agent_id, device_id,
 	   task_name, prompt_digest, workspace_path, codex_thread_id, profile_version,
-       status, retry_target, active_turn_id, failure_code, created_at, updated_at
+       status, retry_target, active_turn_id, failure_code, revision, created_at, updated_at
 FROM worker_reservations
 `
 
@@ -545,6 +570,7 @@ func scanWorker(scanner rowScanner) (WorkerReservation, error) {
 		&worker.RetryTarget,
 		&worker.ActiveTurnID,
 		&worker.FailureCode,
+		&worker.Revision,
 		&worker.CreatedAt,
 		&worker.UpdatedAt,
 	); errors.Is(err, sql.ErrNoRows) {
@@ -665,16 +691,20 @@ func (w WorkerReservation) Validate() error {
 	if w.CreatedAt < 0 || w.UpdatedAt < w.CreatedAt {
 		return errors.New("worker timestamps are invalid")
 	}
+	if w.Revision == 0 || w.Revision >= uint64(1<<63) {
+		return errors.New("worker revision is invalid")
+	}
 	return nil
 }
 
 func validateNewWorkerReservation(reservation WorkerReservation) error {
 	if reservation.Status != "" || reservation.RetryTarget != "" || reservation.CodexThreadID != "" ||
 		reservation.ActiveTurnID != "" || reservation.FailureCode != "" ||
-		reservation.CreatedAt != 0 || reservation.UpdatedAt != 0 {
+		reservation.Revision != 0 || reservation.CreatedAt != 0 || reservation.UpdatedAt != 0 {
 		return errors.New("new worker reservation must not contain lifecycle state")
 	}
 	reservation.Status = WorkerReserved
+	reservation.Revision = 1
 	return reservation.Validate()
 }
 

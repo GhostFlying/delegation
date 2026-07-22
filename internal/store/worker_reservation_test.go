@@ -32,9 +32,15 @@ func TestWorkerReservationsPersistAndEnforceSlots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if first.Revision != 1 {
+		t.Fatalf("initial worker revision = %d, want 1", first.Revision)
+	}
 	second, err := state.ReserveWorker(ctx, secondInput, 2, createdAt.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if second.Revision != 2 {
+		t.Fatalf("second worker revision = %d, want 2", second.Revision)
 	}
 	if _, err := state.ReserveWorker(ctx, thirdInput, 2, createdAt.Add(2*time.Second)); !errors.Is(err, ErrWorkerBusy) {
 		t.Fatalf("third reservation error = %v, want ErrWorkerBusy", err)
@@ -85,12 +91,25 @@ func TestWorkerReservationsPersistAndEnforceSlots(t *testing.T) {
 	if first.Status != WorkerIdle || first.ActiveTurnID != "" || first.CodexThreadID != threadID {
 		t.Fatalf("idle worker = %#v", first)
 	}
+	if first.Revision != 7 {
+		t.Fatalf("idle worker revision = %d, want 7", first.Revision)
+	}
+	idleNoop, err := state.MarkWorkerIdle(ctx, first.WorkerKey, createdAt.Add(8*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idleNoop != first {
+		t.Fatalf("idempotent idle transition = %#v, want %#v", idleNoop, first)
+	}
 	third, err := state.ReserveWorker(ctx, thirdInput, 2, createdAt.Add(8*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if third.Status != WorkerReserved {
 		t.Fatalf("third worker = %#v", third)
+	}
+	if third.Revision != 8 {
+		t.Fatalf("third worker revision = %d, want 8", third.Revision)
 	}
 	owner, err := state.WorkerForThread(ctx, workerControllerID, threadID)
 	if err != nil {

@@ -39,6 +39,7 @@ var (
 	ErrWorkerFailed        = errors.New("managed worker has failed")
 	ErrWorkerInterrupted   = errors.New("managed worker outcome is interrupted")
 	ErrWorkerNotIdle       = errors.New("managed worker is not idle")
+	ErrWorkerNotRunning    = errors.New("managed worker is not running")
 	ErrMCPInjectionBlocked = errors.New("managed worker MCP injection is blocked")
 	errClientRecovering    = errors.New("managed app-server is recovering")
 )
@@ -54,6 +55,8 @@ type application interface {
 	ThreadResume(context.Context, any, any) error
 	MCPServerStatusList(context.Context, any, any) error
 	TurnStart(context.Context, any, any) error
+	TurnSteer(context.Context, any, any) error
+	TurnInterrupt(context.Context, any, any) error
 	Notifications() <-chan appserver.Notification
 	Done() <-chan struct{}
 	Err() error
@@ -90,12 +93,29 @@ type SpawnRequest struct {
 }
 
 type FollowupRequest struct {
-	Key     store.WorkerKey
-	Message string
+	OperationID string
+	Key         store.WorkerKey
+	Message     string
+}
+
+type SendRequest struct {
+	Key       store.WorkerKey
+	MessageID string
+	Message   string
+}
+
+type InterruptRequest struct {
+	OperationID string
+	Key         store.WorkerKey
 }
 
 type StartedTurn struct {
 	Worker store.WorkerReservation
+}
+
+type OperationResult struct {
+	Receipt store.WorkerOperationReceipt
+	Worker  store.WorkerReservation
 }
 
 type Host struct {
@@ -116,6 +136,9 @@ type Host struct {
 	startApplication         startApplication
 	reportError              func(error)
 	completionEvents         chan queuedCompletion
+	changes                  chan struct{}
+	changesMu                sync.Mutex
+	workerRevision           uint64
 	completionDrains         map[application]chan struct{}
 	deferredCompletions      map[application][]turnCompletedNotification
 	applyCompletion          func(turnCompletedNotification) error
@@ -220,18 +243,10 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	credentialEnvironment := codexconfig.CredentialEnvironmentVariables(options.CodexConfig)
 	appServerUnsetEnvironment := append(
 		append([]string(nil), options.CodexUnsetEnvironment...),
-		codexconfig.EnvironmentVariable, "CODEX_ACCESS_TOKEN", "CODEX_SQLITE_HOME",
+		codexconfig.EnvironmentVariable, "CODEX_SQLITE_HOME",
 	)
 	codexEnvironment := cloneStringMap(options.CodexEnvironment)
-	removeEnvironmentName(codexEnvironment, "CODEX_ACCESS_TOKEN")
 	removeEnvironmentName(codexEnvironment, "CODEX_SQLITE_HOME")
-	for _, name := range []string{"CODEX_API_KEY", "OPENAI_API_KEY"} {
-		if containsEnvironmentName(credentialEnvironment, name) {
-			continue
-		}
-		appServerUnsetEnvironment = append(appServerUnsetEnvironment, name)
-		removeEnvironmentName(codexEnvironment, name)
-	}
 	shellExcludedEnvironment := append(
 		append([]string(nil), hostAuthEnvironment...),
 		codexconfig.EnvironmentVariable,
@@ -253,6 +268,7 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		startApplication: start, reportError: reportError,
 		loaded:              make(map[store.WorkerKey]string),
 		completionEvents:    make(chan queuedCompletion, options.MaxWorkerSlots),
+		changes:             make(chan struct{}, 1),
 		completionDrains:    make(map[application]chan struct{}),
 		deferredCompletions: make(map[application][]turnCompletedNotification),
 		done:                make(chan struct{}),
@@ -263,7 +279,13 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		_ = root.Close()
 		return nil, err
 	}
-	if _, err := host.state.RecoverWorkers(ctx, host.controllerID, host.deviceID, time.Now()); err != nil {
+	if err := host.seedWorkerRevision(ctx); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	if _, err := host.recordWorkerRecovery(
+		host.state.RecoverWorkers(ctx, host.controllerID, host.deviceID, time.Now()),
+	); err != nil {
 		_ = root.Close()
 		return nil, fmt.Errorf("recover managed workers: %w", err)
 	}
@@ -289,15 +311,6 @@ func removeEnvironmentName(environment map[string]string, name string) {
 			delete(environment, key)
 		}
 	}
-}
-
-func containsEnvironmentName(environment []string, name string) bool {
-	for _, candidate := range environment {
-		if candidate == name || runtime.GOOS == "windows" && strings.EqualFold(candidate, name) {
-			return true
-		}
-	}
-	return false
 }
 
 func uniqueEnvironmentNames(names []string) []string {
@@ -431,12 +444,16 @@ func (h *Host) spawnLocked(
 		return StartedTurn{Worker: worker}, nil, err
 	}
 	if worker.Status == "" {
-		worker, err = h.state.ReserveWorkerStart(operationContext, desired, h.maxWorkerSlots, time.Now())
+		worker, err = h.recordWorkerChange(
+			h.state.ReserveWorkerStart(operationContext, desired, h.maxWorkerSlots, time.Now()),
+		)
 		if err != nil {
 			return StartedTurn{}, nil, err
 		}
 	} else {
-		worker, err = h.state.BeginWorkerStart(operationContext, worker.WorkerKey, h.maxWorkerSlots, time.Now())
+		worker, err = h.recordWorkerChange(
+			h.state.BeginWorkerStart(operationContext, worker.WorkerKey, h.maxWorkerSlots, time.Now()),
+		)
 		if err != nil {
 			return StartedTurn{Worker: worker}, nil, err
 		}
@@ -445,38 +462,6 @@ func (h *Host) spawnLocked(
 		return h.retryPendingThread(operationContext, client, worker, request.Prompt)
 	}
 	return h.startNewThread(operationContext, client, worker, request.Prompt)
-}
-
-func (h *Host) Followup(ctx context.Context, request FollowupRequest) (StartedTurn, error) {
-	if request.Key.ControllerID != h.controllerID {
-		return StartedTurn{}, errors.New("worker belongs to another controller")
-	}
-	if err := request.Key.Validate(); err != nil {
-		return StartedTurn{}, err
-	}
-	if err := validatePrompt(request.Message); err != nil {
-		return StartedTurn{}, err
-	}
-	for {
-		release, err := h.acquireOperation(ctx)
-		if err != nil {
-			return StartedTurn{}, err
-		}
-		lock := h.lockFor(request.Key)
-		lock.Lock()
-		result, recovery, err := h.followupLocked(ctx, request)
-		lock.Unlock()
-		release()
-		if waitErr := h.awaitRecovery(ctx, recovery); waitErr != nil {
-			return result, errors.Join(err, waitErr)
-		}
-		if !errors.Is(err, errClientRecovering) {
-			return result, err
-		}
-		if err := h.waitForCurrentRecovery(ctx); err != nil {
-			return StartedTurn{}, err
-		}
-	}
 }
 
 func (h *Host) followupLocked(
@@ -505,12 +490,16 @@ func (h *Host) followupLocked(
 	if err != nil {
 		return StartedTurn{Worker: worker}, nil, err
 	}
-	worker, err = h.state.BeginWorkerStart(operationContext, worker.WorkerKey, h.maxWorkerSlots, time.Now())
+	worker, err = h.recordWorkerChange(
+		h.state.BeginWorkerStart(operationContext, worker.WorkerKey, h.maxWorkerSlots, time.Now()),
+	)
 	if err != nil {
 		return StartedTurn{Worker: worker}, nil, err
 	}
 	if h.isLoaded(client, worker.WorkerKey, worker.CodexThreadID) {
-		worker, err = h.state.AttachWorkerThread(operationContext, worker.WorkerKey, worker.CodexThreadID, time.Now())
+		worker, err = h.recordWorkerChange(
+			h.state.AttachWorkerThread(operationContext, worker.WorkerKey, worker.CodexThreadID, time.Now()),
+		)
 		if err != nil {
 			return StartedTurn{Worker: worker}, h.retireClient(client, err), err
 		}
@@ -525,7 +514,9 @@ func (h *Host) followupLocked(
 			recovery, failureErr := h.failWorkerMCP(client, worker.WorkerKey, err)
 			return StartedTurn{Worker: worker}, recovery, failureErr
 		}
-		worker, err = h.state.MarkWorkerReady(operationContext, worker.WorkerKey, time.Now())
+		worker, err = h.recordWorkerChange(
+			h.state.MarkWorkerReady(operationContext, worker.WorkerKey, time.Now()),
+		)
 		if err != nil {
 			return StartedTurn{Worker: worker}, h.retireClient(client, err), err
 		}

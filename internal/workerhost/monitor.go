@@ -173,15 +173,21 @@ func (h *Host) completeTurn(completed turnCompletedNotification) error {
 	}
 	switch completed.Turn.Status {
 	case "completed", "interrupted":
-		if _, err := h.state.MarkWorkerIdle(ctx, worker.WorkerKey, time.Now()); err != nil {
+		if _, err := h.recordWorkerChange(
+			h.state.MarkWorkerIdle(ctx, worker.WorkerKey, time.Now()),
+		); err != nil {
 			return fmt.Errorf("record completed worker: %w", err)
 		}
 	case "failed":
-		if _, err := h.state.FailWorker(ctx, worker.WorkerKey, "turn_failed", time.Now()); err != nil {
+		if _, err := h.recordWorkerChange(
+			h.state.FailWorker(ctx, worker.WorkerKey, "turn_failed", time.Now()),
+		); err != nil {
 			return fmt.Errorf("record failed worker: %w", err)
 		}
 	default:
-		if _, err := h.state.FailWorker(ctx, worker.WorkerKey, "unsupported_turn_status", time.Now()); err != nil {
+		if _, err := h.recordWorkerChange(
+			h.state.FailWorker(ctx, worker.WorkerKey, "unsupported_turn_status", time.Now()),
+		); err != nil {
 			return fmt.Errorf("record unsupported turn status %q: %w", completed.Turn.Status, err)
 		}
 	}
@@ -228,9 +234,9 @@ func (h *Host) closeAndRecover(client application, cause error, recovering chan 
 
 	h.operations.Lock()
 	recoveryContext, cancel := context.WithTimeout(context.Background(), stateTimeout)
-	_, recoveryErr := h.state.RecoverWorkers(
+	_, recoveryErr := h.recordWorkerRecovery(h.state.RecoverWorkers(
 		recoveryContext, h.controllerID, h.deviceID, time.Now(),
-	)
+	))
 	cancel()
 	h.operations.Unlock()
 	if recoveryErr != nil {

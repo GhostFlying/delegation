@@ -117,6 +117,14 @@ func TestRecoverWorkersPreservesRetryIntentAndAmbiguousTurns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var highWatermark uint64
+	for _, worker := range workers {
+		stored, err := state.GetWorker(ctx, worker.WorkerKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		highWatermark = max(highWatermark, stored.Revision)
+	}
 
 	recovered, err := state.RecoverWorkers(
 		ctx,
@@ -134,6 +142,7 @@ func TestRecoverWorkersPreservesRetryIntentAndAmbiguousTurns(t *testing.T) {
 		t.Fatalf("pending worker changed during recovery: %#v, %v", stored, err)
 	}
 
+	recoveryRevisions := make(map[uint64]struct{}, len(recovered))
 	for name, expected := range map[string]struct {
 		status      WorkerStatus
 		failureCode string
@@ -155,6 +164,13 @@ func TestRecoverWorkersPreservesRetryIntentAndAmbiguousTurns(t *testing.T) {
 			(stored.ActiveTurnID != "") != expected.activeTurn || stored.RetryTarget != "" {
 			t.Fatalf("recovered %s worker = %#v", name, stored)
 		}
+		if stored.Revision <= highWatermark {
+			t.Fatalf("recovered %s revision = %d, want > %d", name, stored.Revision, highWatermark)
+		}
+		if _, exists := recoveryRevisions[stored.Revision]; exists {
+			t.Fatalf("recovered workers reused revision %d", stored.Revision)
+		}
+		recoveryRevisions[stored.Revision] = struct{}{}
 	}
 	if again, err := state.RecoverWorkers(
 		ctx,

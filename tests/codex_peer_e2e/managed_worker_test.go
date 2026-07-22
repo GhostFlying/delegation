@@ -31,12 +31,14 @@ import (
 )
 
 const (
-	managedNetworkID = "123e4567-e89b-42d3-a456-426614174950"
-	managedDeviceID  = "123e4567-e89b-42d3-a456-426614174951"
-	managedTreeID    = "123e4567-e89b-42d3-a456-426614174952"
-	managedParentID  = "123e4567-e89b-42d3-a456-426614174953"
-	managedAgentID   = "123e4567-e89b-42d3-a456-426614174954"
-	managedCrashID   = "123e4567-e89b-42d3-a456-426614174955"
+	managedNetworkID       = "123e4567-e89b-42d3-a456-426614174950"
+	managedDeviceID        = "123e4567-e89b-42d3-a456-426614174951"
+	managedTreeID          = "123e4567-e89b-42d3-a456-426614174952"
+	managedParentID        = "123e4567-e89b-42d3-a456-426614174953"
+	managedAgentID         = "123e4567-e89b-42d3-a456-426614174954"
+	managedCrashID         = "123e4567-e89b-42d3-a456-426614174955"
+	managedFollowupID      = "123e4567-e89b-42d3-a456-426614174956"
+	managedCrashFollowupID = "123e4567-e89b-42d3-a456-426614174957"
 
 	managedCrashHelperEnvironment   = "DELEGATION_MANAGED_CRASH_HELPER"
 	managedCrashConfigEnvironment   = "DELEGATION_MANAGED_CRASH_CONFIG"
@@ -220,7 +222,8 @@ command = "delegation-workspace-config-must-not-start"
 
 	host = newHost()
 	resumed, err := host.Followup(context.Background(), workerhost.FollowupRequest{
-		Key: started.Worker.WorkerKey, Message: "managed-worker-case=resume Return probe-ok.",
+		OperationID: managedFollowupID, Key: started.Worker.WorkerKey,
+		Message: "managed-worker-case=resume Return probe-ok.",
 	})
 	if err != nil {
 		closeHost(host)
@@ -263,7 +266,8 @@ command = "delegation-workspace-config-must-not-start"
 		t.Fatalf("recovered running worker = %#v, ready = %#v", interrupted, ready)
 	}
 	restarted, err := host.Followup(context.Background(), workerhost.FollowupRequest{
-		Key: crashedKey, Message: "managed-worker-case=" + managedCrashResumeCase + " Return probe-ok.",
+		OperationID: managedCrashFollowupID, Key: crashedKey,
+		Message: "managed-worker-case=" + managedCrashResumeCase + " Return probe-ok.",
 	})
 	if err != nil {
 		closeHost(host)

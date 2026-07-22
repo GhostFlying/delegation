@@ -45,7 +45,9 @@ func (h *Host) startNewThread(
 		protocolErr := fmt.Errorf("app-server returned invalid threadId: %w", err)
 		return StartedTurn{Worker: worker}, h.retireClient(client, protocolErr), protocolErr
 	}
-	worker, err = h.state.AttachWorkerThread(ctx, worker.WorkerKey, result.Thread.ID, time.Now())
+	worker, err = h.recordWorkerChange(
+		h.state.AttachWorkerThread(ctx, worker.WorkerKey, result.Thread.ID, time.Now()),
+	)
 	if err != nil {
 		failureErr := h.failWorker(worker.WorkerKey, "thread_start_ambiguous", err)
 		return StartedTurn{Worker: worker}, h.retireClient(client, failureErr), failureErr
@@ -61,7 +63,7 @@ func (h *Host) startNewThread(
 		recovery, failureErr := h.failWorkerMCP(client, worker.WorkerKey, err)
 		return StartedTurn{Worker: worker}, recovery, failureErr
 	}
-	worker, err = h.state.MarkWorkerReady(ctx, worker.WorkerKey, time.Now())
+	worker, err = h.recordWorkerChange(h.state.MarkWorkerReady(ctx, worker.WorkerKey, time.Now()))
 	if err != nil {
 		return StartedTurn{Worker: worker}, h.retireClient(client, err), err
 	}
@@ -100,7 +102,9 @@ func (h *Host) resumeThread(
 		)
 		return worker, h.retireClient(client, protocolErr), protocolErr
 	}
-	worker, err = h.state.AttachWorkerThread(ctx, worker.WorkerKey, worker.CodexThreadID, time.Now())
+	worker, err = h.recordWorkerChange(
+		h.state.AttachWorkerThread(ctx, worker.WorkerKey, worker.CodexThreadID, time.Now()),
+	)
 	if err != nil {
 		return worker, h.retireClient(client, err), err
 	}
@@ -115,7 +119,7 @@ func (h *Host) resumeThread(
 		recovery, failureErr := h.failWorkerMCP(client, worker.WorkerKey, err)
 		return worker, recovery, failureErr
 	}
-	worker, err = h.state.MarkWorkerReady(ctx, worker.WorkerKey, time.Now())
+	worker, err = h.recordWorkerChange(h.state.MarkWorkerReady(ctx, worker.WorkerKey, time.Now()))
 	if err != nil {
 		return worker, h.retireClient(client, err), err
 	}
@@ -150,7 +154,9 @@ func (h *Host) startTurn(
 		protocolErr := fmt.Errorf("app-server returned invalid turnId: %w", err)
 		return StartedTurn{Worker: worker}, h.retireClient(client, protocolErr), protocolErr
 	}
-	worker, err = h.state.MarkWorkerRunning(ctx, worker.WorkerKey, result.Turn.ID, time.Now())
+	worker, err = h.recordWorkerChange(
+		h.state.MarkWorkerRunning(ctx, worker.WorkerKey, result.Turn.ID, time.Now()),
+	)
 	if err != nil {
 		return StartedTurn{Worker: worker}, h.retireClient(client, err), err
 	}
@@ -165,7 +171,9 @@ func (h *Host) retryPendingThread(
 ) (StartedTurn, <-chan struct{}, error) {
 	var err error
 	if h.isLoaded(client, worker.WorkerKey, worker.CodexThreadID) {
-		worker, err = h.state.AttachWorkerThread(ctx, worker.WorkerKey, worker.CodexThreadID, time.Now())
+		worker, err = h.recordWorkerChange(
+			h.state.AttachWorkerThread(ctx, worker.WorkerKey, worker.CodexThreadID, time.Now()),
+		)
 		if err != nil {
 			return StartedTurn{Worker: worker}, h.retireClient(client, err), err
 		}
@@ -180,7 +188,7 @@ func (h *Host) retryPendingThread(
 			recovery, failureErr := h.failWorkerMCP(client, worker.WorkerKey, err)
 			return StartedTurn{Worker: worker}, recovery, failureErr
 		}
-		worker, err = h.state.MarkWorkerReady(ctx, worker.WorkerKey, time.Now())
+		worker, err = h.recordWorkerChange(h.state.MarkWorkerReady(ctx, worker.WorkerKey, time.Now()))
 		if err != nil {
 			return StartedTurn{Worker: worker}, h.retireClient(client, err), err
 		}
@@ -207,9 +215,13 @@ func (h *Host) restoreWorkerAfterUnsent(
 	)
 	switch target {
 	case store.WorkerPending:
-		restored, err = h.state.RestoreWorkerPendingAfterUnsent(ctx, worker.WorkerKey, time.Now())
+		restored, err = h.recordWorkerChange(
+			h.state.RestoreWorkerPendingAfterUnsent(ctx, worker.WorkerKey, time.Now()),
+		)
 	case store.WorkerIdle:
-		restored, err = h.state.RestoreWorkerIdleAfterUnsent(ctx, worker.WorkerKey, time.Now())
+		restored, err = h.recordWorkerChange(
+			h.state.RestoreWorkerIdleAfterUnsent(ctx, worker.WorkerKey, time.Now()),
+		)
 	default:
 		err = fmt.Errorf("unsupported unsent recovery status %q", target)
 	}
@@ -413,7 +425,7 @@ func (h *Host) validateRuntimeDirectories() error {
 func (h *Host) failWorker(key store.WorkerKey, code string, cause error) error {
 	ctx, cancel := context.WithTimeout(context.Background(), stateTimeout)
 	defer cancel()
-	_, err := h.state.FailWorker(ctx, key, code, time.Now())
+	_, err := h.recordWorkerChange(h.state.FailWorker(ctx, key, code, time.Now()))
 	if err != nil {
 		fatalErr := errors.Join(cause, fmt.Errorf("record worker failure: %w", err))
 		h.fail(fatalErr)

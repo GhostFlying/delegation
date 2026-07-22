@@ -90,6 +90,7 @@ func TestHostBoundsSpawnAndFollowupPromptItems(t *testing.T) {
 		t.Fatal("Spawn accepted an oversized model-visible item")
 	}
 	if _, err := host.Followup(context.Background(), FollowupRequest{
+		OperationID: newTestID(),
 		Key: store.WorkerKey{
 			ControllerID: testControllerID,
 			TreeID:       testTreeID,
@@ -156,15 +157,24 @@ func TestHostSerializesEarlyCompletionAndColdResumesAfterCrash(t *testing.T) {
 
 	firstApplication.crash(errors.New("test app-server crash"))
 	waitForClientRetirement(t, host, firstApplication)
-	followup, err := host.Followup(context.Background(), FollowupRequest{
-		Key: started.Worker.WorkerKey, Message: "follow-up",
-	})
+	followupRequest := FollowupRequest{
+		OperationID: newTestID(), Key: started.Worker.WorkerKey, Message: "follow-up",
+	}
+	followup, err := host.Followup(context.Background(), followupRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if followup.Worker.Status != store.WorkerRunning ||
-		followup.Worker.CodexThreadID != started.Worker.CodexThreadID {
+		followup.Worker.CodexThreadID != started.Worker.CodexThreadID ||
+		followup.Receipt.Outcome != store.WorkerOutcomeStarted {
 		t.Fatalf("follow-up worker = %#v", followup.Worker)
+	}
+	replayed, err := host.Followup(context.Background(), followupRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed != followup {
+		t.Fatalf("follow-up replay = %#v, want %#v", replayed, followup)
 	}
 	record := secondApplication.snapshot()
 	if len(record.resumes) != 1 || record.resumes[0].ThreadID != started.Worker.CodexThreadID ||
@@ -217,7 +227,7 @@ func TestHostCompletionFencePrecedesRecovery(t *testing.T) {
 	waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerIdle)
 	blockedContext, blockedCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	_, blockedErr := host.Followup(blockedContext, FollowupRequest{
-		Key: started.Worker.WorkerKey, Message: "while recovery is fenced",
+		OperationID: newTestID(), Key: started.Worker.WorkerKey, Message: "while recovery is fenced",
 	})
 	blockedCancel()
 	if !errors.Is(blockedErr, context.DeadlineExceeded) {
@@ -229,7 +239,7 @@ func TestHostCompletionFencePrecedesRecovery(t *testing.T) {
 	close(firstApplication.closeGate)
 	waitForClientRetirement(t, host, firstApplication)
 	_, err := host.Followup(context.Background(), FollowupRequest{
-		Key: started.Worker.WorkerKey, Message: "after fence",
+		OperationID: newTestID(), Key: started.Worker.WorkerKey, Message: "after fence",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -300,7 +310,7 @@ func TestHostRetriesDeferredCompletionWithoutConsumerDeadlock(t *testing.T) {
 	followupDone := make(chan error, 1)
 	go func() {
 		_, err := host.Followup(context.Background(), FollowupRequest{
-			Key: started.Worker.WorkerKey, Message: "after retry",
+			OperationID: newTestID(), Key: started.Worker.WorkerKey, Message: "after retry",
 		})
 		followupDone <- err
 	}()
@@ -344,7 +354,7 @@ func TestHostFailsClosedWhenAppServerExitIsUnconfirmed(t *testing.T) {
 		t.Fatalf("host error = %v, want ErrProcessExitUnconfirmed", host.Err())
 	}
 	_, err := host.Followup(context.Background(), FollowupRequest{
-		Key: started.Worker.WorkerKey, Message: "must not restart",
+		OperationID: newTestID(), Key: started.Worker.WorkerKey, Message: "must not restart",
 	})
 	if !errors.Is(err, appserver.ErrProcessExitUnconfirmed) {
 		t.Fatalf("Followup error = %v, want ErrProcessExitUnconfirmed", err)
@@ -478,7 +488,8 @@ func TestHostInterruptsAmbiguousInitialTurnForExplicitFollowup(t *testing.T) {
 		t.Fatalf("turn/start calls = %d, want 1", got)
 	}
 	followup, err := host.Followup(context.Background(), FollowupRequest{
-		Key: interrupted.WorkerKey, Message: "continue only after explicit confirmation",
+		OperationID: newTestID(), Key: interrupted.WorkerKey,
+		Message: "continue only after explicit confirmation",
 	})
 	if err != nil || followup.Worker.Status != store.WorkerRunning {
 		t.Fatalf("explicit Followup() = %#v, %v", followup, err)
@@ -723,7 +734,7 @@ func TestHostRecoversRunningWorkerWhenAppServerDies(t *testing.T) {
 		t.Fatalf("interrupted Spawn retry error = %v, want ErrWorkerInterrupted", err)
 	}
 	resumed, err := host.Followup(context.Background(), FollowupRequest{
-		Key: started.Worker.WorkerKey, Message: "resume after loss",
+		OperationID: newTestID(), Key: started.Worker.WorkerKey, Message: "resume after loss",
 	})
 	if err != nil || resumed.Worker.Status != store.WorkerRunning {
 		t.Fatalf("Followup() = %#v, %v", resumed, err)
@@ -743,7 +754,7 @@ func TestHostKeepsColdResumeRetryableAfterInterruption(t *testing.T) {
 	waitForClientRetirement(t, host, firstApplication)
 
 	_, err := host.Followup(context.Background(), FollowupRequest{
-		Key: started.Worker.WorkerKey, Message: "interrupted follow-up",
+		OperationID: newTestID(), Key: started.Worker.WorkerKey, Message: "interrupted follow-up",
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("interrupted Followup() error = %v, want deadline exceeded", err)
@@ -751,7 +762,7 @@ func TestHostKeepsColdResumeRetryableAfterInterruption(t *testing.T) {
 	waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerIdle)
 
 	retried, err := host.Followup(context.Background(), FollowupRequest{
-		Key: started.Worker.WorkerKey, Message: "retry follow-up",
+		OperationID: newTestID(), Key: started.Worker.WorkerKey, Message: "retry follow-up",
 	})
 	if err != nil || retried.Worker.Status != store.WorkerRunning {
 		t.Fatalf("retry Followup() = %#v, %v", retried, err)
@@ -772,7 +783,9 @@ func TestHostRetriesUnsentColdResumeOnSameAppServer(t *testing.T) {
 	firstApplication.crash(errors.New("force cold resume"))
 	waitForClientRetirement(t, host, firstApplication)
 
-	request := FollowupRequest{Key: started.Worker.WorkerKey, Message: "retry cold resume"}
+	request := FollowupRequest{
+		OperationID: newTestID(), Key: started.Worker.WorkerKey, Message: "retry cold resume",
+	}
 	if _, err := host.Followup(context.Background(), request); !errors.Is(err, appserver.ErrRequestNotWritten) {
 		t.Fatalf("unsent cold Followup() error = %v", err)
 	}
@@ -781,6 +794,7 @@ func TestHostRetriesUnsentColdResumeOnSameAppServer(t *testing.T) {
 		t.Fatalf("unsent cold resume retired shared app-server %d times", got)
 	}
 	secondApplication.resumeErr = nil
+	request.OperationID = newTestID()
 	retried, err := host.Followup(context.Background(), request)
 	if err != nil || retried.Worker.Status != store.WorkerRunning {
 		t.Fatalf("retry cold Followup() = %#v, %v", retried, err)
@@ -798,7 +812,9 @@ func TestHostRetriesUnsentLoadedTurnOnSameAppServer(t *testing.T) {
 	waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerIdle)
 	application.turnStartErr = errors.Join(appserver.ErrRequestNotWritten, context.Canceled)
 
-	request := FollowupRequest{Key: started.Worker.WorkerKey, Message: "retry loaded turn"}
+	request := FollowupRequest{
+		OperationID: newTestID(), Key: started.Worker.WorkerKey, Message: "retry loaded turn",
+	}
 	if _, err := host.Followup(context.Background(), request); !errors.Is(err, appserver.ErrRequestNotWritten) {
 		t.Fatalf("unsent loaded Followup() error = %v", err)
 	}
@@ -807,6 +823,7 @@ func TestHostRetriesUnsentLoadedTurnOnSameAppServer(t *testing.T) {
 		t.Fatalf("unsent loaded turn retired shared app-server %d times", got)
 	}
 	application.turnStartErr = nil
+	request.OperationID = newTestID()
 	retried, err := host.Followup(context.Background(), request)
 	if err != nil || retried.Worker.Status != store.WorkerRunning {
 		t.Fatalf("retry loaded Followup() = %#v, %v", retried, err)
@@ -869,7 +886,8 @@ func TestHostColdResumesIdleWorkerWhenThreadCloses(t *testing.T) {
 	waitForClientRetirement(t, host, firstApplication)
 
 	resumed, err := host.Followup(context.Background(), FollowupRequest{
-		Key: started.Worker.WorkerKey, Message: "cold resume closed idle thread",
+		OperationID: newTestID(), Key: started.Worker.WorkerKey,
+		Message: "cold resume closed idle thread",
 	})
 	if err != nil || resumed.Worker.Status != store.WorkerRunning {
 		t.Fatalf("Followup() = %#v, %v", resumed, err)
@@ -1238,6 +1256,16 @@ func newTestHostWithWorkspaceRoot(
 	workspaceRoot string,
 	applications ...*fakeApplication,
 ) (*Host, *store.PeerStore, testHostPaths) {
+	return newTestHostWithStateSetup(t, maxSlots, workspaceRoot, nil, applications...)
+}
+
+func newTestHostWithStateSetup(
+	t *testing.T,
+	maxSlots int,
+	workspaceRoot string,
+	setup func(*store.PeerStore, string),
+	applications ...*fakeApplication,
+) (*Host, *store.PeerStore, testHostPaths) {
 	t.Helper()
 	root := t.TempDir()
 	paths := testHostPaths{
@@ -1267,6 +1295,9 @@ func newTestHostWithWorkspaceRoot(
 	state, err := store.OpenPeer(context.Background(), filepath.Join(root, "state", "peer.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if setup != nil {
+		setup(state, workspaceRoot)
 	}
 	var factoryMu sync.Mutex
 	applicationIndex := 0
@@ -1410,7 +1441,9 @@ func assertManagedProfile(
 	if !reflect.DeepEqual(config["mcp_servers."+workerServerName], wantMCP) {
 		t.Fatalf("worker MCP config = %#v, want %#v", config["mcp_servers."+workerServerName], wantMCP)
 	}
-	if _, found := paths.launchOptions.Environment["CODEX_ACCESS_TOKEN"]; found ||
+	if paths.launchOptions.Environment["CODEX_ACCESS_TOKEN"] != "host-auth" ||
+		paths.launchOptions.Environment["CODEX_API_KEY"] != "ambient-codex-auth" ||
+		paths.launchOptions.Environment["OPENAI_API_KEY"] != "ambient-openai-auth" ||
 		paths.launchOptions.Environment["TEST_PROVIDER_VALUE"] != "provider-auth" {
 		t.Fatalf("managed app-server environment = %#v", paths.launchOptions.Environment)
 	}
@@ -1420,17 +1453,11 @@ func assertManagedProfile(
 	if _, found := paths.launchOptions.Environment["CODEX_SQLITE_HOME"]; found {
 		t.Fatalf("managed app-server inherited CODEX_SQLITE_HOME: %#v", paths.launchOptions.Environment)
 	}
-	if _, found := paths.launchOptions.Environment["CODEX_API_KEY"]; found {
-		t.Fatalf("managed app-server inherited CODEX_API_KEY: %#v", paths.launchOptions.Environment)
-	}
-	if _, found := paths.launchOptions.Environment["OPENAI_API_KEY"]; found {
-		t.Fatalf("managed app-server inherited OPENAI_API_KEY: %#v", paths.launchOptions.Environment)
-	}
 	if !slices.Contains(paths.launchOptions.UnsetEnvironment, codexconfig.EnvironmentVariable) ||
-		!slices.Contains(paths.launchOptions.UnsetEnvironment, "CODEX_ACCESS_TOKEN") ||
 		!slices.Contains(paths.launchOptions.UnsetEnvironment, "CODEX_SQLITE_HOME") ||
-		!slices.Contains(paths.launchOptions.UnsetEnvironment, "CODEX_API_KEY") ||
-		!slices.Contains(paths.launchOptions.UnsetEnvironment, "OPENAI_API_KEY") ||
+		slices.Contains(paths.launchOptions.UnsetEnvironment, "CODEX_ACCESS_TOKEN") ||
+		slices.Contains(paths.launchOptions.UnsetEnvironment, "CODEX_API_KEY") ||
+		slices.Contains(paths.launchOptions.UnsetEnvironment, "OPENAI_API_KEY") ||
 		slices.Contains(paths.launchOptions.UnsetEnvironment, "TEST_PROVIDER_VALUE") {
 		t.Fatalf("managed app-server unset environment = %#v", paths.launchOptions.UnsetEnvironment)
 	}
@@ -1504,6 +1531,8 @@ type fakeRecord struct {
 	starts     []threadStartParams
 	resumes    []threadResumeParams
 	turns      []turnStartParams
+	steers     []turnSteerParams
+	interrupts []turnInterruptParams
 	preflights int
 }
 
@@ -1520,6 +1549,10 @@ type fakeApplication struct {
 	resumeErr            error
 	mcpStatusErr         error
 	turnStartErr         error
+	turnSteerErr         error
+	turnInterruptErr     error
+	turnSteerHook        func(turnSteerParams)
+	steerResponseTurnID  string
 	completeBeforeReturn bool
 	completionStatus     string
 	crashAfterComplete   bool
@@ -1663,6 +1696,36 @@ func (a *fakeApplication) TurnStart(ctx context.Context, params, result any) err
 	return nil
 }
 
+func (a *fakeApplication) TurnSteer(_ context.Context, params, result any) error {
+	steer := params.(turnSteerParams)
+	a.mu.Lock()
+	a.record.steers = append(a.record.steers, steer)
+	hook := a.turnSteerHook
+	turnSteerErr := a.turnSteerErr
+	responseTurnID := a.steerResponseTurnID
+	a.mu.Unlock()
+	if hook != nil {
+		hook(steer)
+	}
+	if turnSteerErr != nil {
+		return turnSteerErr
+	}
+	if responseTurnID == "" {
+		responseTurnID = steer.ExpectedTurnID
+	}
+	result.(*turnSteerResult).TurnID = responseTurnID
+	return nil
+}
+
+func (a *fakeApplication) TurnInterrupt(_ context.Context, params, _ any) error {
+	interrupt := params.(turnInterruptParams)
+	a.mu.Lock()
+	a.record.interrupts = append(a.record.interrupts, interrupt)
+	turnInterruptErr := a.turnInterruptErr
+	a.mu.Unlock()
+	return turnInterruptErr
+}
+
 func (a *fakeApplication) Notifications() <-chan appserver.Notification {
 	return a.notifications
 }
@@ -1738,6 +1801,8 @@ func (a *fakeApplication) snapshot() fakeRecord {
 		starts:     append([]threadStartParams(nil), a.record.starts...),
 		resumes:    append([]threadResumeParams(nil), a.record.resumes...),
 		turns:      append([]turnStartParams(nil), a.record.turns...),
+		steers:     append([]turnSteerParams(nil), a.record.steers...),
+		interrupts: append([]turnInterruptParams(nil), a.record.interrupts...),
 		preflights: a.record.preflights,
 	}
 }
