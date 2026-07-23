@@ -107,6 +107,73 @@ func TestWorkspaceCompletionPublishesCommittedAndDirtyChangesBeforeTerminalState
 	}
 }
 
+func TestWorkspaceFailedTurnPublishesChangesBeforeExposingFailure(t *testing.T) {
+	application := newFakeApplication()
+	workspaceID := newTestID()
+	agentID := newTestID()
+	var workspacePath string
+	host, state, _ := newTestHostWithStateSetup(t, 1, "", func(state *store.PeerStore, root string) {
+		workspacePath = filepath.Join(root, workspaceSyncName(testTreeID, workspaceID))
+		initializeTestRepository(t, workspacePath)
+		recordExactPreparedWorkspace(t, state, testTreeID, workspaceID, workspacePath)
+	}, application)
+	started, err := host.Spawn(context.Background(), SpawnRequest{
+		TreeID: testTreeID, AgentID: agentID, ParentAgentID: testParentID,
+		TaskName: "failed changes", Prompt: "modify the repository and fail", WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(workspacePath, "nested", "source.txt"), []byte("failed turn change\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	application.notifyCompletion(
+		started.Worker.CodexThreadID, started.Worker.ActiveTurnID, "failed",
+	)
+
+	artifact := waitChangesPublication(t, host)
+	worker := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerFinalizing)
+	if worker.FinalTarget != store.WorkerFailed || worker.FinalFailureCode != "turn_failed" ||
+		worker.FailureCode != "" || worker.ActiveTurnID != started.Worker.ActiveTurnID {
+		t.Fatalf("failed turn was exposed before artifact ACK: %#v", worker)
+	}
+	if artifact.State != store.ChangesPublishPending || artifact.Status != store.ChangesAvailable ||
+		artifact.TurnID != started.Worker.ActiveTurnID || artifact.WorkspaceID != workspaceID ||
+		artifact.CompletionTarget != store.WorkerFailed ||
+		artifact.CompletionFailureCode != "turn_failed" || artifact.ResultClean ||
+		len(artifact.Parts) != 1 || artifact.Parts[0].Kind != store.ChangesArtifactOverlay ||
+		len(artifact.BaseWarnings) != 0 || len(artifact.ResultWarnings) != 0 ||
+		artifact.FailureCode != "" {
+		t.Fatalf("failed turn pending artifact = %#v", artifact)
+	}
+
+	finalization, err := host.AcknowledgeChangesArtifact(
+		context.Background(), worker.WorkerKey, artifact.ArtifactID, 13,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalization.Worker.Status != store.WorkerFailed ||
+		finalization.Worker.FailureCode != "turn_failed" ||
+		finalization.Worker.FinalTarget != "" || finalization.Worker.FinalFailureCode != "" ||
+		finalization.Worker.ActiveTurnID != "" ||
+		finalization.Artifact.State != store.ChangesPublished ||
+		finalization.Artifact.BrokerSequence != 13 {
+		t.Fatalf("failed turn acknowledged finalization = %#v", finalization)
+	}
+	if publications, err := host.ListPendingChangesPublications(context.Background()); err != nil ||
+		len(publications) != 0 {
+		t.Fatalf("pending publications after failed-turn ACK = %#v, %v", publications, err)
+	}
+	if captures, err := state.ListPendingChangesCaptures(
+		context.Background(), testControllerID, testDeviceID, 1,
+	); err != nil || len(captures) != 0 {
+		t.Fatalf("pending captures after failed-turn ACK = %#v, %v", captures, err)
+	}
+}
+
 func TestStartupRecoversWorkspaceCapturePending(t *testing.T) {
 	workspaceID := newTestID()
 	agentID := newTestID()
