@@ -176,6 +176,8 @@ func (r Runner) captureOverlay(
 	}
 	intentToAdd := pathDifference(visible, invisible)
 	staged := pathSet(visible)
+	worktreeChanged := pathSet(unstaged)
+	untrackedSet := pathSet(untracked)
 	paths := sortedPathUnion(visible, unstaged, untracked)
 	if len(paths) > workspaceoverlay.MaximumEntries {
 		return capturedOverlay{}, fmt.Errorf("dirty workspace paths exceed limit of %d", workspaceoverlay.MaximumEntries)
@@ -226,9 +228,12 @@ func (r Runner) captureOverlay(
 			}
 			state.PayloadSHA256 = payload.SHA256
 		}
-		worktree, err := collector.captureWorktree(root, name, state, trustFileMode)
-		if err != nil {
-			return capturedOverlay{}, err
+		worktree := workspaceoverlay.WorktreeState{Kind: workspaceoverlay.NodeAbsent}
+		if state != nil || worktreeChanged[name] || untrackedSet[name] {
+			worktree, err = collector.captureWorktree(root, name, state, trustFileMode)
+			if err != nil {
+				return capturedOverlay{}, err
+			}
 		}
 		entries = append(entries, workspaceoverlay.Entry{Path: name, Index: state, Worktree: worktree})
 	}
