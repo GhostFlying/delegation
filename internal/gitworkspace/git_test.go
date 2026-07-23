@@ -105,7 +105,32 @@ func TestInspectReportsSubmoduleAndLFSWarnings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"lfs_payload_not_transferred", "submodule_repository_not_transferred"}
+	want := []string{
+		protocol.WorkspaceWarningLFSPayloadNotTransferred,
+		protocol.WorkspaceWarningSubmoduleRepositoryNotTransferred,
+	}
+	if !reflect.DeepEqual(repository.Manifest.Warnings, want) {
+		t.Fatalf("workspace warnings = %#v, want %#v", repository.Manifest.Warnings, want)
+	}
+}
+
+func TestInspectReportsUncommittedWorktreeLFSAttributes(t *testing.T) {
+	runner := testRunner(t)
+	remote, source, _ := createRemoteRepository(t, runner.Binary)
+	if err := os.WriteFile(
+		filepath.Join(source, ".gitattributes"), []byte("*.bin filter=lfs\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "untracked.bin"), []byte("pointer\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	repository, err := runner.Inspect(context.Background(), source, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{protocol.WorkspaceWarningLFSPayloadNotTransferred}
 	if !reflect.DeepEqual(repository.Manifest.Warnings, want) {
 		t.Fatalf("workspace warnings = %#v, want %#v", repository.Manifest.Warnings, want)
 	}

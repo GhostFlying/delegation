@@ -175,18 +175,10 @@ func (r Runner) Inspect(ctx context.Context, sourcePath, gitURL string) (Reposit
 		return Repository{}, err
 	}
 	clean := len(captured.manifest.Entries) == 0
-	warnings := make([]string, 0, 2)
-	if hasSubmodules, checkErr := r.hasSubmodules(ctx, resolvedRoot); checkErr != nil {
-		return Repository{}, checkErr
-	} else if hasSubmodules {
-		warnings = append(warnings, "submodule_repository_not_transferred")
+	warnings, err := r.contentWarnings(ctx, resolvedRoot)
+	if err != nil {
+		return Repository{}, err
 	}
-	if hasLFS, checkErr := r.hasLFS(ctx, resolvedRoot); checkErr != nil {
-		return Repository{}, checkErr
-	} else if hasLFS {
-		warnings = append(warnings, "lfs_payload_not_transferred")
-	}
-	slices.Sort(warnings)
 	manifest := protocol.WorkspaceManifest{
 		GitURL: gitURL, HeadOID: headOID, ObjectFormat: objectFormat,
 		WorkingDirectory: filepath.ToSlash(relative), Clean: clean,
@@ -362,34 +354,117 @@ func ManifestHash(manifest protocol.WorkspaceManifest) (string, error) {
 }
 
 func (r Runner) hasSubmodules(ctx context.Context, root string) (bool, error) {
-	output, err := r.output(ctx, root, "ls-files", "--stage")
+	output, err := r.outputWithLimit(
+		ctx, root, maximumGitPathOutput, "ls-files", "--format=%(objectmode)",
+	)
 	if err != nil {
 		return false, preserveContextError(err, errors.New("inspect source Git index modes"))
 	}
-	return bytes.Contains(output, []byte("160000 ")), nil
+	return slices.ContainsFunc(bytes.Fields(output), func(mode []byte) bool {
+		return bytes.Equal(mode, []byte("160000"))
+	}), nil
 }
 
 func (r Runner) hasLFS(ctx context.Context, root string) (bool, error) {
-	output, err := r.output(ctx, root, "ls-files", "-z")
+	indexPathOutput, err := r.outputWithLimit(
+		ctx, root, maximumGitPathOutput, "ls-files", "-z",
+	)
 	if err != nil {
 		return false, preserveContextError(err, errors.New("list source Git index"))
 	}
-	if len(output) == 0 {
-		return false, nil
+	indexPaths, err := parseNULPaths(indexPathOutput)
+	if err != nil {
+		return false, fmt.Errorf("list source Git index: %w", err)
 	}
-	attributes, err := r.outputWithInput(
-		ctx, root, output, "check-attr", "--cached", "-z", "--stdin", "filter",
+	if hasLFS, checkErr := r.pathsHaveLFSAttribute(ctx, root, indexPaths, true); checkErr != nil {
+		return false, checkErr
+	} else if hasLFS {
+		return true, nil
+	}
+	worktreePathOutput, err := r.outputWithLimit(
+		ctx, root, maximumGitPathOutput,
+		"ls-files", "-z", "--cached", "--others", "--exclude-standard",
 	)
 	if err != nil {
-		return false, preserveContextError(err, errors.New("inspect source Git LFS attributes"))
+		return false, preserveContextError(err, errors.New("list source Git worktree"))
 	}
-	fields := bytes.Split(bytes.TrimSuffix(attributes, []byte{0}), []byte{0})
-	for index := 2; index < len(fields); index += 3 {
-		if bytes.Equal(fields[index], []byte("lfs")) {
-			return true, nil
+	worktreePaths, err := parseNULPaths(worktreePathOutput)
+	if err != nil {
+		return false, fmt.Errorf("list source Git worktree: %w", err)
+	}
+	return r.pathsHaveLFSAttribute(ctx, root, worktreePaths, false)
+}
+
+func (r Runner) pathsHaveLFSAttribute(
+	ctx context.Context,
+	root string,
+	paths []string,
+	cached bool,
+) (bool, error) {
+	if len(paths) == 0 {
+		return false, nil
+	}
+	for _, batch := range batchAttributePaths(paths) {
+		var input bytes.Buffer
+		for _, path := range batch {
+			input.WriteString(path)
+			input.WriteByte(0)
+		}
+		args := []string{"check-attr"}
+		if cached {
+			args = append(args, "--cached")
+		}
+		args = append(args, "-z", "--stdin", "filter")
+		attributes, err := r.outputWithInput(ctx, root, input.Bytes(), args...)
+		if err != nil {
+			return false, preserveContextError(err, errors.New("inspect source Git LFS attributes"))
+		}
+		fields := bytes.Split(bytes.TrimSuffix(attributes, []byte{0}), []byte{0})
+		if len(fields)%3 != 0 {
+			return false, errors.New("Git returned invalid source LFS attributes")
+		}
+		for index := 2; index < len(fields); index += 3 {
+			if bytes.Equal(fields[index], []byte("lfs")) {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
+}
+
+func batchAttributePaths(paths []string) [][]string {
+	const maximumBatchBytes = 256 * 1024
+	if len(paths) == 0 {
+		return nil
+	}
+	batches := make([][]string, 0, len(paths))
+	for len(paths) != 0 {
+		bytes := 0
+		end := 0
+		for end < len(paths) && (end == 0 || bytes+len(paths[end])+1 <= maximumBatchBytes) {
+			bytes += len(paths[end]) + 1
+			end++
+		}
+		batches = append(batches, paths[:end])
+		paths = paths[end:]
+	}
+	return batches
+}
+
+func (r Runner) contentWarnings(ctx context.Context, root string) ([]string, error) {
+	warnings := make([]string, 0, 2)
+	if hasSubmodules, err := r.hasSubmodules(ctx, root); err != nil {
+		return nil, err
+	} else if hasSubmodules {
+		warnings = append(warnings, protocol.WorkspaceWarningSubmoduleRepositoryNotTransferred)
+	}
+	if hasLFS, err := r.hasLFS(ctx, root); err != nil {
+		return nil, err
+	} else if hasLFS {
+		warnings = append(warnings, protocol.WorkspaceWarningLFSPayloadNotTransferred)
+	}
+	slices.Sort(warnings)
+	return warnings, nil
 }
 
 func (r Runner) run(ctx context.Context, directory string, args ...string) error {

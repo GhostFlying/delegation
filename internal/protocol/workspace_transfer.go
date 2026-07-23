@@ -9,10 +9,12 @@ import (
 )
 
 const (
-	WorkspaceArtifactChunkBytes               = 128 * 1024
-	MaximumWorkspaceArtifactBytes       int64 = 256 * 1024 * 1024
-	MaximumWorkspaceTransferBytes       int64 = 512 * 1024 * 1024
-	WorkspaceWarningFullHistoryFallback       = "remote_git_full_history_fallback"
+	WorkspaceArtifactChunkBytes                             = 128 * 1024
+	MaximumWorkspaceArtifactBytes                     int64 = 256 * 1024 * 1024
+	MaximumWorkspaceTransferBytes                     int64 = 512 * 1024 * 1024
+	WorkspaceWarningFullHistoryFallback                     = "remote_git_full_history_fallback"
+	WorkspaceWarningLFSPayloadNotTransferred                = "lfs_payload_not_transferred"
+	WorkspaceWarningSubmoduleRepositoryNotTransferred       = "submodule_repository_not_transferred"
 )
 
 type WorkspaceArtifactKind string
