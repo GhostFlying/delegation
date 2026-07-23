@@ -19,6 +19,8 @@ const (
 	connectorTestArtifactID  = "123e4567-e89b-42d3-a456-426614174206"
 	connectorTestTurnID      = "123e4567-e89b-42d3-a456-426614174207"
 	connectorTestWorkspaceID = "123e4567-e89b-42d3-a456-426614174208"
+	connectorSecondArtifact  = "123e4567-e89b-42d3-a456-426614174209"
+	connectorSecondTurn      = "123e4567-e89b-42d3-a456-426614174210"
 )
 
 type changesArtifactAcknowledgement struct {
@@ -36,6 +38,61 @@ type changesArtifactTestSource struct {
 	pending []ChangesArtifactPublication
 	changes chan struct{}
 	acked   chan changesArtifactAcknowledgement
+}
+
+type timeoutOnceAcknowledgementSource struct {
+	*changesArtifactTestSource
+	attempts atomic.Int64
+}
+
+type blockingChangesArtifactSource struct {
+	changes       chan struct{}
+	initialListed chan struct{}
+	blocked       chan struct{}
+	release       chan struct{}
+	calls         atomic.Int64
+}
+
+func (s *timeoutOnceAcknowledgementSource) AcknowledgeChangesArtifact(
+	ctx context.Context,
+	publication ChangesArtifactPublication,
+	sequence uint64,
+) error {
+	if s.attempts.Add(1) == 1 {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return s.changesArtifactTestSource.AcknowledgeChangesArtifact(ctx, publication, sequence)
+}
+
+func newBlockingChangesArtifactSource() *blockingChangesArtifactSource {
+	return &blockingChangesArtifactSource{
+		changes: make(chan struct{}, 1), initialListed: make(chan struct{}),
+		blocked: make(chan struct{}), release: make(chan struct{}),
+	}
+}
+
+func (s *blockingChangesArtifactSource) ArtifactChanges() <-chan struct{} { return s.changes }
+
+func (s *blockingChangesArtifactSource) ListPendingChangesPublications(
+	context.Context,
+) ([]ChangesArtifactPublication, error) {
+	switch s.calls.Add(1) {
+	case 1:
+		close(s.initialListed)
+	case 2:
+		close(s.blocked)
+		<-s.release
+	}
+	return nil, nil
+}
+
+func (*blockingChangesArtifactSource) AcknowledgeChangesArtifact(
+	context.Context,
+	ChangesArtifactPublication,
+	uint64,
+) error {
+	return errors.New("unexpected changes artifact acknowledgement")
 }
 
 func newChangesArtifactTestSource(
@@ -97,7 +154,7 @@ func (s *changesArtifactTestSource) pendingCount() int {
 	return len(s.pending)
 }
 
-func TestConnectorPublishesPendingChangesBeforeReadiness(t *testing.T) {
+func TestConnectorReadinessDoesNotWaitForPendingChangesPublication(t *testing.T) {
 	publication := testChangesArtifactPublication()
 	source := newChangesArtifactTestSource(publication)
 	requestSeen := make(chan ChangesArtifactPublication, 1)
@@ -117,22 +174,15 @@ func TestConnectorPublishesPendingChangesBeforeReadiness(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := runClient(client, ctx)
 
+	waitReady(t, client)
 	received := waitChangesArtifactPublication(t, requestSeen)
 	assertSameChangesArtifactPublication(t, received, publication)
-	readyContext, cancelReady := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	err := client.WaitReady(readyContext)
-	cancelReady()
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("connector became ready before changes artifact acknowledgement: %v", err)
-	}
 	close(releaseResponse)
 	acknowledgement := waitChangesArtifactAcknowledgement(t, source.acked)
 	assertSameChangesArtifactPublication(t, acknowledgement.publication, publication)
 	if acknowledgement.sequence != 17 || source.pendingCount() != 0 {
 		t.Fatalf("changes artifact acknowledgement = %#v, pending = %d", acknowledgement, source.pendingCount())
 	}
-	waitReady(t, client)
-
 	cancel()
 	close(holdConnection)
 	if err := waitClient(done); err != nil {
@@ -224,30 +274,163 @@ func TestConnectorReplaysExactChangesArtifactAfterLostResponse(t *testing.T) {
 	}
 }
 
-func TestConnectorRejectsMismatchedChangesArtifactResult(t *testing.T) {
-	publication := testChangesArtifactPublication()
-	source := newChangesArtifactTestSource(publication)
+func TestConnectorReportsTimedOutChangesRetriesAndDrainsLaterArtifacts(t *testing.T) {
+	rejected := testChangesArtifactPublication()
+	later := testChangesArtifactPublication()
+	later.Params.ArtifactID = connectorSecondArtifact
+	later.Params.TurnID = connectorSecondTurn
+	source := newChangesArtifactTestSource(rejected, later)
+	requests := make(chan ChangesArtifactPublication, 3)
+	holdConnection := make(chan struct{})
+	var connections atomic.Int64
+	var rejectedAttempts atomic.Int64
 	server := newFakeBroker(t, func(connection *websocket.Conn) {
-		request := readChangesArtifactPublication(t, connection)
-		writeTestResult(t, connection, request.envelope, protocol.PublishChangesArtifactResult{
-			ArtifactID: connectorTestMessageID, Sequence: 31,
-		})
+		connections.Add(1)
+		for range 3 {
+			request := readChangesArtifactPublication(t, connection)
+			requests <- request.publication
+			if request.publication.Params.ArtifactID == rejected.Params.ArtifactID &&
+				rejectedAttempts.Add(1) == 1 {
+				continue
+			}
+			sequence := uint64(41)
+			if request.publication.Params.ArtifactID == later.Params.ArtifactID {
+				sequence = 40
+			}
+			writeTestResult(t, connection, request.envelope, protocol.PublishChangesArtifactResult{
+				ArtifactID: request.publication.Params.ArtifactID, Sequence: sequence,
+			})
+		}
+		<-holdConnection
 	})
 	defer server.Close()
 	client := newChangesArtifactClient(t, websocketURL(server.URL), source)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	healthy, err := client.runSession(ctx)
-	if err == nil || !strings.Contains(err.Error(), "mismatched changes artifact") || healthy {
-		t.Fatalf("mismatched publication result = healthy %v, error %v", healthy, err)
+	client.reconnectMin = 50 * time.Millisecond
+	client.reconnectMax = 50 * time.Millisecond
+	client.artifactCallLimit = 25 * time.Millisecond
+	reported := make(chan error, 1)
+	client.reportError = func(err error) {
+		select {
+		case reported <- err:
+		default:
+		}
 	}
-	if source.pendingCount() != 1 {
-		t.Fatalf("mismatched result acknowledged local outbox; pending = %d", source.pendingCount())
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runClient(client, ctx)
+	waitReady(t, client)
+
+	first := waitChangesArtifactPublication(t, requests)
+	second := waitChangesArtifactPublication(t, requests)
+	third := waitChangesArtifactPublication(t, requests)
+	assertSameChangesArtifactPublication(t, first, rejected)
+	assertSameChangesArtifactPublication(t, second, later)
+	assertSameChangesArtifactPublication(t, third, rejected)
 	select {
-	case acknowledgement := <-source.acked:
-		t.Fatalf("mismatched result was acknowledged: %#v", acknowledgement)
-	default:
+	case err := <-reported:
+		if !strings.Contains(err.Error(), "context deadline exceeded") {
+			t.Fatalf("reported artifact error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("connector did not report the timed out changes artifact")
+	}
+	laterAcknowledgement := waitChangesArtifactAcknowledgement(t, source.acked)
+	assertSameChangesArtifactPublication(t, laterAcknowledgement.publication, later)
+	if laterAcknowledgement.sequence != 40 {
+		t.Fatalf("later artifact acknowledgement = %#v", laterAcknowledgement)
+	}
+	retriedAcknowledgement := waitChangesArtifactAcknowledgement(t, source.acked)
+	assertSameChangesArtifactPublication(t, retriedAcknowledgement.publication, rejected)
+	if retriedAcknowledgement.sequence != 41 || source.pendingCount() != 0 {
+		t.Fatalf("retried artifact acknowledgement = %#v, pending = %d", retriedAcknowledgement, source.pendingCount())
+	}
+	if !client.Status().Connected || connections.Load() != 1 || rejectedAttempts.Load() != 2 {
+		t.Fatalf("artifact rejection changed connector session: status=%#v connections=%d attempts=%d",
+			client.Status(), connections.Load(), rejectedAttempts.Load())
+	}
+
+	cancel()
+	close(holdConnection)
+	if err := waitClient(done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConnectorAcknowledgementTimeoutDoesNotStarveLaterArtifact(t *testing.T) {
+	first := testChangesArtifactPublication()
+	later := testChangesArtifactPublication()
+	later.Params.ArtifactID = connectorSecondArtifact
+	later.Params.TurnID = connectorSecondTurn
+	source := &timeoutOnceAcknowledgementSource{
+		changesArtifactTestSource: newChangesArtifactTestSource(first, later),
+	}
+	requests := make(chan ChangesArtifactPublication, 3)
+	holdConnection := make(chan struct{})
+	var connections atomic.Int64
+	server := newFakeBroker(t, func(connection *websocket.Conn) {
+		connections.Add(1)
+		for range 3 {
+			request := readChangesArtifactPublication(t, connection)
+			requests <- request.publication
+			sequence := uint64(51)
+			if request.publication.Params.ArtifactID == later.Params.ArtifactID {
+				sequence = 52
+			}
+			writeTestResult(t, connection, request.envelope, protocol.PublishChangesArtifactResult{
+				ArtifactID: request.publication.Params.ArtifactID, Sequence: sequence,
+			})
+		}
+		<-holdConnection
+	})
+	defer server.Close()
+	client := newChangesArtifactClient(t, websocketURL(server.URL), source)
+	client.reconnectMin = 50 * time.Millisecond
+	client.reconnectMax = 50 * time.Millisecond
+	client.artifactCallLimit = 25 * time.Millisecond
+	reported := make(chan error, 1)
+	client.reportError = func(err error) {
+		select {
+		case reported <- err:
+		default:
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runClient(client, ctx)
+	waitReady(t, client)
+
+	firstRequest := waitChangesArtifactPublication(t, requests)
+	laterRequest := waitChangesArtifactPublication(t, requests)
+	replayedRequest := waitChangesArtifactPublication(t, requests)
+	assertSameChangesArtifactPublication(t, firstRequest, first)
+	assertSameChangesArtifactPublication(t, laterRequest, later)
+	assertSameChangesArtifactPublication(t, replayedRequest, first)
+	select {
+	case err := <-reported:
+		if !strings.Contains(err.Error(), "context deadline exceeded") {
+			t.Fatalf("reported acknowledgement error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("connector did not report the timed out changes artifact acknowledgement")
+	}
+	laterAcknowledgement := waitChangesArtifactAcknowledgement(t, source.acked)
+	assertSameChangesArtifactPublication(t, laterAcknowledgement.publication, later)
+	if laterAcknowledgement.sequence != 52 {
+		t.Fatalf("later artifact acknowledgement = %#v", laterAcknowledgement)
+	}
+	firstAcknowledgement := waitChangesArtifactAcknowledgement(t, source.acked)
+	assertSameChangesArtifactPublication(t, firstAcknowledgement.publication, first)
+	if firstAcknowledgement.sequence != 51 || source.pendingCount() != 0 {
+		t.Fatalf("replayed artifact acknowledgement = %#v, pending = %d",
+			firstAcknowledgement, source.pendingCount())
+	}
+	if !client.Status().Connected || connections.Load() != 1 || source.attempts.Load() != 3 {
+		t.Fatalf("acknowledgement timeout changed connector session: status=%#v connections=%d attempts=%d",
+			client.Status(), connections.Load(), source.attempts.Load())
+	}
+
+	cancel()
+	close(holdConnection)
+	if err := waitClient(done); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -281,6 +464,95 @@ func TestConnectorShutdownPreservesUnacknowledgedChangesArtifact(t *testing.T) {
 	default:
 	}
 	close(releaseBroker)
+}
+
+func TestConnectorJoinsChangesPublisherBeforeReconnect(t *testing.T) {
+	source := newBlockingChangesArtifactSource()
+	closeFirst := make(chan struct{})
+	secondConnected := make(chan struct{})
+	holdSecond := make(chan struct{})
+	var connections atomic.Int64
+	server := newFakeBroker(t, func(connection *websocket.Conn) {
+		if connections.Add(1) == 1 {
+			<-closeFirst
+			_ = connection.CloseNow()
+			return
+		}
+		close(secondConnected)
+		<-holdSecond
+	})
+	defer server.Close()
+	client := newChangesArtifactClient(t, websocketURL(server.URL), source)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runClient(client, ctx)
+	waitReady(t, client)
+	waitSignal(t, source.initialListed, "initial changes artifact scan")
+	source.changes <- struct{}{}
+	waitSignal(t, source.blocked, "blocked changes artifact scan")
+	close(closeFirst)
+
+	select {
+	case <-secondConnected:
+		t.Fatal("connector reconnected before the previous changes publisher exited")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(source.release)
+	waitSignal(t, secondConnected, "connector reconnect")
+
+	cancel()
+	close(holdSecond)
+	if err := waitClient(done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConnectorTreatsClosedChangesNotificationChannelAsSessionFailure(t *testing.T) {
+	source := newChangesArtifactTestSource()
+	close(source.changes)
+	holdConnection := make(chan struct{})
+	var connections atomic.Int64
+	server := newFakeBroker(t, func(*websocket.Conn) {
+		connections.Add(1)
+		<-holdConnection
+	})
+	defer server.Close()
+	client := newChangesArtifactClient(t, websocketURL(server.URL), source)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reported := make(chan error, 1)
+	client.reportError = func(err error) {
+		reported <- err
+	}
+	done := runClient(client, ctx)
+
+	err := waitClient(done)
+	if !errors.Is(err, errChangesArtifactNotificationsClosed) {
+		t.Fatalf("connector run error = %v", err)
+	}
+	select {
+	case reportedErr := <-reported:
+		if !errors.Is(reportedErr, errChangesArtifactNotificationsClosed) {
+			t.Fatalf("reported connector error = %v", reportedErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("connector did not fail after the changes notification channel closed")
+	}
+	if client.Status().Connected {
+		t.Fatalf("connector remained ready after changes notification channel closed: %#v", client.Status())
+	}
+	if connections.Load() != 1 {
+		t.Fatalf("connector retried a permanently closed changes notification channel %d times", connections.Load())
+	}
+	close(holdConnection)
+}
+
+func waitSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
 }
 
 func newChangesArtifactClient(

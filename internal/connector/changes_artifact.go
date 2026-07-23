@@ -10,59 +10,91 @@ import (
 
 const maximumPendingChangesPublications = 64
 
+var errChangesArtifactNotificationsClosed = errors.New("changes artifact notification channel closed")
+
 func (s *session) publishPendingChangesArtifacts(ctx context.Context) error {
-	publications, err := s.client.changesArtifacts.ListPendingChangesPublications(ctx)
+	listContext, cancelList := context.WithTimeout(ctx, s.client.artifactCallLimit)
+	publications, err := s.client.changesArtifacts.ListPendingChangesPublications(listContext)
+	cancelList()
 	if err != nil {
 		return fmt.Errorf("list pending changes artifact publications: %w", err)
 	}
+	var publicationErrors []error
 	if len(publications) > maximumPendingChangesPublications {
-		return fmt.Errorf(
+		publicationErrors = append(publicationErrors, fmt.Errorf(
 			"changes artifact source returned more than %d pending publications",
 			maximumPendingChangesPublications,
-		)
+		))
+		publications = publications[:maximumPendingChangesPublications]
 	}
 	artifactIDs := make(map[string]struct{}, len(publications))
 	turns := make(map[string]struct{}, len(publications))
 	for index, publication := range publications {
 		if err := s.validateChangesArtifactPublication(publication); err != nil {
-			return fmt.Errorf("pending changes artifact %d: %w", index, err)
+			publicationErrors = append(publicationErrors, fmt.Errorf(
+				"pending changes artifact %d: %w", index, err,
+			))
+			continue
 		}
 		if _, duplicate := artifactIDs[publication.Params.ArtifactID]; duplicate {
-			return errors.New("changes artifact source returned a duplicate artifactId")
+			publicationErrors = append(publicationErrors, fmt.Errorf(
+				"pending changes artifact %d: duplicate artifactId", index,
+			))
+			continue
 		}
 		artifactIDs[publication.Params.ArtifactID] = struct{}{}
 		turnKey := publication.Source.TreeID + "\x00" + publication.Source.AgentID +
 			"\x00" + publication.Params.TurnID
 		if _, duplicate := turns[turnKey]; duplicate {
-			return errors.New("changes artifact source returned a duplicate worker turn")
+			publicationErrors = append(publicationErrors, fmt.Errorf(
+				"pending changes artifact %d: duplicate worker turn", index,
+			))
+			continue
 		}
 		turns[turnKey] = struct{}{}
-	}
-	for _, publication := range publications {
+
+		callContext, cancelCall := context.WithTimeout(ctx, s.client.artifactCallLimit)
 		payload, err := s.call(
-			ctx,
+			callContext,
 			protocol.MethodPublishChangesArtifact,
 			publication.Source.TreeID,
 			&publication.Source,
 			publication.Params,
 		)
+		cancelCall()
 		if err != nil {
-			return fmt.Errorf("publish changes artifact: %w", err)
+			publicationErrors = append(publicationErrors, fmt.Errorf(
+				"publish pending changes artifact %d: %w", index, err,
+			))
+			continue
 		}
 		var result protocol.PublishChangesArtifactResult
 		if err := decodeResult(payload, &result); err != nil {
-			return fmt.Errorf("decode changes artifact publication result: %w", err)
+			publicationErrors = append(publicationErrors, fmt.Errorf(
+				"decode pending changes artifact %d publication result: %w", index, err,
+			))
+			continue
 		}
 		if err := result.Validate(); err != nil || result.ArtifactID != publication.Params.ArtifactID {
-			return errors.New("broker returned a mismatched changes artifact publication result")
+			publicationErrors = append(publicationErrors, fmt.Errorf(
+				"pending changes artifact %d: broker returned a mismatched publication result", index,
+			))
+			continue
 		}
-		if err := s.client.changesArtifacts.AcknowledgeChangesArtifact(
-			ctx, publication, result.Sequence,
-		); err != nil {
-			return fmt.Errorf("acknowledge changes artifact publication: %w", err)
+		acknowledgeContext, cancelAcknowledge := context.WithTimeout(
+			ctx, s.client.artifactCallLimit,
+		)
+		err = s.client.changesArtifacts.AcknowledgeChangesArtifact(
+			acknowledgeContext, publication, result.Sequence,
+		)
+		cancelAcknowledge()
+		if err != nil {
+			publicationErrors = append(publicationErrors, fmt.Errorf(
+				"acknowledge pending changes artifact %d publication: %w", index, err,
+			))
 		}
 	}
-	return nil
+	return errors.Join(publicationErrors...)
 }
 
 func (s *session) validateChangesArtifactPublication(publication ChangesArtifactPublication) error {
@@ -81,22 +113,26 @@ func (s *session) validateChangesArtifactPublication(publication ChangesArtifact
 }
 
 func (s *session) changesArtifactLoop() {
+	retryDelay := s.client.reconnectMin
 	for {
+		err := s.publishPendingChangesArtifacts(s.context)
+		if err != nil {
+			s.client.reportError(fmt.Errorf("publish pending changes artifacts: %w", err))
+			if err := waitContext(s.context, retryDelay); err != nil {
+				return
+			}
+			retryDelay = min(retryDelay*2, s.client.reconnectMax)
+			continue
+		}
+		retryDelay = s.client.reconnectMin
 		select {
 		case <-s.done:
 			return
 		case _, ok := <-s.client.artifactChanges:
 			if !ok {
-				s.close(errors.New("changes artifact notification channel closed"))
+				s.close(errChangesArtifactNotificationsClosed)
 				return
 			}
-		}
-		ctx, cancel := context.WithTimeout(s.context, connectTimeout)
-		err := s.publishPendingChangesArtifacts(ctx)
-		cancel()
-		if err != nil {
-			s.close(err)
-			return
 		}
 	}
 }

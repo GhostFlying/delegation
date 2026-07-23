@@ -198,6 +198,7 @@ type Client struct {
 	token             *tokenfile.Token
 	reconnectMin      time.Duration
 	reconnectMax      time.Duration
+	artifactCallLimit time.Duration
 	dial              DialFunc
 	httpClient        *http.Client
 	reportError       func(error)
@@ -320,12 +321,13 @@ func New(options Options) (*Client, error) {
 		httpTransport.Proxy = nil
 	}
 	return &Client{
-		endpoint:     endpoint,
-		hello:        hello,
-		token:        token,
-		reconnectMin: reconnectMin,
-		reconnectMax: reconnectMax,
-		dial:         dial,
+		endpoint:          endpoint,
+		hello:             hello,
+		token:             token,
+		reconnectMin:      reconnectMin,
+		reconnectMax:      reconnectMax,
+		artifactCallLimit: connectTimeout,
+		dial:              dial,
 		httpClient: &http.Client{Transport: httpTransport, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}},
@@ -367,6 +369,9 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		if err != nil {
 			c.reportError(err)
+		}
+		if errors.Is(err, errChangesArtifactNotificationsClosed) {
+			return err
 		}
 		if healthy {
 			backoff = c.reconnectMin
@@ -483,23 +488,21 @@ func (c *Client) runSession(ctx context.Context) (healthy bool, returnErr error)
 		return false, err
 	}
 	helloResult.WorkerAppliedRevision = appliedRevision
-	publicationContext, cancelPublication := context.WithTimeout(ctx, connectTimeout)
-	err = current.publishPendingChangesArtifacts(publicationContext)
-	cancelPublication()
-	if err != nil {
-		current.close(err)
-		return false, err
-	}
 	c.publish(current, helloResult)
-	defer c.unpublish(current)
 	go current.heartbeatLoop(helloResult.HeartbeatIntervalMS)
 	go current.workerLifecycleLoop(appliedRevision)
-	go current.changesArtifactLoop()
+	changesArtifactDone := make(chan struct{})
+	go func() {
+		defer close(changesArtifactDone)
+		current.changesArtifactLoop()
+	}()
 	select {
 	case <-ctx.Done():
 		current.close(ctx.Err())
 	case <-current.done:
 	}
+	c.unpublish(current)
+	<-changesArtifactDone
 	return current.heartbeatSucceeded.Load(), current.err()
 }
 
