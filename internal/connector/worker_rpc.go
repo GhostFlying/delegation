@@ -233,16 +233,18 @@ func (s *session) startInbound(request protocol.Envelope, run func(context.Conte
 		<-s.inboundSem
 		return errors.New("broker reused an active requestId")
 	}
-	s.inbound[request.RequestID] = struct{}{}
+	operationContext, cancel := context.WithCancel(s.context)
+	s.inbound[request.RequestID] = cancel
 	s.inboundMu.Unlock()
 	go func() {
 		defer func() {
+			cancel()
 			s.inboundMu.Lock()
 			delete(s.inbound, request.RequestID)
 			s.inboundMu.Unlock()
 			<-s.inboundSem
 		}()
-		run(s.context)
+		run(operationContext)
 	}()
 	return nil
 }

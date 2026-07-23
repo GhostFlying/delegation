@@ -24,9 +24,11 @@ const (
 type recordingWorkspacePeer struct {
 	mu sync.Mutex
 
-	deviceID   string
-	manifest   protocol.WorkspaceManifest
-	prepareErr error
+	deviceID        string
+	manifest        protocol.WorkspaceManifest
+	prepareErr      error
+	prepareStarted  chan struct{}
+	prepareCanceled chan struct{}
 
 	inspections  []connector.WorkspaceInspectRequest
 	preparations []connector.WorkspacePrepareRequest
@@ -46,14 +48,25 @@ func (p *recordingWorkspacePeer) InspectWorkspace(
 }
 
 func (p *recordingWorkspacePeer) PrepareWorkspace(
-	_ context.Context,
+	ctx context.Context,
 	request connector.WorkspacePrepareRequest,
 ) (protocol.PrepareWorkspaceResult, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.preparations = append(p.preparations, request)
-	if p.prepareErr != nil {
-		return protocol.PrepareWorkspaceResult{}, p.prepareErr
+	prepareErr := p.prepareErr
+	prepareStarted := p.prepareStarted
+	prepareCanceled := p.prepareCanceled
+	p.mu.Unlock()
+	if prepareStarted != nil {
+		prepareStarted <- struct{}{}
+		<-ctx.Done()
+		if prepareCanceled != nil {
+			prepareCanceled <- struct{}{}
+		}
+		return protocol.PrepareWorkspaceResult{}, ctx.Err()
+	}
+	if prepareErr != nil {
+		return protocol.PrepareWorkspaceResult{}, prepareErr
 	}
 	hash, err := protocol.WorkspaceManifestHash(request.Params.Manifest)
 	if err != nil {
@@ -64,6 +77,66 @@ func (p *recordingWorkspacePeer) PrepareWorkspace(
 		Outcome:     protocol.WorkspacePrepareDirect, Strategy: protocol.WorkspaceStrategyDirect,
 		ManifestHash: hash, Warnings: append([]string{}, request.Params.Manifest.Warnings...),
 	}, nil
+}
+
+func TestWorkspaceRPCCancellationStopsTargetPeerOperation(t *testing.T) {
+	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	gitURL := "ssh://git@example.invalid/repository.git"
+	sourceManager := &recordingWorkspacePeer{
+		deviceID: brokerTestDeviceID,
+		manifest: workspaceRPCManifest(gitURL, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+	}
+	prepareStarted := make(chan struct{}, 1)
+	prepareCanceled := make(chan struct{}, 1)
+	targetManager := &recordingWorkspacePeer{
+		deviceID: agentRPCTargetID, prepareStarted: prepareStarted, prepareCanceled: prepareCanceled,
+	}
+	sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceManager)
+	startAgentRPCConnector(t, harness, agentRPCTargetID, targetManager)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var root protocol.EnsureRootTreeResult
+	if err := sourceClient.Call(
+		ctx, protocol.MethodEnsureRootTree, "", nil,
+		protocol.EnsureRootTreeParams{ExternalThreadID: agentRPCThreadID}, &root,
+	); err != nil {
+		t.Fatal(err)
+	}
+	source := root.Principal.Identity()
+	callContext, cancelCall := context.WithCancel(context.Background())
+	callDone := make(chan error, 1)
+	sourcePath := filepath.Join(t.TempDir(), "trusted", "source")
+	go func() {
+		var result protocol.SyncWorkspaceResult
+		callDone <- sourceClient.Call(
+			callContext, protocol.MethodSyncWorkspace, root.Tree.TreeID, &source,
+			protocol.SyncWorkspaceParams{
+				SyncID: workspaceRPCFailedSyncID, TargetDeviceID: agentRPCTargetID,
+				GitURL: gitURL, SourcePath: sourcePath,
+			},
+			&result,
+		)
+	}()
+	select {
+	case <-prepareStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("target workspace preparation did not start")
+	}
+	cancelCall()
+	select {
+	case err := <-callDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled workspace sync = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled workspace sync did not return")
+	}
+	select {
+	case <-prepareCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("target peer operation was not canceled")
+	}
 }
 
 func (p *recordingWorkspacePeer) SpawnWorker(

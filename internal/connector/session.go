@@ -52,7 +52,7 @@ type session struct {
 	heartbeatSucceeded atomic.Bool
 	inboundSem         chan struct{}
 	inboundMu          sync.Mutex
-	inbound            map[string]struct{}
+	inbound            map[string]context.CancelFunc
 	context            context.Context
 	cancel             context.CancelFunc
 }
@@ -61,7 +61,7 @@ func newSession(client *Client, connection *websocket.Conn) *session {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &session{
 		client: client, connection: connection, pending: map[string]pendingCall{}, done: make(chan struct{}),
-		inboundSem: make(chan struct{}, maximumPendingCalls), inbound: make(map[string]struct{}),
+		inboundSem: make(chan struct{}, maximumPendingCalls), inbound: make(map[string]context.CancelFunc),
 		context: ctx, cancel: cancel,
 	}
 }
@@ -237,12 +237,35 @@ func (s *session) readLoop() {
 				return
 			}
 		case protocol.KindNotification:
-			// Unknown notifications are forward-compatible and intentionally ignored.
+			if envelope.Method == protocol.MethodCancelRequest {
+				if err := s.handleBrokerCancellation(envelope); err != nil {
+					s.close(err)
+					return
+				}
+			}
+			// Other unknown notifications are forward-compatible and intentionally ignored.
 		default:
 			s.close(errors.New("broker sent an unsupported message kind"))
 			return
 		}
 	}
+}
+
+func (s *session) handleBrokerCancellation(envelope protocol.Envelope) error {
+	if envelope.TreeID != "" || envelope.Source != nil {
+		return errors.New("broker cancellation authority is invalid")
+	}
+	params, err := protocol.DecodePayload[protocol.CancelRequestParams](envelope.Payload)
+	if err != nil || !hasDirection(params.RequestID, protocol.DirectionBroker) {
+		return errors.New("broker cancellation payload is invalid")
+	}
+	s.inboundMu.Lock()
+	cancel := s.inbound[params.RequestID]
+	s.inboundMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return nil
 }
 
 func (s *session) heartbeatLoop(intervalMS int64) {

@@ -1052,11 +1052,35 @@ func (s *session) callPeer(
 		return result.payload, result.err
 	case <-ctx.Done():
 		if s.removePeerCall(requestID) {
+			if cancelErr := s.cancelPeerRequest(requestID); cancelErr != nil {
+				_ = s.connection.CloseNow()
+			}
 			return nil, ctx.Err()
 		}
 		result := <-pending.result
 		return result.payload, result.err
 	}
+}
+
+func (s *session) cancelPeerRequest(requestID string) error {
+	payload, err := json.Marshal(protocol.CancelRequestParams{RequestID: requestID})
+	if err != nil {
+		return err
+	}
+	cancellationID, err := protocol.NewRequestID(protocol.DirectionBroker)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	defer cancel()
+	return s.writeEnvelope(ctx, protocol.Envelope{
+		ProtocolVersion: protocol.Version,
+		Kind:            protocol.KindNotification,
+		RequestID:       cancellationID,
+		Method:          protocol.MethodCancelRequest,
+		ControllerID:    s.server.controllerID,
+		Payload:         payload,
+	})
 }
 
 func (s *session) addPeerCall(requestID string, pending peerPendingCall) error {
