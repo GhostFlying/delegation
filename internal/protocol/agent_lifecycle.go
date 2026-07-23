@@ -19,6 +19,7 @@ const (
 	WorkerLifecyclePreflight   WorkerLifecyclePhase = "preflight"
 	WorkerLifecycleReady       WorkerLifecyclePhase = "ready"
 	WorkerLifecycleRunning     WorkerLifecyclePhase = "running"
+	WorkerLifecycleFinalizing  WorkerLifecyclePhase = "finalizing"
 	WorkerLifecycleIdle        WorkerLifecyclePhase = "idle"
 	WorkerLifecycleInterrupted WorkerLifecyclePhase = "interrupted"
 	WorkerLifecycleFailed      WorkerLifecyclePhase = "failed"
@@ -32,6 +33,7 @@ func (p WorkerLifecyclePhase) Validate(failureCode string) error {
 		WorkerLifecyclePreflight,
 		WorkerLifecycleReady,
 		WorkerLifecycleRunning,
+		WorkerLifecycleFinalizing,
 		WorkerLifecycleIdle,
 		WorkerLifecycleInterrupted:
 		if failureCode != "" {

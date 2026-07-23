@@ -96,6 +96,7 @@ const (
 	MethodWriteWorkspaceArtifact  = "workspace.transfer.write"
 	MethodFinishWorkspaceTransfer = "workspace.transfer.finish"
 	MethodCancelWorkspaceTransfer = "workspace.transfer.cancel"
+	MethodPublishChangesArtifact  = "artifact.changes.publish"
 )
 
 type CancelRequestParams struct {
@@ -121,6 +122,7 @@ const (
 	FeaturePeerRoot          = "peerRootV1"
 	FeatureWorkspaceSync     = "workspaceSyncV1"
 	FeatureWorkspaceTransfer = "workspaceTransferV1"
+	FeatureChangesArtifact   = "changesArtifactV1"
 )
 
 var methodPattern = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,63}$`)

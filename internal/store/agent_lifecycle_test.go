@@ -215,17 +215,28 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 
 	applyLifecyclePage(
 		t, registry, session, 3, 4,
-		lifecycleSnapshotFor(first, 4, protocol.WorkerLifecycleIdle),
+		lifecycleSnapshotFor(first, 4, protocol.WorkerLifecycleFinalizing),
 	)
 	changed, err := registry.ListAgentLifecycleActivity(
 		context.Background(), root.Identity(), AgentLifecyclePageRequest{AfterSequence: 2, Limit: 2},
 	)
 	if err != nil || len(changed.Activities) != 1 || changed.Activities[0].Sequence != 3 ||
-		changed.Activities[0].Phase != protocol.WorkerLifecycleIdle {
+		changed.Activities[0].Phase != protocol.WorkerLifecycleFinalizing {
 		t.Fatalf("changed lifecycle activity = %#v, error %v", changed, err)
 	}
+	applyLifecyclePage(
+		t, registry, session, 4, 5,
+		lifecycleSnapshotFor(first, 5, protocol.WorkerLifecycleIdle),
+	)
+	changed, err = registry.ListAgentLifecycleActivity(
+		context.Background(), root.Identity(), AgentLifecyclePageRequest{AfterSequence: 3, Limit: 2},
+	)
+	if err != nil || len(changed.Activities) != 1 || changed.Activities[0].Sequence != 4 ||
+		changed.Activities[0].Phase != protocol.WorkerLifecycleIdle {
+		t.Fatalf("idle lifecycle activity = %#v, error %v", changed, err)
+	}
 	if _, err := registry.ListAgentLifecycleActivity(
-		context.Background(), root.Identity(), AgentLifecyclePageRequest{AfterSequence: 4, Limit: 1},
+		context.Background(), root.Identity(), AgentLifecyclePageRequest{AfterSequence: 5, Limit: 1},
 	); !errors.Is(err, ErrAgentLifecycleCursorAhead) {
 		t.Fatalf("cursor ahead error = %v, want ErrAgentLifecycleCursorAhead", err)
 	}

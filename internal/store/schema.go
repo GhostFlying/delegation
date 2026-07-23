@@ -54,6 +54,8 @@ CREATE TABLE trees (
 		CHECK (last_agent_sequence BETWEEN 0 AND 256),
 	last_lifecycle_sequence INTEGER NOT NULL DEFAULT 0
 		CHECK (last_lifecycle_sequence >= 0),
+	last_artifact_sequence INTEGER NOT NULL DEFAULT 0
+		CHECK (last_artifact_sequence >= 0),
     PRIMARY KEY (controller_id, external_thread_id),
     UNIQUE (controller_id, tree_id)
 ) STRICT;
@@ -195,7 +197,7 @@ CREATE TABLE agent_lifecycle_states (
 	target_revision INTEGER NOT NULL CHECK (target_revision > 0),
 	phase TEXT NOT NULL CHECK (
 		phase IN ('reserved', 'pending', 'starting', 'preflight', 'ready',
-		          'running', 'idle', 'interrupted', 'failed')
+		          'running', 'finalizing', 'idle', 'interrupted', 'failed')
 	),
 	failure_code TEXT NOT NULL CHECK (
 		length(CAST(failure_code AS BLOB)) <= 64 AND
@@ -218,6 +220,54 @@ CREATE TABLE agent_lifecycle_states (
 
 CREATE INDEX agent_lifecycle_states_by_tree_sequence
 	ON agent_lifecycle_states(controller_id, tree_id, lifecycle_sequence);
+
+CREATE TABLE changes_artifacts (
+	controller_id TEXT NOT NULL,
+	tree_id TEXT NOT NULL,
+	artifact_id TEXT NOT NULL CHECK (length(artifact_id) = 36),
+	turn_id TEXT NOT NULL CHECK (length(turn_id) = 36),
+	workspace_id TEXT NOT NULL CHECK (length(workspace_id) = 36),
+	status TEXT NOT NULL CHECK (status IN ('available', 'unchanged', 'captureFailed')),
+	source_agent_id TEXT NOT NULL CHECK (length(source_agent_id) = 36),
+	source_device_id TEXT NOT NULL CHECK (length(source_device_id) = 36),
+	object_format TEXT NOT NULL CHECK (object_format IN ('sha1', 'sha256')),
+	base_head_oid TEXT NOT NULL CHECK (length(base_head_oid) IN (40, 64)),
+	base_manifest_hash TEXT NOT NULL CHECK (length(base_manifest_hash) = 64),
+	base_snapshot_hash TEXT NOT NULL CHECK (length(base_snapshot_hash) = 64),
+	base_clean INTEGER NOT NULL CHECK (base_clean IN (0, 1)),
+	result_head_oid TEXT NOT NULL CHECK (
+		(status = 'captureFailed' AND result_head_oid = '') OR
+		(status != 'captureFailed' AND length(result_head_oid) = length(base_head_oid))
+	),
+	result_snapshot_hash TEXT NOT NULL CHECK (
+		(status = 'captureFailed' AND result_snapshot_hash = '') OR
+		(status != 'captureFailed' AND length(result_snapshot_hash) = 64)
+	),
+	result_clean INTEGER NOT NULL CHECK (result_clean IN (0, 1)),
+	parts_json TEXT NOT NULL CHECK (length(CAST(parts_json AS BLOB)) <= 1024),
+	warnings_json TEXT NOT NULL CHECK (length(CAST(warnings_json AS BLOB)) <= 2048),
+	failure_code TEXT NOT NULL CHECK (
+		length(CAST(failure_code AS BLOB)) <= 64 AND
+		((status = 'captureFailed' AND length(failure_code) > 0) OR
+		 (status != 'captureFailed' AND failure_code = ''))
+	),
+	artifact_sequence INTEGER NOT NULL CHECK (artifact_sequence > 0),
+	observed_at INTEGER NOT NULL CHECK (observed_at >= 0),
+	PRIMARY KEY (controller_id, tree_id, artifact_id),
+	UNIQUE (controller_id, tree_id, source_agent_id, turn_id),
+	UNIQUE (controller_id, tree_id, artifact_sequence),
+	FOREIGN KEY (controller_id, tree_id, source_agent_id)
+		REFERENCES principals(controller_id, tree_id, agent_id) ON DELETE CASCADE,
+	FOREIGN KEY (controller_id, tree_id, workspace_id)
+		REFERENCES workspace_sync_receipts(controller_id, tree_id, sync_id),
+	FOREIGN KEY (controller_id, source_device_id)
+		REFERENCES devices(controller_id, device_id),
+	FOREIGN KEY (controller_id, tree_id)
+		REFERENCES trees(controller_id, tree_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX changes_artifacts_by_tree_sequence
+	ON changes_artifacts(controller_id, tree_id, artifact_sequence);
 
 CREATE TABLE mailboxes (
     controller_id TEXT NOT NULL,

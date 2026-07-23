@@ -19,6 +19,7 @@ func TestWorkerLifecyclePhaseValidatesFailureCode(t *testing.T) {
 		WorkerLifecyclePreflight,
 		WorkerLifecycleReady,
 		WorkerLifecycleRunning,
+		WorkerLifecycleFinalizing,
 		WorkerLifecycleIdle,
 		WorkerLifecycleInterrupted,
 	} {

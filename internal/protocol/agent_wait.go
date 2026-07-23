@@ -12,6 +12,7 @@ const (
 	MethodWaitAgent            = "agent.wait"
 	MaximumAgentWaitMessages   = 2
 	MaximumAgentWaitActivities = 16
+	MaximumAgentWaitArtifacts  = 1
 	MaximumAgentWaitMillis     = 25_000
 )
 
