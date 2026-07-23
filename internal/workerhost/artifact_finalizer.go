@@ -23,6 +23,13 @@ const (
 	pendingChangesArtifactSuffix = ".pending"
 )
 
+type artifactRetentionError struct {
+	err error
+}
+
+func (e *artifactRetentionError) Error() string { return e.err.Error() }
+func (e *artifactRetentionError) Unwrap() error { return e.err }
+
 func openChangesArtifactRoot(workspaceRoot *os.Root) (*os.Root, error) {
 	created := false
 	if err := workspaceRoot.Mkdir(changesArtifactRootName, 0o700); err != nil {
@@ -106,6 +113,7 @@ func (h *Host) AcknowledgeChangesArtifact(
 	}
 	finalization.Worker = worker
 	h.signalArtifactChange()
+	h.signalArtifactWork()
 	return finalization, nil
 }
 
@@ -125,15 +133,39 @@ func (h *Host) signalArtifactChange() {
 
 func (h *Host) processArtifactFinalizations(ctx context.Context) {
 	defer h.background.Done()
+	retryDelay := h.artifactRetryMin
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-h.artifactWake:
 		}
-		if err := h.processPendingArtifactFinalizations(ctx); err != nil {
+		for {
+			err := h.processPendingArtifactFinalizations(ctx)
+			if err == nil {
+				retryDelay = h.artifactRetryMin
+				break
+			}
 			if errors.Is(err, context.Canceled) && ctx.Err() != nil {
 				return
+			}
+			var retentionError *artifactRetentionError
+			if errors.As(err, &retentionError) {
+				h.reportError(fmt.Errorf("finalize worker changes artifacts: %w", err))
+				timer := time.NewTimer(retryDelay)
+				select {
+				case <-ctx.Done():
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					return
+				case <-timer.C:
+				}
+				retryDelay = min(retryDelay*2, h.artifactRetryMax)
+				continue
 			}
 			fatalErr := fmt.Errorf("finalize worker changes artifacts: %w", err)
 			h.reportError(fatalErr)
@@ -169,7 +201,60 @@ func (h *Host) processPendingArtifactFinalizations(ctx context.Context) error {
 	if len(publications) != 0 {
 		h.signalArtifactChange()
 	}
+	if err := h.pruneChangesArtifacts(
+		ctx,
+		store.MaximumRetainedChangesArtifacts,
+		store.MaximumRetainedChangesPayloadBytes,
+	); err != nil {
+		return &artifactRetentionError{err: fmt.Errorf("prune retained changes artifacts: %w", err)}
+	}
 	return nil
+}
+
+func (h *Host) prunePublishedChangesArtifacts(
+	ctx context.Context,
+	retainCount int,
+	retainBytes int64,
+) error {
+	if retainCount < 0 || retainCount > store.MaximumRetainedChangesArtifacts {
+		return errors.New("changes artifact retention limit is invalid")
+	}
+	if retainBytes < 0 || retainBytes > store.MaximumRetainedChangesPayloadBytes {
+		return errors.New("changes artifact retained byte limit is invalid")
+	}
+	for {
+		retention, err := h.state.GetPublishedChangesArtifactRetention(
+			ctx, h.controllerID, h.deviceID,
+		)
+		if err != nil {
+			return err
+		}
+		if retention.Count <= retainCount && retention.ReservedBytes <= retainBytes {
+			return nil
+		}
+		artifacts, err := h.state.ListPublishedChangesArtifacts(
+			ctx, h.controllerID, h.deviceID, 1,
+		)
+		if err != nil {
+			return err
+		}
+		if len(artifacts) != 1 {
+			return errors.New("published changes artifact retention changed during pruning")
+		}
+		artifact := artifacts[0]
+		pendingName, finalName, err := changesArtifactDirectoryNames(artifact.ArtifactID)
+		if err != nil {
+			return err
+		}
+		if err := h.removeChangesArtifactDirectories(ctx, pendingName, finalName); err != nil {
+			return err
+		}
+		if err := h.state.DeletePublishedChangesArtifact(
+			ctx, artifact.WorkerKey, artifact.ArtifactID,
+		); err != nil {
+			return err
+		}
+	}
 }
 
 func (h *Host) captureChangesArtifact(ctx context.Context, artifact store.ChangesArtifact) error {
@@ -185,9 +270,27 @@ func (h *Host) captureChangesArtifact(ctx context.Context, artifact store.Change
 		time.Now(),
 	)
 	if errors.Is(err, store.ErrChangesArtifactQuota) {
-		return h.completeFailedChangesCapture(
-			ctx, artifact, changesArtifactQuotaCode, err,
+		if pruneErr := h.pruneChangesArtifacts(
+			ctx,
+			store.MaximumRetainedChangesArtifacts,
+			store.MaximumRetainedChangesPayloadBytes-store.MaximumChangesArtifactPayloadBytes,
+		); pruneErr != nil {
+			return &artifactRetentionError{
+				err: fmt.Errorf("reclaim retained changes artifacts: %w", pruneErr),
+			}
+		}
+		_, err = h.state.ReserveChangesArtifactPayload(
+			ctx,
+			artifact.WorkerKey,
+			artifact.ArtifactID,
+			store.MaximumChangesArtifactPayloadBytes,
+			time.Now(),
 		)
+		if errors.Is(err, store.ErrChangesArtifactQuota) {
+			return h.completeFailedChangesCapture(
+				ctx, artifact, changesArtifactQuotaCode, err,
+			)
+		}
 	}
 	if err != nil {
 		return err

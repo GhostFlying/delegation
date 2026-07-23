@@ -55,8 +55,10 @@ immediately while `has_more` is true before concluding that no unread result rem
 workspace-backed turn it also reports bounded changes-artifact metadata after the target captures
 the descendant Git bundle and dirty overlay. Read `base_warnings` as conditions inherited from the
 prepared workspace and `result_warnings` as conditions observed while capturing the worker result;
-neither list supersedes the other. Those payloads remain on the target peer. Reuse the same operation
-ID only when retrying the exact same logical action.
+neither list supersedes the other. Target payload retention is best-effort: up to the latest 64
+published artifacts within a 2 GiB peer-wide payload budget, with oldest payloads removed first.
+Broker metadata can outlive a target payload and does not prove current payload availability. Reuse
+the same operation ID only when retrying the exact same logical action.
 
 Remote workers do not receive the peer roster and cannot recursively delegate in v0. A managed
 worker thread permanently remains a worker; opening its history does not promote it to a root. Start

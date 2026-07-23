@@ -137,6 +137,9 @@ type Host struct {
 	workspaceRoot            *os.Root
 	artifactRoot             *os.Root
 	removeWorkspaceTransfer  func(string) error
+	pruneChangesArtifacts    func(context.Context, int, int64) error
+	artifactRetryMin         time.Duration
+	artifactRetryMax         time.Duration
 	maxWorkerSlots           int
 	codexConfig              map[string]any
 	state                    *store.PeerStore
@@ -326,6 +329,9 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		shutdownDone:        make(chan struct{}),
 	}
 	host.applyCompletion = host.completeTurn
+	host.pruneChangesArtifacts = host.prunePublishedChangesArtifacts
+	host.artifactRetryMin = 100 * time.Millisecond
+	host.artifactRetryMax = 5 * time.Second
 	if err := host.validateStoredAuthority(ctx); err != nil {
 		_ = artifactRoot.Close()
 		_ = root.Close()

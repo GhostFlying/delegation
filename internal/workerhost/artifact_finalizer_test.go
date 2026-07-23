@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -301,6 +302,275 @@ func TestShutdownLeavesUnacknowledgedWorkspaceWorkerFinalizing(t *testing.T) {
 	}
 	if worker.Status != store.WorkerFinalizing || stored.State != store.ChangesPublishPending {
 		t.Fatalf("shutdown finalized unacknowledged worker = %#v / %#v", worker, stored)
+	}
+}
+
+func TestPublishedChangesArtifactRetentionPrunesOldestPayload(t *testing.T) {
+	var artifacts []store.ChangesArtifact
+	host, state, _ := newTestHostWithStateSetup(t, 2, "", func(state *store.PeerStore, root string) {
+		for index := range 2 {
+			workspaceID := newTestID()
+			workspacePath := filepath.Join(root, workspaceSyncName(testTreeID, workspaceID))
+			initializeTestRepository(t, workspacePath)
+			workspace := recordExactPreparedWorkspace(
+				t, state, testTreeID, workspaceID, workspacePath,
+			)
+			worker := makeRunningWorkspaceWorker(t, state, workspace, newTestID())
+			finalization, err := state.BeginWorkerFinalization(
+				context.Background(), worker.WorkerKey, worker.ActiveTurnID,
+				store.WorkerIdle, "", time.Unix(1_700_000_010+int64(index*10), 0),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifact, err := state.CompleteChangesArtifactCapture(
+				context.Background(), worker.WorkerKey, finalization.Artifact.ArtifactID,
+				store.ChangesCaptureResult{
+					Status: store.ChangesUnchanged, ResultHeadOID: workspace.HeadOID,
+					ResultSnapshotHash: workspace.SourceSnapshotHash, ResultClean: workspace.Clean,
+				},
+				time.Unix(1_700_000_011+int64(index*10), 0),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			acknowledged, err := state.AcknowledgeChangesArtifact(
+				context.Background(), worker.WorkerKey, artifact.ArtifactID,
+				uint64(index+1), time.Unix(1_700_000_012+int64(index*10), 0),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts = append(artifacts, acknowledged.Artifact)
+		}
+	})
+	for _, artifact := range artifacts {
+		_, finalName, err := changesArtifactDirectoryNames(artifact.ArtifactID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := host.artifactRoot.Mkdir(finalName, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := host.artifactRoot.WriteFile(filepath.Join(finalName, "marker"), []byte("retained"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := syncDirectory(host.artifactRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := host.prunePublishedChangesArtifacts(
+		context.Background(), 1, store.MaximumRetainedChangesPayloadBytes,
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, oldestName, err := changesArtifactDirectoryNames(artifacts[0].ArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, newestName, err := changesArtifactDirectoryNames(artifacts[1].ArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.artifactRoot.Stat(oldestName); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oldest retained artifact directory survived pruning: %v", err)
+	}
+	if _, err := host.artifactRoot.Stat(filepath.Join(newestName, "marker")); err != nil {
+		t.Fatalf("newest retained artifact payload was pruned: %v", err)
+	}
+	if _, err := state.GetChangesArtifact(
+		context.Background(), artifacts[0].WorkerKey, artifacts[0].ArtifactID,
+	); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("oldest retained artifact metadata survived pruning: %v", err)
+	}
+	retained, err := state.ListPublishedChangesArtifacts(
+		context.Background(), testControllerID, testDeviceID, 2,
+	)
+	if err != nil || len(retained) != 1 || retained[0].ArtifactID != artifacts[1].ArtifactID {
+		t.Fatalf("retained changes artifacts = %#v, %v", retained, err)
+	}
+}
+
+func TestArtifactRetentionFailureRetriesWithoutFailingHost(t *testing.T) {
+	state, err := store.OpenPeer(
+		context.Background(), filepath.Join(t.TempDir(), "state", "peer.sqlite3"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	reported := make(chan error, 1)
+	retried := make(chan struct{})
+	var attempts atomic.Int64
+	host := &Host{
+		controllerID:     testControllerID,
+		deviceID:         testDeviceID,
+		state:            state,
+		artifactWake:     make(chan struct{}, 1),
+		artifactChanges:  make(chan struct{}, 1),
+		artifactRetryMin: time.Millisecond,
+		artifactRetryMax: time.Millisecond,
+		reportError: func(err error) {
+			select {
+			case reported <- err:
+			default:
+			}
+		},
+	}
+	host.pruneChangesArtifacts = func(context.Context, int, int64) error {
+		if attempts.Add(1) == 1 {
+			return errors.New("transient retention failure")
+		}
+		close(retried)
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	host.background.Add(1)
+	go host.processArtifactFinalizations(ctx)
+	host.signalArtifactWork()
+
+	select {
+	case <-retried:
+	case <-time.After(2 * time.Second):
+		t.Fatal("artifact retention was not retried")
+	}
+	select {
+	case err := <-reported:
+		if !strings.Contains(err.Error(), "transient retention failure") {
+			t.Fatalf("reported retention error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("transient artifact retention error was not reported")
+	}
+	cancel()
+	host.background.Wait()
+	if attempts.Load() != 2 {
+		t.Fatalf("artifact retention attempts = %d, want 2", attempts.Load())
+	}
+}
+
+func TestPublishedChangesArtifactRetentionReclaimsCaptureHeadroom(t *testing.T) {
+	var (
+		published     []store.ChangesArtifact
+		workspaceRoot string
+	)
+	host, state, _ := newTestHostWithStateSetup(t, 5, "", func(state *store.PeerStore, root string) {
+		workspaceRoot = root
+		for index := range 4 {
+			workspaceID := newTestID()
+			workspacePath := filepath.Join(root, workspaceSyncName(testTreeID, workspaceID))
+			initializeTestRepository(t, workspacePath)
+			workspace := recordExactPreparedWorkspace(
+				t, state, testTreeID, workspaceID, workspacePath,
+			)
+			worker := makeRunningWorkspaceWorker(t, state, workspace, newTestID())
+			finalization, err := state.BeginWorkerFinalization(
+				context.Background(), worker.WorkerKey, worker.ActiveTurnID,
+				store.WorkerIdle, "", time.Unix(1_700_000_010+int64(index*10), 0),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := state.ReserveChangesArtifactPayload(
+				context.Background(), worker.WorkerKey, finalization.Artifact.ArtifactID,
+				store.MaximumChangesArtifactPayloadBytes,
+				time.Unix(1_700_000_011+int64(index*10), 0),
+			); err != nil {
+				t.Fatal(err)
+			}
+			artifact, err := state.CompleteChangesArtifactCapture(
+				context.Background(), worker.WorkerKey, finalization.Artifact.ArtifactID,
+				store.ChangesCaptureResult{
+					Status: store.ChangesAvailable, ResultHeadOID: workspace.HeadOID,
+					ResultSnapshotHash: workspace.SourceSnapshotHash, ResultClean: workspace.Clean,
+					Parts: []store.ChangesArtifactPart{
+						{Kind: store.ChangesArtifactBundle, Name: store.ChangesBundlePartName,
+							SizeBytes: protocol.MaximumWorkspaceArtifactBytes, SHA256: strings.Repeat("a", 64)},
+						{Kind: store.ChangesArtifactOverlay, Name: store.ChangesOverlayPartName,
+							SizeBytes: protocol.MaximumWorkspaceArtifactBytes, SHA256: strings.Repeat("b", 64)},
+					},
+				},
+				time.Unix(1_700_000_012+int64(index*10), 0),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			acknowledged, err := state.AcknowledgeChangesArtifact(
+				context.Background(), worker.WorkerKey, artifact.ArtifactID,
+				uint64(index+1), time.Unix(1_700_000_013+int64(index*10), 0),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			published = append(published, acknowledged.Artifact)
+		}
+	})
+
+	for _, artifact := range published {
+		_, finalName, err := changesArtifactDirectoryNames(artifact.ArtifactID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := host.artifactRoot.Mkdir(finalName, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := host.artifactRoot.WriteFile(filepath.Join(finalName, "marker"), []byte("retained"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := syncDirectory(host.artifactRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	workspaceID := newTestID()
+	workspacePath := filepath.Join(workspaceRoot, workspaceSyncName(testTreeID, workspaceID))
+	initializeTestRepository(t, workspacePath)
+	workspace := recordExactPreparedWorkspace(t, state, testTreeID, workspaceID, workspacePath)
+	if err := os.WriteFile(
+		filepath.Join(workspacePath, "nested", "worker.txt"), []byte("worker change\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	worker := makeRunningWorkspaceWorker(t, state, workspace, newTestID())
+	finalization, err := state.BeginWorkerFinalization(
+		context.Background(), worker.WorkerKey, worker.ActiveTurnID,
+		store.WorkerIdle, "", time.Unix(1_700_000_100, 0),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.ReserveChangesArtifactPayload(
+		context.Background(), worker.WorkerKey, finalization.Artifact.ArtifactID,
+		store.MaximumChangesArtifactPayloadBytes, time.Unix(1_700_000_101, 0),
+	); !errors.Is(err, store.ErrChangesArtifactQuota) {
+		t.Fatalf("full retained payload quota reservation error = %v", err)
+	}
+
+	if err := host.captureChangesArtifact(context.Background(), finalization.Artifact); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := state.GetChangesArtifact(
+		context.Background(), worker.WorkerKey, finalization.Artifact.ArtifactID,
+	)
+	if err != nil || ready.State != store.ChangesPublishPending ||
+		ready.Status != store.ChangesAvailable || ready.FailureCode != "" || len(ready.Parts) != 1 ||
+		ready.Parts[0].Kind != store.ChangesArtifactOverlay {
+		t.Fatalf("capture after byte retention pruning = %#v, %v", ready, err)
+	}
+	retention, err := state.GetPublishedChangesArtifactRetention(
+		context.Background(), testControllerID, testDeviceID,
+	)
+	if err != nil || retention.Count != 3 ||
+		retention.ReservedBytes != store.MaximumRetainedChangesPayloadBytes-store.MaximumChangesArtifactPayloadBytes {
+		t.Fatalf("published retention after headroom pruning = %#v, %v", retention, err)
+	}
+	_, oldestName, err := changesArtifactDirectoryNames(published[0].ArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.artifactRoot.Stat(oldestName); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oldest byte-heavy artifact survived pruning: %v", err)
 	}
 }
 

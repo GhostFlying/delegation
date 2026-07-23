@@ -217,8 +217,11 @@ Use `send_message` to steer a running worker or queue a message for an idle work
 `followup_task` to start a new turn for an idle worker, and `interrupt_agent` to stop an active turn.
 `wait_agent` returns bounded lifecycle, worker-message, and changes-artifact metadata pages; call it
 again immediately while `has_more` is true before concluding that the result is complete. Artifact
-bundle and overlay payloads remain on the target peer. M3 has no apply operation and never writes
-worker changes back automatically; explicit root-side apply is deferred to M4.
+bundle and overlay payloads remain on the target peer on a best-effort basis: up to the latest 64
+published artifacts within a 2 GiB peer-wide payload budget, with oldest payloads removed first.
+Broker metadata can outlive a target payload and does not prove that the payload is still available.
+M3 exposes neither payload download nor apply, and never writes worker changes back automatically;
+explicit root-side apply is deferred to M4.
 
 ## License
 

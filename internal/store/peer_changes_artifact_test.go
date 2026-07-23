@@ -14,7 +14,10 @@ import (
 	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
-const changesSourceDeviceID = "123e4567-e89b-42d3-a456-426614174399"
+const (
+	changesSourceDeviceID      = "123e4567-e89b-42d3-a456-426614174399"
+	changesOtherTargetDeviceID = "123e4567-e89b-42d3-a456-426614174398"
+)
 
 func TestChangesArtifactFinalizationPersistsThroughBrokerAcknowledgement(t *testing.T) {
 	ctx := context.Background()
@@ -373,13 +376,15 @@ func TestChangesArtifactQuotaReservationsAreConcurrentAndDurable(t *testing.T) {
 		}()
 	}
 	wait.Wait()
-	var succeeded, quotaRejected int
-	for _, err := range errorsByIndex {
+	var succeeded, quotaRejected, succeededIndex, quotaIndex int
+	for index, err := range errorsByIndex {
 		switch {
 		case err == nil:
 			succeeded++
+			succeededIndex = index
 		case errors.Is(err, ErrChangesArtifactQuota):
 			quotaRejected++
+			quotaIndex = index
 		default:
 			t.Fatalf("unexpected concurrent reservation error = %v", err)
 		}
@@ -397,41 +402,156 @@ WHERE retention_reserved = 1
 	if reservedBytes != MaximumRetainedChangesPayloadBytes {
 		t.Fatalf("reserved bytes = %d, want %d", reservedBytes, MaximumRetainedChangesPayloadBytes)
 	}
+	retained := finalizations[succeededIndex]
+	ready, err := state.CompleteChangesArtifactCapture(
+		ctx, retained.Worker.WorkerKey, retained.Artifact.ArtifactID,
+		ChangesCaptureResult{
+			Status: ChangesAvailable, ResultHeadOID: strings.Repeat("c", 40),
+			ResultSnapshotHash: strings.Repeat("d", 64), ResultClean: false,
+			Parts: []ChangesArtifactPart{
+				{Kind: ChangesArtifactBundle, Name: ChangesBundlePartName,
+					SizeBytes: protocol.MaximumWorkspaceArtifactBytes, SHA256: strings.Repeat("e", 64)},
+				{Kind: ChangesArtifactOverlay, Name: ChangesOverlayPartName,
+					SizeBytes: protocol.MaximumWorkspaceArtifactBytes, SHA256: strings.Repeat("f", 64)},
+			},
+		},
+		start.Add(3*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.AcknowledgeChangesArtifact(
+		ctx, retained.Worker.WorkerKey, ready.ArtifactID, 1, start.Add(4*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.DeletePublishedChangesArtifact(
+		ctx, retained.Worker.WorkerKey, ready.ArtifactID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.GetChangesArtifact(
+		ctx, retained.Worker.WorkerKey, ready.ArtifactID,
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted retained artifact lookup error = %v", err)
+	}
+	if err := state.DeletePublishedChangesArtifact(
+		ctx, retained.Worker.WorkerKey, ready.ArtifactID,
+	); err != nil {
+		t.Fatalf("replayed retained artifact deletion error = %v", err)
+	}
+	released := finalizations[quotaIndex]
+	if _, err := state.ReserveChangesArtifactPayload(
+		ctx, released.Worker.WorkerKey, released.Artifact.ArtifactID,
+		MaximumChangesArtifactPayloadBytes, start.Add(5*time.Second),
+	); err != nil {
+		t.Fatalf("reserve after retained artifact deletion: %v", err)
+	}
+	if err := state.db.QueryRow(`
+SELECT COALESCE(sum(reserved_bytes), 0) FROM peer_changes_artifacts
+WHERE retention_reserved = 1
+`).Scan(&reservedBytes); err != nil {
+		t.Fatal(err)
+	}
+	if reservedBytes != MaximumRetainedChangesPayloadBytes {
+		t.Fatalf("reserved bytes after deletion = %d, want %d", reservedBytes, MaximumRetainedChangesPayloadBytes)
+	}
 }
 
-func TestChangesArtifactRecordQuotaCountsAllOutcomes(t *testing.T) {
+func TestChangesArtifactLifetimeDoesNotBlockNewFinalizations(t *testing.T) {
 	ctx := context.Background()
 	state := openPeerTestStore(t)
 	start := time.Unix(7_000, 0)
-	for index := range MaximumRetainedChangesArtifacts {
-		worker, workspace, turnID := prepareRunningChangesWorker(t, state, 200+index, false, start)
-		finalization, err := state.BeginWorkerFinalization(
-			ctx, worker.WorkerKey, turnID, WorkerIdle, "", start.Add(time.Second),
+	for index := range MaximumRetainedChangesArtifacts + 1 {
+		publishedAt := start.Add(time.Duration(index+1) * 10 * time.Second)
+		publishUnchangedChangesArtifact(
+			t, state, 200+index, workerDeviceID,
+			publishedAt.Add(-10*time.Second), publishedAt, uint64(index+1),
 		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if index%2 == 0 {
-			_, err = state.CompleteChangesArtifactCapture(ctx, worker.WorkerKey,
-				finalization.Artifact.ArtifactID, ChangesCaptureResult{
-					Status: ChangesUnchanged, ResultHeadOID: workspace.HeadOID,
-					ResultSnapshotHash: workspace.SourceSnapshotHash, ResultClean: false,
-				}, start.Add(2*time.Second))
-		} else {
-			_, err = state.CompleteChangesArtifactCapture(ctx, worker.WorkerKey,
-				finalization.Artifact.ArtifactID, ChangesCaptureResult{
-					Status: ChangesCaptureFailed, FailureCode: "capture_failed",
-				}, start.Add(2*time.Second))
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
 	}
-	overflow, _, turnID := prepareRunningChangesWorker(t, state, 500, true, start)
-	if _, err := state.BeginWorkerFinalization(
-		ctx, overflow.WorkerKey, turnID, WorkerIdle, "", start.Add(3*time.Second),
-	); !errors.Is(err, ErrChangesArtifactQuota) {
-		t.Fatalf("record quota error = %v", err)
+	published, err := state.ListPublishedChangesArtifacts(
+		ctx, workerControllerID, workerDeviceID, maximumChangesArtifactPage,
+	)
+	if err != nil || len(published) != MaximumRetainedChangesArtifacts+1 {
+		t.Fatalf("lifetime published artifacts = %d, %v", len(published), err)
+	}
+}
+
+func TestPublishedChangesArtifactsAreOldestFirstAndDeviceScoped(t *testing.T) {
+	ctx := context.Background()
+	state := openPeerTestStore(t)
+	start := time.Unix(9_000, 0)
+	latest := publishUnchangedChangesArtifact(
+		t, state, 701, workerDeviceID, start, start.Add(100*time.Second), 1,
+	)
+	oldest := publishUnchangedChangesArtifact(
+		t, state, 702, workerDeviceID, start.Add(10*time.Second), start.Add(50*time.Second), 2,
+	)
+	middle := publishUnchangedChangesArtifact(
+		t, state, 703, workerDeviceID, start.Add(20*time.Second), start.Add(75*time.Second), 3,
+	)
+	foreign := publishUnchangedChangesArtifact(
+		t, state, 704, changesOtherTargetDeviceID,
+		start.Add(30*time.Second), start.Add(40*time.Second), 4,
+	)
+
+	published, err := state.ListPublishedChangesArtifacts(
+		ctx, workerControllerID, workerDeviceID, 2,
+	)
+	if err != nil || len(published) != 2 || published[0].ArtifactID != oldest.ArtifactID ||
+		published[1].ArtifactID != middle.ArtifactID {
+		t.Fatalf("bounded published artifacts = %#v, %v", published, err)
+	}
+	published, err = state.ListPublishedChangesArtifacts(
+		ctx, workerControllerID, workerDeviceID, 10,
+	)
+	if err != nil || len(published) != 3 || published[0].ArtifactID != oldest.ArtifactID ||
+		published[1].ArtifactID != middle.ArtifactID || published[2].ArtifactID != latest.ArtifactID {
+		t.Fatalf("ordered published artifacts = %#v, %v", published, err)
+	}
+	other, err := state.ListPublishedChangesArtifacts(
+		ctx, workerControllerID, changesOtherTargetDeviceID, 10,
+	)
+	if err != nil || len(other) != 1 || other[0].ArtifactID != foreign.ArtifactID {
+		t.Fatalf("other-device published artifacts = %#v, %v", other, err)
+	}
+}
+
+func TestDeletePublishedChangesArtifactRejectsPendingStates(t *testing.T) {
+	ctx := context.Background()
+	state := openPeerTestStore(t)
+	start := time.Unix(10_000, 0)
+	worker, workspace, turnID := prepareRunningChangesWorker(t, state, 800, true, start)
+	finalization, err := state.BeginWorkerFinalization(
+		ctx, worker.WorkerKey, turnID, WorkerIdle, "", start.Add(5*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.DeletePublishedChangesArtifact(
+		ctx, worker.WorkerKey, finalization.Artifact.ArtifactID,
+	); !errors.Is(err, ErrChangesArtifactTransition) {
+		t.Fatalf("capture-pending deletion error = %v", err)
+	}
+	ready, err := state.CompleteChangesArtifactCapture(
+		ctx, worker.WorkerKey, finalization.Artifact.ArtifactID,
+		ChangesCaptureResult{
+			Status: ChangesUnchanged, ResultHeadOID: workspace.HeadOID,
+			ResultSnapshotHash: workspace.SourceSnapshotHash, ResultClean: workspace.Clean,
+		},
+		start.Add(6*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.DeletePublishedChangesArtifact(
+		ctx, worker.WorkerKey, ready.ArtifactID,
+	); !errors.Is(err, ErrChangesArtifactTransition) {
+		t.Fatalf("publish-pending deletion error = %v", err)
+	}
+	stored, err := state.GetChangesArtifact(ctx, worker.WorkerKey, ready.ArtifactID)
+	if err != nil || stored.State != ChangesPublishPending {
+		t.Fatalf("pending artifact after rejected deletion = %#v, %v", stored, err)
 	}
 }
 
@@ -503,9 +623,23 @@ func prepareRunningChangesWorker(
 	clean bool,
 	start time.Time,
 ) (WorkerReservation, PreparedWorkspace, string) {
+	return prepareRunningChangesWorkerOnDevice(
+		t, state, index, workerDeviceID, clean, start,
+	)
+}
+
+func prepareRunningChangesWorkerOnDevice(
+	t *testing.T,
+	state *PeerStore,
+	index int,
+	deviceID string,
+	clean bool,
+	start time.Time,
+) (WorkerReservation, PreparedWorkspace, string) {
 	t.Helper()
 	ctx := context.Background()
 	worker := workerReservation(t, changesTestID(10_000+index), fmt.Sprintf("changes %d", index))
+	worker.DeviceID = deviceID
 	worker.WorkspaceID = changesTestID(20_000 + index)
 	worker.WorkingDirectory = ""
 	workspace := changesPreparedWorkspace(t, worker, clean)
@@ -526,6 +660,45 @@ func prepareRunningChangesWorker(
 		t.Fatal(err)
 	}
 	return worker, workspace, turnID
+}
+
+func publishUnchangedChangesArtifact(
+	t *testing.T,
+	state *PeerStore,
+	index int,
+	deviceID string,
+	start, publishedAt time.Time,
+	brokerSequence uint64,
+) ChangesArtifact {
+	t.Helper()
+	ctx := context.Background()
+	worker, workspace, turnID := prepareRunningChangesWorkerOnDevice(
+		t, state, index, deviceID, true, start,
+	)
+	finalization, err := state.BeginWorkerFinalization(
+		ctx, worker.WorkerKey, turnID, WorkerIdle, "", start.Add(5*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err := state.CompleteChangesArtifactCapture(
+		ctx, worker.WorkerKey, finalization.Artifact.ArtifactID,
+		ChangesCaptureResult{
+			Status: ChangesUnchanged, ResultHeadOID: workspace.HeadOID,
+			ResultSnapshotHash: workspace.SourceSnapshotHash, ResultClean: workspace.Clean,
+		},
+		start.Add(6*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := state.AcknowledgeChangesArtifact(
+		ctx, worker.WorkerKey, ready.ArtifactID, brokerSequence, publishedAt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return published.Artifact
 }
 
 func makeChangesWorkerRunning(
