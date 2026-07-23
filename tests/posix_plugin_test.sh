@@ -3,6 +3,7 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 plugin_root="$repo_root/plugins/delegation"
+version=$(sed -n '1p' "$plugin_root/VERSION")
 if [ "$(uname -s)" = Darwin ]; then
   tmp=$(mktemp -d /tmp/dp.XXXXXX)
 else
@@ -26,10 +27,10 @@ if DELEGATION_HOME="$tmp/missing" "$plugin_root/scripts/delegation-mcp" mcp root
   printf '%s\n' 'expected missing runtime launcher to fail' >&2
   exit 1
 fi
-grep -F 'runtime 0.1.0-alpha.0.m1.1 is not installed' "$tmp/err" >/dev/null
+grep -F "runtime $version is not installed" "$tmp/err" >/dev/null
 
 DELEGATION_BINARY="$tmp/delegation" "$plugin_root/scripts/delegation-mcp" version --json >"$tmp/version"
-grep -F '"version":"0.1.0-alpha.0.m1.1"' "$tmp/version" >/dev/null
+grep -F "\"version\":\"$version\"" "$tmp/version" >/dev/null
 
 cp -R "$plugin_root" "$tmp/plugin"
 mkdir -p "$tmp/payload" "$tmp/fake-bin"
@@ -46,7 +47,7 @@ case "$(uname -m)" in
   arm64|aarch64) arch=arm64 ;;
   *) exit 1 ;;
 esac
-artifact="delegation_0.1.0-alpha.0.m1.1_${os}_${arch}.tar.gz"
+artifact="delegation_${version}_${os}_${arch}.tar.gz"
 if command -v sha256sum >/dev/null 2>&1; then
   checksum=$(sha256sum "$tmp/artifact.tar.gz" | awk '{ print $1 }')
 else
@@ -119,7 +120,7 @@ exit "$link_status"
 EOF
 chmod 0755 "$tmp/fake-bin/link"
 
-expected_url="https://github.com/GhostFlying/delegation/releases/download/v0.1.0-alpha.0.m1.1/$artifact"
+expected_url="https://github.com/GhostFlying/delegation/releases/download/v$version/$artifact"
 download_log="$tmp/downloads.log"
 DELEGATION_TEST_EXPECTED_URL=$expected_url
 DELEGATION_TEST_DOWNLOAD_LOG=$download_log
@@ -181,7 +182,7 @@ umask 022
 mkdir -p "$runtime_user_home"
 : >"$download_log"
 installed=$(PATH="$tmp/fake-bin:$PATH" HOME="$runtime_user_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime")
-test "$installed" = "$runtime_home/bin/0.1.0-alpha.0.m1.1/$os-$arch/delegation"
+test "$installed" = "$runtime_home/bin/$version/$os-$arch/delegation"
 test -x "$installed"
 test "$(wc -l <"$download_log")" -eq 1
 case "$os" in
@@ -189,9 +190,9 @@ case "$os" in
   darwin) test "$(stat -f '%Lp' "$runtime_home")" = 700 ;;
 esac
 "$installed" version --json >"$tmp/installed-version"
-grep -F '"version":"0.1.0-alpha.0.m1.1"' "$tmp/installed-version" >/dev/null
+grep -F "\"version\":\"$version\"" "$tmp/installed-version" >/dev/null
 HOME="$runtime_user_home" "$tmp/plugin/scripts/delegation-mcp" version --json >"$tmp/launcher-installed-version"
-grep -F '"version":"0.1.0-alpha.0.m1.1"' "$tmp/launcher-installed-version" >/dev/null
+grep -F "\"version\":\"$version\"" "$tmp/launcher-installed-version" >/dev/null
 launcher="$tmp/plugin/scripts/delegation-mcp"
 config="$runtime_home/peer.json"
 service_environment="$runtime_home/peer.env"
@@ -262,7 +263,7 @@ grep -F 'installed runtime directory contains unexpected files' "$tmp/existing-e
 rm "$(dirname "$installed")/unexpected.txt"
 
 race_home="$tmp/race-home"
-race_target="$race_home/bin/0.1.0-alpha.0.m1.1/$os-$arch"
+race_target="$race_home/bin/$version/$os-$arch"
 installed=$(PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$race_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" DELEGATION_TEST_CREATE_TARGET="$race_target" "$tmp/plugin/scripts/install-runtime")
 test "$installed" = "$race_target/delegation"
 test -x "$installed"
@@ -276,7 +277,7 @@ PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$concurrent_home" DELEGATION_TEST_AR
 second_pid=$!
 wait "$first_pid"
 wait "$second_pid"
-concurrent_binary="$concurrent_home/bin/0.1.0-alpha.0.m1.1/$os-$arch/delegation"
+concurrent_binary="$concurrent_home/bin/$version/$os-$arch/delegation"
 test "$(sed -n '1p' "$tmp/concurrent-first")" = "$concurrent_binary"
 test "$(sed -n '1p' "$tmp/concurrent-second")" = "$concurrent_binary"
 test -x "$concurrent_binary"
@@ -290,7 +291,7 @@ if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$directory_race_home" DELEGATION_
   printf '%s\n' 'expected a directory at the publication path to fail' >&2
   exit 1
 fi
-directory_race_binary="$directory_race_home/bin/0.1.0-alpha.0.m1.1/$os-$arch/delegation"
+directory_race_binary="$directory_race_home/bin/$version/$os-$arch/delegation"
 test -d "$directory_race_binary"
 grep -F 'failed to publish runtime without replacing another file' "$tmp/directory-race-err" >/dev/null
 
@@ -300,7 +301,7 @@ if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$symlink_race_home" DELEGATION_TE
   printf '%s\n' 'expected a symlink at the publication path to fail' >&2
   exit 1
 fi
-symlink_race_binary="$symlink_race_home/bin/0.1.0-alpha.0.m1.1/$os-$arch/delegation"
+symlink_race_binary="$symlink_race_home/bin/$version/$os-$arch/delegation"
 test -L "$symlink_race_binary"
 test -z "$(LC_ALL=C ls -A1 "$symlink_race_outside")"
 grep -F 'failed to publish runtime without replacing another file' "$tmp/symlink-race-err" >/dev/null
@@ -322,4 +323,4 @@ if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$tmp/malicious-home" DELEGATION_T
 fi
 grep -F 'must contain one regular file' "$tmp/malicious-err" >/dev/null
 test ! -x "$tmp/outside"
-test ! -e "$tmp/malicious-home/bin/0.1.0-alpha.0.m1.1/$os-$arch"
+test ! -e "$tmp/malicious-home/bin/$version/$os-$arch"

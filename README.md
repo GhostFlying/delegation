@@ -4,13 +4,11 @@ Delegation is a Codex plugin for assigning bounded work across trusted peers wit
 systems, toolchains, or local capabilities. Every participating device can host user-created root
 tasks and managed workers.
 
-The project is being delivered in reviewed milestones. M0 provides the plugin, skills, native
-runtime bootstrap, and release foundation. M1 provides the broker and persistent registry. M1.1
-makes every device an equal peer and exposes root MCP discovery from any user-created Codex task.
-M2 runs isolated managed Codex threads on selected peers with durable spawn, agent discovery,
-message, follow-up, interrupt, and wait controls. M3 synchronizes an exact Git HEAD plus the root
-task's dirty index and worktree state, then captures descendant commits and dirty worker results as
-target-retained changes artifacts whose metadata is visible to the root.
+The project is delivered in reviewed milestones. The current M3 checkpoint includes the plugin and
+runtime bootstrap, a broker-backed equal-peer registry, isolated managed Codex workers with durable
+lifecycle and messaging controls, and Git workspace synchronization. It synchronizes an exact Git
+HEAD plus the root task's dirty index and worktree state, then captures descendant commits and dirty
+worker results as target-retained changes artifacts whose metadata is visible to the root.
 
 ## Install The Plugin
 
@@ -49,10 +47,12 @@ not runtime dependencies of Delegation.
 
 ## Prepare A Release
 
-Run the `Release candidate` workflow from the exact commit intended for release. It builds all six
-runtime archives twice, requires byte-identical output, and uploads a candidate containing the
-generated `release-artifacts.sha256`. Review that candidate, then replace the comments in the
-plugin's checksum file with the reviewed manifest in a normal commit.
+Freeze the version and all build-affecting source, then run the `Release candidate` workflow from
+that source commit. It builds all six runtime archives twice, requires byte-identical output, and
+uploads a candidate containing the generated `release-artifacts.sha256`. Review that candidate,
+then replace the comments in the plugin's checksum file with the reviewed manifest in a normal
+commit. If the version or any build-affecting source changes afterward, discard that manifest and
+generate a new candidate.
 
 Before enabling releases, configure the `github-release` environment to accept deployments only
 from `main` and require approval. Also add a tag ruleset that prevents updates and deletion for
@@ -112,10 +112,10 @@ plugins/delegation/scripts/delegation-mcp credential revoke \
 Revocation closes access on the next broker frame and marks the peer offline. Revoked IDs remain
 tombstoned and require a new device UUID.
 
-Delegation has not published a runtime release yet. Config, broker state, peer state, wire protocol,
-local bridge, and native service definitions are versioned independently and have no upgrade
-support. Discard configuration and state created by earlier development checkouts, then run `setup
-broker` and `setup peer` again; the current runtime never converts or deletes them automatically.
+Pre-1.0 releases provide no upgrade support. Config, broker state, peer state, wire protocol, local
+bridge, and native service definitions are versioned independently. Discard configuration and state
+created by earlier development checkouts, then run `setup broker` and `setup peer` again; the
+current runtime never converts or deletes them automatically.
 
 Run `doctor --config <path>` after setup. Broker and peer may coexist on one device through
 `broker.json` and `peer.json`; commands that could be ambiguous require an explicit config. Install
@@ -152,15 +152,15 @@ Windows restart-on-failure hardening is deferred to M4.
 Restart the peer service after rotating provider credentials or replacing the environment file.
 
 Managed worker process cleanup is lifecycle ownership, not an OS security boundary. On Unix-like
-hosts, a deliberately detached same-UID process is outside the M2 threat model; on macOS, an
+hosts, a deliberately detached same-UID process is outside the current threat model; on macOS, an
 immediately daemonizing double-fork may reparent before it becomes discoverable to the connector.
-Windows managed workers use Codex's `:danger-full-access` permission profile in M2 because
+Windows managed workers use Codex's `:danger-full-access` permission profile because
 restricted read profiles require a separately provisioned elevated Windows sandbox. The broker and
 worker MCP capability checks constrain the normal worker principal only; they are not a security
 boundary against the worker process itself. Treat a Windows worker as fully trusted same-user code:
 it can read or modify same-user credentials, configuration, and state; use the peer credential to
 impersonate or fence that peer; and access the network without restriction. Do not delegate an
-untrusted prompt, repository, or program to a Windows peer in M2. Elevated sandbox provisioning is
+untrusted prompt, repository, or program to a Windows peer. Elevated sandbox provisioning is
 deferred until it can be installed and verified without an interactive prompt in the peer service.
 
 ## Discover Peers
@@ -168,10 +168,10 @@ deferred until it can be installed and verified without an interactive prompt in
 The bundled root MCP initializes without broker access so setup remains available when the runtime
 or connector is offline. Its instructions are static and do not inject a device roster. Call
 `list_devices` for a current, tree-authorized view of the network registry, then call
-`describe_device` when the full runtime feature list or current presence details matter. M1.1
-exposes peer identity, `isCurrentDevice`, OS, architecture, runtime and protocol versions, features,
-online state, and last-seen time. It does not expose a device role or arbitrary toolchain, hardware,
-tag, or capacity metadata; do not infer those properties from a peer name.
+`describe_device` when the full runtime feature list or current presence details matter. The root
+MCP exposes peer identity, `isCurrentDevice`, OS, architecture, runtime and protocol versions,
+features, online state, and last-seen time. It does not expose a device role or arbitrary toolchain,
+hardware, tag, or capacity metadata; do not infer those properties from a peer name.
 
 The root MCP talks only to the same-user local connector bridge. It neither reads the connector's
 broker token nor opens a broker connection itself. Device calls lazily bind the Codex task's

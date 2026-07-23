@@ -137,6 +137,8 @@ function Write-ArtifactChecksum {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $pluginRoot = Join-Path $repoRoot "plugins\delegation"
+$version = (Get-Content -LiteralPath (Join-Path $pluginRoot "VERSION") -Raw).Trim()
+$versionJSON = '"version":"' + $version + '"'
 $launcherPS = Join-Path $pluginRoot "scripts\delegation-mcp.ps1"
 $launcherCmd = Join-Path $pluginRoot "scripts\delegation-mcp.cmd"
 $pwsh = (Get-Command pwsh.exe).Source
@@ -157,7 +159,7 @@ try {
     }
     $missingPS = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", $launcherPS, "mcp", "root") $missingEnvironment
     Assert-True ($missingPS.ExitCode -eq 127) "PowerShell launcher missing-runtime exit was $($missingPS.ExitCode)"
-    Assert-True ($missingPS.Stderr -match "runtime 0.1.0-alpha.0.m1.1 is not installed") "PowerShell launcher missing-runtime error was unclear"
+    Assert-True ($missingPS.Stderr.Contains("runtime $version is not installed")) "PowerShell launcher missing-runtime error was unclear"
 
     $missingCmd = Invoke-BatchFile -Path $launcherCmd -ScriptArguments @("mcp", "root") -Environment $missingEnvironment
     Assert-True ($missingCmd.ExitCode -eq 127) "cmd launcher missing-runtime exit was $($missingCmd.ExitCode); stdout: $($missingCmd.Stdout); stderr: $($missingCmd.Stderr)"
@@ -168,7 +170,7 @@ try {
     }
     $override = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", $launcherPS, "version", "--json") $overrideEnvironment
     Assert-True ($override.ExitCode -eq 0) "PowerShell launcher override failed: $($override.Stderr)"
-    Assert-True ($override.Stdout -match '"version":"0.1.0-alpha.0.m1.1"') "PowerShell launcher did not pass arguments through"
+    Assert-True ($override.Stdout.Contains($versionJSON)) "PowerShell launcher did not pass arguments through"
     $overrideConfig = Join-Path $tempRoot "override\peer.json"
     $overrideSetup = Invoke-ChildProcess $runtime @(
         "setup", "peer",
@@ -215,15 +217,15 @@ try {
         "Arm64" { $arch = "arm64" }
         default { throw "unsupported test architecture: $architecture" }
     }
-    $artifactName = "delegation_0.1.0-alpha.0.m1.1_windows_${arch}.zip"
+    $artifactName = "delegation_${version}_windows_${arch}.zip"
     $artifact = Join-Path $tempRoot $artifactName
     Compress-Archive -LiteralPath (Join-Path $payload "delegation.exe") -DestinationPath $artifact
     Write-ArtifactChecksum $testPlugin $artifact $artifactName
 
-    $expectedUrl = "https://github.com/GhostFlying/delegation/releases/download/v0.1.0-alpha.0.m1.1/$artifactName"
+    $expectedUrl = "https://github.com/GhostFlying/delegation/releases/download/v$version/$artifactName"
     $windowsPowerShellHome = Join-Path $tempRoot "windows-powershell-home"
     $windowsPowerShellInstall = Invoke-WindowsPowerShellInstall $windowsPowerShell (Join-Path $testPlugin "scripts\install-runtime.ps1") $artifact $expectedUrl $windowsPowerShellHome
-    $windowsPowerShellBinary = Join-Path $windowsPowerShellHome "bin\0.1.0-alpha.0.m1.1\windows-$arch\delegation.exe"
+    $windowsPowerShellBinary = Join-Path $windowsPowerShellHome "bin\$version\windows-$arch\delegation.exe"
     Assert-True ($windowsPowerShellInstall.ExitCode -eq 0) "Windows PowerShell installation failed: $($windowsPowerShellInstall.Stderr)"
     Assert-True (($windowsPowerShellInstall.Stdout | Out-String).Trim() -eq $windowsPowerShellBinary) "Windows PowerShell installer returned an unexpected path"
     Assert-True (Test-Path -LiteralPath $windowsPowerShellBinary -PathType Leaf) "Windows PowerShell did not commit the runtime"
@@ -234,7 +236,7 @@ try {
 	New-Item -ItemType Junction -Path $resolvedAncestorAlias -Target $resolvedAncestorTarget | Out-Null
 	$resolvedAncestorHome = Join-Path $resolvedAncestorAlias "delegation-home"
 	$resolvedAncestorInstall = Invoke-WindowsPowerShellInstall $windowsPowerShell (Join-Path $testPlugin "scripts\install-runtime.ps1") $artifact $expectedUrl $resolvedAncestorHome
-	$resolvedAncestorBinary = Join-Path $resolvedAncestorHome "bin\0.1.0-alpha.0.m1.1\windows-$arch\delegation.exe"
+	$resolvedAncestorBinary = Join-Path $resolvedAncestorHome "bin\$version\windows-$arch\delegation.exe"
 	Assert-True ($resolvedAncestorInstall.ExitCode -eq 0) "Windows installer rejected a junction that resolves to a local volume: $($resolvedAncestorInstall.Stderr)"
 	Assert-True (Test-Path -LiteralPath $resolvedAncestorBinary -PathType Leaf) "Windows installer did not commit through a resolved local ancestor"
 
@@ -309,7 +311,7 @@ try {
     Assert-True ($installerCmdRepeat.ExitCode -eq 0) "cmd installer repeat failed: $($installerCmdRepeat.Stderr)"
     Assert-True (($installerCmdRepeat.Stdout | Out-String).Trim() -eq $windowsPowerShellBinary) "cmd installer did not reuse the existing runtime"
 
-    $windowsPowerShellLock = Join-Path $windowsPowerShellHome ".locks\install-0.1.0-alpha.0.m1.1-windows-$arch.lock"
+    $windowsPowerShellLock = Join-Path $windowsPowerShellHome ".locks\install-${version}-windows-$arch.lock"
     $heldWindowsPowerShellLock = [System.IO.File]::Open(
         $windowsPowerShellLock,
         [System.IO.FileMode]::OpenOrCreate,
@@ -345,9 +347,9 @@ try {
     $env:DELEGATION_TEST_EXPECTED_URL = $expectedUrl
     $global:DelegationTestDownloadCount = 0
     $env:DELEGATION_HOME = Join-Path $tempRoot "installed-home"
-    $staleLock = Join-Path $env:DELEGATION_HOME ".locks\install-0.1.0-alpha.0.m1.1-windows-$arch.lock"
+    $staleLock = Join-Path $env:DELEGATION_HOME ".locks\install-${version}-windows-$arch.lock"
     $installed = & (Join-Path $testPlugin "scripts\install-runtime.ps1")
-    $expectedBinary = Join-Path $env:DELEGATION_HOME "bin\0.1.0-alpha.0.m1.1\windows-$arch\delegation.exe"
+    $expectedBinary = Join-Path $env:DELEGATION_HOME "bin\$version\windows-$arch\delegation.exe"
     Assert-True ($installed -eq $expectedBinary) "installer returned $installed, expected $expectedBinary"
     Assert-True (Test-Path -LiteralPath $expectedBinary -PathType Leaf) "installer did not atomically install the runtime"
     Assert-True ($global:DelegationTestDownloadCount -eq 1) "installer made $global:DelegationTestDownloadCount download requests"
@@ -357,9 +359,9 @@ try {
         DELEGATION_HOME = $env:DELEGATION_HOME
     }
     $installedPS = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", $launcherPS, "version", "--json") $installedEnvironment
-    Assert-True ($installedPS.ExitCode -eq 0 -and $installedPS.Stdout -match '"version":"0.1.0-alpha.0.m1.1"') "PowerShell launcher did not find the installed runtime"
+    Assert-True ($installedPS.ExitCode -eq 0 -and $installedPS.Stdout.Contains($versionJSON)) "PowerShell launcher did not find the installed runtime"
     $installedCmd = Invoke-BatchFile -Path $launcherCmd -ScriptArguments @("version", "--json") -Environment $installedEnvironment
-    Assert-True ($installedCmd.ExitCode -eq 0 -and $installedCmd.Stdout -match '"version":"0.1.0-alpha.0.m1.1"') "cmd launcher did not find the installed runtime"
+    Assert-True ($installedCmd.ExitCode -eq 0 -and $installedCmd.Stdout.Contains($versionJSON)) "cmd launcher did not find the installed runtime"
     Assert-True (Test-Path -LiteralPath $staleLock -PathType Leaf) "installer removed its persistent lock file"
 
     $installedExtra = Join-Path (Split-Path -Parent $expectedBinary) "unexpected.txt"
@@ -375,7 +377,7 @@ try {
     Assert-True $existingExtraFailed "installer accepted an installed runtime directory with extra files"
 
     $reparseHome = Join-Path $tempRoot "reparse-home"
-    $reparseTarget = Join-Path $reparseHome "bin\0.1.0-alpha.0.m1.1\windows-$arch"
+    $reparseTarget = Join-Path $reparseHome "bin\$version\windows-$arch"
     New-ProtectedDelegationHome -Path $reparseHome
     New-Item -ItemType Directory -Force -Path $reparseTarget | Out-Null
     $reparseBinary = Join-Path $reparseTarget "delegation.exe"
@@ -395,7 +397,7 @@ try {
     }
 
     $junctionHome = Join-Path $tempRoot "junction-home"
-    $junctionParent = Join-Path $junctionHome "bin\0.1.0-alpha.0.m1.1"
+    $junctionParent = Join-Path $junctionHome "bin\$version"
     $junctionOutside = Join-Path $tempRoot "junction-outside"
     New-ProtectedDelegationHome -Path $junctionHome
     New-Item -ItemType Directory -Force -Path $junctionParent, $junctionOutside | Out-Null
@@ -408,7 +410,7 @@ try {
     Assert-True ($junctionResult.ExitCode -ne 0 -and $junctionResult.Stderr -match "runtime target must not be a reparse point") "Windows PowerShell installer accepted a reparse-point target directory"
 
     $raceHome = Join-Path $tempRoot "race-home"
-    $raceTarget = Join-Path $raceHome "bin\0.1.0-alpha.0.m1.1\windows-$arch"
+    $raceTarget = Join-Path $raceHome "bin\$version\windows-$arch"
     $env:DELEGATION_HOME = $raceHome
     $env:DELEGATION_TEST_CREATE_TARGET = $raceTarget
     $raceFailed = $false
@@ -426,7 +428,7 @@ try {
     $activeLockDirectory = Join-Path $activeHome ".locks"
     New-ProtectedDelegationHome -Path $activeHome
     New-Item -ItemType Directory -Force -Path $activeLockDirectory | Out-Null
-    $activeLock = Join-Path $activeLockDirectory "install-0.1.0-alpha.0.m1.1-windows-$arch.lock"
+    $activeLock = Join-Path $activeLockDirectory "install-${version}-windows-$arch.lock"
     $heldLock = [System.IO.File]::Open(
         $activeLock,
         [System.IO.FileMode]::OpenOrCreate,
@@ -444,7 +446,7 @@ try {
     }
     Assert-True $activeLockFailed "installer ignored an active process-held lock"
     $recovered = & (Join-Path $testPlugin "scripts\install-runtime.ps1")
-    $expectedRecovered = Join-Path $activeHome "bin\0.1.0-alpha.0.m1.1\windows-$arch\delegation.exe"
+    $expectedRecovered = Join-Path $activeHome "bin\$version\windows-$arch\delegation.exe"
     Assert-True ($recovered -eq $expectedRecovered -and (Test-Path -LiteralPath $expectedRecovered -PathType Leaf)) "installer did not recover after the process-held lock was released"
 
     $badChecksumPlugin = Join-Path $tempRoot "bad-checksum-plugin"

@@ -9,7 +9,7 @@ separate.
   authentication is the default. Keep plaintext listeners on loopback unless the user explicitly
   accepts `--allow-insecure-nonloopback` behind an encrypted private network or tunnel.
 - `setup peer` joins a physical device to that network. Every peer can host user-created root tasks
-  and can later receive managed workers. Supply the broker URL, network `controllerId`, broker-bound
+  and receive managed workers. Supply the broker URL, network `controllerId`, broker-bound
   `deviceId`, display name, and protected peer-token path. Setup generates a device ID only in
   `none` auth mode.
 

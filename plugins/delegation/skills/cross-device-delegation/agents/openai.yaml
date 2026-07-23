@@ -1,4 +1,4 @@
 interface:
   display_name: "Cross-device Delegation"
   short_description: "Delegate platform-specific work to trusted peers"
-  default_prompt: "Use $cross-device-delegation to select an appropriate peer and delegate this task when worker tools are available."
+  default_prompt: "Use $cross-device-delegation to select an appropriate peer, synchronize repository state when needed, and delegate this task."

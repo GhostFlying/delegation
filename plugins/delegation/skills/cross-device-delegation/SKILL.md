@@ -14,8 +14,8 @@ benefits from another environment; do not fork the root conversation onto the ta
 Delegation MCP instructions contain no peer roster. Call `list_devices` for current availability,
 then `describe_device` for the full advertised feature list and current presence details. Match the
 task against reported OS, architecture, runtime and protocol versions, features, and online state.
-Use `isCurrentDevice` to recognize the local peer; self-targeting is valid once spawn exists and
-creates a separate managed worker. Delegation does not report arbitrary toolchains, hardware, tags,
+Use `isCurrentDevice` to recognize the local peer; self-targeting creates a separate managed
+worker. Delegation does not report arbitrary toolchains, hardware, tags,
 or capacity; do not infer them from a peer name. Ask the user for missing placement facts or have a
 worker validate them explicitly.
 

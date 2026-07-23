@@ -1,7 +1,7 @@
 {
   "name": "delegation",
-  "version": "0.1.0-alpha.0.m1.1",
-  "description": "Discover trusted peers and inspect their platform-specific environments.",
+  "version": "0.1.0-alpha.1",
+  "description": "Delegate bounded Codex work across trusted peers with synchronized Git workspaces.",
   "author": {
     "name": "GhostFlying",
     "url": "https://github.com/GhostFlying"
@@ -13,15 +13,22 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Delegation",
-    "shortDescription": "Discover trusted development peers",
-    "longDescription": "Inspect equal Delegation peers and their platform and runtime capabilities from any user-created root task before selecting a future delegation target. Worker execution and workspace transport are not available in M1.1.",
+    "shortDescription": "Delegate Codex work across trusted peers",
+    "longDescription": "Discover equal peers, synchronize an explicit Git HEAD plus dirty state, dispatch isolated managed Codex workers, collaborate through messages and lifecycle controls, and inspect target-retained changes-artifact metadata. Worker changes are never applied to the root workspace automatically.",
     "developerName": "GhostFlying",
     "category": "Developer Tools",
-    "capabilities": ["Peer discovery", "Platform capability inventory"],
+    "capabilities": [
+      "Peer discovery",
+      "Git workspace synchronization",
+      "Managed worker dispatch",
+      "Worker collaboration",
+      "Changes artifact metadata"
+    ],
     "websiteURL": "https://github.com/GhostFlying/delegation",
     "defaultPrompt": [
-      "List the peers available for this task and identify the current device.",
-      "Describe the capabilities and current status of a Delegation peer."
+      "Delegate a bounded repository task to the best available peer.",
+      "Synchronize this Git workspace and run platform-specific validation on another peer.",
+      "Wait for the managed worker and summarize its changes artifact without applying it."
     ]
   },
   "mcpServers": "./.mcp.json"

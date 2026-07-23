@@ -247,7 +247,7 @@ jobs:
           cp .agents/plugins/marketplace.json "$snapshot/.agents/plugins/marketplace.json"
           cp -R plugins/delegation "$snapshot/plugins/delegation"
           python .ci/codex/codex-rs/skills/src/assets/samples/plugin-creator/scripts/update_plugin_cachebuster.py \
-            --cachebuster ci-m11 "$snapshot/plugins/delegation"
+            --cachebuster ci-checkpoint "$snapshot/plugins/delegation"
           codex plugin remove delegation@delegation --json > "$RUNNER_TEMP/plugin-remove.json"
           codex plugin marketplace remove delegation --json > "$RUNNER_TEMP/marketplace-remove.json"
           codex plugin marketplace add "$snapshot" --json > "$RUNNER_TEMP/cache-marketplace-add.json"
@@ -261,7 +261,7 @@ jobs:
           snapshot = temp / "cachebuster-marketplace"
           base_version = (snapshot / "plugins/delegation/VERSION").read_text().strip()
           added = json.loads((temp / "cache-plugin-add.json").read_text())
-          assert added["version"] == f"{base_version}+codex.ci-m11"
+          assert added["version"] == f"{base_version}+codex.ci-checkpoint"
           assert Path(added["installedPath"]).name == added["version"]
           assert (snapshot / "plugins/delegation/VERSION").read_text().strip() == base_version
           PY
@@ -306,7 +306,9 @@ jobs:
           go run ./cmd/releasepack -out dist-first
           go run ./cmd/releasepack -out dist-second
       - name: Compare candidate bytes
-        run: diff -r dist-first dist-second
+        run: |
+          diff -r dist-first dist-second
+          diff -u plugins/delegation/release-artifacts.sha256 dist-first/release-artifacts.sha256
       - name: Verify exact release target matrix
         shell: bash
         run: |
