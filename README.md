@@ -8,7 +8,8 @@ The project is being delivered in reviewed milestones. M0 provides the plugin, s
 runtime bootstrap, and release foundation. M1 provides the broker and persistent registry. M1.1
 makes every device an equal peer and exposes root MCP discovery from any user-created Codex task.
 M2 runs isolated managed Codex threads on selected peers with durable spawn, agent discovery,
-message, follow-up, interrupt, and wait controls. Git workspace transport remains M3 work.
+message, follow-up, interrupt, and wait controls. M3 synchronizes an exact Git HEAD plus the root
+task's dirty index and worktree state; worker changes artifacts remain the next M3 checkpoint.
 
 ## Install The Plugin
 
@@ -185,8 +186,12 @@ For repository work, first call `sync_workspace` with a fresh `sync_id`, the onl
 source `HEAD` when it can; otherwise the peers relay a scoped thin or self-contained Git bundle.
 The bundle contains only objects reachable from `HEAD`, not unrelated branches or tags. A
 `remote_git_full_history_fallback` warning means that HEAD-reachable history may include deleted
-content. This checkpoint accepts clean workspaces; dirty-overlay transport is added in the next M3
-checkpoint.
+content. Dirty sources add a bounded, deterministic `tar.zst` overlay that preserves staged and
+unstaged content, binary files, rename/delete semantics, intent-to-add entries, and non-ignored
+untracked files. The target applies it only inside the managed workspace and verifies the resulting
+Git snapshot before publishing it. Non-portable paths, unsupported index states or special files,
+and absolute or escaping dirty symlinks fail closed instead of being partially synchronized. LFS
+payloads and submodule repositories are not embedded; heed the corresponding sync warnings.
 
 Call `spawn_agent` with a fresh `spawn_id` UUID, the same target, the returned `workspace_id`, a
 unique lowercase `task_name`, and a self-contained `message`. Tasks that do not need repository
@@ -206,8 +211,9 @@ another spawn.
 Use `send_message` to steer a running worker or queue a message for an idle worker,
 `followup_task` to start a new turn for an idle worker, and `interrupt_agent` to stop an active turn.
 `wait_agent` returns bounded lifecycle and worker-message pages; call it again immediately while
-`has_more` is true before concluding that the result is complete. Change artifacts and explicit
-root-side apply arrive later in M3; the current flow never writes worker changes back automatically.
+`has_more` is true before concluding that the result is complete. Worker changes artifacts and
+explicit root-side apply arrive later in M3; the current flow never writes worker changes back
+automatically.
 
 ## License
 

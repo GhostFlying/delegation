@@ -30,9 +30,10 @@ installed checkpoint boundary instead of pretending unavailable workspace tools 
 1. For repository work, call `sync_workspace` first with a fresh `sync_id`, the selected
    `target_device_id`, and the repository's explicit SSH or HTTPS Git URL. Pass its returned
    `workspace_id` to `spawn_agent`. Disclose `remote_git_full_history_fallback`: the transfer
-   includes HEAD-reachable history that may contain deleted content. The current checkpoint handles
-   clean workspaces through direct clone or scoped bundle fallback; report a dirty-overlay error
-   instead of pretending local modifications were synchronized.
+   includes HEAD-reachable history that may contain deleted content. The current checkpoint uses
+   direct clone or scoped bundle fallback for the exact HEAD and overlays staged, unstaged, binary,
+   delete/rename, intent-to-add, and non-ignored untracked state. Report any portability, unsafe
+   symlink, special-file, LFS, or submodule warning instead of implying unsupported content moved.
 2. Generate a fresh UUID `spawn_id` for the logical dispatch. Call `spawn_agent` with that ID, the
    selected `target_device_id`, an optional prepared `workspace_id`, a unique lowercase `task_name`,
    and a self-contained `message`. Include the requested output, validation command, and relevant

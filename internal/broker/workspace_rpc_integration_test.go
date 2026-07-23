@@ -272,10 +272,7 @@ func TestWorkspaceRPCDirectPrepareAcknowledgementLossRetriesSameSync(t *testing.
 	}
 	sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceManager)
 	targetClient := startAgentRPCConnector(t, harness, agentRPCTargetID, targetManager)
-	initialTarget := harness.server.connection(agentRPCTargetID)
-	if initialTarget == nil {
-		t.Fatal("target connector was not registered")
-	}
+	initialTarget := waitForWorkspaceInitialSession(t, harness.server, agentRPCTargetID)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var root protocol.EnsureRootTreeResult

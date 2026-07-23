@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -23,10 +24,13 @@ type transferWorkspacePeer struct {
 	recordingWorkspacePeer
 
 	requireTransfer bool
+	requireBundle   bool
 	requireOverlay  bool
+	fullFallback    bool
 	artifact        []byte
+	artifacts       map[protocol.WorkspaceArtifactKind][]byte
 	transfer        protocol.WorkspaceTransferManifest
-	received        []byte
+	received        map[protocol.WorkspaceArtifactKind][]byte
 	readRequests    []connector.WorkspaceReadArtifactRequest
 	writeRequests   []connector.WorkspaceWriteArtifactRequest
 	cancelCount     int
@@ -38,6 +42,11 @@ type transferWorkspacePeer struct {
 	beginErr        error
 	writeApplied    chan struct{}
 	writeRelease    chan struct{}
+	writeBlockKind  protocol.WorkspaceArtifactKind
+	readObserved    chan struct{}
+	readRelease     chan struct{}
+	readBlockKind   protocol.WorkspaceArtifactKind
+	readBlockOffset int64
 	finishPublished chan struct{}
 	finishRelease   chan struct{}
 	published       *protocol.PrepareWorkspaceResult
@@ -63,8 +72,9 @@ func (p *transferWorkspacePeer) PrepareWorkspace(
 	if err != nil {
 		return protocol.PrepareWorkspaceResult{}, err
 	}
+	bundleRequired := !p.requireOverlay || p.requireBundle
 	basisOIDs := []string{"1111111111111111111111111111111111111111"}
-	if p.requireOverlay {
+	if !bundleRequired || p.fullFallback {
 		basisOIDs = nil
 	}
 	return protocol.PrepareWorkspaceResult{
@@ -72,7 +82,7 @@ func (p *transferWorkspacePeer) PrepareWorkspace(
 		Outcome:     protocol.WorkspacePrepareTransferRequired, ManifestHash: hash,
 		Warnings:       append([]string(nil), request.Params.Manifest.Warnings...),
 		BasisOIDs:      basisOIDs,
-		BundleRequired: !p.requireOverlay, OverlayRequired: p.requireOverlay,
+		BundleRequired: bundleRequired, OverlayRequired: p.requireOverlay,
 	}, nil
 }
 
@@ -80,22 +90,46 @@ func (p *transferWorkspacePeer) CreateWorkspaceTransfer(
 	_ context.Context,
 	request connector.WorkspaceCreateTransferRequest,
 ) (protocol.CreateWorkspaceTransferResult, error) {
-	if len(p.artifact) == 0 {
-		return protocol.CreateWorkspaceTransferResult{}, errors.New("source artifact is unavailable")
-	}
-	digest := sha256.Sum256(p.artifact)
 	manifestHash, err := protocol.WorkspaceManifestHash(request.Params.Manifest)
 	if err != nil {
 		return protocol.CreateWorkspaceTransferResult{}, err
 	}
+	strategy := protocol.WorkspaceStrategyDirect
+	if request.Params.BundleRequired {
+		strategy = protocol.WorkspaceStrategyFull
+		if len(request.Params.BasisOIDs) != 0 {
+			strategy = protocol.WorkspaceStrategyThin
+		}
+	}
+	warnings, err := protocol.WorkspaceWarningsForStrategy(request.Params.Manifest.Warnings, strategy)
+	if err != nil {
+		return protocol.CreateWorkspaceTransferResult{}, err
+	}
+	descriptors := make([]protocol.WorkspaceArtifactDescriptor, 0, 2)
+	for _, kind := range []protocol.WorkspaceArtifactKind{
+		protocol.WorkspaceArtifactBundle, protocol.WorkspaceArtifactOverlay,
+	} {
+		required := kind == protocol.WorkspaceArtifactBundle && request.Params.BundleRequired ||
+			kind == protocol.WorkspaceArtifactOverlay && request.Params.OverlayRequired
+		if !required {
+			continue
+		}
+		data := p.artifacts[kind]
+		if len(data) == 0 && len(p.artifact) != 0 &&
+			(!request.Params.BundleRequired || kind == protocol.WorkspaceArtifactBundle) {
+			data = p.artifact
+		}
+		if len(data) == 0 {
+			return protocol.CreateWorkspaceTransferResult{}, fmt.Errorf("source %s artifact is unavailable", kind)
+		}
+		digest := sha256.Sum256(data)
+		descriptors = append(descriptors, protocol.WorkspaceArtifactDescriptor{
+			Kind: kind, Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:]),
+		})
+	}
 	transfer := protocol.WorkspaceTransferManifest{
 		TransferID: request.Params.TransferID, WorkspaceID: request.Params.WorkspaceID,
-		Strategy: protocol.WorkspaceStrategyThin, ManifestHash: manifestHash,
-		Artifacts: []protocol.WorkspaceArtifactDescriptor{{
-			Kind: protocol.WorkspaceArtifactBundle, Size: int64(len(p.artifact)),
-			SHA256: hex.EncodeToString(digest[:]),
-		}},
-		Warnings: append([]string(nil), request.Params.Manifest.Warnings...),
+		Strategy: strategy, ManifestHash: manifestHash, Artifacts: descriptors, Warnings: warnings,
 	}
 	p.mu.Lock()
 	p.transfer = transfer
@@ -112,20 +146,39 @@ func (p *transferWorkspacePeer) ReadWorkspaceArtifact(
 	request connector.WorkspaceReadArtifactRequest,
 ) (protocol.ReadWorkspaceArtifactResult, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.readRequests = append(p.readRequests, request)
-	if request.Params.TransferID != p.transfer.TransferID || request.Params.Kind != protocol.WorkspaceArtifactBundle ||
-		request.Params.Offset < 0 || request.Params.Offset >= int64(len(p.artifact)) {
+	data := p.artifacts[request.Params.Kind]
+	if len(data) == 0 && len(p.artifact) != 0 && len(p.transfer.Artifacts) != 0 &&
+		request.Params.Kind == p.transfer.Artifacts[0].Kind {
+		data = p.artifact
+	}
+	if request.Params.TransferID != p.transfer.TransferID ||
+		request.Params.Offset < 0 || request.Params.Offset >= int64(len(data)) {
+		p.mu.Unlock()
 		return protocol.ReadWorkspaceArtifactResult{}, errors.New("invalid source artifact read")
 	}
-	end := min(request.Params.Offset+int64(request.Params.Limit), int64(len(p.artifact)))
+	end := min(request.Params.Offset+int64(request.Params.Limit), int64(len(data)))
 	if p.shortReads {
 		end = request.Params.Offset + 1
 	}
-	data := append([]byte(nil), p.artifact[request.Params.Offset:end]...)
+	chunk := append([]byte(nil), data[request.Params.Offset:end]...)
+	readObserved := p.readObserved
+	readRelease := p.readRelease
+	if request.Params.Kind != p.readBlockKind || request.Params.Offset != p.readBlockOffset {
+		readObserved = nil
+		readRelease = nil
+	} else {
+		p.readObserved = nil
+		p.readRelease = nil
+	}
+	p.mu.Unlock()
+	if readObserved != nil {
+		close(readObserved)
+		<-readRelease
+	}
 	return protocol.ReadWorkspaceArtifactResult{
 		TransferID: request.Params.TransferID, Kind: request.Params.Kind,
-		Offset: request.Params.Offset, Data: data, NextOffset: end,
+		Offset: request.Params.Offset, Data: chunk, NextOffset: end,
 	}, nil
 }
 
@@ -136,7 +189,7 @@ func (p *transferWorkspacePeer) BeginWorkspaceTransfer(
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.transfer = request.Params.Transfer
-	p.received = nil
+	p.received = make(map[protocol.WorkspaceArtifactKind][]byte)
 	if p.beginErr != nil {
 		return protocol.BeginWorkspaceTransferResult{}, p.beginErr
 	}
@@ -150,16 +203,21 @@ func (p *transferWorkspacePeer) WriteWorkspaceArtifact(
 	p.mu.Lock()
 	p.writeRequests = append(p.writeRequests, request)
 	if request.Params.TransferID != p.transfer.TransferID ||
-		request.Params.Offset != int64(len(p.received)) {
+		request.Params.Offset != int64(len(p.received[request.Params.Kind])) {
 		p.mu.Unlock()
 		return protocol.WriteWorkspaceArtifactResult{}, errors.New("out-of-sequence target artifact write")
 	}
-	p.received = append(p.received, request.Params.Data...)
-	nextOffset := int64(len(p.received))
+	p.received[request.Params.Kind] = append(p.received[request.Params.Kind], request.Params.Data...)
+	nextOffset := int64(len(p.received[request.Params.Kind]))
 	writeApplied := p.writeApplied
 	writeRelease := p.writeRelease
-	p.writeApplied = nil
-	p.writeRelease = nil
+	if p.writeBlockKind != "" && request.Params.Kind != p.writeBlockKind {
+		writeApplied = nil
+		writeRelease = nil
+	} else {
+		p.writeApplied = nil
+		p.writeRelease = nil
+	}
 	p.mu.Unlock()
 	if writeApplied != nil {
 		close(writeApplied)
@@ -175,15 +233,13 @@ func (p *transferWorkspacePeer) FinishWorkspaceTransfer(
 	request connector.WorkspaceTransferControlRequest,
 ) (protocol.FinishWorkspaceTransferResult, error) {
 	p.mu.Lock()
-	if len(p.transfer.Artifacts) != 1 {
-		p.mu.Unlock()
-		return protocol.FinishWorkspaceTransferResult{}, errors.New("target transfer descriptor is unavailable")
-	}
-	digest := sha256.Sum256(p.received)
-	if int64(len(p.received)) != p.transfer.Artifacts[0].Size ||
-		hex.EncodeToString(digest[:]) != p.transfer.Artifacts[0].SHA256 {
-		p.mu.Unlock()
-		return protocol.FinishWorkspaceTransferResult{}, errors.New("target transfer digest mismatch")
+	for _, descriptor := range p.transfer.Artifacts {
+		data := p.received[descriptor.Kind]
+		digest := sha256.Sum256(data)
+		if int64(len(data)) != descriptor.Size || hex.EncodeToString(digest[:]) != descriptor.SHA256 {
+			p.mu.Unlock()
+			return protocol.FinishWorkspaceTransferResult{}, fmt.Errorf("target %s transfer digest mismatch", descriptor.Kind)
+		}
 	}
 	workspace := protocol.PrepareWorkspaceResult{
 		WorkspaceID: request.Params.WorkspaceID, Outcome: protocol.WorkspacePrepareReady,
@@ -280,7 +336,7 @@ func TestWorkspaceRPCRelaysBoundedArtifactWithoutExposingIntermediateState(t *te
 		t.Fatalf("workspace sync = %#v", synchronized)
 	}
 	targetManager.mu.Lock()
-	received := append([]byte(nil), targetManager.received...)
+	received := append([]byte(nil), targetManager.received[protocol.WorkspaceArtifactBundle]...)
 	writes := append([]connector.WorkspaceWriteArtifactRequest(nil), targetManager.writeRequests...)
 	targetCancels := targetManager.cancelCount
 	targetManager.mu.Unlock()
@@ -357,10 +413,7 @@ func TestWorkspaceRPCPostSideEffectAcknowledgementLossRetriesSameSync(t *testing
 			}
 			sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceManager)
 			targetClient := startAgentRPCConnector(t, harness, agentRPCTargetID, targetManager)
-			initialTarget := harness.server.connection(agentRPCTargetID)
-			if initialTarget == nil {
-				t.Fatal("target connector was not registered")
-			}
+			initialTarget := waitForWorkspaceInitialSession(t, harness.server, agentRPCTargetID)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			var root protocol.EnsureRootTreeResult
@@ -439,6 +492,131 @@ func TestWorkspaceRPCPostSideEffectAcknowledgementLossRetriesSameSync(t *testing
 	}
 }
 
+func TestWorkspaceRPCDirtyBundleOverlayReconnectsAtArtifactBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		blockSourceRead   bool
+		wantOverlayBefore int
+		fullFallback      bool
+		strategy          protocol.WorkspaceStrategy
+	}{
+		{name: "thin bundle to overlay boundary", blockSourceRead: true, strategy: protocol.WorkspaceStrategyThin},
+		{
+			name: "full bundle overlay write acknowledgement", fullFallback: true,
+			wantOverlayBefore: protocol.WorkspaceArtifactChunkBytes, strategy: protocol.WorkspaceStrategyFull,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+			gitURL := "ssh://git@example.invalid/repository.git"
+			manifest := workspaceRPCManifest(gitURL, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			manifest.Clean = false
+			bundle := bytes.Repeat([]byte("b"), protocol.WorkspaceArtifactChunkBytes+17)
+			overlay := bytes.Repeat([]byte("o"), protocol.WorkspaceArtifactChunkBytes+31)
+			sourceManager := &transferWorkspacePeer{
+				recordingWorkspacePeer: recordingWorkspacePeer{
+					deviceID: brokerTestDeviceID, manifest: manifest,
+				},
+				artifacts: map[protocol.WorkspaceArtifactKind][]byte{
+					protocol.WorkspaceArtifactBundle: bundle, protocol.WorkspaceArtifactOverlay: overlay,
+				},
+			}
+			targetManager := &transferWorkspacePeer{
+				recordingWorkspacePeer: recordingWorkspacePeer{deviceID: agentRPCTargetID},
+				requireTransfer:        true, requireBundle: true, requireOverlay: true,
+				fullFallback: test.fullFallback,
+			}
+			observed := make(chan struct{})
+			release := make(chan struct{})
+			if test.blockSourceRead {
+				sourceManager.readObserved = observed
+				sourceManager.readRelease = release
+				sourceManager.readBlockKind = protocol.WorkspaceArtifactOverlay
+			} else {
+				targetManager.writeApplied = observed
+				targetManager.writeRelease = release
+				targetManager.writeBlockKind = protocol.WorkspaceArtifactOverlay
+			}
+			sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceManager)
+			targetClient := startAgentRPCConnector(t, harness, agentRPCTargetID, targetManager)
+			initialTarget := waitForWorkspaceInitialSession(t, harness.server, agentRPCTargetID)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var root protocol.EnsureRootTreeResult
+			if err := sourceClient.Call(
+				ctx, protocol.MethodEnsureRootTree, "", nil,
+				protocol.EnsureRootTreeParams{ExternalThreadID: agentRPCRemoteThreadID}, &root,
+			); err != nil {
+				t.Fatal(err)
+			}
+			source := root.Principal.Identity()
+			params := protocol.SyncWorkspaceParams{
+				SyncID: workspaceTransferRPCSyncID, TargetDeviceID: agentRPCTargetID,
+				GitURL: gitURL, SourcePath: filepath.Join(t.TempDir(), "trusted", "dirty-source"),
+			}
+			callDone := make(chan error, 1)
+			go func() {
+				callDone <- sourceClient.Call(
+					ctx, protocol.MethodSyncWorkspace, root.Tree.TreeID, &source, params,
+					&protocol.SyncWorkspaceResult{},
+				)
+			}()
+			select {
+			case <-observed:
+			case <-time.After(2 * time.Second):
+				t.Fatal("dirty transfer did not reach the requested artifact boundary")
+			}
+			targetManager.mu.Lock()
+			receivedBundle := append([]byte(nil), targetManager.received[protocol.WorkspaceArtifactBundle]...)
+			receivedOverlay := len(targetManager.received[protocol.WorkspaceArtifactOverlay])
+			targetManager.mu.Unlock()
+			if !bytes.Equal(receivedBundle, bundle) || receivedOverlay != test.wantOverlayBefore {
+				t.Fatalf(
+					"boundary receipt = bundle %d/%d, overlay %d/%d",
+					len(receivedBundle), len(bundle), receivedOverlay, test.wantOverlayBefore,
+				)
+			}
+			_ = initialTarget.connection.CloseNow()
+			close(release)
+			select {
+			case err := <-callDone:
+				if err == nil {
+					t.Fatal("dirty transfer with a lost connection unexpectedly succeeded")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("dirty transfer connection loss did not return")
+			}
+			select {
+			case <-harness.reported:
+			case <-time.After(2 * time.Second):
+				t.Fatal("dirty transfer connection loss did not report cleanup fencing")
+			}
+			waitForWorkspaceSessionReplacement(t, harness.server, agentRPCTargetID, initialTarget)
+			if err := targetClient.WaitReady(ctx); err != nil {
+				t.Fatal(err)
+			}
+			waitForWorkspaceCleanupDrain(t, harness.server, brokerTestDeviceID, agentRPCTargetID)
+			var retried protocol.SyncWorkspaceResult
+			if err := sourceClient.Call(
+				ctx, protocol.MethodSyncWorkspace, root.Tree.TreeID, &source, params, &retried,
+			); err != nil || retried.Workspace == nil || retried.Workspace.Strategy != test.strategy {
+				t.Fatalf("dirty transfer retry = %#v, %v", retried, err)
+			}
+			wantFullWarning := test.strategy == protocol.WorkspaceStrategyFull
+			if slices.Contains(retried.Workspace.Warnings, protocol.WorkspaceWarningFullHistoryFallback) != wantFullWarning {
+				t.Fatalf("dirty transfer warnings = %v", retried.Workspace.Warnings)
+			}
+			targetManager.mu.Lock()
+			gotBundle := append([]byte(nil), targetManager.received[protocol.WorkspaceArtifactBundle]...)
+			gotOverlay := append([]byte(nil), targetManager.received[protocol.WorkspaceArtifactOverlay]...)
+			targetManager.mu.Unlock()
+			if !bytes.Equal(gotBundle, bundle) || !bytes.Equal(gotOverlay, overlay) {
+				t.Fatalf("retried dirty transfer received bundle/overlay = %d/%d", len(gotBundle), len(gotOverlay))
+			}
+		})
+	}
+}
+
 func TestWorkspaceRPCSuccessfulTransferSurvivesSourceCleanupFailure(t *testing.T) {
 	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
 	gitURL := "ssh://git@example.invalid/repository.git"
@@ -456,10 +634,7 @@ func TestWorkspaceRPCSuccessfulTransferSurvivesSourceCleanupFailure(t *testing.T
 	}
 	sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceManager)
 	startAgentRPCConnector(t, harness, agentRPCTargetID, targetManager)
-	initialSource := harness.server.connection(brokerTestDeviceID)
-	if initialSource == nil {
-		t.Fatal("source connector was not registered")
-	}
+	initialSource := waitForWorkspaceInitialSession(t, harness.server, brokerTestDeviceID)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var root protocol.EnsureRootTreeResult
@@ -515,7 +690,7 @@ func TestWorkspaceRPCSuccessfulTransferSurvivesSourceCleanupFailure(t *testing.T
 	}
 }
 
-func TestWorkspaceRPCDirtyOverlayRejectionCleansBothPeers(t *testing.T) {
+func TestWorkspaceRPCOverlayCreationFailureCleansBothPeers(t *testing.T) {
 	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
 	gitURL := "ssh://git@example.invalid/repository.git"
 	manifest := workspaceRPCManifest(gitURL, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -525,7 +700,7 @@ func TestWorkspaceRPCDirtyOverlayRejectionCleansBothPeers(t *testing.T) {
 			deviceID: brokerTestDeviceID, manifest: manifest,
 		},
 		artifact:  []byte("unused-overlay-placeholder"),
-		createErr: errors.New("dirty workspace overlay transport is not implemented"),
+		createErr: errors.New("simulated workspace overlay creation failure"),
 	}
 	targetManager := &transferWorkspacePeer{
 		recordingWorkspacePeer: recordingWorkspacePeer{deviceID: agentRPCTargetID},
@@ -552,15 +727,15 @@ func TestWorkspaceRPCDirtyOverlayRejectionCleansBothPeers(t *testing.T) {
 		ctx, protocol.MethodSyncWorkspace, root.Tree.TreeID, &source, params,
 		&protocol.SyncWorkspaceResult{},
 	); err == nil {
-		t.Fatal("dirty workspace synchronization unexpectedly succeeded")
+		t.Fatal("workspace synchronization unexpectedly succeeded after overlay creation failure")
 	}
 	select {
 	case canceled := <-targetManager.cancelObserved:
 		if canceled.Params.WorkspaceID != params.SyncID || canceled.Params.TransferID != params.SyncID {
-			t.Fatalf("dirty target provisional cleanup = %#v", canceled)
+			t.Fatalf("overlay target provisional cleanup = %#v", canceled)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("dirty target provisional workspace was not cleaned")
+		t.Fatal("overlay target provisional workspace was not cleaned")
 	}
 	sourceManager.mu.Lock()
 	sourceCancels := sourceManager.cancelCount
@@ -569,7 +744,7 @@ func TestWorkspaceRPCDirtyOverlayRejectionCleansBothPeers(t *testing.T) {
 	targetCancels := targetManager.cancelCount
 	targetManager.mu.Unlock()
 	if sourceCancels != 1 || targetCancels != 1 {
-		t.Fatalf("dirty rejection cleanup = source %d target %d, want 1/1", sourceCancels, targetCancels)
+		t.Fatalf("overlay failure cleanup = source %d target %d, want 1/1", sourceCancels, targetCancels)
 	}
 	waitForWorkspaceCleanupDrain(t, harness.server, brokerTestDeviceID, agentRPCTargetID)
 }
@@ -665,11 +840,8 @@ func TestWorkspaceRPCTransferFailureCleansCreatedState(t *testing.T) {
 			}
 			sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceManager)
 			startAgentRPCConnector(t, harness, agentRPCTargetID, targetManager)
-			initialSourceSession := harness.server.connection(brokerTestDeviceID)
-			initialTargetSession := harness.server.connection(agentRPCTargetID)
-			if initialSourceSession == nil || initialTargetSession == nil {
-				t.Fatal("workspace connectors were not registered")
-			}
+			initialSourceSession := waitForWorkspaceInitialSession(t, harness.server, brokerTestDeviceID)
+			initialTargetSession := waitForWorkspaceInitialSession(t, harness.server, agentRPCTargetID)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			var root protocol.EnsureRootTreeResult
@@ -795,6 +967,20 @@ func waitForWorkspaceSessionReplacement(t *testing.T, server *Server, deviceID s
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("workspace connector did not replace session %p: current=%p", initial, current)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func waitForWorkspaceInitialSession(t *testing.T, server *Server, deviceID string) *session {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if current := server.connection(deviceID); current != nil {
+			return current
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("workspace connector %s was not registered", deviceID)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

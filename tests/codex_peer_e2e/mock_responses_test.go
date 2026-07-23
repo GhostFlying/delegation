@@ -248,6 +248,8 @@ func (m *mockResponses) handleWorkerWorkspace(
 	successMarker := "WORKSPACE_" + strings.ToUpper(scenario.name) + "_OK"
 	shellTool, shellArguments := managedShellTool(
 		`test "$(cat source.txt)" = ` + managedPOSIXShellLiteral(scenario.sourceMarker) + ` && ` +
+			`test "$(cat dirty-source.txt)" = ` + managedPOSIXShellLiteral(scenario.dirtyMarker) + ` && ` +
+			`test "$(git -C .. ls-files --others --exclude-standard -- nested/dirty-source.txt)" = nested/dirty-source.txt && ` +
 			`test "$(git rev-parse HEAD)" = ` + managedPOSIXShellLiteral(scenario.head) + ` && ` +
 			`printf '%s\n' ` + managedPOSIXShellLiteral(scenario.workerMarker) + ` > worker-change.txt && ` +
 			`printf '%s\n' ` + managedPOSIXShellLiteral(successMarker),

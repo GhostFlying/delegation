@@ -52,6 +52,7 @@ type workspaceE2EScenario struct {
 	nestedCWD     string
 	head          string
 	sourceMarker  string
+	dirtyMarker   string
 	workerMarker  string
 	strategy      protocol.WorkspaceStrategy
 	warnings      []string
@@ -84,6 +85,7 @@ func createTopologyGitRepositories(
 			taskName: "direct_workspace", rootSyncCase: rootWorkspaceDirectSync,
 			rootSpawnCase: rootWorkspaceDirectSpawn, workerCase: workerWorkspaceDirect,
 			sourceMarker: "delegation-workspace-direct-source",
+			dirtyMarker:  "delegation-workspace-direct-dirty-overlay",
 			workerMarker: "delegation-workspace-direct-worker-write",
 			strategy:     protocol.WorkspaceStrategyDirect,
 		},
@@ -92,6 +94,7 @@ func createTopologyGitRepositories(
 			taskName: "thin_bundle_workspace", rootSyncCase: rootWorkspaceThinSync,
 			rootSpawnCase: rootWorkspaceThinSpawn, workerCase: workerWorkspaceThin,
 			sourceMarker: "delegation-workspace-thin-unpublished-head",
+			dirtyMarker:  "delegation-workspace-thin-dirty-overlay",
 			workerMarker: "delegation-workspace-thin-worker-write",
 			strategy:     protocol.WorkspaceStrategyThin,
 		},
@@ -100,6 +103,7 @@ func createTopologyGitRepositories(
 			taskName: "full_bundle_workspace", rootSyncCase: rootWorkspaceFullSync,
 			rootSpawnCase: rootWorkspaceFullSpawn, workerCase: workerWorkspaceFull,
 			sourceMarker: "delegation-workspace-full-unreachable-remote",
+			dirtyMarker:  "delegation-workspace-full-dirty-overlay",
 			workerMarker: "delegation-workspace-full-worker-write",
 			strategy:     protocol.WorkspaceStrategyFull,
 			warnings:     []string{protocol.WorkspaceWarningFullHistoryFallback},
@@ -138,6 +142,12 @@ func createTopologyGitRepositories(
 		}
 		head, _ := run(t, os.Environ(), "git", "-C", scenario.sourceRoot, "rev-parse", "HEAD^{commit}")
 		scenario.head = strings.TrimSpace(head)
+		if err := os.WriteFile(
+			filepath.Join(scenario.nestedCWD, "dirty-source.txt"),
+			[]byte(scenario.dirtyMarker+"\n"), 0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return scenarios
 }
@@ -196,12 +206,16 @@ func testWorkspaceDelegation(
 	database := openDatabase(t, targetConfig.Peer.StateFile)
 	defer database.Close()
 	var workspacePath, workspaceStatus, claimedAgentID, strategy, warningsJSON string
+	var sourceClean bool
+	var sourceSnapshotHash, manifestHash string
 	if err := database.QueryRow(`
-SELECT workspace_path, status, claimed_agent_id, strategy, warnings_json
-FROM prepared_workspaces
-WHERE controller_id = ? AND tree_id = ? AND workspace_id = ?
-`, networkID, agent.Principal.TreeID, scenario.syncID).Scan(
+	SELECT workspace_path, status, claimed_agent_id, strategy, warnings_json,
+	       source_clean, source_snapshot_hash, manifest_hash
+	FROM prepared_workspaces
+	WHERE controller_id = ? AND tree_id = ? AND workspace_id = ?
+	`, networkID, agent.Principal.TreeID, scenario.syncID).Scan(
 		&workspacePath, &workspaceStatus, &claimedAgentID, &strategy, &warningsJSON,
+		&sourceClean, &sourceSnapshotHash, &manifestHash,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -209,6 +223,12 @@ WHERE controller_id = ? AND tree_id = ? AND workspace_id = ?
 		t.Fatalf("prepared workspace status = %q, claimant %q", workspaceStatus, claimedAgentID)
 	}
 	assertWorkspaceStrategyAndWarnings(t, "target prepared workspace", strategy, warningsJSON, scenario)
+	if sourceClean || len(sourceSnapshotHash) != 64 || len(manifestHash) != 64 {
+		t.Fatalf(
+			"target source snapshot = clean %t, snapshot %q, manifest %q",
+			sourceClean, sourceSnapshotHash, manifestHash,
+		)
+	}
 	if data, err := os.ReadFile(filepath.Join(workspacePath, "nested", "source.txt")); err != nil ||
 		strings.TrimSpace(string(data)) != scenario.sourceMarker {
 		t.Fatalf("target source marker = %q, %v", data, err)
@@ -216,6 +236,17 @@ WHERE controller_id = ? AND tree_id = ? AND workspace_id = ?
 	if data, err := os.ReadFile(filepath.Join(workspacePath, "nested", "worker-change.txt")); err != nil ||
 		strings.TrimSpace(string(data)) != scenario.workerMarker {
 		t.Fatalf("target worker marker = %q, %v", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(workspacePath, "nested", "dirty-source.txt")); err != nil ||
+		strings.TrimSpace(string(data)) != scenario.dirtyMarker {
+		t.Fatalf("target dirty marker = %q, %v", data, err)
+	}
+	dirtyStatus, _ := run(
+		t, os.Environ(), "git", "-C", workspacePath, "status", "--porcelain=v1",
+		"--untracked-files=all", "--", "nested/dirty-source.txt",
+	)
+	if strings.TrimSpace(dirtyStatus) != "?? nested/dirty-source.txt" {
+		t.Fatalf("target dirty marker status = %q", dirtyStatus)
 	}
 	if _, err := os.Stat(filepath.Join(scenario.nestedCWD, "worker-change.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("worker change was written back to source: %v", err)
@@ -227,18 +258,29 @@ WHERE controller_id = ? AND tree_id = ? AND workspace_id = ?
 
 	broker := openDatabase(t, brokerStatePath)
 	defer broker.Close()
-	var status, consumedSpawnID string
+	var status, consumedSpawnID, brokerSnapshotHash, brokerManifestHash string
+	var brokerSourceClean bool
 	if err := broker.QueryRow(`
-SELECT status, consumed_spawn_id, strategy, warnings_json
+	SELECT status, consumed_spawn_id, strategy, warnings_json,
+	       source_clean, source_snapshot_hash, manifest_hash
 FROM workspace_sync_receipts
 WHERE controller_id = ? AND sync_id = ?
-`, networkID, scenario.syncID).Scan(&status, &consumedSpawnID, &strategy, &warningsJSON); err != nil {
+	`, networkID, scenario.syncID).Scan(
+		&status, &consumedSpawnID, &strategy, &warningsJSON,
+		&brokerSourceClean, &brokerSnapshotHash, &brokerManifestHash,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if status != "prepared" || consumedSpawnID != scenario.spawnID {
 		t.Fatalf("broker workspace receipt = status %q, spawn %q", status, consumedSpawnID)
 	}
 	assertWorkspaceStrategyAndWarnings(t, "broker workspace receipt", strategy, warningsJSON, scenario)
+	if brokerSourceClean || brokerSnapshotHash != sourceSnapshotHash || brokerManifestHash != manifestHash {
+		t.Fatalf(
+			"broker source snapshot = clean %t, snapshot %q, manifest %q; target snapshot %q, manifest %q",
+			brokerSourceClean, brokerSnapshotHash, brokerManifestHash, sourceSnapshotHash, manifestHash,
+		)
+	}
 }
 
 func assertWorkspaceStrategyAndWarnings(
