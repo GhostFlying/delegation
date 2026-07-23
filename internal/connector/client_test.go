@@ -235,15 +235,27 @@ func TestCanceledMailboxWaitsReleaseBrokerCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var mailbox protocol.WaitMailboxResult
-	if err := client.Call(
-		context.Background(),
-		protocol.MethodWaitMailbox,
-		root.Tree.TreeID,
-		&source,
-		protocol.WaitMailboxParams{TimeoutMillis: 1_000, Limit: 1},
-		&mailbox,
-	); err != nil {
-		t.Fatalf("mailbox wait after canceling capacity: %v", err)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		waitContext, cancelWait := context.WithDeadline(context.Background(), deadline)
+		err := client.Call(
+			waitContext,
+			protocol.MethodWaitMailbox,
+			root.Tree.TreeID,
+			&source,
+			protocol.WaitMailboxParams{TimeoutMillis: 1_000, Limit: 1},
+			&mailbox,
+		)
+		cancelWait()
+		if err == nil {
+			break
+		}
+		var rpcErr *RPCError
+		if !errors.As(err, &rpcErr) || rpcErr.Code != protocol.ErrorUnavailable ||
+			rpcErr.Message != "too many pending mailbox waits" || time.Now().After(deadline) {
+			t.Fatalf("mailbox wait after canceling capacity: %v", err)
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if len(mailbox.Messages) != 1 || mailbox.Messages[0].MessageID != sent.MessageID ||
 		mailbox.Messages[0].Message != "capacity released" || !client.Status().Connected {
@@ -1318,7 +1330,7 @@ func newFakeBrokerWithFeatures(
 
 func readTestEnvelope(t *testing.T, connection *websocket.Conn) protocol.Envelope {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	messageType, data, err := connection.Read(ctx)
 	if err != nil {

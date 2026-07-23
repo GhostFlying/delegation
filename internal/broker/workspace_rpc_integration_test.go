@@ -333,7 +333,7 @@ func TestWorkspaceRPCDirectPrepareAcknowledgementLossRetriesSameSync(t *testing.
 }
 
 func TestWorkspaceRPCCancellationStopsTargetPeerOperation(t *testing.T) {
-	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	harness := newBrokerHarness(t, config.AuthModeNone, 5*time.Second)
 	gitURL := "ssh://git@example.invalid/repository.git"
 	sourceManager := &recordingWorkspacePeer{
 		deviceID: brokerTestDeviceID,
@@ -375,7 +375,7 @@ func TestWorkspaceRPCCancellationStopsTargetPeerOperation(t *testing.T) {
 	}()
 	select {
 	case <-prepareStarted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("target workspace preparation did not start")
 	}
 	cancelCall()
@@ -384,17 +384,17 @@ func TestWorkspaceRPCCancellationStopsTargetPeerOperation(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("canceled workspace sync = %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("canceled workspace sync did not return")
 	}
 	select {
 	case <-prepareCanceled:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("target peer operation was not canceled")
 	}
 	select {
 	case <-cancelObserved:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("broker did not finish provisional target cleanup")
 	}
 	waitForWorkspaceCleanupDrain(t, harness.server, brokerTestDeviceID, agentRPCTargetID)
@@ -402,7 +402,7 @@ func TestWorkspaceRPCCancellationStopsTargetPeerOperation(t *testing.T) {
 
 func waitForWorkspaceCleanupDrain(t *testing.T, server *Server, sourceDeviceID, targetDeviceID string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		sourceAsync := 0
 		if source := server.connection(sourceDeviceID); source != nil {

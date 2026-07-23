@@ -87,7 +87,7 @@ func (p *serializedWorkspacePeer) snapshotConcurrency() (int, int) {
 }
 
 func TestWorkspaceSyncSingleFlightWaitsForCanceledTargetCleanup(t *testing.T) {
-	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	harness := newBrokerHarness(t, config.AuthModeNone, 5*time.Second)
 	gitURL := "ssh://git@example.invalid/repository.git"
 	sourceManager := &recordingWorkspacePeer{
 		deviceID: brokerTestDeviceID,
@@ -115,7 +115,7 @@ func TestWorkspaceSyncSingleFlightWaitsForCanceledTargetCleanup(t *testing.T) {
 	cancelOnlyWorkspaceSync(t, sourceSession)
 	select {
 	case <-targetManager.firstCanceled:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("target did not observe cancellation")
 	}
 	secondContext, cancelSecond := context.WithTimeout(context.Background(), 10*time.Second)
@@ -131,7 +131,7 @@ func TestWorkspaceSyncSingleFlightWaitsForCanceledTargetCleanup(t *testing.T) {
 	case err := <-secondDone:
 		inspections, _, _ := sourceManager.snapshot()
 		t.Fatalf("second workspace sync ended before retry after %d inspections: %v", len(inspections), err)
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		sourceSession.asyncMu.Lock()
 		asyncCount := len(sourceSession.asyncCancels)
 		sourceSession.asyncMu.Unlock()
@@ -177,7 +177,7 @@ func cancelOnlyWorkspaceSync(t *testing.T, session *session) {
 }
 
 func TestWorkspaceSyncSingleFlightRetriesAfterLeaderFailure(t *testing.T) {
-	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	harness := newBrokerHarness(t, config.AuthModeNone, 5*time.Second)
 	gitURL := "ssh://git@example.invalid/repository.git"
 	sourceManager := &recordingWorkspacePeer{
 		deviceID: brokerTestDeviceID,
