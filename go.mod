@@ -6,8 +6,10 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/coder/websocket v1.8.15
 	github.com/google/jsonschema-go v0.4.3
+	github.com/klauspost/compress v1.19.1
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	golang.org/x/sys v0.47.0
+	golang.org/x/text v0.40.0
 	modernc.org/sqlite v1.54.0
 )
 
