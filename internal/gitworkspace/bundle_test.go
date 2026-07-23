@@ -105,6 +105,45 @@ func TestSelfContainedBundleImportsWithoutRemote(t *testing.T) {
 	}
 }
 
+func TestApplyBundleCleansDirtyExistingSandboxBeforeRetry(t *testing.T) {
+	runner := testRunner(t)
+	remote, source, _ := createRemoteRepository(t, runner.Binary)
+	repository, err := runner.Inspect(context.Background(), source, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(t.TempDir(), "workspace.bundle")
+	if _, err := runner.CreateBundle(
+		context.Background(), repository.Root, bundle, repository.Manifest, nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "target")
+	if err := runner.ApplyBundle(context.Background(), target, bundle, repository.Manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(target, "nested", "hello.txt"), []byte("dirty tracked\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	untracked := filepath.Join(target, "leftover-untracked.txt")
+	if err := os.WriteFile(untracked, []byte("leftover\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.ApplyBundle(context.Background(), target, bundle, repository.Manifest); err != nil {
+		t.Fatal(err)
+	}
+	assertPreparedBundleWorkspace(t, runner, target, repository.Manifest)
+	if _, err := os.Stat(untracked); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bundle retry retained untracked file: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(target, "nested", "hello.txt"))
+	if err != nil || string(data) != "hello\n" {
+		t.Fatalf("bundle retry tracked bytes = %q, %v", data, err)
+	}
+}
+
 func TestSelfContainedBundleExcludesUnrelatedRefsAndObjects(t *testing.T) {
 	runner := testRunner(t)
 	remote, source, _ := createRemoteRepository(t, runner.Binary)

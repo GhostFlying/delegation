@@ -304,6 +304,37 @@ func TestHardenedEnvironmentReplacesGitOverrides(t *testing.T) {
 	}
 }
 
+func TestIsolatedTargetEnvironmentDisablesAmbientGitConfiguration(t *testing.T) {
+	runner := testRunner(t)
+	for name, value := range map[string]string{
+		"GIT_CONFIG_SYSTEM":   filepath.Join(t.TempDir(), "system-config"),
+		"GIT_CONFIG_GLOBAL":   filepath.Join(t.TempDir(), "global-config"),
+		"GIT_ATTR_NOSYSTEM":   "0",
+		"GIT_CONFIG_NOSYSTEM": "0",
+		"GIT_DIR":             filepath.Join(t.TempDir(), "attacker"),
+	} {
+		t.Setenv(name, value)
+	}
+	want := map[string]string{
+		"GIT_TERMINAL_PROMPT": "0",
+		"GIT_LFS_SKIP_SMUDGE": "1",
+		"GIT_SSH_COMMAND":     "ssh -o BatchMode=yes",
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_CONFIG_GLOBAL":   os.DevNull,
+		"GIT_ATTR_NOSYSTEM":   "1",
+	}
+	got := make(map[string]string)
+	for _, variable := range runner.forIsolatedTarget().commandEnvironment() {
+		name, value, _ := strings.Cut(variable, "=")
+		if strings.HasPrefix(strings.ToUpper(name), "GIT_") {
+			got[strings.ToUpper(name)] = value
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("isolated target Git environment = %#v, want %#v", got, want)
+	}
+}
+
 func testRunner(t *testing.T) Runner {
 	t.Helper()
 	binary, err := exec.LookPath("git")
@@ -326,12 +357,19 @@ func testRunner(t *testing.T) Runner {
 }
 
 func createRemoteRepository(t *testing.T, gitBinary string) (string, string, string) {
+	return createRemoteRepositoryWithObjectFormat(t, gitBinary, "sha1")
+}
+
+func createRemoteRepositoryWithObjectFormat(
+	t *testing.T,
+	gitBinary, objectFormat string,
+) (string, string, string) {
 	t.Helper()
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")
 	source := filepath.Join(root, "source")
-	gitRun(t, gitBinary, root, "init", "--bare", remote)
-	gitRun(t, gitBinary, root, "init", source)
+	gitInitWithObjectFormat(t, gitBinary, root, objectFormat, "--bare", remote)
+	gitInitWithObjectFormat(t, gitBinary, root, objectFormat, source)
 	if err := os.Mkdir(filepath.Join(source, "nested"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -359,6 +397,25 @@ func createRemoteRepository(t *testing.T, gitBinary string) (string, string, str
 	t.Setenv("no_proxy", "*")
 	remoteURL := server.URL + "/" + filepath.Base(remote)
 	return remoteURL, source, gitOutput(t, gitBinary, source, "rev-parse", "HEAD^{commit}")
+}
+
+func gitInitWithObjectFormat(
+	t *testing.T,
+	gitBinary, directory, objectFormat string,
+	args ...string,
+) {
+	t.Helper()
+	commandArgs := []string{"init", "--object-format=" + objectFormat}
+	commandArgs = append(commandArgs, args...)
+	command := exec.Command(gitBinary, commandArgs...)
+	command.Dir = directory
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if output, err := command.CombinedOutput(); err != nil {
+		if objectFormat == "sha256" {
+			t.Skipf("Git SHA-256 repositories are unavailable: %v\n%s", err, output)
+		}
+		t.Fatalf("git %v: %v\n%s", commandArgs, err, output)
+	}
 }
 
 func gitRun(t *testing.T, gitBinary, directory string, args ...string) {

@@ -3,8 +3,6 @@ package gitworkspace
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -50,7 +48,15 @@ type BasePreparation struct {
 type Runner struct {
 	Binary              string
 	excludedEnvironment []string
+	profile             gitCommandProfile
 }
+
+type gitCommandProfile uint8
+
+const (
+	gitCommandProfileHost gitCommandProfile = iota
+	gitCommandProfileIsolatedTarget
+)
 
 func NewRunner(binary string, excludedEnvironment ...string) (Runner, error) {
 	if !filepath.IsAbs(binary) {
@@ -164,14 +170,11 @@ func (r Runner) Inspect(ctx context.Context, sourcePath, gitURL string) (Reposit
 	if err := r.ensureSafeSourceConfig(ctx, resolvedRoot); err != nil {
 		return Repository{}, err
 	}
-	status, err := r.output(
-		ctx, resolvedRoot, "status", "--porcelain=v2", "-z",
-		"--untracked-files=normal", "--ignore-submodules=all",
-	)
+	captured, err := r.captureOverlay(ctx, resolvedRoot, headOID, objectFormat, filepath.ToSlash(relative), "")
 	if err != nil {
-		return Repository{}, preserveContextError(err, errors.New("inspect source Git status"))
+		return Repository{}, err
 	}
-	clean := len(status) == 0
+	clean := len(captured.manifest.Entries) == 0
 	warnings := make([]string, 0, 2)
 	if hasSubmodules, checkErr := r.hasSubmodules(ctx, resolvedRoot); checkErr != nil {
 		return Repository{}, checkErr
@@ -184,13 +187,10 @@ func (r Runner) Inspect(ctx context.Context, sourcePath, gitURL string) (Reposit
 		warnings = append(warnings, "lfs_payload_not_transferred")
 	}
 	slices.Sort(warnings)
-	snapshot := sha256.Sum256([]byte(strings.Join([]string{
-		headOID, objectFormat, filepath.ToSlash(relative), fmt.Sprintf("clean=%t", clean),
-	}, "\x00")))
 	manifest := protocol.WorkspaceManifest{
 		GitURL: gitURL, HeadOID: headOID, ObjectFormat: objectFormat,
 		WorkingDirectory: filepath.ToSlash(relative), Clean: clean,
-		SourceSnapshotHash: hex.EncodeToString(snapshot[:]), Warnings: warnings,
+		SourceSnapshotHash: captured.manifest.SourceSnapshotHash, Warnings: warnings,
 	}
 	if err := manifest.Validate(); err != nil {
 		return Repository{}, fmt.Errorf("source workspace manifest: %w", err)
@@ -241,7 +241,7 @@ func (r Runner) PrepareBase(
 		"-c", "protocol.allow=never",
 		"-c", "protocol.https.allow=always",
 		"-c", "protocol.ssh.allow=always",
-		"clone", "--no-checkout", "--no-recurse-submodules", "--", manifest.GitURL, destination,
+		"clone", "--no-checkout", "--no-recurse-submodules", "--template=", "--", manifest.GitURL, destination,
 	}
 	if err := r.runWithTimeout(ctx, cloneCommandTimeout, parent, args...); err != nil {
 		if isContextError(err) {
@@ -251,10 +251,11 @@ func (r Runner) PrepareBase(
 			BundleRequired: true, OverlayRequired: !manifest.Clean,
 		}, nil
 	}
-	if err := r.run(ctx, destination, "config", "core.hooksPath", disabledHooksPath()); err != nil {
-		return BasePreparation{}, preserveContextError(err, errors.New("disable target Git hooks"))
+	targetRunner := r.forIsolatedTarget()
+	if err := targetRunner.configureTargetCheckout(ctx, destination); err != nil {
+		return BasePreparation{}, err
 	}
-	actualFormat, err := r.output(ctx, destination, "rev-parse", "--show-object-format")
+	actualFormat, err := targetRunner.output(ctx, destination, "rev-parse", "--show-object-format")
 	if err != nil {
 		return BasePreparation{}, preserveContextError(err, errors.New("inspect target Git object format"))
 	}
@@ -263,11 +264,11 @@ func (r Runner) PrepareBase(
 			BundleRequired: true, OverlayRequired: !manifest.Clean,
 		}, nil
 	}
-	if err := r.run(ctx, destination, "cat-file", "-e", manifest.HeadOID+"^{commit}"); err != nil {
+	if err := targetRunner.run(ctx, destination, "cat-file", "-e", manifest.HeadOID+"^{commit}"); err != nil {
 		if isContextError(err) {
 			return BasePreparation{}, err
 		}
-		basisOIDs, basisErr := r.bundleBasisOIDs(ctx, destination)
+		basisOIDs, basisErr := targetRunner.bundleBasisOIDs(ctx, destination)
 		if basisErr != nil {
 			return BasePreparation{}, basisErr
 		}
@@ -276,17 +277,17 @@ func (r Runner) PrepareBase(
 			BundleRequired: true, OverlayRequired: !manifest.Clean, BasisOIDs: basisOIDs,
 		}, nil
 	}
-	if err := r.run(ctx, destination, "checkout", "--detach", "--force", manifest.HeadOID); err != nil {
+	if err := targetRunner.run(ctx, destination, "checkout", "--detach", "--force", manifest.HeadOID); err != nil {
 		return BasePreparation{}, preserveContextError(err, errors.New("check out exact source HEAD on target"))
 	}
-	actualHead, err := r.output(ctx, destination, "rev-parse", "--verify", "HEAD^{commit}")
+	actualHead, err := targetRunner.output(ctx, destination, "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return BasePreparation{}, preserveContextError(err, errors.New("target checkout does not match the exact source HEAD"))
 	}
 	if strings.TrimSpace(string(actualHead)) != manifest.HeadOID {
 		return BasePreparation{}, errors.New("target checkout does not match the exact source HEAD")
 	}
-	status, err := r.output(ctx, destination, "status", "--porcelain=v2", "-z", "--untracked-files=normal")
+	status, err := targetRunner.output(ctx, destination, "status", "--porcelain=v2", "-z", "--untracked-files=normal")
 	if err != nil {
 		return BasePreparation{}, preserveContextError(err, errors.New("target direct clone is not clean"))
 	}
@@ -308,6 +309,7 @@ func (r Runner) VerifyDirect(
 	ctx context.Context,
 	repositoryPath, headOID, objectFormat string,
 ) error {
+	r = r.forIsolatedTarget()
 	if !filepath.IsAbs(repositoryPath) || !gitObjectID(headOID) {
 		return errors.New("direct workspace verification input is invalid")
 	}
@@ -331,6 +333,26 @@ func (r Runner) VerifyDirect(
 	}
 	if len(status) != 0 {
 		return errors.New("prepared workspace is no longer clean")
+	}
+	return nil
+}
+
+func (r Runner) configureTargetCheckout(ctx context.Context, repositoryPath string) error {
+	r = r.forIsolatedTarget()
+	settings := [][2]string{
+		{"core.hooksPath", disabledHooksPath()},
+		{"core.autocrlf", "false"},
+		{"core.eol", "lf"},
+		{"core.excludesFile", ""},
+		{"core.attributesFile", ""},
+	}
+	if runtime.GOOS != "windows" {
+		settings = append(settings, [2]string{"core.fileMode", "true"})
+	}
+	for _, setting := range settings {
+		if err := r.run(ctx, repositoryPath, "config", setting[0], setting[1]); err != nil {
+			return preserveContextError(err, errors.New("configure deterministic target Git checkout"))
+		}
 	}
 	return nil
 }
@@ -371,7 +393,7 @@ func (r Runner) hasLFS(ctx context.Context, root string) (bool, error) {
 }
 
 func (r Runner) run(ctx context.Context, directory string, args ...string) error {
-	_, err := r.command(ctx, commandTimeout, directory, nil, args...)
+	_, err := r.command(ctx, commandTimeout, maximumOutput, directory, nil, args...)
 	return err
 }
 
@@ -381,7 +403,7 @@ func (r Runner) runWithTimeout(
 	directory string,
 	args ...string,
 ) error {
-	_, err := r.command(ctx, timeout, directory, nil, args...)
+	_, err := r.command(ctx, timeout, maximumOutput, directory, nil, args...)
 	return err
 }
 
@@ -391,7 +413,7 @@ func (r Runner) runDiscardingOutput(ctx context.Context, directory string, args 
 	command := exec.CommandContext(commandContext, r.Binary, safeGitArgs(args)...)
 	command.WaitDelay = commandWaitDelay
 	command.Dir = directory
-	command.Env = hardenedEnvironment(r.excludedEnvironment)
+	command.Env = r.commandEnvironment()
 	command.Stdout = io.Discard
 	var stderr limitedBuffer
 	command.Stderr = &stderr
@@ -412,7 +434,7 @@ func (r Runner) runDiscardingOutput(ctx context.Context, directory string, args 
 }
 
 func (r Runner) output(ctx context.Context, directory string, args ...string) ([]byte, error) {
-	return r.command(ctx, commandTimeout, directory, nil, args...)
+	return r.command(ctx, commandTimeout, maximumOutput, directory, nil, args...)
 }
 
 func (r Runner) outputWithInput(
@@ -421,12 +443,22 @@ func (r Runner) outputWithInput(
 	input []byte,
 	args ...string,
 ) ([]byte, error) {
-	return r.command(ctx, commandTimeout, directory, input, args...)
+	return r.command(ctx, commandTimeout, maximumOutput, directory, input, args...)
+}
+
+func (r Runner) outputWithLimit(
+	ctx context.Context,
+	directory string,
+	limit int,
+	args ...string,
+) ([]byte, error) {
+	return r.command(ctx, commandTimeout, limit, directory, nil, args...)
 }
 
 func (r Runner) command(
 	ctx context.Context,
 	timeout time.Duration,
+	outputLimit int,
 	directory string,
 	input []byte,
 	args ...string,
@@ -436,11 +468,11 @@ func (r Runner) command(
 	command := exec.CommandContext(commandContext, r.Binary, safeGitArgs(args)...)
 	command.WaitDelay = commandWaitDelay
 	command.Dir = directory
-	command.Env = hardenedEnvironment(r.excludedEnvironment)
+	command.Env = r.commandEnvironment()
 	if input != nil {
 		command.Stdin = bytes.NewReader(input)
 	}
-	var output limitedBuffer
+	output := limitedBuffer{limit: outputLimit}
 	command.Stdout = &output
 	command.Stderr = &output
 	err := command.Run()
@@ -457,6 +489,22 @@ func (r Runner) command(
 		return nil, errors.New("Git command output exceeded the configured limit")
 	}
 	return output.Bytes(), nil
+}
+
+func (r Runner) forIsolatedTarget() Runner {
+	r.profile = gitCommandProfileIsolatedTarget
+	return r
+}
+
+func (r Runner) commandEnvironment() []string {
+	environment := hardenedEnvironment(r.excludedEnvironment)
+	if r.profile != gitCommandProfileIsolatedTarget {
+		return environment
+	}
+	environment = setEnvironment(environment, "GIT_CONFIG_NOSYSTEM", "1")
+	environment = setEnvironment(environment, "GIT_CONFIG_GLOBAL", os.DevNull)
+	environment = setEnvironment(environment, "GIT_ATTR_NOSYSTEM", "1")
+	return environment
 }
 
 func safeGitArgs(args []string) []string {
@@ -518,11 +566,16 @@ func (r Runner) configValue(
 type limitedBuffer struct {
 	buffer bytes.Buffer
 	full   bool
+	limit  int
 }
 
 func (b *limitedBuffer) Write(data []byte) (int, error) {
 	original := len(data)
-	remaining := maximumOutput - b.buffer.Len()
+	limit := b.limit
+	if limit == 0 {
+		limit = maximumOutput
+	}
+	remaining := limit - b.buffer.Len()
 	if remaining <= 0 {
 		b.full = true
 		return original, nil

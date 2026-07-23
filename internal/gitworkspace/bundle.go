@@ -53,9 +53,6 @@ func (r Runner) CreateBundle(
 	if err := manifest.Validate(); err != nil {
 		return "", err
 	}
-	if !manifest.Clean {
-		return "", errors.New("clean bundle transport cannot export a dirty source")
-	}
 	if !filepath.IsAbs(repositoryPath) || !filepath.IsAbs(destination) {
 		return "", errors.New("bundle paths must be absolute")
 	}
@@ -152,7 +149,7 @@ func (r Runner) createBundleFile(
 	command := exec.CommandContext(commandContext, r.Binary, safeGitArgs(args)...)
 	command.WaitDelay = commandWaitDelay
 	command.Dir = repositoryPath
-	command.Env = hardenedEnvironment(r.excludedEnvironment)
+	command.Env = r.commandEnvironment()
 	output := boundedFileWriter{file: file, remaining: maximumBytes}
 	var stderr limitedBuffer
 	command.Stdout = &output
@@ -265,11 +262,12 @@ func (r Runner) ApplyBundle(
 	repositoryPath, bundlePath string,
 	manifest protocol.WorkspaceManifest,
 ) error {
+	r = r.forIsolatedTarget()
 	if err := manifest.Validate(); err != nil {
 		return err
 	}
-	if !manifest.Clean {
-		return errors.New("clean bundle transport cannot apply a dirty source")
+	if err := ValidateRemoteURL(manifest.GitURL); err != nil {
+		return err
 	}
 	if !filepath.IsAbs(repositoryPath) || !filepath.IsAbs(bundlePath) {
 		return errors.New("bundle paths must be absolute")
@@ -286,7 +284,7 @@ func (r Runner) ApplyBundle(
 			return fmt.Errorf("create bundle repository: %w", err)
 		}
 		createdRepository = true
-		if err := r.run(ctx, repositoryPath, "init", "--object-format="+manifest.ObjectFormat); err != nil {
+		if err := r.run(ctx, repositoryPath, "init", "--template=", "--object-format="+manifest.ObjectFormat); err != nil {
 			return preserveContextError(err, errors.New("initialize bundle repository"))
 		}
 		if err := r.run(ctx, repositoryPath, "config", "remote.origin.url", manifest.GitURL); err != nil {
@@ -295,8 +293,8 @@ func (r Runner) ApplyBundle(
 	} else if err != nil {
 		return fmt.Errorf("inspect bundle repository: %w", err)
 	}
-	if err := r.run(ctx, repositoryPath, "config", "core.hooksPath", disabledHooksPath()); err != nil {
-		return preserveContextError(err, errors.New("disable target Git hooks"))
+	if err := r.configureTargetCheckout(ctx, repositoryPath); err != nil {
+		return err
 	}
 	actualFormat, err := r.output(ctx, repositoryPath, "rev-parse", "--show-object-format")
 	if err != nil || strings.TrimSpace(string(actualFormat)) != manifest.ObjectFormat {
@@ -322,13 +320,20 @@ func (r Runner) ApplyBundle(
 	); err != nil {
 		return preserveContextError(err, errors.New("import target Git bundle"))
 	}
+	if err := r.run(ctx, repositoryPath, "clean", "-ffdx"); err != nil {
+		return preserveContextError(err, errors.New("clean target bundle workspace before checkout"))
+	}
 	if err := r.run(ctx, repositoryPath, "checkout", "--detach", "--force", manifest.HeadOID); err != nil {
 		return preserveContextError(err, errors.New("check out bundled source HEAD"))
 	}
 	if err := r.VerifyDirect(ctx, repositoryPath, manifest.HeadOID, manifest.ObjectFormat); err != nil {
 		return err
 	}
-	if err := validateWorkingDirectory(repositoryPath, manifest.WorkingDirectory); err != nil {
+	if err := validateWorkingDirectory(repositoryPath, manifest.WorkingDirectory); errors.Is(err, os.ErrNotExist) {
+		if manifest.Clean {
+			return errors.New("target working directory is absent from the exact source HEAD")
+		}
+	} else if err != nil {
 		return err
 	}
 	succeeded = true
