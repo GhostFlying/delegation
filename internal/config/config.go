@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion = 2
+	CurrentSchemaVersion = 3
 	brokerConnectPath    = "/v1/connect"
 	maximumConfigSize    = 1024 * 1024
 	MaximumWorkerSlots   = 64
@@ -63,6 +63,7 @@ type AuthConfig struct {
 
 type PeerConfig struct {
 	CodexBinary    string `json:"codexBinary,omitempty"`
+	GitBinary      string `json:"gitBinary,omitempty"`
 	CodexHome      string `json:"codexHome,omitempty"`
 	WorkspaceRoot  string `json:"workspaceRoot,omitempty"`
 	StateFile      string `json:"stateFile,omitempty"`
@@ -173,6 +174,9 @@ func (c Config) Validate() error {
 		}
 		if !filepath.IsAbs(c.Peer.CodexBinary) {
 			return errors.New("peer codexBinary must be an absolute path")
+		}
+		if !filepath.IsAbs(c.Peer.GitBinary) {
+			return errors.New("peer gitBinary must be an absolute path")
 		}
 		if !filepath.IsAbs(c.Peer.CodexHome) {
 			return errors.New("peer codexHome must be an absolute path")

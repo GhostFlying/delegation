@@ -25,8 +25,9 @@ func (h *Host) startNewThread(
 ) (StartedTurn, <-chan struct{}, error) {
 	var result threadResult
 	err := client.ThreadStart(ctx, threadStartParams{
-		CWD: worker.WorkspacePath, ApprovalPolicy: "never",
-		Config: h.managedConfig(worker), ServiceName: "delegation",
+		CWD: h.workerCWD(worker), RuntimeWorkspaceRoots: []string{worker.WorkspacePath},
+		ApprovalPolicy: "never",
+		Config:         h.managedConfig(worker), ServiceName: "delegation",
 		ThreadSource: workerSource, DeveloperMessage: workerInstructions,
 	}, &result)
 	if err != nil {
@@ -44,6 +45,9 @@ func (h *Host) startNewThread(
 	if err := identity.ValidateID(result.Thread.ID); err != nil {
 		protocolErr := fmt.Errorf("app-server returned invalid threadId: %w", err)
 		return StartedTurn{Worker: worker}, h.retireClient(client, protocolErr), protocolErr
+	}
+	if err := h.validateThreadWorkspace(result, worker); err != nil {
+		return StartedTurn{Worker: worker}, h.retireClient(client, err), err
 	}
 	worker, err = h.recordWorkerChange(
 		h.state.AttachWorkerThread(ctx, worker.WorkerKey, result.Thread.ID, time.Now()),
@@ -79,9 +83,10 @@ func (h *Host) resumeThread(
 ) (store.WorkerReservation, <-chan struct{}, error) {
 	var result threadResult
 	err := client.ThreadResume(ctx, threadResumeParams{
-		ThreadID: worker.CodexThreadID, CWD: worker.WorkspacePath,
-		ApprovalPolicy: "never",
-		Config:         h.managedConfig(worker), DeveloperMessage: workerInstructions,
+		ThreadID: worker.CodexThreadID, CWD: h.workerCWD(worker),
+		RuntimeWorkspaceRoots: []string{worker.WorkspacePath},
+		ApprovalPolicy:        "never",
+		Config:                h.managedConfig(worker), DeveloperMessage: workerInstructions,
 		ExcludeTurns: true,
 	}, &result)
 	if err != nil {
@@ -101,6 +106,9 @@ func (h *Host) resumeThread(
 			worker.CodexThreadID,
 		)
 		return worker, h.retireClient(client, protocolErr), protocolErr
+	}
+	if err := h.validateThreadWorkspace(result, worker); err != nil {
+		return worker, h.retireClient(client, err), err
 	}
 	worker, err = h.recordWorkerChange(
 		h.state.AttachWorkerThread(ctx, worker.WorkerKey, worker.CodexThreadID, time.Now()),
@@ -454,6 +462,23 @@ func (h *Host) failWorkerMCP(
 }
 
 func (h *Host) validateStoredAuthority(ctx context.Context) error {
+	workspaces, err := h.state.ListPreparedWorkspaces(ctx)
+	if err != nil {
+		return err
+	}
+	for _, workspace := range workspaces {
+		if workspace.ControllerID != h.controllerID || workspace.TargetDeviceID != h.deviceID {
+			return errors.New("peer state contains a workspace from another controller or device")
+		}
+		if err := h.verifyPreparedWorkspaceAuthority(workspace); err != nil {
+			return err
+		}
+		if workspace.Status == store.PreparedWorkspaceReady {
+			if err := h.verifyPreparedWorkspace(ctx, workspace); err != nil {
+				return err
+			}
+		}
+	}
 	workers, err := h.state.ListWorkers(ctx)
 	if err != nil {
 		return err
@@ -462,7 +487,13 @@ func (h *Host) validateStoredAuthority(ctx context.Context) error {
 		if worker.ControllerID != h.controllerID || worker.DeviceID != h.deviceID {
 			return errors.New("peer state contains a worker from another controller or device")
 		}
-		if worker.WorkspacePath != h.workspacePath(worker.WorkerKey) {
+		expectedPath := h.workspacePath(worker.WorkerKey)
+		if worker.WorkspaceID != "" {
+			expectedPath = filepath.Join(
+				h.workspaceRoot.Name(), workspaceSyncName(worker.TreeID, worker.WorkspaceID),
+			)
+		}
+		if worker.WorkspacePath != expectedPath {
 			return errors.New("peer state contains a worker outside the configured workspace root")
 		}
 		if worker.ProfileVersion != workerProfileVersion {

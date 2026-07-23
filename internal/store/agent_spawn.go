@@ -23,6 +23,7 @@ type AgentSpawnIntent struct {
 	TargetDeviceID string
 	TaskName       string
 	PromptDigest   [sha256.Size]byte
+	WorkspaceID    string
 }
 
 type AgentSpawnKey struct {
@@ -93,6 +94,22 @@ func (s *Store) BeginAgentSpawn(
 		if !errors.Is(err, ErrNotFound) {
 			return err
 		}
+		if intent.WorkspaceID != "" {
+			workspace, workspaceErr := queryWorkspaceSyncReceipt(ctx, connection, WorkspaceSyncKey{
+				ControllerID:  intent.Source.ControllerID,
+				TreeID:        intent.Source.TreeID,
+				SourceAgentID: intent.Source.AgentID,
+				SyncID:        intent.WorkspaceID,
+			})
+			if workspaceErr != nil {
+				return fmt.Errorf("spawn workspace: %w", workspaceErr)
+			}
+			if workspace.Status != WorkspaceSyncPrepared ||
+				workspace.TargetDeviceID != intent.TargetDeviceID ||
+				(workspace.ConsumedSpawnID != "" && workspace.ConsumedSpawnID != intent.SpawnID) {
+				return fmt.Errorf("%w: workspace is not available for this spawn", ErrConflict)
+			}
+		}
 		device, err := queryDevice(ctx, connection, intent.Source.ControllerID, intent.TargetDeviceID)
 		if err != nil {
 			return fmt.Errorf("worker device: %w", err)
@@ -137,10 +154,10 @@ INSERT INTO principals(
 		if _, err := connection.ExecContext(ctx, `
 INSERT INTO agent_spawn_receipts(
     controller_id, tree_id, sequence, source_agent_id, spawn_id, agent_id,
-    target_device_id, task_name, prompt_digest, status, failure_code, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+    target_device_id, task_name, workspace_id, prompt_digest, status, failure_code, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
 `, principal.ControllerID, principal.TreeID, sequence, principal.ParentAgentID, intent.SpawnID,
-			principal.AgentID, principal.DeviceID, intent.TaskName, intent.PromptDigest[:],
+			principal.AgentID, principal.DeviceID, intent.TaskName, intent.WorkspaceID, intent.PromptDigest[:],
 			protocol.AgentSpawnPending, timestamp, timestamp); err != nil {
 			return fmt.Errorf("create agent spawn receipt: %w", err)
 		}
@@ -157,13 +174,29 @@ WHERE controller_id = ? AND tree_id = ? AND last_agent_sequence = ?
 		} else if affected != 1 {
 			return errors.New("tree agent sequence changed during spawn")
 		}
+		if intent.WorkspaceID != "" {
+			result, err := connection.ExecContext(ctx, `
+UPDATE workspace_sync_receipts
+SET consumed_spawn_id = ?, updated_at = max(updated_at, ?)
+WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND sync_id = ?
+	AND status = 'prepared' AND consumed_spawn_id IN ('', ?)
+`, intent.SpawnID, timestamp, intent.Source.ControllerID, intent.Source.TreeID,
+				intent.Source.AgentID, intent.WorkspaceID, intent.SpawnID)
+			if err != nil {
+				return fmt.Errorf("consume spawn workspace: %w", err)
+			}
+			if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+				return fmt.Errorf("%w: workspace consumption raced", ErrConflict)
+			}
+		}
 		receipt = AgentSpawnReceipt{
 			Agent: protocol.AgentSummary{
-				SpawnID:   intent.SpawnID,
-				Principal: principal.Identity(),
-				TaskName:  intent.TaskName,
-				Status:    protocol.AgentSpawnPending,
-				Sequence:  sequence,
+				SpawnID:     intent.SpawnID,
+				Principal:   principal.Identity(),
+				TaskName:    intent.TaskName,
+				Status:      protocol.AgentSpawnPending,
+				WorkspaceID: intent.WorkspaceID,
+				Sequence:    sequence,
 			},
 			PromptDigest: intent.PromptDigest,
 			CreatedAt:    timestamp,
@@ -334,6 +367,11 @@ func validateAgentSpawnIntent(intent AgentSpawnIntent) error {
 			return fmt.Errorf("%s %w", field.name, err)
 		}
 	}
+	if intent.WorkspaceID != "" {
+		if err := identity.ValidateID(intent.WorkspaceID); err != nil {
+			return fmt.Errorf("workspaceId %w", err)
+		}
+	}
 	if err := protocol.ValidateAgentTaskName(intent.TaskName); err != nil {
 		return err
 	}
@@ -347,6 +385,7 @@ func receiptMatchesIntent(receipt AgentSpawnReceipt, intent AgentSpawnIntent) bo
 		receipt.Agent.Principal.ParentAgentID == intent.Source.AgentID &&
 		receipt.Agent.Principal.DeviceID == intent.TargetDeviceID &&
 		receipt.Agent.TaskName == intent.TaskName &&
+		receipt.Agent.WorkspaceID == intent.WorkspaceID &&
 		receipt.PromptDigest == intent.PromptDigest
 }
 
@@ -373,6 +412,7 @@ func scanAgentSpawnReceipt(scanner rowScanner) (AgentSpawnReceipt, error) {
 		&receipt.Agent.Principal.DeviceID,
 		&targetDeviceID,
 		&receipt.Agent.TaskName,
+		&receipt.Agent.WorkspaceID,
 		&digest,
 		&receipt.Agent.Status,
 		&receipt.Agent.FailureCode,
@@ -405,7 +445,7 @@ func scanAgentSpawnReceipt(scanner rowScanner) (AgentSpawnReceipt, error) {
 const agentSpawnSelect = `
 SELECT r.spawn_id, p.controller_id, p.tree_id, p.agent_id, p.parent_agent_id, p.device_id,
 	   r.target_device_id,
-       r.task_name, r.prompt_digest, r.status, r.failure_code, r.sequence, r.created_at, r.updated_at
+       r.task_name, r.workspace_id, r.prompt_digest, r.status, r.failure_code, r.sequence, r.created_at, r.updated_at
 FROM agent_spawn_receipts AS r
 JOIN principals AS p
   ON p.controller_id = r.controller_id AND p.tree_id = r.tree_id AND p.agent_id = r.agent_id

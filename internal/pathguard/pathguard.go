@@ -75,6 +75,27 @@ func ValidatePeerRuntimeAuthority(
 	return nil
 }
 
+// ValidateManagedExecutable rejects an executable that managed Codex can
+// overwrite through either of its writable runtime directories.
+func ValidateManagedExecutable(name, executablePath, codexHome, workspaceRoot string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("managed executable name is required")
+	}
+	for _, directory := range []namedPath{
+		{name: "worker CODEX_HOME", path: codexHome},
+		{name: "worker workspace root", path: workspaceRoot},
+	} {
+		contained, err := pathWithin(executablePath, directory.path)
+		if err != nil {
+			return err
+		}
+		if contained {
+			return fmt.Errorf("%s must not be inside %s", name, directory.name)
+		}
+	}
+	return nil
+}
+
 // ValidatePeerServiceEnvironment prevents provider credentials from aliasing
 // peer authority files or living inside a directory exposed to managed Codex.
 func ValidatePeerServiceEnvironment(

@@ -524,6 +524,7 @@ func sendRuntimeHello(t *testing.T, connection *websocket.Conn, deviceID string)
 			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
 			protocol.FeatureWorkerLifecycle,
+			protocol.FeatureWorkspaceSync,
 		},
 	})
 	if err != nil {

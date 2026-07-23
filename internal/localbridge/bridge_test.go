@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -330,6 +331,34 @@ func TestBridgeRootAgentControlHasLongCallDeadline(t *testing.T) {
 	remaining := <-backend.remaining
 	if remaining <= 2*time.Minute || remaining > localCallTimeout {
 		t.Fatalf("local agent control deadline = %s", remaining)
+	}
+}
+
+func TestBridgeWorkspaceCallHasExtendedDeadline(t *testing.T) {
+	backend := &deadlineBackend{remaining: make(chan time.Duration, 1)}
+	client, stop := startTestBridge(t, backend)
+	defer stop()
+	root := control.NewRootPrincipal(
+		bridgeTestControllerID, bridgeTestTreeID, bridgeTestAgentID, bridgeTestDeviceID,
+	).Identity()
+	var result struct {
+		OK bool `json:"ok"`
+	}
+	if err := client.Call(
+		context.Background(), protocol.MethodSyncWorkspace, root.TreeID, &root,
+		protocol.SyncWorkspaceParams{
+			SyncID:         "123e4567-e89b-42d3-a456-426614174305",
+			TargetDeviceID: bridgeTestDeviceID,
+			GitURL:         "ssh://git@example.invalid/repository.git",
+			SourcePath:     filepath.Join(t.TempDir(), "source"),
+		},
+		&result,
+	); err != nil {
+		t.Fatal(err)
+	}
+	remaining := <-backend.remaining
+	if remaining <= 5*time.Minute || remaining > localWorkspaceCallTimeout {
+		t.Fatalf("local workspace deadline = %s", remaining)
 	}
 }
 

@@ -25,6 +25,7 @@ type setupResult struct {
 	DeviceID      string                `json:"deviceId,omitempty"`
 	StatePath     string                `json:"statePath,omitempty"`
 	CodexHome     string                `json:"codexHome,omitempty"`
+	GitBinary     string                `json:"gitBinary,omitempty"`
 	WorkspaceRoot string                `json:"workspaceRoot,omitempty"`
 	TokenFile     string                `json:"tokenFile,omitempty"`
 }
@@ -146,6 +147,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	authMode := flags.String("auth-mode", string(delegationconfig.AuthModeToken), "authentication mode: token or none")
 	tokenFile := flags.String("token-file", "", "existing peer token file path")
 	codexBinary := flags.String("codex-binary", "codex", "Codex executable path or name")
+	gitBinary := flags.String("git-binary", "git", "Git executable path or name")
 	codexHome := flags.String("codex-home", "", "managed worker CODEX_HOME; defaults beside the peer config")
 	workspaceRoot := flags.String("workspace-root", "", "managed worker workspace root; defaults beside the peer config")
 	statePath := flags.String("state", "", "peer reservation database path; defaults beside the peer config")
@@ -172,6 +174,10 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	resolvedCodexBinary, err := resolveExecutable(*codexBinary)
 	if err != nil {
 		return writeError(stderr, fmt.Errorf("resolve Codex executable: %w", err))
+	}
+	resolvedGitBinary, err := resolveExecutable(*gitBinary)
+	if err != nil {
+		return writeError(stderr, fmt.Errorf("resolve Git executable: %w", err))
 	}
 	if *codexHome == "" {
 		*codexHome = filepath.Join(filepath.Dir(resolvedConfig), "codex")
@@ -232,6 +238,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		},
 		Peer: delegationconfig.PeerConfig{
 			CodexBinary:    resolvedCodexBinary,
+			GitBinary:      resolvedGitBinary,
 			CodexHome:      resolvedCodexHome,
 			WorkspaceRoot:  resolvedWorkspaceRoot,
 			StateFile:      resolvedState,
@@ -252,6 +259,16 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		resolvedWorkspaceRoot,
 	); err != nil {
 		return writeError(stderr, err)
+	}
+	for name, executable := range map[string]string{
+		"Codex binary": resolvedCodexBinary,
+		"Git binary":   resolvedGitBinary,
+	} {
+		if err := pathguard.ValidateManagedExecutable(
+			name, executable, resolvedCodexHome, resolvedWorkspaceRoot,
+		); err != nil {
+			return writeError(stderr, err)
+		}
 	}
 	if err := store.ValidatePath(resolvedState); err != nil {
 		return writeError(stderr, err)
@@ -314,6 +331,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		DeviceID:      cfg.DeviceID,
 		StatePath:     cfg.Peer.StateFile,
 		CodexHome:     cfg.Peer.CodexHome,
+		GitBinary:     cfg.Peer.GitBinary,
 		WorkspaceRoot: cfg.Peer.WorkspaceRoot,
 		TokenFile:     auth.TokenFile,
 	}, *jsonOutput)
@@ -419,6 +437,9 @@ func writeSetupResult(stdout, stderr io.Writer, result setupResult, jsonOutput b
 	}
 	if result.CodexHome != "" {
 		fmt.Fprintf(stdout, "managed CODEX_HOME: %s\n", result.CodexHome)
+	}
+	if result.GitBinary != "" {
+		fmt.Fprintf(stdout, "Git binary: %s\n", result.GitBinary)
 	}
 	if result.WorkspaceRoot != "" {
 		fmt.Fprintf(stdout, "workspace root: %s\n", result.WorkspaceRoot)

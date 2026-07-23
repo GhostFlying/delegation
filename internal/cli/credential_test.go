@@ -628,7 +628,7 @@ func TestCredentialRejectsUnsupportedSchemaWithoutMutatingAuthority(t *testing.T
 	if code == 0 {
 		t.Fatal("credential issue accepted an unsupported broker config")
 	}
-	for _, text := range []string{"unsupported config schema version 3", "supports only version 2"} {
+	for _, text := range []string{"unsupported config schema version 4", "supports only version 3"} {
 		if !strings.Contains(stderr, text) {
 			t.Fatalf("unsupported schema credential error = %q, want %q", stderr, text)
 		}

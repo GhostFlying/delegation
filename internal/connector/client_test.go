@@ -122,6 +122,7 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
 			protocol.FeatureWorkerLifecycle,
+			protocol.FeatureWorkspaceSync,
 		},
 	}
 	if _, err := fixture.registry.RegisterTrustedDevice(
@@ -334,6 +335,87 @@ func TestCanceledAgentWaitSendsCancellationWithoutClosingConnector(t *testing.T)
 	}
 }
 
+func TestCanceledWorkspaceSyncSendsCancellationWithoutClosingConnector(t *testing.T) {
+	requestID := make(chan string, 1)
+	cancellation := make(chan protocol.CancelRequestParams, 1)
+	hold := make(chan struct{})
+	server := newFakeBroker(t, func(connection *websocket.Conn) {
+		request := readTestEnvelope(t, connection)
+		if request.Kind != protocol.KindRequest || request.Method != protocol.MethodSyncWorkspace {
+			t.Errorf("workspace sync envelope = %#v", request)
+			return
+		}
+		requestID <- request.RequestID
+		notification := readTestEnvelope(t, connection)
+		if notification.Kind != protocol.KindNotification ||
+			notification.Method != protocol.MethodCancelRequest ||
+			notification.TreeID != "" || notification.Source != nil {
+			t.Errorf("workspace sync cancellation envelope = %#v", notification)
+			return
+		}
+		params, err := protocol.DecodePayload[protocol.CancelRequestParams](notification.Payload)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		cancellation <- params
+		<-hold
+	})
+	defer server.Close()
+	defer close(hold)
+	client := newTestClient(t, websocketURL(server.URL), config.AuthModeNone, nil)
+	clientContext, stopClient := context.WithCancel(context.Background())
+	clientDone := runClient(client, clientContext)
+	waitReady(t, client)
+
+	source := control.NewRootPrincipal(
+		connectorTestControllerID, connectorTestThreadID,
+		connectorTestWorkerID, connectorTestDeviceID,
+	).Identity()
+	callContext, cancelCall := context.WithCancel(context.Background())
+	callDone := make(chan error, 1)
+	sourcePath := t.TempDir()
+	go func() {
+		var result protocol.SyncWorkspaceResult
+		callDone <- client.Call(
+			callContext, protocol.MethodSyncWorkspace, connectorTestThreadID, &source,
+			protocol.SyncWorkspaceParams{
+				SyncID:         "123e4567-e89b-42d3-a456-426614174206",
+				TargetDeviceID: connectorTestDeviceID,
+				GitURL:         "ssh://git@example.invalid/repository.git",
+				SourcePath:     sourcePath,
+			},
+			&result,
+		)
+	}()
+	var originalRequestID string
+	select {
+	case originalRequestID = <-requestID:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake broker did not receive workspace sync")
+	}
+	cancelCall()
+	if err := <-callDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled workspace sync error = %v", err)
+	}
+	select {
+	case params := <-cancellation:
+		if params.RequestID != originalRequestID {
+			t.Fatalf("canceled request ID = %q, want %q", params.RequestID, originalRequestID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake broker did not receive workspace sync cancellation")
+	}
+	if !client.Status().Connected {
+		t.Fatal("connector closed after canceling workspace sync")
+	}
+
+	stopClient()
+	if err := waitClient(clientDone); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNoneAuthPeerConnectorRegisters(t *testing.T) {
 	fixture := newBrokerFixture(t, config.AuthModeNone, 20*time.Millisecond)
 	client := newTestClient(t, fixture.url(), config.AuthModeNone, nil)
@@ -357,6 +439,7 @@ func TestConnectorRequiresEveryBrokerFeatureBeforePublishingReadiness(t *testing
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
 		protocol.FeatureWorkerLifecycle,
+		protocol.FeatureWorkspaceSync,
 	}
 	for _, missing := range required {
 		t.Run(missing, func(t *testing.T) {
@@ -790,6 +873,7 @@ func TestConnectorValidatesStaticOptionsAndOfflineCalls(t *testing.T) {
 		Architecture:          "amd64",
 		WorkerSpawner:         testWorkerSpawner{},
 		WorkerLifecycleSource: testWorkerSpawner{},
+		WorkspaceManager:      testWorkerSpawner{},
 	}
 	client, err := New(base)
 	if err != nil {
@@ -828,6 +912,11 @@ func TestConnectorValidatesStaticOptionsAndOfflineCalls(t *testing.T) {
 	if _, err := New(invalid); err == nil || !strings.Contains(err.Error(), "lifecycle source") {
 		t.Fatalf("connector accepted a missing worker lifecycle source: %v", err)
 	}
+	invalid = base
+	invalid.WorkspaceManager = nil
+	if _, err := New(invalid); err == nil || !strings.Contains(err.Error(), "workspace manager") {
+		t.Fatalf("connector accepted a missing workspace manager: %v", err)
+	}
 }
 
 func TestConnectorAmbientProxyPolicy(t *testing.T) {
@@ -846,6 +935,7 @@ func TestConnectorAmbientProxyPolicy(t *testing.T) {
 			Architecture:             "amd64",
 			WorkerSpawner:            testWorkerSpawner{},
 			WorkerLifecycleSource:    testWorkerSpawner{},
+			WorkspaceManager:         testWorkerSpawner{},
 		}
 		plaintext, err := New(base)
 		if err != nil {
@@ -978,6 +1068,7 @@ func newTestClient(
 		RuntimeVersion: "0.1.0-alpha.0.m1.1", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: testWorkerSpawner{},
+		WorkspaceManager: testWorkerSpawner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -997,6 +1088,20 @@ func (testWorkerSpawner) ListWorkerLifecycles(
 	context.Context,
 ) ([]protocol.WorkerLifecycleSnapshot, error) {
 	return []protocol.WorkerLifecycleSnapshot{}, nil
+}
+
+func (testWorkerSpawner) InspectWorkspace(
+	context.Context,
+	WorkspaceInspectRequest,
+) (protocol.InspectWorkspaceResult, error) {
+	return protocol.InspectWorkspaceResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) PrepareWorkspace(
+	context.Context,
+	WorkspacePrepareRequest,
+) (protocol.PrepareWorkspaceResult, error) {
+	return protocol.PrepareWorkspaceResult{}, errors.New("not used")
 }
 
 func (spawnOnlyWorkerSpawner) SpawnWorker(
@@ -1136,6 +1241,7 @@ func newFakeBroker(t *testing.T, afterHello func(*websocket.Conn)) *httptest.Ser
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
 		protocol.FeatureWorkerLifecycle,
+		protocol.FeatureWorkspaceSync,
 	}, afterHello)
 }
 

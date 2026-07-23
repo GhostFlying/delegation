@@ -41,6 +41,7 @@ const (
 	agentWaitRequestTimeout      = 30 * time.Second
 	agentSpawnRequestTimeout     = 125 * time.Second
 	agentOperationRequestTimeout = 125 * time.Second
+	workspaceSyncRequestTimeout  = 5 * time.Minute
 	maximumPendingPeerCalls      = 128
 )
 
@@ -68,6 +69,9 @@ type Registry interface {
 	ClaimWorkerLifecycleSession(context.Context, store.WorkerLifecycleSessionClaim) (uint64, error)
 	ApplyWorkerLifecyclePage(context.Context, store.WorkerLifecyclePageApply) (protocol.SyncWorkerLifecycleResult, error)
 	ListAgentLifecycleActivity(context.Context, control.PrincipalIdentity, store.AgentLifecyclePageRequest) (store.AgentLifecyclePage, error)
+	BeginWorkspaceSync(context.Context, store.WorkspaceSyncIntent, time.Time) (store.WorkspaceSyncReceipt, error)
+	PinWorkspaceSyncManifest(context.Context, store.WorkspaceSyncKey, protocol.WorkspaceManifest, time.Time) (store.WorkspaceSyncReceipt, error)
+	FinishWorkspaceSync(context.Context, store.WorkspaceSyncKey, protocol.WorkspaceSummary, time.Time) (store.WorkspaceSyncReceipt, error)
 }
 
 type Options struct {
@@ -521,6 +525,7 @@ func (s *Server) acceptHello(
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
 		protocol.FeatureWorkerLifecycle,
+		protocol.FeatureWorkspaceSync,
 	} {
 		if !slices.Contains(hello.Features, feature) {
 			_ = s.writeError(ctx, connection, envelope, protocol.ErrorInvalidParams, "peer does not support required protocol features")
@@ -600,6 +605,7 @@ func (s *Server) acceptHello(
 			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
 			protocol.FeatureWorkerLifecycle,
+			protocol.FeatureWorkspaceSync,
 		},
 		HeartbeatIntervalMS:   s.heartbeatInterval.Milliseconds(),
 		Revision:              device.Revision,
@@ -833,6 +839,8 @@ func (s *session) handleEnvelope(
 		return false, s.handleSyncWorkerLifecycle(ctx, envelope)
 	case protocol.MethodWaitAgent:
 		return false, s.startAgentWait(ctx, sessionContext, envelope)
+	case protocol.MethodSyncWorkspace:
+		return false, s.startWorkspaceSync(ctx, sessionContext, envelope)
 	}
 	if envelope.Method != protocol.MethodHeartbeat {
 		return false, s.writeError(ctx, envelope, protocol.ErrorMethodNotFound, "method not found")

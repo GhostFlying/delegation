@@ -722,7 +722,8 @@ func windowsIntegrationPeerConfig(
 			Auth: delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
 		},
 		Peer: delegationconfig.PeerConfig{
-			CodexBinary: binaryPath, CodexHome: codexHome, WorkspaceRoot: workspaceRoot,
+			CodexBinary: binaryPath, GitBinary: binaryPath,
+			CodexHome: codexHome, WorkspaceRoot: workspaceRoot,
 			StateFile:      filepath.Join(root, "peer", "state", "peer.sqlite3"),
 			MaxWorkerSlots: 1,
 		},

@@ -23,6 +23,8 @@ type managedWorkerHost interface {
 	Send(context.Context, workerhost.SendRequest) (workerhost.OperationResult, error)
 	Followup(context.Context, workerhost.FollowupRequest) (workerhost.OperationResult, error)
 	Interrupt(context.Context, workerhost.InterruptRequest) (workerhost.OperationResult, error)
+	InspectWorkspace(context.Context, workerhost.WorkspaceInspectRequest) (protocol.InspectWorkspaceResult, error)
+	PrepareWorkspace(context.Context, workerhost.WorkspacePrepareRequest) (protocol.PrepareWorkspaceResult, error)
 }
 
 type managedWorkerState interface {
@@ -55,6 +57,7 @@ func (s managedWorkerSpawner) SpawnWorker(
 		ParentAgentID: request.Source.AgentID,
 		TaskName:      request.Params.TaskName,
 		Prompt:        request.Params.Message,
+		WorkspaceID:   request.Params.WorkspaceID,
 	})
 	if err == nil {
 		result.Outcome = protocol.AgentSpawnOutcomeStarted

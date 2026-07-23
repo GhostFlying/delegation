@@ -27,6 +27,7 @@ const (
 	ToolFollowupTask   = "followup_task"
 	ToolInterruptAgent = "interrupt_agent"
 	ToolWaitAgent      = "wait_agent"
+	ToolSyncWorkspace  = "sync_workspace"
 	maximumDevicePage  = 4
 	listFeatureLimit   = 0
 	maximumListBytes   = 4 * 1024
@@ -34,7 +35,7 @@ const (
 	bridgeCallTimeout  = 15 * time.Second
 	agentCallTimeout   = 135 * time.Second
 	uuidPattern        = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
-	serverInstructions = "Delegation exposes live peers and managed agents. Use list_devices for bounded summaries and describe_device before choosing an online peer; isCurrentDevice allows self-targeting. Call spawn_agent with a fresh spawn_id and self-contained task. busy means no target slot; indeterminate means no definitive target result was confirmed or recorded and the worker may have started. Retry either with the same spawn_id and exact arguments. Use list_agents for durable receipts and wait_agent for lifecycle activity or worker messages; call wait_agent again while has_more is true. Targets accept an agent UUID, task_name, or /root/task_name. Use a fresh message_id or operation_id for each logical action; retry uncertain results with the same ID and arguments. send_message delivers to running or idle agents, followup_task starts idle agents, and interrupt_agent stops active turns."
+	serverInstructions = "Delegation exposes live peers, synchronized Git workspaces, and managed agents. Use list_devices for bounded summaries and describe_device before choosing an online peer; isCurrentDevice allows self-targeting. For repository work, call sync_workspace with a fresh sync_id, an explicit Git URL, and the selected target; then pass the returned workspace_id to spawn_agent. Call spawn_agent with a fresh spawn_id and self-contained task. busy means no target slot; indeterminate means no definitive target result was confirmed or recorded and the worker may have started. Retry either with the same ID and exact arguments. Use list_agents for durable receipts and wait_agent for lifecycle activity or worker messages; call wait_agent again while has_more is true. Targets accept an agent UUID, task_name, or /root/task_name. Use a fresh message_id or operation_id for each logical action; retry uncertain results with the same ID and arguments. send_message delivers to running or idle agents, followup_task starts idle agents, and interrupt_agent stops active turns."
 )
 
 type Backend interface {
@@ -110,6 +111,10 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 	if err != nil {
 		return nil, err
 	}
+	workspaceSchema, err := workspaceInputSchema()
+	if err != nil {
+		return nil, err
+	}
 	root := &Root{
 		backend: backend, controllerID: controllerID, deviceID: deviceID,
 		waitStates: make(map[string]*agentWaitState),
@@ -120,9 +125,18 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 		},
 		&mcp.ServerOptions{
 			Instructions: serverInstructions,
-			Capabilities: &mcp.ServerCapabilities{},
+			Capabilities: &mcp.ServerCapabilities{Experimental: map[string]any{
+				sandboxStateMetaCapability: map[string]any{},
+			}},
 		},
 	)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        ToolSyncWorkspace,
+		Title:       "Synchronize Git workspace",
+		Description: "Prepare the current trusted Git worktree on an explicitly selected peer using an explicit remote URL.",
+		Annotations: mutatingAnnotations(),
+		InputSchema: workspaceSchema,
+	}, root.syncWorkspace)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        ToolListDevices,
 		Title:       "List delegation devices",
@@ -433,24 +447,6 @@ func isAgentCall(method string) bool {
 	default:
 		return false
 	}
-}
-
-func threadID(request *mcp.CallToolRequest) (string, error) {
-	if request == nil || request.Params == nil {
-		return "", errors.New("Codex did not provide tool-call metadata")
-	}
-	value, found := request.Params.Meta["threadId"]
-	if !found {
-		return "", errors.New("Codex did not provide _meta.threadId; start a new Codex task and retry")
-	}
-	threadID, ok := value.(string)
-	if !ok {
-		return "", errors.New("Codex provided a non-string _meta.threadId")
-	}
-	if err := identity.ValidateID(threadID); err != nil {
-		return "", fmt.Errorf("Codex _meta.threadId %w", err)
-	}
-	return threadID, nil
 }
 
 func summarizeDevice(device control.Device, featureLimit int, currentDeviceID string) DeviceSummary {

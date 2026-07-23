@@ -18,9 +18,78 @@ func (s *session) handleBrokerRequest(request protocol.Envelope) error {
 		return s.handleFollowupWorkerRequest(request)
 	case protocol.MethodInterruptWorker:
 		return s.handleInterruptWorkerRequest(request)
+	case protocol.MethodInspectWorkspace:
+		return s.handleInspectWorkspaceRequest(request)
+	case protocol.MethodPrepareWorkspace:
+		return s.handlePrepareWorkspaceRequest(request)
 	default:
 		return s.writeError(request, protocol.ErrorMethodNotFound, "method not found")
 	}
+}
+
+func (s *session) handleInspectWorkspaceRequest(request protocol.Envelope) error {
+	if err := validateBrokerWorkerRequest(request); err != nil || request.Source.DeviceID != s.client.hello.DeviceID {
+		return s.writeError(request, protocol.ErrorInvalidRequest, "invalid workspace inspection request")
+	}
+	params, err := protocol.DecodePayload[protocol.InspectWorkspaceParams](request.Payload)
+	if err != nil || params.Validate() != nil {
+		return s.writeError(request, protocol.ErrorInvalidParams, "invalid workspace inspection payload")
+	}
+	source := *request.Source
+	return s.startInbound(request, func(ctx context.Context) {
+		result, operationErr := s.client.workspaceManager.InspectWorkspace(ctx, WorkspaceInspectRequest{
+			TreeID: request.TreeID, Source: source, Params: params,
+		})
+		if operationErr != nil {
+			s.client.reportError(fmt.Errorf("inspect source workspace: %w", operationErr))
+			if writeErr := s.writeError(request, protocol.ErrorUnavailable, "source workspace inspection failed"); writeErr != nil {
+				s.close(writeErr)
+			}
+			return
+		}
+		if result.Validate() != nil || result.SyncID != params.SyncID {
+			if writeErr := s.writeError(request, protocol.ErrorInternal, "source returned invalid workspace metadata"); writeErr != nil {
+				s.close(writeErr)
+			}
+			return
+		}
+		if writeErr := s.writeResult(request, result); writeErr != nil {
+			s.close(writeErr)
+		}
+	})
+}
+
+func (s *session) handlePrepareWorkspaceRequest(request protocol.Envelope) error {
+	if err := validateBrokerWorkerRequest(request); err != nil {
+		return s.writeError(request, protocol.ErrorInvalidRequest, "invalid workspace prepare request")
+	}
+	params, err := protocol.DecodePayload[protocol.PrepareWorkspaceParams](request.Payload)
+	if err != nil || params.Validate() != nil || params.SourceAgentID != request.Source.AgentID ||
+		params.SourceDeviceID != request.Source.DeviceID {
+		return s.writeError(request, protocol.ErrorInvalidParams, "invalid workspace prepare payload")
+	}
+	source := *request.Source
+	return s.startInbound(request, func(ctx context.Context) {
+		result, operationErr := s.client.workspaceManager.PrepareWorkspace(ctx, WorkspacePrepareRequest{
+			TreeID: request.TreeID, Source: source, Params: params,
+		})
+		if operationErr != nil {
+			s.client.reportError(fmt.Errorf("prepare target workspace: %w", operationErr))
+			if writeErr := s.writeError(request, protocol.ErrorUnavailable, "target workspace preparation failed"); writeErr != nil {
+				s.close(writeErr)
+			}
+			return
+		}
+		if result.Validate() != nil || result.WorkspaceID != params.WorkspaceID {
+			if writeErr := s.writeError(request, protocol.ErrorInternal, "target returned invalid workspace metadata"); writeErr != nil {
+				s.close(writeErr)
+			}
+			return
+		}
+		if writeErr := s.writeResult(request, result); writeErr != nil {
+			s.close(writeErr)
+		}
+	})
 }
 
 func (s *session) handleSpawnWorkerRequest(request protocol.Envelope) error {

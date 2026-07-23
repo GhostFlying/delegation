@@ -54,7 +54,7 @@ func (s *session) handleSpawnAgent(ctx context.Context, request protocol.Envelop
 	receipt, err := s.server.registry.BeginAgentSpawn(ctx, store.AgentSpawnIntent{
 		Source: *request.Source, SpawnID: params.SpawnID, AgentID: agentID,
 		TargetDeviceID: params.TargetDeviceID, TaskName: params.TaskName,
-		PromptDigest: sha256.Sum256([]byte(params.Message)),
+		PromptDigest: sha256.Sum256([]byte(params.Message)), WorkspaceID: params.WorkspaceID,
 	}, s.server.now())
 	if err != nil {
 		return s.handleAgentStoreError(ctx, request, "begin agent spawn", err)
@@ -76,7 +76,7 @@ func (s *session) handleSpawnAgent(ctx context.Context, request protocol.Envelop
 		*request.Source,
 		protocol.SpawnWorkerParams{
 			SpawnID: params.SpawnID, AgentID: receipt.Agent.Principal.AgentID,
-			TaskName: params.TaskName, Message: params.Message,
+			TaskName: params.TaskName, Message: params.Message, WorkspaceID: params.WorkspaceID,
 		},
 	)
 	if callErr != nil {

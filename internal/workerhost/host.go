@@ -19,7 +19,9 @@ import (
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/gitworkspace"
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -71,6 +73,7 @@ type Options struct {
 	PeerConfigPath          string
 	DelegationBinary        string
 	CodexBinary             string
+	GitBinary               string
 	CodexEnvironment        map[string]string
 	CodexUnsetEnvironment   []string
 	ProviderEnvironmentFile string
@@ -90,6 +93,7 @@ type SpawnRequest struct {
 	ParentAgentID string
 	TaskName      string
 	Prompt        string
+	WorkspaceID   string
 }
 
 type FollowupRequest struct {
@@ -124,6 +128,7 @@ type Host struct {
 	peerConfigPath           string
 	delegationBinary         string
 	codexBinary              string
+	git                      gitworkspace.Runner
 	codexEnvironment         map[string]string
 	codexUnsetEnvironment    []string
 	shellExcludedEnvironment []string
@@ -176,6 +181,7 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		"peer config":       options.PeerConfigPath,
 		"delegation binary": options.DelegationBinary,
 		"Codex binary":      options.CodexBinary,
+		"Git binary":        options.GitBinary,
 		"Codex home":        options.CodexHome,
 		"workspace root":    options.WorkspaceRoot,
 	} {
@@ -198,6 +204,23 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	codexBinary, err := filepath.EvalSymlinks(options.CodexBinary)
 	if err != nil {
 		return nil, fmt.Errorf("resolve Codex binary: %w", err)
+	}
+	credentialEnvironment := codexconfig.CredentialEnvironmentVariables(options.CodexConfig)
+	gitExcludedEnvironment := append(append([]string(nil), hostAuthEnvironment...), credentialEnvironment...)
+	gitRunner, err := gitworkspace.NewRunner(options.GitBinary, gitExcludedEnvironment...)
+	if err != nil {
+		return nil, err
+	}
+	for name, executable := range map[string]string{
+		"delegation binary": options.DelegationBinary,
+		"Codex binary":      codexBinary,
+		"Git binary":        gitRunner.Binary,
+	} {
+		if err := pathguard.ValidateManagedExecutable(
+			name, executable, options.CodexHome, options.WorkspaceRoot,
+		); err != nil {
+			return nil, err
+		}
 	}
 	providerEnvironmentFile := ""
 	if options.ProviderEnvironmentFile != "" {
@@ -240,7 +263,6 @@ func New(ctx context.Context, options Options) (*Host, error) {
 			return appserver.Start(ctx, options)
 		}
 	}
-	credentialEnvironment := codexconfig.CredentialEnvironmentVariables(options.CodexConfig)
 	appServerUnsetEnvironment := append(
 		append([]string(nil), options.CodexUnsetEnvironment...),
 		codexconfig.EnvironmentVariable, "CODEX_SQLITE_HOME",
@@ -258,7 +280,7 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	host := &Host{
 		controllerID: options.ControllerID, deviceID: options.DeviceID,
 		peerConfigPath: options.PeerConfigPath, delegationBinary: options.DelegationBinary,
-		codexBinary: codexBinary, codexHome: options.CodexHome,
+		codexBinary: codexBinary, git: gitRunner, codexHome: options.CodexHome,
 		codexEnvironment:         codexEnvironment,
 		codexUnsetEnvironment:    uniqueEnvironmentNames(appServerUnsetEnvironment),
 		shellExcludedEnvironment: uniqueEnvironmentNames(shellExcludedEnvironment),
@@ -391,10 +413,25 @@ func (h *Host) spawnLocked(
 	key store.WorkerKey,
 ) (StartedTurn, <-chan struct{}, error) {
 	workspacePath := h.workspacePath(key)
+	workingDirectory := ""
+	if request.WorkspaceID != "" {
+		prepared, err := h.state.GetPreparedWorkspace(ctx, store.PreparedWorkspaceKey{
+			ControllerID: h.controllerID, TreeID: request.TreeID, WorkspaceID: request.WorkspaceID,
+		})
+		if err != nil {
+			return StartedTurn{}, nil, fmt.Errorf("load prepared workspace: %w", err)
+		}
+		if prepared.SourceAgentID != request.ParentAgentID || prepared.TargetDeviceID != h.deviceID {
+			return StartedTurn{}, nil, store.ErrWorkerReservationConflict
+		}
+		workspacePath = prepared.WorkspacePath
+		workingDirectory = prepared.WorkingDirectory
+	}
 	desired := store.WorkerReservation{
 		WorkerKey: key, ParentAgentID: request.ParentAgentID, DeviceID: h.deviceID,
 		TaskName: request.TaskName, PromptDigest: promptDigest(request.Prompt),
-		WorkspacePath: workspacePath, ProfileVersion: workerProfileVersion,
+		WorkspaceID: request.WorkspaceID, WorkspacePath: workspacePath,
+		WorkingDirectory: workingDirectory, ProfileVersion: workerProfileVersion,
 	}
 	var worker store.WorkerReservation
 	if existing, err := h.state.GetWorker(ctx, key); err == nil {
@@ -408,7 +445,7 @@ func (h *Host) spawnLocked(
 		case store.WorkerReserved, store.WorkerPending:
 			worker = existing
 		case store.WorkerRunning, store.WorkerIdle:
-			if err := h.prepareWorkspace(key); err != nil {
+			if err := h.prepareWorkerWorkspace(ctx, existing); err != nil {
 				return StartedTurn{Worker: existing}, nil, err
 			}
 			return StartedTurn{Worker: existing}, nil, nil
@@ -431,7 +468,7 @@ func (h *Host) spawnLocked(
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return StartedTurn{}, nil, err
 	}
-	if err := h.prepareWorkspace(key); err != nil {
+	if err := h.prepareWorkerWorkspace(ctx, desired); err != nil {
 		return StartedTurn{}, nil, err
 	}
 	operationContext, cancel, err := detachedOperationContext(ctx)
@@ -444,9 +481,15 @@ func (h *Host) spawnLocked(
 		return StartedTurn{Worker: worker}, nil, err
 	}
 	if worker.Status == "" {
-		worker, err = h.recordWorkerChange(
-			h.state.ReserveWorkerStart(operationContext, desired, h.maxWorkerSlots, time.Now()),
-		)
+		if desired.WorkspaceID == "" {
+			worker, err = h.recordWorkerChange(
+				h.state.ReserveWorkerStart(operationContext, desired, h.maxWorkerSlots, time.Now()),
+			)
+		} else {
+			worker, err = h.recordWorkerChange(
+				h.state.ReserveWorkerStartWithWorkspace(operationContext, desired, h.maxWorkerSlots, time.Now()),
+			)
+		}
 		if err != nil {
 			return StartedTurn{}, nil, err
 		}
@@ -478,7 +521,7 @@ func (h *Host) followupLocked(
 	if worker.Status != store.WorkerIdle && worker.Status != store.WorkerInterrupted {
 		return StartedTurn{Worker: worker}, nil, fmt.Errorf("%w: status is %s", ErrWorkerNotIdle, worker.Status)
 	}
-	if err := h.prepareWorkspace(worker.WorkerKey); err != nil {
+	if err := h.prepareWorkerWorkspace(ctx, worker); err != nil {
 		return StartedTurn{Worker: worker}, nil, err
 	}
 	operationContext, cancel, err := detachedOperationContext(ctx)
@@ -566,6 +609,8 @@ func sameReservation(stored, desired store.WorkerReservation) bool {
 		stored.DeviceID == desired.DeviceID &&
 		stored.TaskName == desired.TaskName &&
 		stored.PromptDigest == desired.PromptDigest &&
+		stored.WorkspaceID == desired.WorkspaceID &&
 		stored.WorkspacePath == desired.WorkspacePath &&
+		stored.WorkingDirectory == desired.WorkingDirectory &&
 		stored.ProfileVersion == desired.ProfileVersion
 }

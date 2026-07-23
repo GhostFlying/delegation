@@ -49,6 +49,7 @@ type fakeRootBackend struct {
 	agentsResult    *protocol.ListAgentsResult
 	operationResult *protocol.AgentOperationResult
 	waitResults     []protocol.WaitAgentResult
+	workspaceResult *protocol.SyncWorkspaceResult
 }
 
 type cancelRootBackend struct {
@@ -90,6 +91,7 @@ func (b *fakeRootBackend) Call(
 	spawnResult := b.spawnResult
 	agentsResult := b.agentsResult
 	operationResult := b.operationResult
+	workspaceResult := b.workspaceResult
 	var waitResult *protocol.WaitAgentResult
 	if method == protocol.MethodWaitAgent && len(b.waitResults) != 0 {
 		copy := b.waitResults[0]
@@ -136,6 +138,11 @@ func (b *fakeRootBackend) Call(
 			Revision: 8,
 			Device:   testDevice(params.(protocol.DescribeDeviceParams).DeviceID, 24),
 		}
+	case protocol.MethodSyncWorkspace:
+		if workspaceResult == nil {
+			return errors.New("unexpected workspace sync")
+		}
+		*result.(*protocol.SyncWorkspaceResult) = *workspaceResult
 	case protocol.MethodSpawnAgent:
 		if spawnResult != nil {
 			*result.(*protocol.SpawnAgentResult) = *spawnResult
@@ -217,16 +224,18 @@ func TestRootMCPListsStaticToolsAndBindsThread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 8 ||
+	if len(tools.Tools) != 9 ||
 		tools.Tools[0].Name != ToolDescribeDevice || tools.Tools[1].Name != ToolFollowupTask ||
 		tools.Tools[2].Name != ToolInterruptAgent || tools.Tools[3].Name != ToolListAgents ||
 		tools.Tools[4].Name != ToolListDevices || tools.Tools[5].Name != ToolSendMessage ||
-		tools.Tools[6].Name != ToolSpawnAgent || tools.Tools[7].Name != ToolWaitAgent {
+		tools.Tools[6].Name != ToolSpawnAgent || tools.Tools[7].Name != ToolSyncWorkspace ||
+		tools.Tools[8].Name != ToolWaitAgent {
 		t.Fatalf("root tools = %#v", tools.Tools)
 	}
 	for _, tool := range tools.Tools {
 		mutating := tool.Name == ToolSpawnAgent || tool.Name == ToolSendMessage ||
-			tool.Name == ToolFollowupTask || tool.Name == ToolInterruptAgent
+			tool.Name == ToolFollowupTask || tool.Name == ToolInterruptAgent ||
+			tool.Name == ToolSyncWorkspace
 		consuming := tool.Name == ToolWaitAgent
 		if tool.Annotations == nil ||
 			tool.Annotations.IdempotentHint != !consuming ||
@@ -610,7 +619,8 @@ func TestValidateListResultRejectsRevisionSkew(t *testing.T) {
 
 func TestRootMCPOutputIsBounded(t *testing.T) {
 	if maximumDevicePage > 4 || listFeatureLimit != 0 || maximumListBytes > 4*1024 ||
-		maximumDetailBytes > 8*1024 || maximumAgentListBytes > 16*1024 || len(serverInstructions) > 1024 {
+		maximumDetailBytes > 8*1024 || maximumAgentListBytes > 16*1024 ||
+		maximumWorkspaceOutputBytes > 16*1024 || len(serverInstructions) > 1536 {
 		t.Fatalf(
 			"root MCP bounds = page %d, features %d, list %d bytes, detail %d bytes, instructions %d bytes",
 			maximumDevicePage, listFeatureLimit, maximumListBytes, maximumDetailBytes,
@@ -730,6 +740,15 @@ func assertToolSchema(t *testing.T, tool *mcp.Tool) {
 			*taskName.MaxLength != protocol.MaximumAgentTaskNameBytes || taskName.Pattern == "" ||
 			message.MaxLength == nil || *message.MaxLength != protocol.MaximumAgentPromptBytes {
 			t.Fatalf("spawn_agent input schema = %s", data)
+		}
+	case ToolSyncWorkspace:
+		syncID := schema.Properties["sync_id"]
+		targetID := schema.Properties["target_device_id"]
+		gitURL := schema.Properties["git_url"]
+		if syncID.Pattern != uuidPattern || targetID.Pattern != uuidPattern ||
+			gitURL.MinLength == nil || *gitURL.MinLength != 1 || gitURL.MaxLength == nil ||
+			*gitURL.MaxLength != protocol.MaximumGitURLBytes {
+			t.Fatalf("sync_workspace input schema = %s", data)
 		}
 	case ToolSendMessage, ToolFollowupTask, ToolInterruptAgent:
 		target := schema.Properties["target"]

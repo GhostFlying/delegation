@@ -82,6 +82,23 @@ type WorkerLifecycleSource interface {
 	ListWorkerLifecycles(context.Context) ([]protocol.WorkerLifecycleSnapshot, error)
 }
 
+type WorkspaceInspectRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.InspectWorkspaceParams
+}
+
+type WorkspacePrepareRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.PrepareWorkspaceParams
+}
+
+type WorkspaceManager interface {
+	InspectWorkspace(context.Context, WorkspaceInspectRequest) (protocol.InspectWorkspaceResult, error)
+	PrepareWorkspace(context.Context, WorkspacePrepareRequest) (protocol.PrepareWorkspaceResult, error)
+}
+
 type Options struct {
 	BrokerURL                string
 	AllowInsecureNonLoopback bool
@@ -100,6 +117,7 @@ type Options struct {
 	WorkerSpawner            WorkerSpawner
 	WorkerController         WorkerController
 	WorkerLifecycleSource    WorkerLifecycleSource
+	WorkspaceManager         WorkspaceManager
 }
 
 type Status struct {
@@ -132,6 +150,7 @@ type Client struct {
 	workerSpawner    WorkerSpawner
 	workerController WorkerController
 	workerLifecycle  WorkerLifecycleSource
+	workspaceManager WorkspaceManager
 	running          atomic.Bool
 
 	mu      sync.RWMutex
@@ -167,6 +186,9 @@ func New(options Options) (*Client, error) {
 	if options.WorkerLifecycleSource == nil {
 		return nil, errors.New("connector worker lifecycle source is required")
 	}
+	if options.WorkspaceManager == nil {
+		return nil, errors.New("connector workspace manager is required")
+	}
 	features := []string{
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
@@ -174,6 +196,7 @@ func New(options Options) (*Client, error) {
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
 		protocol.FeatureWorkerLifecycle,
+		protocol.FeatureWorkspaceSync,
 	}
 	hello := protocol.Hello{
 		ControllerID:   options.ControllerID,
@@ -239,6 +262,7 @@ func New(options Options) (*Client, error) {
 		workerSpawner:    options.WorkerSpawner,
 		workerController: workerController,
 		workerLifecycle:  options.WorkerLifecycleSource,
+		workspaceManager: options.WorkspaceManager,
 		updates:          make(chan struct{}),
 	}, nil
 }
@@ -475,6 +499,7 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
 		protocol.FeatureWorkerLifecycle,
+		protocol.FeatureWorkspaceSync,
 	}
 	for _, feature := range required {
 		if !slices.Contains(result.Features, feature) {

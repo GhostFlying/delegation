@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -18,7 +21,9 @@ import (
 	"github.com/GhostFlying/delegation/internal/appserver"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	"github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -59,6 +64,236 @@ func TestHostUsesOneAppServerAndEnforcesWorkerSlots(t *testing.T) {
 	}
 	if len(workers) != 2 {
 		t.Fatalf("stored workers = %#v", workers)
+	}
+}
+
+func TestHostSpawnsFromPreparedWorkspaceWithRepositoryRuntimeBoundary(t *testing.T) {
+	application := newFakeApplication()
+	workspaceID := "123e4567-e89b-42d3-a456-42661417440a"
+	agentID := "123e4567-e89b-42d3-a456-42661417440b"
+	var workspacePath string
+	host, state, _ := newTestHostWithStateSetup(t, 2, "", func(state *store.PeerStore, root string) {
+		workspacePath = filepath.Join(root, workspaceSyncName(testTreeID, workspaceID))
+		head := initializeTestRepository(t, workspacePath)
+		recordPreparedWorkspace(t, state, workspaceID, workspacePath, head)
+	}, application)
+	started, err := host.Spawn(context.Background(), SpawnRequest{
+		TreeID: testTreeID, AgentID: agentID, ParentAgentID: testParentID,
+		TaskName: "prepared", Prompt: "inspect and modify the synchronized repository",
+		WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.Worker.WorkspaceID != workspaceID || started.Worker.WorkspacePath != workspacePath ||
+		started.Worker.WorkingDirectory != "nested" || started.Worker.Status != store.WorkerRunning {
+		t.Fatalf("prepared worker = %#v", started.Worker)
+	}
+	record := application.snapshot()
+	if len(record.starts) != 1 || record.starts[0].CWD != filepath.Join(workspacePath, "nested") ||
+		!reflect.DeepEqual(record.starts[0].RuntimeWorkspaceRoots, []string{workspacePath}) {
+		t.Fatalf("prepared app-server start = %#v", record.starts)
+	}
+	prepared, err := state.GetPreparedWorkspace(context.Background(), store.PreparedWorkspaceKey{
+		ControllerID: testControllerID, TreeID: testTreeID, WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Status != store.PreparedWorkspaceClaimed || prepared.ClaimedAgentID != agentID {
+		t.Fatalf("claimed prepared workspace = %#v", prepared)
+	}
+	_, err = host.Spawn(context.Background(), SpawnRequest{
+		TreeID: testTreeID, AgentID: "123e4567-e89b-42d3-a456-42661417440c",
+		ParentAgentID: testParentID, TaskName: "reuse", Prompt: "reuse workspace",
+		WorkspaceID: workspaceID,
+	})
+	if !errors.Is(err, store.ErrWorkerReservationConflict) {
+		t.Fatalf("second workspace claim = %v, want conflict", err)
+	}
+}
+
+func TestHostRejectsPreparedWorkingDirectorySymlinkEscape(t *testing.T) {
+	application := newFakeApplication()
+	workspaceID := "123e4567-e89b-42d3-a456-42661417440d"
+	var workspacePath string
+	host, _, _ := newTestHostWithStateSetup(t, 1, "", func(state *store.PeerStore, root string) {
+		workspacePath = filepath.Join(root, workspaceSyncName(testTreeID, workspaceID))
+		head := initializeTestRepository(t, workspacePath)
+		recordPreparedWorkspace(t, state, workspaceID, workspacePath, head)
+	}, application)
+	if err := os.RemoveAll(filepath.Join(workspacePath, "nested")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(workspacePath, "nested")); err != nil {
+		t.Skipf("creating a directory symlink is unavailable: %v", err)
+	}
+	_, err := host.Spawn(context.Background(), SpawnRequest{
+		TreeID: testTreeID, AgentID: "123e4567-e89b-42d3-a456-42661417440e",
+		ParentAgentID: testParentID, TaskName: "escape", Prompt: "must not escape",
+		WorkspaceID: workspaceID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "working directory") {
+		t.Fatalf("symlink escape Spawn() = %v", err)
+	}
+	if got := application.snapshot(); len(got.starts) != 0 {
+		t.Fatalf("app-server started after symlink escape: %#v", got)
+	}
+}
+
+func TestHostDirectPreparationRecoversOrphanAndRevalidatesReadyWorkspace(t *testing.T) {
+	host, state, _ := newTestHost(t, 1)
+	gitURL, sourcePath := createHostedTestRepository(t)
+	source := control.NewRootPrincipal(
+		testControllerID, testTreeID, testParentID, testDeviceID,
+	).Identity()
+	workspaceID := "123e4567-e89b-42d3-a456-42661417440f"
+	inspected, err := host.InspectWorkspace(context.Background(), WorkspaceInspectRequest{
+		TreeID: testTreeID, Source: source,
+		Params: protocol.InspectWorkspaceParams{
+			SyncID: workspaceID, GitURL: gitURL,
+			SourcePath: filepath.Join(sourcePath, "nested"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphanPath := filepath.Join(host.workspaceRoot.Name(), workspaceSyncName(testTreeID, workspaceID))
+	if err := os.Mkdir(orphanPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanPath, "orphan"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := WorkspacePrepareRequest{
+		TreeID: testTreeID, Source: source,
+		Params: protocol.PrepareWorkspaceParams{
+			WorkspaceID: workspaceID, SourceAgentID: source.AgentID,
+			SourceDeviceID: source.DeviceID, Manifest: inspected.Manifest,
+		},
+	}
+	prepared, err := host.PrepareWorkspace(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Outcome != protocol.WorkspacePrepareDirect ||
+		prepared.Strategy != protocol.WorkspaceStrategyDirect {
+		t.Fatalf("prepared result = %#v", prepared)
+	}
+	if _, err := os.Stat(filepath.Join(orphanPath, "orphan")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan marker survived preparation: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(orphanPath, "nested", "source.txt")); err != nil ||
+		string(data) != "source\n" {
+		t.Fatalf("prepared source = %q, %v", data, err)
+	}
+	repeated, err := host.PrepareWorkspace(context.Background(), request)
+	if err != nil || !reflect.DeepEqual(repeated, prepared) {
+		t.Fatalf("idempotent direct preparation = %#v, %v", repeated, err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanPath, "nested", "source.txt"), []byte("tampered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.PrepareWorkspace(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), "no longer clean") {
+		t.Fatalf("tampered prepared workspace retry = %v", err)
+	}
+	stored, err := state.GetPreparedWorkspace(context.Background(), store.PreparedWorkspaceKey{
+		ControllerID: testControllerID, TreeID: testTreeID, WorkspaceID: workspaceID,
+	})
+	if err != nil || stored.Status != store.PreparedWorkspaceReady {
+		t.Fatalf("stored direct workspace = %#v, %v", stored, err)
+	}
+}
+
+func TestHostScopesPreparedWorkspacePathsByTree(t *testing.T) {
+	host, state, _ := newTestHost(t, 1)
+	gitURL, sourcePath := createHostedTestRepository(t)
+	workspaceID := "123e4567-e89b-42d3-a456-4266141744a0"
+	trees := []struct {
+		treeID  string
+		agentID string
+	}{
+		{treeID: testTreeID, agentID: "123e4567-e89b-42d3-a456-4266141744a1"},
+		{treeID: "123e4567-e89b-42d3-a456-4266141744a2", agentID: "123e4567-e89b-42d3-a456-4266141744a3"},
+	}
+	paths := make([]string, 0, len(trees))
+	for _, current := range trees {
+		source := control.NewRootPrincipal(
+			testControllerID, current.treeID, current.agentID, testDeviceID,
+		).Identity()
+		inspected, err := host.InspectWorkspace(context.Background(), WorkspaceInspectRequest{
+			TreeID: current.treeID, Source: source,
+			Params: protocol.InspectWorkspaceParams{
+				SyncID: workspaceID, GitURL: gitURL,
+				SourcePath: filepath.Join(sourcePath, "nested"),
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := host.PrepareWorkspace(context.Background(), WorkspacePrepareRequest{
+			TreeID: current.treeID, Source: source,
+			Params: protocol.PrepareWorkspaceParams{
+				WorkspaceID: workspaceID, SourceAgentID: source.AgentID,
+				SourceDeviceID: source.DeviceID, Manifest: inspected.Manifest,
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		stored, err := state.GetPreparedWorkspace(context.Background(), store.PreparedWorkspaceKey{
+			ControllerID: testControllerID, TreeID: current.treeID, WorkspaceID: workspaceID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, stored.WorkspacePath)
+	}
+	if paths[0] == paths[1] {
+		t.Fatalf("two trees shared prepared workspace path %q", paths[0])
+	}
+	for _, path := range paths {
+		if data, err := os.ReadFile(filepath.Join(path, "nested", "source.txt")); err != nil ||
+			string(data) != "source\n" {
+			t.Fatalf("tree-scoped workspace %q = %q, %v", path, data, err)
+		}
+	}
+}
+
+func TestHostStartupToleratesClaimedWorkspaceContentChanges(t *testing.T) {
+	workspaceID := "123e4567-e89b-42d3-a456-4266141744a4"
+	agentID := "123e4567-e89b-42d3-a456-4266141744a5"
+	var reservation store.WorkerReservation
+	host, _, _ := newTestHostWithStateSetup(t, 2, "", func(state *store.PeerStore, root string) {
+		workspacePath := filepath.Join(root, workspaceSyncName(testTreeID, workspaceID))
+		head := initializeTestRepository(t, workspacePath)
+		recordPreparedWorkspace(t, state, workspaceID, workspacePath, head)
+		reservation = store.WorkerReservation{
+			WorkerKey: store.WorkerKey{
+				ControllerID: testControllerID, TreeID: testTreeID, AgentID: agentID,
+			},
+			ParentAgentID: testParentID, DeviceID: testDeviceID, TaskName: "claimed",
+			PromptDigest: strings.Repeat("a", 64), WorkspaceID: workspaceID,
+			WorkspacePath: workspacePath, WorkingDirectory: "nested",
+			ProfileVersion: workerProfileVersion,
+		}
+		if _, err := state.ReserveWorkerStartWithWorkspace(
+			context.Background(), reservation, 2, time.Unix(1_700_000_001, 0),
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(filepath.Join(workspacePath, "nested")); err != nil {
+			t.Fatal(err)
+		}
+	}, newFakeApplication())
+	if err := host.prepareWorkerWorkspace(context.Background(), reservation); err == nil ||
+		!strings.Contains(err.Error(), "working directory") {
+		t.Fatalf("changed claimed workspace validation = %v", err)
+	}
+	if started := spawnTestWorker(
+		t, host, "123e4567-e89b-42d3-a456-4266141744a6", "unrelated",
+	); started.Worker.Status != store.WorkerRunning {
+		t.Fatalf("unrelated worker after claimed workspace drift = %#v", started.Worker)
 	}
 }
 
@@ -1236,6 +1471,7 @@ type testHostPaths struct {
 	configPath              string
 	delegationBinary        string
 	codexBinary             string
+	gitBinary               string
 	codexHome               string
 	providerEnvironmentFile string
 	launchOptions           *appserver.Options
@@ -1268,9 +1504,22 @@ func newTestHostWithStateSetup(
 ) (*Host, *store.PeerStore, testHostPaths) {
 	t.Helper()
 	root := t.TempDir()
+	gitBinary, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("Git is unavailable")
+	}
+	gitBinary, err = filepath.Abs(gitBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitBinary, err = filepath.EvalSymlinks(gitBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
 	paths := testHostPaths{
 		configPath: filepath.Join(root, "peer.json"), delegationBinary: filepath.Join(root, "delegation"),
-		codexBinary: filepath.Join(root, "codex"), codexHome: filepath.Join(root, "codex-home"),
+		codexBinary: filepath.Join(root, "codex"), gitBinary: gitBinary,
+		codexHome:               filepath.Join(root, "codex-home"),
 		providerEnvironmentFile: filepath.Join(root, "peer.env"),
 		launchOptions:           &appserver.Options{}, allowCloseError: &atomic.Bool{},
 	}
@@ -1292,7 +1541,7 @@ func newTestHostWithStateSetup(
 			t.Fatal(err)
 		}
 	}
-	workspaceRoot, err := filepath.EvalSymlinks(workspaceRoot)
+	workspaceRoot, err = filepath.EvalSymlinks(workspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1308,7 +1557,8 @@ func newTestHostWithStateSetup(
 	host, err := New(context.Background(), Options{
 		ControllerID: testControllerID, DeviceID: testDeviceID,
 		PeerConfigPath: paths.configPath, DelegationBinary: paths.delegationBinary,
-		CodexBinary: paths.codexBinary, CodexHome: paths.codexHome,
+		CodexBinary: paths.codexBinary, GitBinary: paths.gitBinary,
+		CodexHome: paths.codexHome,
 		CodexEnvironment: map[string]string{
 			"CODEX_ACCESS_TOKEN":  "host-auth",
 			"CODEX_API_KEY":       "ambient-codex-auth",
@@ -1394,7 +1644,7 @@ func assertManagedProfile(
 		t.Fatalf("provider config = %#v", config)
 	}
 	filesystem := map[string]any{
-		":minimal": "read", ":workspace_roots": map[string]any{".": "read"},
+		":minimal": "read", ":workspace_roots": map[string]any{".": "write"},
 	}
 	resolvedProviderEnvironmentFile, err := filepath.EvalSymlinks(paths.providerEnvironmentFile)
 	if err != nil {
@@ -1587,8 +1837,9 @@ func newFakeApplication() *fakeApplication {
 }
 
 func (a *fakeApplication) ThreadStart(_ context.Context, params, result any) error {
+	start := params.(threadStartParams)
 	a.mu.Lock()
-	a.record.starts = append(a.record.starts, params.(threadStartParams))
+	a.record.starts = append(a.record.starts, start)
 	hook := a.threadStartHook
 	threadStartErr := a.threadStartErr
 	a.mu.Unlock()
@@ -1600,7 +1851,7 @@ func (a *fakeApplication) ThreadStart(_ context.Context, params, result any) err
 	if threadStartErr != nil {
 		return threadStartErr
 	}
-	result.(*threadResult).Thread.ID = newTestID()
+	setFakeThreadResult(result.(*threadResult), newTestID(), start.CWD, start.RuntimeWorkspaceRoots)
 	return nil
 }
 
@@ -1628,8 +1879,21 @@ func (a *fakeApplication) ThreadResume(_ context.Context, params, result any) er
 	if resumeErr != nil {
 		return resumeErr
 	}
-	result.(*threadResult).Thread.ID = resume.ThreadID
+	setFakeThreadResult(result.(*threadResult), resume.ThreadID, resume.CWD, resume.RuntimeWorkspaceRoots)
 	return nil
+}
+
+func setFakeThreadResult(result *threadResult, threadID, cwd string, roots []string) {
+	result.Thread.ID = threadID
+	result.CWD = cwd
+	result.RuntimeWorkspaceRoots = append([]string(nil), roots...)
+	profile := workerPermissionProfile
+	if runtime.GOOS == "windows" {
+		profile = windowsWorkerProfile
+	}
+	result.ActivePermissionProfile = &struct {
+		ID string `json:"id"`
+	}{ID: profile}
 }
 
 func (a *fakeApplication) MCPServerStatusList(_ context.Context, params, result any) error {
@@ -1818,4 +2082,107 @@ func newTestID() string {
 		panic(err)
 	}
 	return id
+}
+
+func initializeTestRepository(t *testing.T, repositoryPath string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(repositoryPath, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repositoryPath, "nested", "source.txt"), []byte("source\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, filepath.Dir(repositoryPath), "init", repositoryPath)
+	runTestGit(t, repositoryPath, "add", "nested/source.txt")
+	runTestGit(
+		t, repositoryPath, "-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid",
+		"commit", "-m", "initial",
+	)
+	return outputTestGit(t, repositoryPath, "rev-parse", "HEAD^{commit}")
+}
+
+func recordPreparedWorkspace(
+	t *testing.T,
+	state *store.PeerStore,
+	workspaceID, workspacePath, head string,
+) {
+	recordPreparedWorkspaceForTree(t, state, testTreeID, workspaceID, workspacePath, head)
+}
+
+func recordPreparedWorkspaceForTree(
+	t *testing.T,
+	state *store.PeerStore,
+	treeID, workspaceID, workspacePath, head string,
+) {
+	t.Helper()
+	manifest := protocol.WorkspaceManifest{
+		GitURL: "ssh://git@example.invalid/repository.git", HeadOID: head,
+		ObjectFormat: "sha1", WorkingDirectory: "nested", Clean: true,
+		SourceSnapshotHash: strings.Repeat("a", 64), Warnings: []string{},
+	}
+	hash, err := protocol.WorkspaceManifestHash(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.RecordPreparedWorkspace(context.Background(), store.PreparedWorkspace{
+		PreparedWorkspaceKey: store.PreparedWorkspaceKey{
+			ControllerID: testControllerID, TreeID: treeID, WorkspaceID: workspaceID,
+		},
+		SourceAgentID: testParentID, SourceDeviceID: testParentID,
+		TargetDeviceID: testDeviceID, GitURL: manifest.GitURL,
+		HeadOID: head, ObjectFormat: "sha1", WorkingDirectory: "nested",
+		WorkspacePath: workspacePath, Strategy: protocol.WorkspaceStrategyDirect,
+		ManifestHash: hash, Warnings: []string{},
+	}, time.Unix(1_700_000_000, 0)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runTestGit(t *testing.T, directory string, args ...string) {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = directory
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, output)
+	}
+}
+
+func outputTestGit(t *testing.T, directory string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = directory
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func createHostedTestRepository(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	source := filepath.Join(root, "source")
+	runTestGit(t, root, "init", "--bare", remote)
+	initializeTestRepository(t, source)
+	runTestGit(t, source, "remote", "add", "origin", remote)
+	runTestGit(t, source, "push", "origin", "HEAD:refs/heads/main")
+	runTestGit(t, root, "--git-dir="+remote, "update-server-info")
+	server := httptest.NewTLSServer(http.FileServer(http.Dir(root)))
+	t.Cleanup(server.Close)
+	gitHome := filepath.Join(root, "git-home")
+	if err := os.Mkdir(gitHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(gitHome, ".gitconfig"), []byte("[http]\n\tsslVerify = false\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", gitHome)
+	t.Setenv("NO_PROXY", "*")
+	t.Setenv("no_proxy", "*")
+	return server.URL + "/" + filepath.Base(remote), source
 }

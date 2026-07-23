@@ -74,6 +74,40 @@ CREATE TABLE principals (
 CREATE INDEX principals_by_parent
     ON principals(controller_id, tree_id, parent_agent_id);
 
+CREATE TABLE workspace_sync_receipts (
+	controller_id TEXT NOT NULL,
+	tree_id TEXT NOT NULL,
+	source_agent_id TEXT NOT NULL,
+	sync_id TEXT NOT NULL,
+	source_device_id TEXT NOT NULL,
+	target_device_id TEXT NOT NULL,
+	git_url TEXT NOT NULL CHECK (length(CAST(git_url AS BLOB)) BETWEEN 1 AND 4096),
+	source_path_digest BLOB NOT NULL CHECK (length(source_path_digest) = 32),
+	status TEXT NOT NULL CHECK (status IN ('pending', 'inspected', 'prepared')),
+	head_oid TEXT NOT NULL DEFAULT '',
+	object_format TEXT NOT NULL DEFAULT '' CHECK (object_format IN ('', 'sha1', 'sha256')),
+	working_directory TEXT NOT NULL DEFAULT '',
+	source_clean INTEGER NOT NULL DEFAULT 0 CHECK (source_clean IN (0, 1)),
+	source_snapshot_hash TEXT NOT NULL DEFAULT '',
+	strategy TEXT NOT NULL DEFAULT '' CHECK (strategy IN ('', 'direct', 'thinBundle', 'selfContainedBundle')),
+	manifest_hash TEXT NOT NULL DEFAULT '',
+	warnings_json TEXT NOT NULL DEFAULT '[]',
+	consumed_spawn_id TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL CHECK (created_at >= 0),
+	updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+	PRIMARY KEY (controller_id, tree_id, source_agent_id, sync_id),
+	UNIQUE (controller_id, tree_id, sync_id),
+	FOREIGN KEY (controller_id, tree_id, source_agent_id)
+		REFERENCES principals(controller_id, tree_id, agent_id) ON DELETE CASCADE,
+	FOREIGN KEY (controller_id, source_device_id)
+		REFERENCES devices(controller_id, device_id),
+	FOREIGN KEY (controller_id, target_device_id)
+		REFERENCES devices(controller_id, device_id)
+) STRICT;
+
+CREATE INDEX workspace_sync_receipts_by_target
+	ON workspace_sync_receipts(controller_id, target_device_id, status, updated_at);
+
 CREATE TABLE agent_spawn_receipts (
 	controller_id TEXT NOT NULL,
 	tree_id TEXT NOT NULL,
@@ -85,6 +119,7 @@ CREATE TABLE agent_spawn_receipts (
 	task_name TEXT NOT NULL CHECK (
 		length(CAST(task_name AS BLOB)) BETWEEN 1 AND 64
 	),
+	workspace_id TEXT NOT NULL DEFAULT '',
 	prompt_digest BLOB NOT NULL CHECK (length(prompt_digest) = 32),
 	status TEXT NOT NULL CHECK (status IN ('pending', 'started', 'failed')),
 	failure_code TEXT NOT NULL CHECK (

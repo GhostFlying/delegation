@@ -354,7 +354,7 @@ func TestConfigRejectsUnsupportedSchemaVersions(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Validate accepted schema version %d", version)
 		}
-		for _, text := range []string{"unsupported config schema version", "supports only version 2", "setup broker or setup peer"} {
+		for _, text := range []string{"unsupported config schema version", "supports only version 3", "setup broker or setup peer"} {
 			if !strings.Contains(err.Error(), text) {
 				t.Fatalf("schema version %d error = %q, want %q", version, err, text)
 			}
@@ -374,7 +374,7 @@ func TestReadReportsUnsupportedSchemaBeforeUnknownFields(t *testing.T) {
 	}
 	writeProtectedConfigFixture(t, path, data)
 	_, err = Read(path)
-	if err == nil || !strings.Contains(err.Error(), "unsupported config schema version 3") ||
+	if err == nil || !strings.Contains(err.Error(), "unsupported config schema version 4") ||
 		strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("unsupported config read error = %v", err)
 	}
@@ -385,6 +385,7 @@ func testPeerRuntime(t *testing.T) PeerConfig {
 	root := t.TempDir()
 	return PeerConfig{
 		CodexBinary:    filepath.Join(root, "codex"),
+		GitBinary:      filepath.Join(root, "git"),
 		CodexHome:      filepath.Join(root, "codex-home"),
 		WorkspaceRoot:  filepath.Join(root, "workspaces"),
 		StateFile:      filepath.Join(root, "peer.sqlite3"),

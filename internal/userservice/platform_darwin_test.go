@@ -383,7 +383,8 @@ func TestDarwinLaunchAgentRoundTrip(t *testing.T) {
 			Auth: delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
 		},
 		Peer: delegationconfig.PeerConfig{
-			CodexBinary: binaryPath, CodexHome: codexHome, WorkspaceRoot: workspaceRoot,
+			CodexBinary: binaryPath, GitBinary: binaryPath,
+			CodexHome: codexHome, WorkspaceRoot: workspaceRoot,
 			StateFile:      filepath.Join(filepath.Dir(configPath), "state", "peer.sqlite3"),
 			MaxWorkerSlots: 1,
 		},

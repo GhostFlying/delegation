@@ -5,27 +5,34 @@ import (
 )
 
 type threadStartParams struct {
-	CWD              string         `json:"cwd"`
-	ApprovalPolicy   string         `json:"approvalPolicy"`
-	Config           map[string]any `json:"config"`
-	ServiceName      string         `json:"serviceName"`
-	ThreadSource     string         `json:"threadSource"`
-	DeveloperMessage string         `json:"developerInstructions"`
+	CWD                   string         `json:"cwd"`
+	RuntimeWorkspaceRoots []string       `json:"runtimeWorkspaceRoots"`
+	ApprovalPolicy        string         `json:"approvalPolicy"`
+	Config                map[string]any `json:"config"`
+	ServiceName           string         `json:"serviceName"`
+	ThreadSource          string         `json:"threadSource"`
+	DeveloperMessage      string         `json:"developerInstructions"`
 }
 
 type threadResumeParams struct {
-	ThreadID         string         `json:"threadId"`
-	CWD              string         `json:"cwd"`
-	ApprovalPolicy   string         `json:"approvalPolicy"`
-	Config           map[string]any `json:"config"`
-	DeveloperMessage string         `json:"developerInstructions"`
-	ExcludeTurns     bool           `json:"excludeTurns"`
+	ThreadID              string         `json:"threadId"`
+	CWD                   string         `json:"cwd"`
+	RuntimeWorkspaceRoots []string       `json:"runtimeWorkspaceRoots"`
+	ApprovalPolicy        string         `json:"approvalPolicy"`
+	Config                map[string]any `json:"config"`
+	DeveloperMessage      string         `json:"developerInstructions"`
+	ExcludeTurns          bool           `json:"excludeTurns"`
 }
 
 type threadResult struct {
 	Thread struct {
 		ID string `json:"id"`
 	} `json:"thread"`
+	CWD                     string   `json:"cwd"`
+	RuntimeWorkspaceRoots   []string `json:"runtimeWorkspaceRoots"`
+	ActivePermissionProfile *struct {
+		ID string `json:"id"`
+	} `json:"activePermissionProfile"`
 }
 
 type mcpStatusParams struct {

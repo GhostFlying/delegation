@@ -63,6 +63,8 @@ func TestCodexPeerTopology(t *testing.T) {
 	modelServer := httptest.NewServer(mock)
 	t.Cleanup(modelServer.Close)
 	peers := createPeers(t, root, modelServer.URL)
+	gitRepository := createTopologyGitRepository(t, root, peers)
+	mock.workspaceGitURL = gitRepository.gitURL
 	brokerAddress := freeAddress(t)
 	brokerConfig := filepath.Join(peers[0].delegationHome, "broker.json")
 	statePath := filepath.Join(peers[0].delegationHome, "state", "broker.sqlite3")
@@ -147,6 +149,12 @@ func TestCodexPeerTopology(t *testing.T) {
 		deviceIDs["B"]: 1,
 		deviceIDs["C"]: 1,
 	})
+	t.Run("direct Git workspace delegation", func(t *testing.T) {
+		testDirectWorkspaceDelegation(
+			t, peers[2], peers[0], codexBinary, delegationBinary, statePath, gitRepository,
+		)
+		mock.verify(t, []string{rootWorkspaceSync, rootWorkspaceSpawn, workerWorkspaceDirect})
+	})
 	for _, current := range peers {
 		matches, err := filepath.Glob(filepath.Join(current.home, ".delegation", "run", "*.sock"))
 		if err != nil || len(matches) != 1 {
@@ -205,9 +213,10 @@ func TestCodexPeerTopology(t *testing.T) {
 			workerCollaborationInitial, workerCollaborationResume, workerSelfTarget,
 		})
 	})
-	assertCount(t, statePath, "SELECT count(*) FROM trees", 4)
+	assertCount(t, statePath, "SELECT count(*) FROM trees", 5)
 	mock.verify(t, []string{
 		"lazy", "a1", "b1", "c1", "a2", "a1-resume", "cross-conflict",
+		rootWorkspaceSync, rootWorkspaceSpawn, workerWorkspaceDirect,
 	})
 }
 
@@ -282,11 +291,21 @@ func runCodex(
 	current peer,
 	codexBinary, delegationBinary, repoRoot, testCase, resumeThread string,
 ) execResult {
+	return runCodexAt(
+		t, current, codexBinary, delegationBinary, repoRoot, testCase, resumeThread,
+	)
+}
+
+func runCodexAt(
+	t *testing.T,
+	current peer,
+	codexBinary, delegationBinary, cwd, testCase, resumeThread string,
+) execResult {
 	t.Helper()
 	prompt := "delegation-e2e-case=" + testCase
-	args := []string{"exec"}
+	args := []string{"exec", "-C", cwd}
 	if resumeThread == "" {
-		args = append(args, "--strict-config", "--json", "--skip-git-repo-check", "-C", repoRoot, prompt)
+		args = append(args, "--strict-config", "--json", "--skip-git-repo-check", prompt)
 	} else {
 		args = append(args, "resume", "--all", "--strict-config", "--json", "--skip-git-repo-check", resumeThread, prompt)
 	}

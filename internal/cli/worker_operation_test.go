@@ -87,6 +87,20 @@ func (h *fakeManagedWorkerHost) Interrupt(
 	return h.interruptResult, h.interruptErr
 }
 
+func (h *fakeManagedWorkerHost) InspectWorkspace(
+	context.Context,
+	workerhost.WorkspaceInspectRequest,
+) (protocol.InspectWorkspaceResult, error) {
+	return protocol.InspectWorkspaceResult{}, errors.New("unexpected workspace inspection")
+}
+
+func (h *fakeManagedWorkerHost) PrepareWorkspace(
+	context.Context,
+	workerhost.WorkspacePrepareRequest,
+) (protocol.PrepareWorkspaceResult, error) {
+	return protocol.PrepareWorkspaceResult{}, errors.New("unexpected workspace preparation")
+}
+
 type staticManagedWorkerState struct {
 	worker store.WorkerReservation
 	err    error

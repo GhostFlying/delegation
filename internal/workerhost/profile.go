@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	workerProfileVersion    = 1
+	workerProfileVersion    = 2
 	workerPermissionProfile = "delegation-worker"
 	windowsWorkerProfile    = ":danger-full-access"
 	rootPluginEnabledConfig = "plugins.delegation@delegation.enabled"
@@ -33,7 +33,7 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 	config[rootPluginEnabledConfig] = false
 	filesystem := map[string]any{
 		":minimal":         "read",
-		":workspace_roots": map[string]any{".": "read"},
+		":workspace_roots": map[string]any{".": "write"},
 	}
 	addCodexRuntimeFilesystemPermission(filesystem, h.codexBinary)
 	if h.providerEnvironmentFile != "" {
@@ -46,15 +46,15 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 		config["default_permissions"] = windowsWorkerProfile
 		// An explicit trust decision prevents app-server from persisting one in the
 		// isolated CODEX_HOME without enabling workspace-local Codex configuration.
-		config["projects"] = map[string]any{
-			worker.WorkspacePath: map[string]any{"trust_level": "untrusted"},
-		}
 		delete(config, "permissions."+workerPermissionProfile)
 	} else {
 		config["default_permissions"] = workerPermissionProfile
 		config["permissions."+workerPermissionProfile] = map[string]any{
 			"filesystem": filesystem,
 		}
+	}
+	config["projects"] = map[string]any{
+		worker.WorkspacePath: map[string]any{"trust_level": "untrusted"},
 	}
 	config["shell_environment_policy"] = map[string]any{
 		"inherit":                 "core",

@@ -156,6 +156,20 @@ func (integrationWorkerController) InterruptWorker(
 	}, nil
 }
 
+func (integrationWorkerController) InspectWorkspace(
+	context.Context,
+	connector.WorkspaceInspectRequest,
+) (protocol.InspectWorkspaceResult, error) {
+	return protocol.InspectWorkspaceResult{}, errors.New("workspace inspection is outside this mailbox test")
+}
+
+func (integrationWorkerController) PrepareWorkspace(
+	context.Context,
+	connector.WorkspacePrepareRequest,
+) (protocol.PrepareWorkspaceResult, error) {
+	return protocol.PrepareWorkspaceResult{}, errors.New("workspace preparation is outside this mailbox test")
+}
+
 func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 	controllerID := newIntegrationID(t)
 	deviceID := newIntegrationID(t)
@@ -203,6 +217,7 @@ func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 		WorkerSpawner:         integrationWorkerSpawner{},
 		WorkerController:      integrationWorkerController{},
 		WorkerLifecycleSource: integrationWorkerLifecycleSource{},
+		WorkspaceManager:      integrationWorkerController{},
 	})
 	if err != nil {
 		cancelRun()

@@ -136,7 +136,8 @@ func runConnectorServiceWithProviderEnvironment(
 	workers, err := workerhost.New(ctx, workerhost.Options{
 		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
 		PeerConfigPath: configPath, DelegationBinary: runtimeBinary,
-		CodexBinary: codexLaunch.NativePath, CodexHome: cfg.Peer.CodexHome,
+		CodexBinary: codexLaunch.NativePath, GitBinary: cfg.Peer.GitBinary,
+		CodexHome:               cfg.Peer.CodexHome,
 		CodexEnvironment:        codexEnvironment,
 		CodexUnsetEnvironment:   codexLaunch.UnsetEnvironment,
 		ProviderEnvironmentFile: environmentFile,
@@ -169,6 +170,7 @@ func runConnectorServiceWithProviderEnvironment(
 		WorkerLifecycleSource: managedWorkerLifecycleSource{
 			host: workers, controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 		},
+		WorkspaceManager: workerManager,
 		ReportError: func(err error) {
 			_ = writeStderr("delegation: connector reconnecting: %v\n", err)
 		},
@@ -334,6 +336,16 @@ func loadConnectorAuthority(
 		cfg.Peer.WorkspaceRoot,
 	); err != nil {
 		return nil, err
+	}
+	for name, executable := range map[string]string{
+		"Codex binary": cfg.Peer.CodexBinary,
+		"Git binary":   cfg.Peer.GitBinary,
+	} {
+		if err := pathguard.ValidateManagedExecutable(
+			name, executable, cfg.Peer.CodexHome, cfg.Peer.WorkspaceRoot,
+		); err != nil {
+			return nil, err
+		}
 	}
 	if err := delegationconfig.ValidatePrivateDirectory(cfg.Peer.CodexHome); err != nil {
 		return nil, fmt.Errorf("validate managed CODEX_HOME: %w", err)

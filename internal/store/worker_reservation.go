@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
 const (
@@ -48,20 +49,22 @@ type WorkerKey struct {
 
 type WorkerReservation struct {
 	WorkerKey
-	ParentAgentID  string
-	DeviceID       string
-	TaskName       string
-	PromptDigest   string
-	WorkspacePath  string
-	CodexThreadID  string
-	ProfileVersion int
-	Status         WorkerStatus
-	RetryTarget    WorkerStatus
-	ActiveTurnID   string
-	FailureCode    string
-	Revision       uint64
-	CreatedAt      int64
-	UpdatedAt      int64
+	ParentAgentID    string
+	DeviceID         string
+	TaskName         string
+	PromptDigest     string
+	WorkspaceID      string
+	WorkspacePath    string
+	WorkingDirectory string
+	CodexThreadID    string
+	ProfileVersion   int
+	Status           WorkerStatus
+	RetryTarget      WorkerStatus
+	ActiveTurnID     string
+	FailureCode      string
+	Revision         uint64
+	CreatedAt        int64
+	UpdatedAt        int64
 }
 
 func (s *PeerStore) ReserveWorker(
@@ -70,7 +73,7 @@ func (s *PeerStore) ReserveWorker(
 	maxActive int,
 	observedAt time.Time,
 ) (WorkerReservation, error) {
-	return s.reserveWorker(ctx, reservation, maxActive, observedAt, WorkerReserved)
+	return s.reserveWorker(ctx, reservation, maxActive, observedAt, WorkerReserved, false)
 }
 
 // ReserveWorkerStart atomically creates a reservation in starting state. It
@@ -82,7 +85,19 @@ func (s *PeerStore) ReserveWorkerStart(
 	maxActive int,
 	observedAt time.Time,
 ) (WorkerReservation, error) {
-	return s.reserveWorker(ctx, reservation, maxActive, observedAt, WorkerStarting)
+	return s.reserveWorker(ctx, reservation, maxActive, observedAt, WorkerStarting, false)
+}
+
+func (s *PeerStore) ReserveWorkerStartWithWorkspace(
+	ctx context.Context,
+	reservation WorkerReservation,
+	maxActive int,
+	observedAt time.Time,
+) (WorkerReservation, error) {
+	if reservation.WorkspaceID == "" {
+		return WorkerReservation{}, errors.New("prepared workspace ID is required")
+	}
+	return s.reserveWorker(ctx, reservation, maxActive, observedAt, WorkerStarting, true)
 }
 
 func (s *PeerStore) reserveWorker(
@@ -91,6 +106,7 @@ func (s *PeerStore) reserveWorker(
 	maxActive int,
 	observedAt time.Time,
 	initialStatus WorkerStatus,
+	claimWorkspace bool,
 ) (WorkerReservation, error) {
 	if err := validateNewWorkerReservation(reservation); err != nil {
 		return WorkerReservation{}, err
@@ -135,6 +151,37 @@ func (s *PeerStore) reserveWorker(
 		if err := requireWorkerSlot(ctx, connection, maxActive); err != nil {
 			return err
 		}
+		if claimWorkspace {
+			workspace, workspaceErr := queryPreparedWorkspace(ctx, connection, PreparedWorkspaceKey{
+				ControllerID: reservation.ControllerID,
+				TreeID:       reservation.TreeID,
+				WorkspaceID:  reservation.WorkspaceID,
+			})
+			if workspaceErr != nil {
+				return workspaceErr
+			}
+			if workspace.TargetDeviceID != reservation.DeviceID ||
+				workspace.WorkspacePath != reservation.WorkspacePath ||
+				workspace.WorkingDirectory != reservation.WorkingDirectory {
+				return ErrWorkerReservationConflict
+			}
+			if workspace.Status == PreparedWorkspaceClaimed {
+				if workspace.ClaimedAgentID != reservation.AgentID {
+					return ErrWorkerReservationConflict
+				}
+			} else if workspace.Status == PreparedWorkspaceReady {
+				if _, err := connection.ExecContext(ctx, `
+UPDATE prepared_workspaces
+SET status = 'claimed', claimed_agent_id = ?, updated_at = ?
+WHERE controller_id = ? AND tree_id = ? AND workspace_id = ? AND status = 'prepared'
+`, reservation.AgentID, timestamp, reservation.ControllerID,
+					reservation.TreeID, reservation.WorkspaceID); err != nil {
+					return fmt.Errorf("claim prepared workspace: %w", err)
+				}
+			} else {
+				return errors.New("prepared workspace has an unsupported status")
+			}
+		}
 		reservation.Revision, err = nextWorkerRevision(ctx, connection)
 		if err != nil {
 			return err
@@ -142,8 +189,9 @@ func (s *PeerStore) reserveWorker(
 		if _, err := connection.ExecContext(ctx, `
 INSERT INTO worker_reservations(
     controller_id, tree_id, agent_id, parent_agent_id, device_id,
-	task_name, prompt_digest, workspace_path, profile_version, status, retry_target, revision, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	task_name, prompt_digest, workspace_id, workspace_path, working_directory,
+	profile_version, status, retry_target, revision, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 			reservation.ControllerID,
 			reservation.TreeID,
@@ -152,7 +200,9 @@ INSERT INTO worker_reservations(
 			reservation.DeviceID,
 			reservation.TaskName,
 			reservation.PromptDigest,
+			reservation.WorkspaceID,
 			reservation.WorkspacePath,
+			reservation.WorkingDirectory,
 			reservation.ProfileVersion,
 			reservation.Status,
 			reservation.RetryTarget,
@@ -548,7 +598,8 @@ WHERE controller_id = ? AND codex_thread_id = ?
 
 const workerSelect = `
 SELECT controller_id, tree_id, agent_id, parent_agent_id, device_id,
-	   task_name, prompt_digest, workspace_path, codex_thread_id, profile_version,
+	   task_name, prompt_digest, workspace_id, workspace_path, working_directory,
+	   codex_thread_id, profile_version,
        status, retry_target, active_turn_id, failure_code, revision, created_at, updated_at
 FROM worker_reservations
 `
@@ -563,7 +614,9 @@ func scanWorker(scanner rowScanner) (WorkerReservation, error) {
 		&worker.DeviceID,
 		&worker.TaskName,
 		&worker.PromptDigest,
+		&worker.WorkspaceID,
 		&worker.WorkspacePath,
+		&worker.WorkingDirectory,
 		&worker.CodexThreadID,
 		&worker.ProfileVersion,
 		&worker.Status,
@@ -626,6 +679,16 @@ func (w WorkerReservation) Validate() error {
 	}
 	if !filepath.IsAbs(w.WorkspacePath) || len(w.WorkspacePath) > maximumWorkspacePath {
 		return errors.New("workspacePath must be a bounded absolute path")
+	}
+	if w.WorkspaceID != "" {
+		if err := identity.ValidateID(w.WorkspaceID); err != nil {
+			return fmt.Errorf("workspaceId %w", err)
+		}
+	}
+	if len(w.WorkingDirectory) > protocol.MaximumWorkspaceRelativeBytes ||
+		filepath.IsAbs(w.WorkingDirectory) || w.WorkingDirectory == "." || w.WorkingDirectory == ".." ||
+		strings.HasPrefix(filepath.Clean(w.WorkingDirectory), ".."+string(filepath.Separator)) {
+		return errors.New("workingDirectory must stay within the workspace")
 	}
 	if w.CodexThreadID != "" {
 		if err := identity.ValidateID(w.CodexThreadID); err != nil {
@@ -730,6 +793,8 @@ func sameWorkerReservation(stored, requested WorkerReservation) bool {
 		stored.DeviceID == requested.DeviceID &&
 		stored.TaskName == requested.TaskName &&
 		stored.PromptDigest == requested.PromptDigest &&
+		stored.WorkspaceID == requested.WorkspaceID &&
 		stored.WorkspacePath == requested.WorkspacePath &&
+		stored.WorkingDirectory == requested.WorkingDirectory &&
 		stored.ProfileVersion == requested.ProfileVersion
 }

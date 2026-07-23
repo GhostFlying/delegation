@@ -18,6 +18,7 @@ type SpawnAgentInput struct {
 	TargetDeviceID string `json:"target_device_id" jsonschema:"target peer UUID returned by list_devices"`
 	TaskName       string `json:"task_name" jsonschema:"short lowercase task identifier"`
 	Message        string `json:"message" jsonschema:"self-contained task for the managed worker"`
+	WorkspaceID    string `json:"workspace_id,omitempty" jsonschema:"prepared workspace UUID returned by sync_workspace"`
 }
 
 type AgentOutput struct {
@@ -28,6 +29,7 @@ type AgentOutput struct {
 	TaskName       string                    `json:"task_name"`
 	Status         protocol.AgentSpawnStatus `json:"status"`
 	FailureCode    string                    `json:"failure_code,omitempty"`
+	WorkspaceID    string                    `json:"workspace_id,omitempty"`
 }
 
 type SpawnAgentOutput struct {
@@ -39,6 +41,7 @@ type SpawnAgentOutput struct {
 	Status         protocol.AgentSpawnStatus  `json:"status"`
 	Outcome        protocol.AgentSpawnOutcome `json:"outcome"`
 	FailureCode    string                     `json:"failure_code,omitempty"`
+	WorkspaceID    string                     `json:"workspace_id,omitempty"`
 }
 
 type ListAgentsInput struct {
@@ -62,7 +65,7 @@ func (r *Root) spawnAgent(
 	}
 	params := protocol.SpawnAgentParams{
 		SpawnID: input.SpawnID, TargetDeviceID: input.TargetDeviceID,
-		TaskName: input.TaskName, Message: input.Message,
+		TaskName: input.TaskName, Message: input.Message, WorkspaceID: input.WorkspaceID,
 	}
 	if err := params.Validate(); err != nil {
 		return nil, SpawnAgentOutput{}, err
@@ -157,6 +160,12 @@ func agentInputSchemas() (*jsonschema.Schema, *jsonschema.Schema, error) {
 		property.MaxLength = jsonschema.Ptr(36)
 		property.Pattern = uuidPattern
 	}
+	workspaceID, found := spawn.Properties["workspace_id"]
+	if !found {
+		return nil, nil, errors.New("spawn_agent input schema is missing workspace_id")
+	}
+	workspaceID.MaxLength = jsonschema.Ptr(36)
+	workspaceID.Pattern = `^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$`
 	taskName, found := spawn.Properties["task_name"]
 	if !found {
 		return nil, nil, errors.New("spawn_agent input schema is missing task_name")
@@ -203,7 +212,7 @@ func validateSpawnAgentResult(
 		result.Agent.Principal.TreeID != treeID ||
 		result.Agent.Principal.ParentAgentID != parentAgentID ||
 		result.Agent.Principal.DeviceID != params.TargetDeviceID ||
-		result.Agent.TaskName != params.TaskName {
+		result.Agent.TaskName != params.TaskName || result.Agent.WorkspaceID != params.WorkspaceID {
 		return errors.New("delegation service returned a mismatched agent")
 	}
 	return nil
@@ -245,6 +254,7 @@ func agentOutput(agent protocol.AgentSummary) AgentOutput {
 		TaskName:       agent.TaskName,
 		Status:         agent.Status,
 		FailureCode:    agent.FailureCode,
+		WorkspaceID:    agent.WorkspaceID,
 	}
 }
 
@@ -259,5 +269,6 @@ func spawnAgentOutput(result protocol.SpawnAgentResult) SpawnAgentOutput {
 		Status:         agent.Status,
 		Outcome:        result.Outcome,
 		FailureCode:    agent.FailureCode,
+		WorkspaceID:    agent.WorkspaceID,
 	}
 }

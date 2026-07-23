@@ -130,6 +130,38 @@ func TestValidatePeerRuntimeAuthorityRejectsAuthorityInsideManagedDirectories(t 
 	}
 }
 
+func TestValidateManagedExecutableRejectsManagedDirectoriesAndAliases(t *testing.T) {
+	root := t.TempDir()
+	codexHome := filepath.Join(root, "codex")
+	workspaceRoot := filepath.Join(root, "workspaces")
+	executable := filepath.Join(root, "bin", "git")
+	if err := ValidateManagedExecutable("Git binary", executable, codexHome, workspaceRoot); err != nil {
+		t.Fatal(err)
+	}
+	for name, candidate := range map[string]string{
+		"inside CODEX_HOME": filepath.Join(codexHome, "bin", "git"),
+		"inside workspace":  filepath.Join(workspaceRoot, "tools", "git"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateManagedExecutable(
+				"Git binary", candidate, codexHome, workspaceRoot,
+			); err == nil {
+				t.Fatal("ValidateManagedExecutable accepted a managed executable")
+			}
+		})
+	}
+	if err := os.MkdirAll(filepath.Join(workspaceRoot, "tools"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "git-link")
+	if err := os.Symlink(filepath.Join(workspaceRoot, "tools", "git"), alias); err != nil {
+		t.Skipf("creating a symbolic link is unavailable: %v", err)
+	}
+	if err := ValidateManagedExecutable("Git binary", alias, codexHome, workspaceRoot); err == nil {
+		t.Fatal("ValidateManagedExecutable accepted a symlink into the workspace")
+	}
+}
+
 func TestValidatePeerRuntimeAuthorityRejectsParentComponentsBeforeResolvingLinks(t *testing.T) {
 	root := t.TempDir()
 	workspaceRoot := filepath.Join(root, "workspaces")

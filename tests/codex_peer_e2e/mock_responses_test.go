@@ -17,10 +17,11 @@ import (
 )
 
 type mockResponses struct {
-	mu           sync.Mutex
-	calls        map[string]int
-	errors       []string
-	workerBlocks map[string]*workerResponseBlock
+	mu              sync.Mutex
+	calls           map[string]int
+	errors          []string
+	workerBlocks    map[string]*workerResponseBlock
+	workspaceGitURL string
 }
 
 type workerResponseBlock struct {
@@ -61,7 +62,10 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		block := m.workerBlocks[testCase]
 		m.mu.Unlock()
 		encodedTools, _ := json.Marshal(body["tools"])
-		for _, forbidden := range []string{"spawn_agent", "list_agents", "list_devices", "describe_device"} {
+		for _, forbidden := range []string{
+			"sync_workspace", "spawn_agent", "list_agents", "list_devices", "describe_device",
+			"followup_task", "interrupt_agent",
+		} {
 			if bytes.Contains(encodedTools, []byte(forbidden)) {
 				m.record(fmt.Errorf("case %s exposed root tool %s: %s", key, forbidden, encodedTools))
 			}
@@ -87,6 +91,9 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 				m.record(fmt.Errorf("case %s received model call %d", key, call+1))
 			}
 			writeFinalResponse(writer, key)
+			return
+		case workerWorkspaceDirect:
+			m.handleWorkerWorkspaceDirect(writer, body, key, call)
 			return
 		}
 		if call != 0 {
@@ -115,7 +122,7 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeFinalResponse(writer, key)
 		return
 	}
-	if script, ok := rootAgentScriptFor(testCase); ok {
+	if script, ok := m.rootAgentScriptFor(testCase); ok {
 		m.handleRootAgentScript(writer, body, peerLabel, key, testCase, call, script)
 		return
 	}
@@ -161,8 +168,28 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	writeFinalResponse(writer, key)
 }
 
-func rootAgentScriptFor(testCase string) (rootAgentScript, bool) {
+func (m *mockResponses) rootAgentScriptFor(testCase string) (rootAgentScript, bool) {
 	switch testCase {
+	case rootWorkspaceSync:
+		return rootAgentScript{
+			tool: "sync_workspace", query: "delegation synchronize exact Git workspace on peer",
+			arguments: map[string]any{
+				"sync_id": workspaceE2ESyncID, "target_device_id": deviceIDs["A"],
+				"git_url": m.workspaceGitURL,
+			},
+			expectedOutput: []string{workspaceE2ESyncID, "direct"},
+		}, true
+	case rootWorkspaceSpawn:
+		return rootAgentScript{
+			tool: "spawn_agent", query: "delegation spawn managed agent in synchronized workspace",
+			arguments: map[string]any{
+				"spawn_id": workspaceE2ESpawnID, "target_device_id": deviceIDs["A"],
+				"task_name": workspaceE2ETask, "workspace_id": workspaceE2ESyncID,
+				"message": "delegation-worker-case=" + workerWorkspaceDirect +
+					" Read source.txt and write worker-change.txt.",
+			},
+			expectedOutput: []string{workspaceE2ESpawnID, workspaceE2ETask, workspaceE2ESyncID, "started"},
+		}, true
 	case rootMCPSpawn:
 		return rootAgentScript{
 			tool: "spawn_agent", query: "delegation spawn managed agent on peer",
@@ -200,6 +227,48 @@ func rootAgentScriptFor(testCase string) (rootAgentScript, bool) {
 		}, true
 	default:
 		return rootAgentScript{}, false
+	}
+}
+
+func (m *mockResponses) handleWorkerWorkspaceDirect(
+	writer http.ResponseWriter,
+	body map[string]any,
+	key string,
+	call int,
+) {
+	const callID = "call-worker-workspace-direct-shell"
+	shellTool, shellArguments := managedShellTool(
+		`test "$(cat source.txt)" = "` + workspaceSourceMarker + `" && ` +
+			`printf '%s\n' '` + workspaceWorkerMarker + `' > worker-change.txt && ` +
+			`printf 'WORKSPACE_DIRECT_OK\n'`,
+	)
+	switch call {
+	case 0:
+		tools, _ := json.Marshal(body["tools"])
+		if !bytes.Contains(tools, []byte(`"name":"`+shellTool+`"`)) {
+			m.record(fmt.Errorf("case %s exposes no %s tool: %s", key, shellTool, tools))
+		}
+		arguments, _ := json.Marshal(shellArguments)
+		writeSSE(writer,
+			map[string]any{"type": "response.created", "response": map[string]any{
+				"id": "resp-" + key + "-shell",
+			}},
+			map[string]any{"type": "response.output_item.done", "item": map[string]any{
+				"type": "function_call", "call_id": callID,
+				"name": shellTool, "arguments": string(arguments),
+			}},
+			completedEvent("resp-"+key+"-shell"),
+		)
+	case 1:
+		output, err := functionOutput(body, callID)
+		if err != nil {
+			m.record(fmt.Errorf("case %s: %w", key, err))
+		} else if !strings.Contains(output, "WORKSPACE_DIRECT_OK") {
+			m.record(fmt.Errorf("case %s workspace command failed: %s", key, output))
+		}
+		writeFinalResponse(writer, key)
+	default:
+		m.fail(writer, fmt.Errorf("case %s received unexpected model call %d", key, call+1))
 	}
 }
 
@@ -471,6 +540,7 @@ func requestCase(body map[string]any) string {
 	data, _ := json.Marshal(body)
 	text := string(data)
 	for _, testCase := range []string{
+		rootWorkspaceSpawn, rootWorkspaceSync,
 		rootMCPWaitFollowup, rootMCPFollowup, rootMCPQueue, rootMCPSpawn,
 		"cross-conflict", "a1-resume", "lazy", "a1", "b1", "c1", "a2",
 	} {
@@ -481,6 +551,7 @@ func requestCase(body map[string]any) string {
 		}
 	}
 	for _, testCase := range []string{
+		workerWorkspaceDirect,
 		workerCollaborationResume, workerCollaborationInitial, workerSelfTarget,
 		workerRootMCPFollowup, workerRootMCPInitial,
 		workerAdmissionA, workerAdmissionB, workerAdmissionRetry,
@@ -801,8 +872,11 @@ func (m *mockResponses) verify(t *testing.T, cases []string) {
 			if testCase == workerRootMCPFollowup || testCase == workerCollaborationResume ||
 				testCase == workerCollaborationInitial {
 				want = 4
+			} else if testCase == workerWorkspaceDirect {
+				want = 2
 			}
-		} else if strings.HasPrefix(testCase, "root-mcp-") {
+		} else if strings.HasPrefix(testCase, "root-mcp-") ||
+			strings.HasPrefix(testCase, "root-workspace-") {
 			label = "C"
 		} else if testCase == "lazy" {
 			label, want = "A", 1

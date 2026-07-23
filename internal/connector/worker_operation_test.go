@@ -431,7 +431,8 @@ func newTestClientWithWorkerManager(
 		RuntimeVersion: "0.1.0-alpha.0.m1.1", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 		WorkerSpawner: manager, WorkerController: manager,
-		WorkerLifecycleSource: testWorkerSpawner{}, ReportError: reportError,
+		WorkerLifecycleSource: testWorkerSpawner{}, WorkspaceManager: testWorkerSpawner{},
+		ReportError: reportError,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -58,6 +58,7 @@ func TestHostCanonicalizesSymlinkedCodexBinaryWithoutGrantingEitherDirectory(t *
 		PeerConfigPath:   paths.configPath,
 		DelegationBinary: paths.delegationBinary,
 		CodexBinary:      symlink,
+		GitBinary:        paths.codexBinary,
 		CodexHome:        paths.codexHome,
 		WorkspaceRoot:    filepath.Join(filepath.Dir(paths.configPath), "workspaces"),
 		MaxWorkerSlots:   1,

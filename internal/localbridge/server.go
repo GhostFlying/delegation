@@ -22,6 +22,7 @@ const (
 	maximumConcurrentControlCalls = 32
 	maximumConcurrentCalls        = maximumConcurrentWaitCalls + maximumConcurrentControlCalls
 	localCallTimeout              = 130 * time.Second
+	localWorkspaceCallTimeout     = 305 * time.Second
 )
 
 type Backend interface {
@@ -167,14 +168,15 @@ func (s *Server) handle(serverContext context.Context, connection net.Conn) {
 	defer func() { <-s.connectionSem }()
 	defer s.untrack(connection)
 	defer connection.Close()
-	ctx, cancel := context.WithTimeout(serverContext, localCallTimeout)
-	defer cancel()
-	if deadline, ok := ctx.Deadline(); ok {
+	readContext, cancelRead := context.WithTimeout(serverContext, localCallTimeout)
+	defer cancelRead()
+	if deadline, ok := readContext.Deadline(); ok {
 		if err := connection.SetDeadline(deadline); err != nil {
 			return
 		}
 	}
 	request, err := readJSONFrame[request](connection)
+	cancelRead()
 	if err != nil {
 		return
 	}
@@ -182,6 +184,17 @@ func (s *Server) handle(serverContext context.Context, connection net.Conn) {
 		s.writeError(connection, request.RequestID, protocol.ErrorInvalidRequest, "invalid local request")
 		connection.Close()
 		return
+	}
+	callTimeout := localCallTimeout
+	if request.Method == protocol.MethodSyncWorkspace {
+		callTimeout = localWorkspaceCallTimeout
+	}
+	ctx, cancel := context.WithTimeout(serverContext, callTimeout)
+	defer cancel()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := connection.SetDeadline(deadline); err != nil {
+			return
+		}
 	}
 	releaseCall, admitted := s.admitCall(request.Method)
 	if !admitted {
@@ -254,7 +267,8 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 	case protocol.MethodListDevices, protocol.MethodDescribeDevice,
 		protocol.MethodSpawnAgent, protocol.MethodListAgents,
 		protocol.MethodSendAgent, protocol.MethodFollowupAgent, protocol.MethodInterruptAgent,
-		protocol.MethodWaitAgent, protocol.MethodSendMessage, protocol.MethodWaitMailbox:
+		protocol.MethodWaitAgent, protocol.MethodSendMessage, protocol.MethodWaitMailbox,
+		protocol.MethodSyncWorkspace:
 		if request.TreeID == "" || request.Source == nil {
 			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "request requires a principal"}
 		}

@@ -78,6 +78,7 @@ type SpawnAgentParams struct {
 	TargetDeviceID string `json:"targetDeviceId"`
 	TaskName       string `json:"taskName"`
 	Message        string `json:"message"`
+	WorkspaceID    string `json:"workspaceId,omitempty"`
 }
 
 func (p SpawnAgentParams) Validate() error {
@@ -90,14 +91,20 @@ func (p SpawnAgentParams) Validate() error {
 	if err := ValidateAgentTaskName(p.TaskName); err != nil {
 		return err
 	}
+	if p.WorkspaceID != "" {
+		if err := identity.ValidateID(p.WorkspaceID); err != nil {
+			return fmt.Errorf("workspaceId %w", err)
+		}
+	}
 	return ValidateAgentMessage(p.Message)
 }
 
 type SpawnWorkerParams struct {
-	SpawnID  string `json:"spawnId"`
-	AgentID  string `json:"agentId"`
-	TaskName string `json:"taskName"`
-	Message  string `json:"message"`
+	SpawnID     string `json:"spawnId"`
+	AgentID     string `json:"agentId"`
+	TaskName    string `json:"taskName"`
+	Message     string `json:"message"`
+	WorkspaceID string `json:"workspaceId,omitempty"`
 }
 
 func (p SpawnWorkerParams) Validate() error {
@@ -110,6 +117,11 @@ func (p SpawnWorkerParams) Validate() error {
 	if err := ValidateAgentTaskName(p.TaskName); err != nil {
 		return err
 	}
+	if p.WorkspaceID != "" {
+		if err := identity.ValidateID(p.WorkspaceID); err != nil {
+			return fmt.Errorf("workspaceId %w", err)
+		}
+	}
 	return ValidateAgentMessage(p.Message)
 }
 
@@ -119,6 +131,7 @@ type AgentSummary struct {
 	TaskName    string                    `json:"taskName"`
 	Status      AgentSpawnStatus          `json:"status"`
 	FailureCode string                    `json:"failureCode"`
+	WorkspaceID string                    `json:"workspaceId,omitempty"`
 	Sequence    uint64                    `json:"sequence"`
 }
 
@@ -134,6 +147,11 @@ func (a AgentSummary) Validate() error {
 	}
 	if err := ValidateAgentTaskName(a.TaskName); err != nil {
 		return err
+	}
+	if a.WorkspaceID != "" {
+		if err := identity.ValidateID(a.WorkspaceID); err != nil {
+			return fmt.Errorf("workspaceId %w", err)
+		}
 	}
 	if err := a.Status.Validate(a.FailureCode); err != nil {
 		return err

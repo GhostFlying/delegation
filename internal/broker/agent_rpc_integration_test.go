@@ -62,6 +62,20 @@ func (agentRPCLifecycleSource) ListWorkerLifecycles(
 	return []protocol.WorkerLifecycleSnapshot{}, nil
 }
 
+func (agentRPCWorkerController) InspectWorkspace(
+	context.Context,
+	connector.WorkspaceInspectRequest,
+) (protocol.InspectWorkspaceResult, error) {
+	return protocol.InspectWorkspaceResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) PrepareWorkspace(
+	context.Context,
+	connector.WorkspacePrepareRequest,
+) (protocol.PrepareWorkspaceResult, error) {
+	return protocol.PrepareWorkspaceResult{}, errors.New("not used")
+}
+
 func (agentRPCWorkerController) SendWorker(
 	_ context.Context,
 	request connector.WorkerSendRequest,
@@ -194,6 +208,7 @@ func TestAgentRPCSelfDispatchIsDurableIdempotentAndNonBlocking(t *testing.T) {
 		WorkerSpawner:         spawner,
 		WorkerController:      agentRPCWorkerController{},
 		WorkerLifecycleSource: agentRPCLifecycleSource{},
+		WorkspaceManager:      agentRPCWorkerController{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -700,6 +715,10 @@ func startAgentRPCConnectorWithAuth(
 	token *tokenfile.Token,
 ) *connector.Client {
 	t.Helper()
+	workspaceManager := connector.WorkspaceManager(agentRPCWorkerController{})
+	if manager, ok := spawner.(connector.WorkspaceManager); ok {
+		workspaceManager = manager
+	}
 	client, err := connector.New(connector.Options{
 		BrokerURL:             strings.Replace(harness.httpServer.URL, "http://", "ws://", 1) + ConnectPath,
 		ControllerID:          brokerTestControllerID,
@@ -715,6 +734,7 @@ func startAgentRPCConnectorWithAuth(
 		WorkerSpawner:         spawner,
 		WorkerController:      agentRPCWorkerController{},
 		WorkerLifecycleSource: agentRPCLifecycleSource{},
+		WorkspaceManager:      workspaceManager,
 	})
 	if err != nil {
 		t.Fatal(err)

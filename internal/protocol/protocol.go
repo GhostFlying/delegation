@@ -87,6 +87,9 @@ const (
 	MethodFollowupWorker      = "worker.followup"
 	MethodInterruptWorker     = "worker.interrupt"
 	MethodSyncWorkerLifecycle = "worker.lifecycle.sync"
+	MethodSyncWorkspace       = "workspace.sync"
+	MethodInspectWorkspace    = "workspace.inspect"
+	MethodPrepareWorkspace    = "workspace.prepare"
 )
 
 type CancelRequestParams struct {
@@ -110,6 +113,7 @@ const (
 	FeatureWorkerDispatch  = "managedWorkerDispatchV1"
 	FeatureWorkerLifecycle = "workerLifecycleV1"
 	FeaturePeerRoot        = "peerRootV1"
+	FeatureWorkspaceSync   = "workspaceSyncV1"
 )
 
 var methodPattern = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,63}$`)
