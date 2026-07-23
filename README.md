@@ -180,11 +180,20 @@ remain a worker; opening its history does not promote it.
 
 ## Dispatch Managed Workers
 
-Call `spawn_agent` with a fresh `spawn_id` UUID, an online `target_device_id` returned by
-`list_devices`, a unique lowercase `task_name`, and a self-contained `message`. The target may be
-the current peer: self-targeting still creates a separate managed Codex thread in the connector's
-app-server. The broker persists the worker principal and dispatch receipt before contacting the
-target, so a lost response can be retried with the same spawn ID and exactly the same arguments.
+For repository work, first call `sync_workspace` with a fresh `sync_id`, the online
+`target_device_id`, and an explicit SSH or HTTPS Git URL. The target clones and checks out the exact
+source `HEAD` when it can; otherwise the peers relay a scoped thin or self-contained Git bundle.
+The bundle contains only objects reachable from `HEAD`, not unrelated branches or tags. A
+`remote_git_full_history_fallback` warning means that HEAD-reachable history may include deleted
+content. This checkpoint accepts clean workspaces; dirty-overlay transport is added in the next M3
+checkpoint.
+
+Call `spawn_agent` with a fresh `spawn_id` UUID, the same target, the returned `workspace_id`, a
+unique lowercase `task_name`, and a self-contained `message`. Tasks that do not need repository
+state may omit `workspace_id`. The target may be the current peer: self-targeting still creates a
+separate managed Codex thread in the connector's app-server. The broker persists the worker
+principal and dispatch receipt before contacting the target, so a lost response can be retried with
+the same spawn ID and exactly the same arguments.
 
 The returned durable status is `started`, `failed`, or `pending`, and the dispatch attempt also has
 an `outcome`. `busy` means the target had no worker slot. `indeterminate` means no definitive target
@@ -194,12 +203,11 @@ and `failed` outcomes are terminal. Use `list_agents` to inspect the current tre
 and terminal failure codes. Task names identify agents within a root tree and cannot be reused for
 another spawn.
 
-This M2 checkpoint starts workers in an empty managed workspace. Use `send_message` to steer a
-running worker or queue a message for an idle worker, `followup_task` to start a new turn for an idle
-worker, and `interrupt_agent` to stop an active turn. `wait_agent` returns bounded lifecycle and
-worker-message pages; call it again immediately while `has_more` is true before concluding that the
-result is complete. Repository synchronization and change artifacts arrive in M3. Do not claim
-that a worker received the root repository until workspace transport reports that explicitly.
+Use `send_message` to steer a running worker or queue a message for an idle worker,
+`followup_task` to start a new turn for an idle worker, and `interrupt_agent` to stop an active turn.
+`wait_agent` returns bounded lifecycle and worker-message pages; call it again immediately while
+`has_more` is true before concluding that the result is complete. Change artifacts and explicit
+root-side apply arrive later in M3; the current flow never writes worker changes back automatically.
 
 ## License
 

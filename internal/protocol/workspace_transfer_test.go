@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -158,6 +159,18 @@ func TestWorkspaceTransferChunkBounds(t *testing.T) {
 	invalidWrite.Data = []byte{1, 2}
 	if err := invalidWrite.Validate(); err == nil {
 		t.Fatal("out-of-range write chunk was accepted")
+	}
+	overflowingWrite := validWrite
+	overflowingWrite.Offset = math.MaxInt64
+	if err := overflowingWrite.Validate(); err == nil {
+		t.Fatal("overflowing write offset was accepted")
+	}
+	overflowingRead := ReadWorkspaceArtifactResult{
+		TransferID: testTransferID, Kind: WorkspaceArtifactBundle,
+		Offset: math.MaxInt64, Data: []byte{1}, NextOffset: math.MinInt64,
+	}
+	if err := overflowingRead.Validate(); err == nil {
+		t.Fatal("overflowing read result was accepted")
 	}
 }
 

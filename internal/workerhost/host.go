@@ -135,6 +135,7 @@ type Host struct {
 	providerEnvironmentFile  string
 	codexHome                string
 	workspaceRoot            *os.Root
+	removeWorkspaceTransfer  func(string) error
 	maxWorkerSlots           int
 	codexConfig              map[string]any
 	state                    *store.PeerStore
@@ -296,7 +297,8 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		shellExcludedEnvironment: uniqueEnvironmentNames(shellExcludedEnvironment),
 		providerEnvironmentFile:  providerEnvironmentFile,
 		workspaceRoot:            root, maxWorkerSlots: options.MaxWorkerSlots,
-		codexConfig: codexconfig.Clone(options.CodexConfig), state: options.Store,
+		removeWorkspaceTransfer: root.RemoveAll,
+		codexConfig:             codexconfig.Clone(options.CodexConfig), state: options.Store,
 		startApplication: start, reportError: reportError,
 		loaded:              make(map[store.WorkerKey]string),
 		completionEvents:    make(chan queuedCompletion, options.MaxWorkerSlots),

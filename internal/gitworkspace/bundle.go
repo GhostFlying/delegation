@@ -80,17 +80,12 @@ func (r Runner) CreateBundle(
 	if strings.TrimSpace(string(shallow)) != "false" {
 		return "", errors.New("Git bundle transport does not support shallow source repositories")
 	}
-	objects, err := r.output(
+	err = r.runDiscardingOutput(
 		ctx, repositoryPath,
-		"--no-replace-objects", "rev-list", "--objects", "--missing=print", "--no-object-names", "HEAD",
+		"--no-replace-objects", "rev-list", "--objects", "--missing=error", "--no-object-names", "HEAD",
 	)
 	if err != nil {
 		return "", preserveContextError(err, errors.New("verify source repository objects"))
-	}
-	for _, object := range strings.Fields(string(objects)) {
-		if strings.HasPrefix(object, "?") {
-			return "", errors.New("Git bundle transport does not support missing source objects")
-		}
 	}
 	strategy := protocol.WorkspaceStrategyFull
 	args := []string{"--no-replace-objects", "bundle", "create", "--quiet", "-", "HEAD"}

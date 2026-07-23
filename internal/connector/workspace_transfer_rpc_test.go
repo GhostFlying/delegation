@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,6 +58,15 @@ type disconnectWorkspaceTransferManager struct {
 	cleanOnce  sync.Once
 }
 
+type failOnceCleanupManager struct {
+	testWorkerSpawner
+	cleanupCalls atomic.Int32
+	firstFailed  chan struct{}
+	retryStarted chan struct{}
+	allowRetry   chan struct{}
+	retryOnce    sync.Once
+}
+
 func (m *disconnectWorkspaceTransferManager) CreateWorkspaceTransfer(
 	ctx context.Context,
 	_ WorkspaceCreateTransferRequest,
@@ -75,6 +85,22 @@ func (m *disconnectWorkspaceTransferManager) CleanupWorkspaceTransfers(context.C
 	}
 	m.cleanOnce.Do(func() { close(m.cleaned) })
 	return nil
+}
+
+func (m *failOnceCleanupManager) CleanupWorkspaceTransfers(ctx context.Context) error {
+	switch m.cleanupCalls.Add(1) {
+	case 1:
+		close(m.firstFailed)
+		return errors.New("transient workspace cleanup failure")
+	default:
+		m.retryOnce.Do(func() { close(m.retryStarted) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-m.allowRetry:
+			return nil
+		}
+	}
 }
 
 func (m *workspaceTransferRPCManager) CreateWorkspaceTransfer(
@@ -446,6 +472,152 @@ func TestConnectorDrainsWorkspaceRPCBeforeSessionCleanup(t *testing.T) {
 	case <-manager.cleaned:
 	default:
 		t.Fatal("connector session did not clean workspace transfer state")
+	}
+}
+
+func TestConnectorRequiresWorkspaceCleanupBeforeReconnecting(t *testing.T) {
+	manager := &failOnceCleanupManager{
+		firstFailed: make(chan struct{}), retryStarted: make(chan struct{}), allowRetry: make(chan struct{}),
+	}
+	connections := make(chan int32, 2)
+	stopRecovered := make(chan struct{})
+	var connectionCount atomic.Int32
+	server := newFakeBroker(t, func(connection *websocket.Conn) {
+		current := connectionCount.Add(1)
+		connections <- current
+		if current == 1 {
+			_ = connection.CloseNow()
+			return
+		}
+		<-stopRecovered
+	})
+	defer server.Close()
+	client, err := New(Options{
+		BrokerURL: websocketURL(server.URL), ControllerID: connectorTestControllerID,
+		DeviceID: connectorTestDeviceID, DeviceName: "builder", AuthMode: config.AuthModeNone,
+		RuntimeVersion: "test", OperatingSystem: "linux", Architecture: "amd64",
+		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
+		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: testWorkerSpawner{},
+		WorkspaceManager: manager,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runClient(client, ctx)
+	select {
+	case first := <-connections:
+		if first != 1 {
+			t.Fatalf("first broker connection = %d", first)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("connector did not establish its first session")
+	}
+	select {
+	case <-manager.firstFailed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("connector did not attempt session cleanup")
+	}
+	select {
+	case <-manager.retryStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("connector did not retry failed cleanup")
+	}
+	select {
+	case reconnect := <-connections:
+		t.Fatalf("connector reconnected before cleanup completed: connection %d", reconnect)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(manager.allowRetry)
+	select {
+	case reconnect := <-connections:
+		if reconnect != 2 {
+			t.Fatalf("recovered broker connection = %d", reconnect)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("connector did not reconnect after cleanup completed")
+	}
+	waitReady(t, client)
+	cancel()
+	close(stopRecovered)
+	if err := waitClient(done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConnectorPreservesCleanupFenceAcrossRunCalls(t *testing.T) {
+	manager := &failOnceCleanupManager{
+		firstFailed: make(chan struct{}), retryStarted: make(chan struct{}), allowRetry: make(chan struct{}),
+	}
+	connections := make(chan int32, 2)
+	stopRecovered := make(chan struct{})
+	var connectionCount atomic.Int32
+	server := newFakeBroker(t, func(connection *websocket.Conn) {
+		current := connectionCount.Add(1)
+		connections <- current
+		if current == 1 {
+			_ = connection.CloseNow()
+			return
+		}
+		<-stopRecovered
+	})
+	defer server.Close()
+	client, err := New(Options{
+		BrokerURL: websocketURL(server.URL), ControllerID: connectorTestControllerID,
+		DeviceID: connectorTestDeviceID, DeviceName: "builder", AuthMode: config.AuthModeNone,
+		RuntimeVersion: "test", OperatingSystem: "linux", Architecture: "amd64",
+		ReconnectMin: 100 * time.Millisecond, ReconnectMax: 100 * time.Millisecond,
+		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: testWorkerSpawner{},
+		WorkspaceManager: manager,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	firstDone := runClient(client, firstContext)
+	select {
+	case first := <-connections:
+		if first != 1 {
+			t.Fatalf("first broker connection = %d", first)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("connector did not establish its first session")
+	}
+	select {
+	case <-manager.firstFailed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("connector did not record failed cleanup")
+	}
+	cancelFirst()
+	if err := waitClient(firstDone); err != nil {
+		t.Fatal(err)
+	}
+	secondContext, cancelSecond := context.WithCancel(context.Background())
+	secondDone := runClient(client, secondContext)
+	select {
+	case <-manager.retryStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Run did not retry the retained cleanup fence")
+	}
+	select {
+	case reconnect := <-connections:
+		t.Fatalf("second Run connected before retained cleanup completed: connection %d", reconnect)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(manager.allowRetry)
+	select {
+	case reconnect := <-connections:
+		if reconnect != 2 {
+			t.Fatalf("recovered broker connection = %d", reconnect)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Run did not connect after retained cleanup completed")
+	}
+	waitReady(t, client)
+	cancelSecond()
+	close(stopRecovered)
+	if err := waitClient(secondDone); err != nil {
+		t.Fatal(err)
 	}
 }
 

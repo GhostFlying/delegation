@@ -75,6 +75,35 @@ func TestRootMCPSyncWorkspaceUsesTrustedSandboxMetadata(t *testing.T) {
 	}
 }
 
+func TestRootMCPSyncWorkspaceBoundsInvalidBackendErrors(t *testing.T) {
+	oversized := strings.Repeat("sensitive-invalid-warning", 16*1024)
+	backend := &fakeRootBackend{workspaceResult: &protocol.SyncWorkspaceResult{
+		Outcome:  protocol.WorkspacePrepareReady,
+		Warnings: []string{oversized},
+	}}
+	ctx, client, closeSessions := connectRootMCP(t, backend)
+	defer closeSessions()
+	result, err := client.CallTool(ctx, &mcp.CallToolParams{
+		Meta: mcp.Meta{
+			"threadId":                 rootMCPThreadID,
+			sandboxStateMetaCapability: map[string]any{"sandboxCwd": localFileURI(t.TempDir())},
+		},
+		Name: ToolSyncWorkspace,
+		Arguments: map[string]any{
+			"sync_id": rootMCPWorkspaceID, "target_device_id": rootMCPWorkerID,
+			"git_url": "ssh://git@example.invalid/repository.git",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := toolText(result)
+	if !result.IsError || text != "delegation service returned an invalid workspace" ||
+		strings.Contains(text, oversized[:64]) || len(text) > 256 {
+		t.Fatalf("invalid backend result was not sanitized: error=%t bytes=%d text=%q", result.IsError, len(text), text)
+	}
+}
+
 func TestRootMCPSyncWorkspaceRejectsUntrustedSandboxMetadata(t *testing.T) {
 	cases := map[string]mcp.Meta{
 		"missing": {"threadId": rootMCPThreadID},

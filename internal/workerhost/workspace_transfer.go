@@ -371,6 +371,24 @@ func (h *Host) FinishWorkspaceTransfer(
 		state.Transfer.WorkspaceID != request.Params.WorkspaceID {
 		return protocol.FinishWorkspaceTransferResult{}, errors.New("target workspace transfer authority is invalid")
 	}
+	preparedKey := store.PreparedWorkspaceKey{
+		ControllerID: h.controllerID, TreeID: request.TreeID, WorkspaceID: request.Params.WorkspaceID,
+	}
+	if prepared, preparedErr := h.state.GetPreparedWorkspace(ctx, preparedKey); preparedErr == nil {
+		if prepared.SourceAgentID != request.Source.AgentID ||
+			prepared.SourceDeviceID != request.Source.DeviceID || prepared.TargetDeviceID != h.deviceID ||
+			prepared.GitURL != state.Manifest.GitURL || prepared.HeadOID != state.Manifest.HeadOID ||
+			prepared.ObjectFormat != state.Manifest.ObjectFormat ||
+			prepared.WorkingDirectory != state.Manifest.WorkingDirectory ||
+			prepared.Strategy != state.Transfer.Strategy ||
+			prepared.ManifestHash != state.Transfer.ManifestHash ||
+			!slices.Equal(prepared.Warnings, state.Transfer.Warnings) {
+			return protocol.FinishWorkspaceTransferResult{}, store.ErrWorkerReservationConflict
+		}
+		return h.finishPublishedWorkspaceTransfer(request, state, preparedWorkspaceResult(prepared))
+	} else if !errors.Is(preparedErr, store.ErrNotFound) {
+		return protocol.FinishWorkspaceTransferResult{}, preparedErr
+	}
 	for _, artifact := range state.Transfer.Artifacts {
 		if state.Offsets[artifact.Kind] != artifact.Size ||
 			hex.EncodeToString(state.Hashes[artifact.Kind].Sum(nil)) != artifact.SHA256 {
@@ -405,6 +423,22 @@ func (h *Host) FinishWorkspaceTransfer(
 	if err != nil {
 		return protocol.FinishWorkspaceTransferResult{}, err
 	}
+	return h.finishPublishedWorkspaceTransfer(request, state, prepared)
+}
+
+func (h *Host) finishPublishedWorkspaceTransfer(
+	request WorkspaceTransferControlRequest,
+	state *inboundWorkspaceTransfer,
+	prepared protocol.PrepareWorkspaceResult,
+) (protocol.FinishWorkspaceTransferResult, error) {
+	if err := h.removeWorkspaceTransfer(state.DirectoryName); err != nil {
+		return protocol.FinishWorkspaceTransferResult{}, fmt.Errorf(
+			"remove completed target workspace transfer: %w", err,
+		)
+	}
+	if err := h.syncWorkspaceDirectory(); err != nil {
+		return protocol.FinishWorkspaceTransferResult{}, err
+	}
 	h.workspaceTransferMu.Lock()
 	delete(h.inboundTransfers, request.Params.TransferID)
 	pendingKey := workspacePreparationKey(request.TreeID, request.Params.WorkspaceID)
@@ -413,11 +447,6 @@ func (h *Host) FinishWorkspaceTransfer(
 		delete(h.pendingWorkspaces, pendingKey)
 	}
 	h.workspaceTransferMu.Unlock()
-	if err := h.workspaceRoot.RemoveAll(state.DirectoryName); err != nil {
-		h.reportError(fmt.Errorf("remove completed target workspace transfer: %w", err))
-	} else if err := h.syncWorkspaceDirectory(); err != nil {
-		h.reportError(err)
-	}
 	return protocol.FinishWorkspaceTransferResult{Workspace: prepared}, nil
 }
 

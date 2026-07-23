@@ -118,6 +118,11 @@ func (s *session) handleSyncWorkspace(ctx context.Context, request protocol.Enve
 		if !cleanupProvisional {
 			return
 		}
+		select {
+		case <-target.done:
+			return
+		default:
+		}
 		cleanupContext, cancel := context.WithTimeout(
 			context.WithoutCancel(ctx), workspaceTransferCleanupTimeout,
 		)
@@ -131,6 +136,7 @@ func (s *session) handleSyncWorkspace(ctx context.Context, request protocol.Enve
 		)
 		if cleanupErr != nil {
 			s.server.reportError(&internalError{operation: "clean provisional target workspace", err: cleanupErr})
+			_ = target.connection.CloseNow()
 		}
 	}()
 	targetPayload, callErr := target.callPeer(
@@ -156,17 +162,34 @@ func (s *session) handleSyncWorkspace(ctx context.Context, request protocol.Enve
 			ctx, target, request.TreeID, *request.Source, params, manifest, prepared,
 		)
 		if err != nil {
-			if isContextError(err) {
-				return err
+			targetFenced := errors.Is(err, errTargetWorkspaceTransferFenced)
+			sourceFenced := errors.Is(err, errSourceWorkspaceTransferFenced)
+			if targetFenced {
+				cleanupProvisional = false
 			}
-			writeErr := s.writeError(ctx, request, protocol.ErrorUnavailable, "workspace artifact transfer failed")
-			if errors.Is(err, errInvalidTargetWorkspaceTransfer) {
-				_ = target.connection.CloseNow()
+			if sourceFenced && prepared.Outcome == protocol.WorkspacePrepareReady {
+				defer s.connection.CloseNow()
+			} else {
+				if sourceFenced {
+					if errors.Is(err, errInvalidTargetWorkspaceTransfer) {
+						_ = target.connection.CloseNow()
+					}
+					return context.Canceled
+				}
+				if isContextError(err) {
+					return err
+				}
+				writeErr := s.writeError(
+					ctx, request, protocol.ErrorUnavailable, "workspace artifact transfer failed",
+				)
+				if errors.Is(err, errInvalidTargetWorkspaceTransfer) {
+					_ = target.connection.CloseNow()
+				}
+				if errors.Is(err, errInvalidSourceWorkspaceTransfer) {
+					_ = s.connection.CloseNow()
+				}
+				return writeErr
 			}
-			if errors.Is(err, errInvalidSourceWorkspaceTransfer) {
-				_ = s.connection.CloseNow()
-			}
-			return writeErr
 		}
 	}
 	expectedWarnings, warningErr := protocol.WorkspaceWarningsForStrategy(manifest.Warnings, prepared.Strategy)

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -382,6 +383,32 @@ func (r Runner) runWithTimeout(
 ) error {
 	_, err := r.command(ctx, timeout, directory, nil, args...)
 	return err
+}
+
+func (r Runner) runDiscardingOutput(ctx context.Context, directory string, args ...string) error {
+	commandContext, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	command := exec.CommandContext(commandContext, r.Binary, safeGitArgs(args)...)
+	command.WaitDelay = commandWaitDelay
+	command.Dir = directory
+	command.Env = hardenedEnvironment(r.excludedEnvironment)
+	command.Stdout = io.Discard
+	var stderr limitedBuffer
+	command.Stderr = &stderr
+	err := command.Run()
+	if commandContext.Err() != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errCommandTimeout
+	}
+	if err != nil {
+		return err
+	}
+	if stderr.full {
+		return errors.New("Git command error output exceeded the configured limit")
+	}
+	return nil
 }
 
 func (r Runner) output(ctx context.Context, directory string, args ...string) ([]byte, error) {

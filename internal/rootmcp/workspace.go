@@ -64,7 +64,7 @@ func (r *Root) syncWorkspace(
 		return nil, SyncWorkspaceOutput{}, explainAgentError(err)
 	}
 	if err := result.Validate(); err != nil {
-		return nil, SyncWorkspaceOutput{}, fmt.Errorf("delegation service returned an invalid workspace: %w", err)
+		return nil, SyncWorkspaceOutput{}, errors.New("delegation service returned an invalid workspace")
 	}
 	output := SyncWorkspaceOutput{
 		SourceDeviceID: principal.DeviceID, TargetDeviceID: input.TargetDeviceID,

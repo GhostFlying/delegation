@@ -16,6 +16,8 @@ const workspaceTransferCleanupTimeout = 30 * time.Second
 var (
 	errInvalidSourceWorkspaceTransfer = errors.New("source returned invalid workspace transfer data")
 	errInvalidTargetWorkspaceTransfer = errors.New("target returned invalid workspace transfer data")
+	errSourceWorkspaceTransferFenced  = errors.New("source workspace transfer peer was fenced after cleanup failure")
+	errTargetWorkspaceTransferFenced  = errors.New("target workspace transfer peer was fenced after cleanup failure")
 )
 
 func (s *session) relayWorkspaceTransfer(
@@ -26,7 +28,7 @@ func (s *session) relayWorkspaceTransfer(
 	params protocol.SyncWorkspaceParams,
 	manifest protocol.WorkspaceManifest,
 	preparation protocol.PrepareWorkspaceResult,
-) (protocol.PrepareWorkspaceResult, error) {
+) (result protocol.PrepareWorkspaceResult, returnErr error) {
 	transferID, err := s.server.newID()
 	if err != nil {
 		return protocol.PrepareWorkspaceResult{}, fmt.Errorf("create workspace transfer ID: %w", err)
@@ -44,6 +46,10 @@ func (s *session) relayWorkspaceTransfer(
 			cleanupContext, protocol.MethodCancelWorkspaceTransfer, treeID, source, controlParams,
 		); cleanupErr != nil {
 			s.server.reportError(&internalError{operation: "clean source workspace transfer", err: cleanupErr})
+			if result.Outcome != protocol.WorkspacePrepareReady {
+				_ = s.connection.CloseNow()
+			}
+			returnErr = errors.Join(returnErr, errSourceWorkspaceTransferFenced)
 		}
 		cancel()
 		if targetStarted && !targetFinished {
@@ -52,6 +58,8 @@ func (s *session) relayWorkspaceTransfer(
 				cleanupContext, protocol.MethodCancelWorkspaceTransfer, treeID, source, controlParams,
 			); cleanupErr != nil {
 				s.server.reportError(&internalError{operation: "cancel target workspace transfer", err: cleanupErr})
+				_ = target.connection.CloseNow()
+				returnErr = errors.Join(returnErr, errTargetWorkspaceTransferFenced)
 			}
 			cancel()
 		}

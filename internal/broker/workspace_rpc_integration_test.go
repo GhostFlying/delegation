@@ -24,12 +24,16 @@ const (
 type recordingWorkspacePeer struct {
 	mu sync.Mutex
 
-	deviceID        string
-	manifest        protocol.WorkspaceManifest
-	prepareErr      error
-	prepareStarted  chan struct{}
-	prepareCanceled chan struct{}
-	cancelObserved  chan connector.WorkspaceTransferControlRequest
+	deviceID         string
+	manifest         protocol.WorkspaceManifest
+	prepareErr       error
+	prepareStarted   chan struct{}
+	prepareCanceled  chan struct{}
+	preparePublished chan struct{}
+	prepareRelease   chan struct{}
+	cancelObserved   chan connector.WorkspaceTransferControlRequest
+	prepared         *protocol.PrepareWorkspaceResult
+	publishCount     int
 
 	inspections           []connector.WorkspaceInspectRequest
 	preparations          []connector.WorkspacePrepareRequest
@@ -58,6 +62,11 @@ func (p *recordingWorkspacePeer) PrepareWorkspace(
 	prepareErr := p.prepareErr
 	prepareStarted := p.prepareStarted
 	prepareCanceled := p.prepareCanceled
+	if p.prepared != nil {
+		prepared := *p.prepared
+		p.mu.Unlock()
+		return prepared, nil
+	}
 	p.mu.Unlock()
 	if prepareStarted != nil {
 		prepareStarted <- struct{}{}
@@ -74,11 +83,24 @@ func (p *recordingWorkspacePeer) PrepareWorkspace(
 	if err != nil {
 		return protocol.PrepareWorkspaceResult{}, err
 	}
-	return protocol.PrepareWorkspaceResult{
+	result := protocol.PrepareWorkspaceResult{
 		WorkspaceID: request.Params.WorkspaceID,
 		Outcome:     protocol.WorkspacePrepareReady, Strategy: protocol.WorkspaceStrategyDirect,
 		ManifestHash: hash, Warnings: append([]string{}, request.Params.Manifest.Warnings...),
-	}, nil
+	}
+	p.mu.Lock()
+	p.prepared = &result
+	p.publishCount++
+	preparePublished := p.preparePublished
+	prepareRelease := p.prepareRelease
+	p.preparePublished = nil
+	p.prepareRelease = nil
+	p.mu.Unlock()
+	if preparePublished != nil {
+		close(preparePublished)
+		<-prepareRelease
+	}
+	return result, nil
 }
 
 func (p *recordingWorkspacePeer) CreateWorkspaceTransfer(
@@ -233,6 +255,83 @@ func TestWorkspaceRPCPrepareFailureCancelsExactProvisionalTarget(t *testing.T) {
 			}
 			waitForWorkspaceCleanupDrain(t, harness.server, brokerTestDeviceID, agentRPCTargetID)
 		})
+	}
+}
+
+func TestWorkspaceRPCDirectPrepareAcknowledgementLossRetriesSameSync(t *testing.T) {
+	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	gitURL := "ssh://git@example.invalid/repository.git"
+	sourceManager := &recordingWorkspacePeer{
+		deviceID: brokerTestDeviceID,
+		manifest: workspaceRPCManifest(gitURL, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+	}
+	preparePublished := make(chan struct{})
+	prepareRelease := make(chan struct{})
+	targetManager := &recordingWorkspacePeer{
+		deviceID: agentRPCTargetID, preparePublished: preparePublished, prepareRelease: prepareRelease,
+	}
+	sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceManager)
+	targetClient := startAgentRPCConnector(t, harness, agentRPCTargetID, targetManager)
+	initialTarget := harness.server.connection(agentRPCTargetID)
+	if initialTarget == nil {
+		t.Fatal("target connector was not registered")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var root protocol.EnsureRootTreeResult
+	if err := sourceClient.Call(
+		ctx, protocol.MethodEnsureRootTree, "", nil,
+		protocol.EnsureRootTreeParams{ExternalThreadID: agentRPCThreadID}, &root,
+	); err != nil {
+		t.Fatal(err)
+	}
+	source := root.Principal.Identity()
+	params := protocol.SyncWorkspaceParams{
+		SyncID: workspaceRPCFailedSyncID, TargetDeviceID: agentRPCTargetID,
+		GitURL: gitURL, SourcePath: filepath.Join(t.TempDir(), "trusted", "source"),
+	}
+	callDone := make(chan error, 1)
+	go func() {
+		callDone <- sourceClient.Call(
+			ctx, protocol.MethodSyncWorkspace, root.Tree.TreeID, &source, params,
+			&protocol.SyncWorkspaceResult{},
+		)
+	}()
+	select {
+	case <-preparePublished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("target did not publish the direct workspace")
+	}
+	_ = initialTarget.connection.CloseNow()
+	close(prepareRelease)
+	select {
+	case err := <-callDone:
+		if err == nil {
+			t.Fatal("direct prepare with lost wire acknowledgement unexpectedly succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("direct prepare acknowledgement loss did not return")
+	}
+	waitForWorkspaceSessionReplacement(t, harness.server, agentRPCTargetID, initialTarget)
+	if err := targetClient.WaitReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var retried protocol.SyncWorkspaceResult
+	if err := sourceClient.Call(
+		ctx, protocol.MethodSyncWorkspace, root.Tree.TreeID, &source, params, &retried,
+	); err != nil || retried.Workspace == nil || retried.Workspace.Strategy != protocol.WorkspaceStrategyDirect {
+		t.Fatalf("same-sync direct retry = %#v, %v", retried, err)
+	}
+	targetManager.mu.Lock()
+	preparations := len(targetManager.preparations)
+	publishCount := targetManager.publishCount
+	cancelCount := len(targetManager.transferCancellations)
+	targetManager.mu.Unlock()
+	if preparations != 2 || publishCount != 1 || cancelCount != 0 {
+		t.Fatalf(
+			"direct retry = %d prepare calls, %d publications, %d cancellations; want 2/1/0",
+			preparations, publishCount, cancelCount,
+		)
 	}
 }
 

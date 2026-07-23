@@ -228,8 +228,10 @@ func (r ReadWorkspaceArtifactResult) Validate() error {
 	if err := r.Kind.Validate(); err != nil {
 		return err
 	}
-	if r.Offset < 0 || len(r.Data) < 1 || len(r.Data) > WorkspaceArtifactChunkBytes ||
-		r.NextOffset != r.Offset+int64(len(r.Data)) || r.NextOffset > MaximumWorkspaceArtifactBytes {
+	dataLength := int64(len(r.Data))
+	if r.Offset < 0 || r.Offset >= MaximumWorkspaceArtifactBytes || dataLength < 1 ||
+		dataLength > WorkspaceArtifactChunkBytes || dataLength > MaximumWorkspaceArtifactBytes-r.Offset ||
+		r.NextOffset != r.Offset+dataLength {
 		return errors.New("workspace artifact read result has invalid bounds")
 	}
 	return nil
@@ -302,8 +304,9 @@ func (p WriteWorkspaceArtifactParams) Validate() error {
 	if err := p.Kind.Validate(); err != nil {
 		return err
 	}
-	if p.Offset < 0 || len(p.Data) < 1 || len(p.Data) > WorkspaceArtifactChunkBytes ||
-		p.Offset+int64(len(p.Data)) > MaximumWorkspaceArtifactBytes {
+	dataLength := int64(len(p.Data))
+	if p.Offset < 0 || p.Offset >= MaximumWorkspaceArtifactBytes || dataLength < 1 ||
+		dataLength > WorkspaceArtifactChunkBytes || dataLength > MaximumWorkspaceArtifactBytes-p.Offset {
 		return errors.New("workspace artifact write has invalid bounds")
 	}
 	return nil

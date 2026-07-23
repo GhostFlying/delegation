@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/GhostFlying/delegation/internal/control"
@@ -16,12 +17,14 @@ import (
 
 func TestHostTransfersCleanBundleWorkspace(t *testing.T) {
 	for _, test := range []struct {
-		name        string
-		full        bool
-		strategy    protocol.WorkspaceStrategy
-		wantWarning bool
+		name         string
+		full         bool
+		strategy     protocol.WorkspaceStrategy
+		wantWarning  bool
+		cleanupRetry bool
 	}{
 		{name: "thin", strategy: protocol.WorkspaceStrategyThin},
+		{name: "thin cleanup retry", strategy: protocol.WorkspaceStrategyThin, cleanupRetry: true},
 		{
 			name: "self contained", full: true, strategy: protocol.WorkspaceStrategyFull,
 			wantWarning: true,
@@ -132,6 +135,31 @@ func TestHostTransfersCleanBundleWorkspace(t *testing.T) {
 					WorkspaceID: workspaceID, TransferID: transferID,
 					SourceAgentID: source.AgentID, SourceDeviceID: source.DeviceID,
 				},
+			}
+			if test.cleanupRetry {
+				removeWorkspaceTransfer := host.removeWorkspaceTransfer
+				failed := false
+				host.removeWorkspaceTransfer = func(name string) error {
+					if !failed && name == targetTransferDirectoryName(transferID) {
+						failed = true
+						return errors.New("simulated Windows file sharing violation")
+					}
+					return removeWorkspaceTransfer(name)
+				}
+				if _, err := host.FinishWorkspaceTransfer(context.Background(), controlRequest); err == nil ||
+					!strings.Contains(err.Error(), "remove completed target workspace transfer") {
+					t.Fatalf("first finish cleanup = %v, want retryable removal error", err)
+				}
+				host.workspaceTransferMu.Lock()
+				_, inboundFound := host.inboundTransfers[transferID]
+				_, pendingFound := host.pendingWorkspaces[workspacePreparationKey(testTreeID, workspaceID)]
+				host.workspaceTransferMu.Unlock()
+				if !inboundFound || !pendingFound {
+					t.Fatal("failed finish cleanup discarded retry ownership")
+				}
+				if _, err := host.workspaceRoot.Lstat(targetTransferDirectoryName(transferID)); err != nil {
+					t.Fatalf("failed finish cleanup lost transfer directory: %v", err)
+				}
 			}
 			finished, err := host.FinishWorkspaceTransfer(context.Background(), controlRequest)
 			if err != nil {
@@ -249,4 +277,202 @@ func TestHostRejectsOutOfSequenceWorkspaceArtifact(t *testing.T) {
 	}); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("canceled transfer prepared workspace: %v", err)
 	}
+}
+
+func TestHostRejectsDirtyOverlayTransferAndCleansProvisionalWorkspace(t *testing.T) {
+	host, state, _ := newTestHost(t, 1)
+	gitURL, sourcePath := createHostedTestRepository(t)
+	if err := os.WriteFile(filepath.Join(sourcePath, "dirty-untracked.txt"), []byte("dirty\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := control.NewRootPrincipal(
+		testControllerID, testTreeID, testParentID, testDeviceID,
+	).Identity()
+	workspaceID := newTestID()
+	inspected, err := host.InspectWorkspace(context.Background(), WorkspaceInspectRequest{
+		TreeID: testTreeID, Source: source,
+		Params: protocol.InspectWorkspaceParams{
+			SyncID: workspaceID, GitURL: gitURL, SourcePath: sourcePath,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspected.Manifest.Clean {
+		t.Fatal("dirty source was reported clean")
+	}
+	prepared, err := host.PrepareWorkspace(context.Background(), WorkspacePrepareRequest{
+		TreeID: testTreeID, Source: source,
+		Params: protocol.PrepareWorkspaceParams{
+			WorkspaceID: workspaceID, SourceAgentID: source.AgentID,
+			SourceDeviceID: source.DeviceID, Manifest: inspected.Manifest,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Outcome != protocol.WorkspacePrepareTransferRequired ||
+		prepared.BundleRequired || !prepared.OverlayRequired {
+		t.Fatalf("dirty target preparation = %#v", prepared)
+	}
+	transferID := newTestID()
+	_, err = host.CreateWorkspaceTransfer(context.Background(), WorkspaceCreateTransferRequest{
+		TreeID: testTreeID, Source: source,
+		Params: protocol.CreateWorkspaceTransferParams{
+			TransferID: transferID, WorkspaceID: workspaceID,
+			GitURL: gitURL, SourcePath: sourcePath, Manifest: inspected.Manifest,
+			OverlayRequired: true,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "dirty workspace overlay transport is not implemented") {
+		t.Fatalf("dirty overlay creation = %v, want explicit checkpoint rejection", err)
+	}
+	controlRequest := WorkspaceTransferControlRequest{
+		TreeID: testTreeID, Source: source,
+		Params: protocol.WorkspaceTransferControlParams{
+			WorkspaceID: workspaceID, TransferID: workspaceID,
+			SourceAgentID: source.AgentID, SourceDeviceID: source.DeviceID,
+		},
+	}
+	if _, err := host.CancelWorkspaceTransfer(context.Background(), controlRequest); err != nil {
+		t.Fatal(err)
+	}
+	host.workspaceTransferMu.Lock()
+	pendingCount := len(host.pendingWorkspaces)
+	outboundCount := len(host.outboundTransfers)
+	inboundCount := len(host.inboundTransfers)
+	host.workspaceTransferMu.Unlock()
+	if pendingCount != 0 || outboundCount != 0 || inboundCount != 0 {
+		t.Fatalf("dirty rejection retained state = pending %d outbound %d inbound %d", pendingCount, outboundCount, inboundCount)
+	}
+	if _, err := host.workspaceRoot.Lstat(workspaceSyncName(testTreeID, workspaceID) + pendingDirectorySuffix); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dirty provisional workspace still exists: %v", err)
+	}
+	if _, err := state.GetPreparedWorkspace(context.Background(), store.PreparedWorkspaceKey{
+		ControllerID: testControllerID, TreeID: testTreeID, WorkspaceID: workspaceID,
+	}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("dirty rejection published workspace: %v", err)
+	}
+}
+
+func TestHostRejectsWorkspaceArtifactDigestMismatchAndCleansTransfer(t *testing.T) {
+	host, state, source, workspaceID, transferID, transfer := prepareCleanWorkspaceTransfer(t)
+	corrupted := false
+	for _, artifact := range transfer.Artifacts {
+		for offset := int64(0); offset < artifact.Size; {
+			limit := min(int64(protocol.WorkspaceArtifactChunkBytes), artifact.Size-offset)
+			chunk, err := host.ReadWorkspaceArtifact(context.Background(), WorkspaceReadArtifactRequest{
+				TreeID: testTreeID, Source: source,
+				Params: protocol.ReadWorkspaceArtifactParams{
+					TransferID: transferID, Kind: artifact.Kind, Offset: offset, Limit: int(limit),
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !corrupted {
+				chunk.Data[0] ^= 0xff
+				corrupted = true
+			}
+			written, err := host.WriteWorkspaceArtifact(context.Background(), WorkspaceWriteArtifactRequest{
+				TreeID: testTreeID, Source: source,
+				Params: protocol.WriteWorkspaceArtifactParams{
+					WorkspaceID: workspaceID, TransferID: transferID,
+					Kind: artifact.Kind, Offset: offset, Data: chunk.Data,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			offset = written.NextOffset
+		}
+	}
+	controlRequest := WorkspaceTransferControlRequest{
+		TreeID: testTreeID, Source: source,
+		Params: protocol.WorkspaceTransferControlParams{
+			WorkspaceID: workspaceID, TransferID: transferID,
+			SourceAgentID: source.AgentID, SourceDeviceID: source.DeviceID,
+		},
+	}
+	if _, err := host.FinishWorkspaceTransfer(context.Background(), controlRequest); err == nil ||
+		!strings.Contains(err.Error(), "digest") {
+		t.Fatalf("finish corrupted transport = %v, want digest rejection", err)
+	}
+	if _, err := state.GetPreparedWorkspace(context.Background(), store.PreparedWorkspaceKey{
+		ControllerID: testControllerID, TreeID: testTreeID, WorkspaceID: workspaceID,
+	}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("corrupted transport published workspace: %v", err)
+	}
+	if _, err := host.CancelWorkspaceTransfer(context.Background(), controlRequest); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		targetTransferDirectoryName(transferID), workspaceSyncName(testTreeID, workspaceID) + pendingDirectorySuffix,
+	} {
+		if _, err := host.workspaceRoot.Lstat(name); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("corrupted transfer path %q still exists: %v", name, err)
+		}
+	}
+}
+
+func prepareCleanWorkspaceTransfer(
+	t *testing.T,
+) (*Host, *store.PeerStore, control.PrincipalIdentity, string, string, protocol.WorkspaceTransferManifest) {
+	t.Helper()
+	host, state, _ := newTestHost(t, 1)
+	gitURL, sourcePath := createHostedTestRepository(t)
+	if err := os.WriteFile(filepath.Join(sourcePath, "unpublished.txt"), []byte("unpublished\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, sourcePath, "add", "unpublished.txt")
+	runTestGit(
+		t, sourcePath,
+		"-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid",
+		"commit", "-m", "unpublished",
+	)
+	source := control.NewRootPrincipal(
+		testControllerID, testTreeID, testParentID, testDeviceID,
+	).Identity()
+	workspaceID := newTestID()
+	inspected, err := host.InspectWorkspace(context.Background(), WorkspaceInspectRequest{
+		TreeID: testTreeID, Source: source,
+		Params: protocol.InspectWorkspaceParams{
+			SyncID: workspaceID, GitURL: gitURL, SourcePath: sourcePath,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := host.PrepareWorkspace(context.Background(), WorkspacePrepareRequest{
+		TreeID: testTreeID, Source: source,
+		Params: protocol.PrepareWorkspaceParams{
+			WorkspaceID: workspaceID, SourceAgentID: source.AgentID,
+			SourceDeviceID: source.DeviceID, Manifest: inspected.Manifest,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transferID := newTestID()
+	created, err := host.CreateWorkspaceTransfer(context.Background(), WorkspaceCreateTransferRequest{
+		TreeID: testTreeID, Source: source,
+		Params: protocol.CreateWorkspaceTransferParams{
+			TransferID: transferID, WorkspaceID: workspaceID,
+			GitURL: gitURL, SourcePath: sourcePath, Manifest: inspected.Manifest,
+			BasisOIDs: prepared.BasisOIDs, BundleRequired: true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.BeginWorkspaceTransfer(context.Background(), WorkspaceBeginTransferRequest{
+		TreeID: testTreeID, Source: source,
+		Params: protocol.BeginWorkspaceTransferParams{
+			SourceAgentID: source.AgentID, SourceDeviceID: source.DeviceID,
+			Manifest: inspected.Manifest, Transfer: created.Transfer,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return host, state, source, workspaceID, transferID, created.Transfer
 }

@@ -27,21 +27,23 @@ delegation with an unrelated remote environment without telling the user.
 Proceed only when the installed runtime exposes `spawn_agent` and `list_agents`. Report the
 installed checkpoint boundary instead of pretending unavailable workspace tools exist.
 
-1. Generate a fresh UUID `spawn_id` for the logical dispatch. Call `spawn_agent` with that ID, the
-   selected `target_device_id`, a unique lowercase `task_name`, and a self-contained `message`.
-   Include the requested output, validation command, and relevant platform constraint; do not send
-   the whole root transcript.
-2. Inspect the dispatch `outcome`. `busy` means the target had no worker slot. `indeterminate`
+1. For repository work, call `sync_workspace` first with a fresh `sync_id`, the selected
+   `target_device_id`, and the repository's explicit SSH or HTTPS Git URL. Pass its returned
+   `workspace_id` to `spawn_agent`. Disclose `remote_git_full_history_fallback`: the transfer
+   includes HEAD-reachable history that may contain deleted content. The current checkpoint handles
+   clean workspaces through direct clone or scoped bundle fallback; report a dirty-overlay error
+   instead of pretending local modifications were synchronized.
+2. Generate a fresh UUID `spawn_id` for the logical dispatch. Call `spawn_agent` with that ID, the
+   selected `target_device_id`, an optional prepared `workspace_id`, a unique lowercase `task_name`,
+   and a self-contained `message`. Include the requested output, validation command, and relevant
+   platform constraint; do not send the whole root transcript.
+3. Inspect the dispatch `outcome`. `busy` means the target had no worker slot. `indeterminate`
    means no definitive target result could be confirmed or durably recorded, so the worker may
    already have started. Both keep one pending receipt: retry with the same spawn ID and exactly the
    same arguments. Never create a second agent merely because capacity was full or a result was
    lost.
-3. Use `list_agents` to inspect durable status. Keep unrelated subtasks local and spawn multiple
+4. Use `list_agents` to inspect durable status. Keep unrelated subtasks local and spawn multiple
    workers only when their work is independent.
-
-The current M2 checkpoint starts workers in an empty managed workspace. Do not delegate repository
-work that requires local files until workspace synchronization is available, unless the task can
-fetch all required public inputs itself.
 
 ## Collaborate
 

@@ -1,6 +1,7 @@
 package gitworkspace
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -14,6 +15,24 @@ import (
 
 	"github.com/GhostFlying/delegation/internal/protocol"
 )
+
+func TestRunDiscardingOutputDoesNotApplyDiagnosticBufferLimit(t *testing.T) {
+	runner := testRunner(t)
+	repository := t.TempDir()
+	gitRun(t, runner.Binary, repository, "init")
+	large := filepath.Join(repository, "large.bin")
+	if err := os.WriteFile(large, bytes.Repeat([]byte("x"), maximumOutput+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oid := gitOutput(t, runner.Binary, repository, "hash-object", "-w", large)
+	if _, err := runner.output(context.Background(), repository, "cat-file", "blob", oid); err == nil ||
+		!strings.Contains(err.Error(), "output exceeded") {
+		t.Fatalf("buffered Git output = %v, want configured-limit rejection", err)
+	}
+	if err := runner.runDiscardingOutput(context.Background(), repository, "cat-file", "blob", oid); err != nil {
+		t.Fatalf("discarded Git output = %v", err)
+	}
+}
 
 func TestValidateRemoteURL(t *testing.T) {
 	for _, remote := range []string{

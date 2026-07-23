@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -686,6 +688,25 @@ func TestRootMCPOutputIsBounded(t *testing.T) {
 	}, listFeatureLimit, rootMCPDeviceID)
 	if len(summary.Features) != 0 || !summary.FeaturesTruncated {
 		t.Fatalf("bounded summary = %#v", summary)
+	}
+}
+
+func TestPluginToolTimeoutExceedsLongestRootCall(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "plugins", "delegation", ".mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var configuration struct {
+		MCPServers map[string]struct {
+			ToolTimeoutSeconds int `json:"tool_timeout_sec"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &configuration); err != nil {
+		t.Fatal(err)
+	}
+	timeout := configuration.MCPServers["delegation"].ToolTimeoutSeconds
+	if time.Duration(timeout)*time.Second <= workspaceCallTimeout {
+		t.Fatalf("plugin tool timeout = %ds, must exceed root workspace timeout %s", timeout, workspaceCallTimeout)
 	}
 }
 

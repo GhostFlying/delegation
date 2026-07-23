@@ -37,8 +37,9 @@ const (
 )
 
 var (
-	ErrUnavailable = errors.New("connector is not connected to the broker")
-	ErrBusy        = errors.New("connector has too many pending broker calls")
+	ErrUnavailable                = errors.New("connector is not connected to the broker")
+	ErrBusy                       = errors.New("connector has too many pending broker calls")
+	errWorkspaceCleanupIncomplete = errors.New("workspace transfer cleanup is incomplete")
 )
 
 type DialFunc func(context.Context, string, *websocket.DialOptions) (*websocket.Conn, *http.Response, error)
@@ -194,6 +195,7 @@ type Client struct {
 	workspaceManager  WorkspaceManager
 	workspaceTransfer WorkspaceTransferManager
 	running           atomic.Bool
+	cleanupPending    atomic.Bool
 
 	mu      sync.RWMutex
 	session *session
@@ -321,6 +323,20 @@ func (c *Client) Run(ctx context.Context) error {
 	defer c.running.Store(false)
 	backoff := c.reconnectMin
 	for {
+		if c.cleanupPending.Load() {
+			if err := c.cleanupWorkspaceTransfers(ctx); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				c.reportError(fmt.Errorf("retry workspace transfer cleanup before reconnect: %w", err))
+				if err := waitContext(ctx, fullJitter(backoff)); err != nil {
+					return nil
+				}
+				backoff = min(backoff*2, c.reconnectMax)
+				continue
+			}
+			c.cleanupPending.Store(false)
+		}
 		healthy, err := c.runSession(ctx)
 		if ctx.Err() != nil {
 			return nil
@@ -412,11 +428,15 @@ func (c *Client) runSession(ctx context.Context) (healthy bool, returnErr error)
 	current := newSession(c, connection)
 	defer func() {
 		current.stopWorkspaceInbound()
-		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), workspaceCleanupTimeout)
-		cleanupErr := c.workspaceTransfer.CleanupWorkspaceTransfers(cleanupContext)
-		cleanupCancel()
+		cleanupErr := c.cleanupWorkspaceTransfers(context.Background())
 		if cleanupErr != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("clean workspace transfers after broker session: %w", cleanupErr))
+			c.cleanupPending.Store(true)
+			returnErr = errors.Join(
+				returnErr,
+				fmt.Errorf("%w: clean workspace transfers after broker session: %w", errWorkspaceCleanupIncomplete, cleanupErr),
+			)
+		} else {
+			c.cleanupPending.Store(false)
 		}
 	}()
 	hello := c.hello
@@ -449,6 +469,12 @@ func (c *Client) runSession(ctx context.Context) (healthy bool, returnErr error)
 	case <-current.done:
 	}
 	return current.heartbeatSucceeded.Load(), current.err()
+}
+
+func (c *Client) cleanupWorkspaceTransfers(ctx context.Context) error {
+	cleanupContext, cancel := context.WithTimeout(ctx, workspaceCleanupTimeout)
+	defer cancel()
+	return c.workspaceTransfer.CleanupWorkspaceTransfers(cleanupContext)
 }
 
 func (c *Client) publish(current *session, result protocol.HelloResult) {
