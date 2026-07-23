@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	workerProfileVersion    = 2
+	workerProfileVersion    = 3
 	workerPermissionProfile = "delegation-worker"
 	windowsWorkerProfile    = ":danger-full-access"
 	rootPluginEnabledConfig = "plugins.delegation@delegation.enabled"
@@ -32,8 +32,11 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 	config["features.enable_fanout"] = false
 	config[rootPluginEnabledConfig] = false
 	filesystem := map[string]any{
-		":minimal":         "read",
-		":workspace_roots": map[string]any{".": "write"},
+		":minimal": "read",
+		":workspace_roots": map[string]any{
+			".":    "write",
+			".git": "write",
+		},
 	}
 	addCodexRuntimeFilesystemPermission(filesystem, h.codexBinary)
 	if h.providerEnvironmentFile != "" {

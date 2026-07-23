@@ -1453,6 +1453,15 @@ func TestManagedProfileUsesPlatformPermissionBoundary(t *testing.T) {
 		return
 	}
 	filesystem := managedFilesystemPermissions(t, config)
+	workspacePermissions, ok := filesystem[":workspace_roots"].(map[string]any)
+	if !ok || workspacePermissions["."] != "write" || workspacePermissions[".git"] != "write" {
+		t.Fatalf("managed workspace permissions = %#v", filesystem[":workspace_roots"])
+	}
+	for _, protected := range []string{".agents", ".codex"} {
+		if _, found := workspacePermissions[protected]; found {
+			t.Fatalf("managed profile grants protected workspace metadata %q: %#v", protected, workspacePermissions)
+		}
+	}
 	if filepath.Dir(paths.configPath) != filepath.Dir(paths.codexBinary) {
 		t.Fatal("test fixture does not co-locate the peer config and Codex binary")
 	}
@@ -1644,7 +1653,11 @@ func assertManagedProfile(
 		t.Fatalf("provider config = %#v", config)
 	}
 	filesystem := map[string]any{
-		":minimal": "read", ":workspace_roots": map[string]any{".": "write"},
+		":minimal": "read",
+		":workspace_roots": map[string]any{
+			".":    "write",
+			".git": "write",
+		},
 	}
 	resolvedProviderEnvironmentFile, err := filepath.EvalSymlinks(paths.providerEnvironmentFile)
 	if err != nil {
