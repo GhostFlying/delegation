@@ -9,7 +9,8 @@ runtime bootstrap, and release foundation. M1 provides the broker and persistent
 makes every device an equal peer and exposes root MCP discovery from any user-created Codex task.
 M2 runs isolated managed Codex threads on selected peers with durable spawn, agent discovery,
 message, follow-up, interrupt, and wait controls. M3 synchronizes an exact Git HEAD plus the root
-task's dirty index and worktree state; worker changes artifacts remain the next M3 checkpoint.
+task's dirty index and worktree state, then captures descendant commits and dirty worker results as
+target-retained changes artifacts whose metadata is visible to the root.
 
 ## Install The Plugin
 
@@ -210,10 +211,10 @@ another spawn.
 
 Use `send_message` to steer a running worker or queue a message for an idle worker,
 `followup_task` to start a new turn for an idle worker, and `interrupt_agent` to stop an active turn.
-`wait_agent` returns bounded lifecycle and worker-message pages; call it again immediately while
-`has_more` is true before concluding that the result is complete. Worker changes artifacts and
-explicit root-side apply arrive later in M3; the current flow never writes worker changes back
-automatically.
+`wait_agent` returns bounded lifecycle, worker-message, and changes-artifact metadata pages; call it
+again immediately while `has_more` is true before concluding that the result is complete. Artifact
+bundle and overlay payloads remain on the target peer. M3 has no apply operation and never writes
+worker changes back automatically; explicit root-side apply is deferred to M4.
 
 ## License
 

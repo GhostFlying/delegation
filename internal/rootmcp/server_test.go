@@ -318,6 +318,25 @@ func TestRootMCPListsStaticToolsAndBindsThread(t *testing.T) {
 	}
 }
 
+func TestRootMCPWaitAgentDescriptionCoversAllEventStreams(t *testing.T) {
+	ctx, clientSession, closeSessions := connectRootMCP(t, &fakeRootBackend{})
+	defer closeSessions()
+	tools, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "Wait for managed-agent lifecycle activity, worker messages, and changes-artifact metadata in this root task."
+	for _, tool := range tools.Tools {
+		if tool.Name == ToolWaitAgent {
+			if tool.Description != want {
+				t.Fatalf("wait_agent description = %q, want %q", tool.Description, want)
+			}
+			return
+		}
+	}
+	t.Fatal("wait_agent tool was not listed")
+}
+
 func TestRootMCPSpawnsAndListsDurableAgents(t *testing.T) {
 	backend := &fakeRootBackend{}
 	ctx, clientSession, closeSessions := connectRootMCP(t, backend)

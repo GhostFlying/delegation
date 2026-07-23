@@ -51,7 +51,9 @@ installed checkpoint boundary instead of pretending unavailable workspace tools 
 Use `send_message` to steer a running worker or queue a message for an idle worker. Use
 `followup_task` to start a new turn only when the worker is idle, and `interrupt_agent` to stop an
 active turn. `wait_agent` consumes bounded lifecycle and worker-message pages; call it again
-immediately while `has_more` is true before concluding that no unread result remains. Reuse the
+immediately while `has_more` is true before concluding that no unread result remains. For a
+workspace-backed turn it also reports bounded changes-artifact metadata after the target captures
+the descendant Git bundle and dirty overlay. Those payloads remain on the target peer. Reuse the
 same operation ID only when retrying the exact same logical action.
 
 Remote workers do not receive the peer roster and cannot recursively delegate in v0. A managed
@@ -63,7 +65,8 @@ environment question from the root or change the target from the root tools.
 
 Treat worker output as evidence from a different environment, not as an automatically accepted
 change. Check the reported commands, platform, workspace revision, warnings, and artifact metadata.
-The v0 flow does not write worker changes back into the root workspace automatically.
+The v0 flow does not expose artifact payload download or apply and does not write worker changes
+back into the root workspace automatically.
 
 Summarize the delegated task, target peer, result, verification evidence, and any artifact that
 still requires an explicit root-side apply decision.
