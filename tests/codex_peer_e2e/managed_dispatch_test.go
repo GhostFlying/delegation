@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -702,7 +703,33 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal(fmt.Errorf("managed worker %s did not become idle on target peer", agentID))
+	var status, retryTarget, activeTurnID, failureCode, finalTarget, finalFailureCode string
+	workerErr := database.QueryRow(`
+SELECT status, retry_target, active_turn_id, failure_code,
+       final_target_status, final_failure_code
+FROM worker_reservations
+WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
+`, networkID, treeID, agentID).Scan(
+		&status, &retryTarget, &activeTurnID, &failureCode, &finalTarget, &finalFailureCode,
+	)
+	var artifactState, captureStatus, artifactFailure string
+	artifactErr := database.QueryRow(`
+SELECT state, capture_status, failure_code
+FROM peer_changes_artifacts
+WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
+ORDER BY created_at DESC
+LIMIT 1
+`, networkID, treeID, agentID).Scan(&artifactState, &captureStatus, &artifactFailure)
+	logPath := filepath.Join(filepath.Dir(filepath.Dir(statePath)), "peer.json.service.log")
+	serviceLog, logErr := os.ReadFile(logPath)
+	t.Fatalf(
+		"managed worker %s did not become idle on target peer: "+
+			"worker=%q retry=%q turn=%q failure=%q final=%q finalFailure=%q query=%v; "+
+			"artifact=%q capture=%q failure=%q query=%v; service log %q read=%v:\n%s",
+		agentID, status, retryTarget, activeTurnID, failureCode, finalTarget, finalFailureCode,
+		workerErr, artifactState, captureStatus, artifactFailure, artifactErr,
+		logPath, logErr, serviceLog,
+	)
 }
 
 func managedWorkerThreadID(t *testing.T, statePath string, agent protocol.AgentSummary) string {

@@ -190,7 +190,7 @@ func (m *mockResponses) rootAgentScriptFor(testCase string) (rootAgentScript, bo
 					"spawn_id": scenario.spawnID, "target_device_id": deviceIDs["A"],
 					"task_name": scenario.taskName, "workspace_id": scenario.syncID,
 					"message": "delegation-worker-case=" + scenario.workerCase +
-						" Verify source.txt and the exact Git HEAD, then write worker-change.txt.",
+						" Verify the prepared workspace, commit the tracked source.txt change, and leave worker-change.txt untracked.",
 				},
 				expectedOutput: []string{scenario.spawnID, scenario.taskName, scenario.syncID, "started"},
 			}, true
@@ -251,6 +251,10 @@ func (m *mockResponses) handleWorkerWorkspace(
 			`test "$(cat dirty-source.txt)" = ` + managedPOSIXShellLiteral(scenario.dirtyMarker) + ` && ` +
 			`test "$(git -C .. ls-files --others --exclude-standard -- nested/dirty-source.txt)" = nested/dirty-source.txt && ` +
 			`test "$(git rev-parse HEAD)" = ` + managedPOSIXShellLiteral(scenario.head) + ` && ` +
+			`printf '%s\n' ` + managedPOSIXShellLiteral(scenario.workerCommitMarker) + ` > source.txt && ` +
+			`git -C .. add -- nested/source.txt && ` +
+			`git -C .. -c user.name='Delegation Worker Test' -c user.email='worker@example.invalid' ` +
+			`commit -m 'worker result commit' && ` +
 			`printf '%s\n' ` + managedPOSIXShellLiteral(scenario.workerMarker) + ` > worker-change.txt && ` +
 			`printf '%s\n' ` + managedPOSIXShellLiteral(successMarker),
 	)
