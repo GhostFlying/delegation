@@ -84,53 +84,54 @@ func (s *session) handleWaitAgent(
 	for {
 		mailboxSubscription := s.server.mailboxNotifier.subscribe(mailboxKey)
 		lifecycleSubscription := s.server.lifecycleNotifier.subscribe(treeKey)
-		result, err := s.readAgentWait(ctx, principal, params)
-		if err != nil {
+		artifactSubscription := s.server.artifactNotifier.subscribe(treeKey)
+		releaseSubscriptions := func() {
 			mailboxSubscription.release()
 			lifecycleSubscription.release()
+			artifactSubscription.release()
+		}
+		result, err := s.readAgentWait(ctx, principal, params)
+		if err != nil {
+			releaseSubscriptions()
 			return s.handleAgentWaitStoreError(ctx, request, err)
 		}
 		select {
 		case <-canceled:
-			mailboxSubscription.release()
-			lifecycleSubscription.release()
+			releaseSubscriptions()
 			return context.Canceled
 		default:
 		}
-		if len(result.Messages) != 0 || len(result.Activities) != 0 || params.TimeoutMillis == 0 {
-			mailboxSubscription.release()
-			lifecycleSubscription.release()
+		if len(result.Messages) != 0 || len(result.Activities) != 0 ||
+			len(result.Artifacts) != 0 || params.TimeoutMillis == 0 {
+			releaseSubscriptions()
 			return s.writeResult(ctx, request, result)
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			mailboxSubscription.release()
-			lifecycleSubscription.release()
+			releaseSubscriptions()
 			return s.writeResult(ctx, request, result)
 		}
 		timer := time.NewTimer(remaining)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			mailboxSubscription.release()
-			lifecycleSubscription.release()
+			releaseSubscriptions()
 			return ctx.Err()
 		case <-canceled:
 			timer.Stop()
-			mailboxSubscription.release()
-			lifecycleSubscription.release()
+			releaseSubscriptions()
 			return context.Canceled
 		case <-mailboxSubscription.channel():
 			timer.Stop()
-			mailboxSubscription.release()
-			lifecycleSubscription.release()
+			releaseSubscriptions()
 		case <-lifecycleSubscription.channel():
 			timer.Stop()
-			mailboxSubscription.release()
-			lifecycleSubscription.release()
+			releaseSubscriptions()
+		case <-artifactSubscription.channel():
+			timer.Stop()
+			releaseSubscriptions()
 		case <-timer.C:
-			mailboxSubscription.release()
-			lifecycleSubscription.release()
+			releaseSubscriptions()
 			return s.writeResult(ctx, request, result)
 		}
 	}
@@ -158,14 +159,30 @@ func (s *session) readAgentWait(
 	if err != nil {
 		return protocol.WaitAgentResult{}, err
 	}
+	artifacts, err := s.server.registry.ListChangesArtifacts(
+		ctx,
+		principal.Identity(),
+		store.ChangesArtifactPageRequest{
+			AfterSequence: params.ArtifactCursor,
+			Limit:         params.ArtifactLimit + 1,
+		},
+	)
+	if err != nil {
+		return protocol.WaitAgentResult{}, err
+	}
 	result := protocol.WaitAgentResult{
 		Messages:       mailbox.Messages,
 		Activities:     make([]protocol.AgentLifecycleActivity, 0, len(lifecycle.Activities)),
+		Artifacts:      artifacts.Artifacts,
 		MoreMessages:   len(mailbox.Messages) > params.MessageLimit,
 		MoreActivities: len(lifecycle.Activities) > params.ActivityLimit,
+		MoreArtifacts:  len(artifacts.Artifacts) > params.ArtifactLimit,
 	}
 	if result.MoreMessages {
 		result.Messages = result.Messages[:params.MessageLimit]
+	}
+	if result.MoreArtifacts {
+		result.Artifacts = result.Artifacts[:params.ArtifactLimit]
 	}
 	for _, activity := range lifecycle.Activities[:min(len(lifecycle.Activities), params.ActivityLimit)] {
 		result.Activities = append(result.Activities, protocol.AgentLifecycleActivity{
@@ -182,6 +199,10 @@ func (s *session) readAgentWait(
 	result.NextLifecycleCursor = params.LifecycleCursor
 	if len(result.Activities) != 0 {
 		result.NextLifecycleCursor = result.Activities[len(result.Activities)-1].Sequence
+	}
+	result.NextArtifactCursor = params.ArtifactCursor
+	if len(result.Artifacts) != 0 {
+		result.NextArtifactCursor = result.Artifacts[len(result.Artifacts)-1].Sequence
 	}
 	return result, nil
 }
@@ -229,7 +250,8 @@ func (s *session) handleAgentWaitStoreError(
 	err error,
 ) error {
 	if errors.Is(err, store.ErrMailboxCursorAhead) ||
-		errors.Is(err, store.ErrAgentLifecycleCursorAhead) {
+		errors.Is(err, store.ErrAgentLifecycleCursorAhead) ||
+		errors.Is(err, store.ErrChangesArtifactCursorAhead) {
 		return s.writeError(
 			ctx, request, protocol.ErrorConflict, "agent wait cursor is ahead of stored state",
 		)

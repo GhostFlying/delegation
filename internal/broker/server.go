@@ -70,6 +70,8 @@ type Registry interface {
 	ClaimWorkerLifecycleSession(context.Context, store.WorkerLifecycleSessionClaim) (uint64, error)
 	ApplyWorkerLifecyclePage(context.Context, store.WorkerLifecyclePageApply) (protocol.SyncWorkerLifecycleResult, error)
 	ListAgentLifecycleActivity(context.Context, control.PrincipalIdentity, store.AgentLifecyclePageRequest) (store.AgentLifecyclePage, error)
+	PublishChangesArtifact(context.Context, string, control.PrincipalIdentity, protocol.PublishChangesArtifactParams, time.Time) (protocol.PublishChangesArtifactResult, error)
+	ListChangesArtifacts(context.Context, control.PrincipalIdentity, store.ChangesArtifactPageRequest) (store.ChangesArtifactPage, error)
 	BeginWorkspaceSync(context.Context, store.WorkspaceSyncIntent, time.Time) (store.WorkspaceSyncReceipt, error)
 	PinWorkspaceSyncManifest(context.Context, store.WorkspaceSyncKey, protocol.WorkspaceManifest, time.Time) (store.WorkspaceSyncReceipt, error)
 	FinishWorkspaceSync(context.Context, store.WorkspaceSyncKey, protocol.WorkspaceSummary, time.Time) (store.WorkspaceSyncReceipt, error)
@@ -111,6 +113,7 @@ type Server struct {
 	background        sync.WaitGroup
 	mailboxNotifier   *mailboxNotifier
 	lifecycleNotifier *treeNotifier
+	artifactNotifier  *treeNotifier
 	agentOperations   *agentOperationQueue
 	workspaceSyncs    *workspaceSyncFlights
 
@@ -240,6 +243,7 @@ func New(options Options) (*Server, error) {
 		deviceHelloLimit:     maximumDeviceHellos,
 		mailboxNotifier:      newMailboxNotifier(),
 		lifecycleNotifier:    newTreeNotifier(),
+		artifactNotifier:     newTreeNotifier(),
 		agentOperations:      newAgentOperationQueue(),
 		workspaceSyncs:       newWorkspaceSyncFlights(maximumActiveWorkspaceSyncs),
 		offlineRetries:       map[string]uint64{},
@@ -522,6 +526,7 @@ func (s *Server) acceptHello(
 		return nil, errors.New("invalid hello payload")
 	}
 	for _, feature := range []string{
+		protocol.FeatureChangesArtifact,
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,
@@ -603,6 +608,7 @@ func (s *Server) acceptHello(
 	result := protocol.HelloResult{
 		ConnectionID: connectionID,
 		Features: []string{
+			protocol.FeatureChangesArtifact,
 			protocol.FeatureDeviceRegistry,
 			protocol.FeatureFullDuplexRPC,
 			protocol.FeatureMailbox,
@@ -842,6 +848,8 @@ func (s *session) handleEnvelope(
 		return false, s.startAgentOperation(ctx, sessionContext, envelope)
 	case protocol.MethodSyncWorkerLifecycle:
 		return false, s.handleSyncWorkerLifecycle(ctx, envelope)
+	case protocol.MethodPublishChangesArtifact:
+		return false, s.handlePublishChangesArtifact(ctx, envelope)
 	case protocol.MethodWaitAgent:
 		return false, s.startAgentWait(ctx, sessionContext, envelope)
 	case protocol.MethodSyncWorkspace:

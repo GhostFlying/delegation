@@ -116,6 +116,7 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 		Arch:           "amd64",
 		RuntimeVersion: "0.1.0-alpha.0.m1.1",
 		Features: []string{
+			protocol.FeatureChangesArtifact,
 			protocol.FeatureDeviceRegistry,
 			protocol.FeatureFullDuplexRPC,
 			protocol.FeatureMailbox,
@@ -316,6 +317,7 @@ func TestCanceledAgentWaitSendsCancellationWithoutClosingConnector(t *testing.T)
 			protocol.WaitAgentParams{
 				TimeoutMillis: protocol.MaximumAgentWaitMillis,
 				MessageLimit:  protocol.MaximumAgentWaitMessages, ActivityLimit: protocol.MaximumAgentWaitActivities,
+				ArtifactLimit: protocol.MaximumAgentWaitArtifacts,
 			},
 			&result,
 		)
@@ -446,6 +448,7 @@ func TestNoneAuthPeerConnectorRegisters(t *testing.T) {
 
 func TestConnectorRequiresEveryBrokerFeatureBeforePublishingReadiness(t *testing.T) {
 	required := []string{
+		protocol.FeatureChangesArtifact,
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,
@@ -1293,6 +1296,7 @@ func waitForDevice(
 
 func newFakeBroker(t *testing.T, afterHello func(*websocket.Conn)) *httptest.Server {
 	return newFakeBrokerWithFeatures(t, []string{
+		protocol.FeatureChangesArtifact,
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,

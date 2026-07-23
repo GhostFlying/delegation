@@ -238,6 +238,7 @@ func New(options Options) (*Client, error) {
 		return nil, errors.New("connector workspace transfer manager is required")
 	}
 	features := []string{
+		protocol.FeatureChangesArtifact,
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,
@@ -575,6 +576,7 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 		return fmt.Errorf("broker features: %w", err)
 	}
 	required := []string{
+		protocol.FeatureChangesArtifact,
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,

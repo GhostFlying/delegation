@@ -518,6 +518,7 @@ func sendRuntimeHello(t *testing.T, connection *websocket.Conn, deviceID string)
 		Arch:           "amd64",
 		RuntimeVersion: "0.1.0-alpha.0.m1.1",
 		Features: []string{
+			protocol.FeatureChangesArtifact,
 			protocol.FeatureDeviceRegistry,
 			protocol.FeatureFullDuplexRPC,
 			protocol.FeatureMailbox,

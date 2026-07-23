@@ -10,18 +10,22 @@ func TestWaitAgentParamsEnforceBoundedCursorsPagesAndTimeout(t *testing.T) {
 		TimeoutMillis: MaximumAgentWaitMillis,
 		MessageLimit:  MaximumAgentWaitMessages,
 		ActivityLimit: MaximumAgentWaitActivities,
+		ArtifactLimit: MaximumAgentWaitArtifacts,
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	invalid := []WaitAgentParams{
-		{MailboxCursor: math.MaxInt64 + 1, MessageLimit: 1, ActivityLimit: 1},
-		{LifecycleCursor: math.MaxInt64 + 1, MessageLimit: 1, ActivityLimit: 1},
-		{TimeoutMillis: -1, MessageLimit: 1, ActivityLimit: 1},
-		{TimeoutMillis: MaximumAgentWaitMillis + 1, MessageLimit: 1, ActivityLimit: 1},
-		{MessageLimit: 0, ActivityLimit: 1},
-		{MessageLimit: MaximumAgentWaitMessages + 1, ActivityLimit: 1},
-		{MessageLimit: 1, ActivityLimit: MaximumAgentWaitActivities + 1},
+		{MailboxCursor: math.MaxInt64 + 1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
+		{LifecycleCursor: math.MaxInt64 + 1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
+		{ArtifactCursor: math.MaxInt64 + 1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
+		{TimeoutMillis: -1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
+		{TimeoutMillis: MaximumAgentWaitMillis + 1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
+		{MessageLimit: 0, ActivityLimit: 1, ArtifactLimit: 1},
+		{MessageLimit: MaximumAgentWaitMessages + 1, ActivityLimit: 1, ArtifactLimit: 1},
+		{MessageLimit: 1, ActivityLimit: MaximumAgentWaitActivities + 1, ArtifactLimit: 1},
+		{MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 0},
+		{MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: MaximumAgentWaitArtifacts + 1},
 	}
 	for index, params := range invalid {
 		if err := params.Validate(); err == nil {

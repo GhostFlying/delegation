@@ -49,6 +49,7 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 		TimeoutMillis: 2_000,
 		MessageLimit:  protocol.MaximumAgentWaitMessages,
 		ActivityLimit: protocol.MaximumAgentWaitActivities,
+		ArtifactLimit: protocol.MaximumAgentWaitArtifacts,
 	}, root)
 	writeEnvelope(t, rootConnection, waitRequest)
 	workerSend := writeAndRead(t, workerConnection, principalRequest(
@@ -102,7 +103,7 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 		protocol.MethodWaitAgent,
 		protocol.WaitAgentParams{
 			MailboxCursor: result.NextMailboxCursor,
-			MessageLimit:  1, ActivityLimit: 1,
+			MessageLimit:  1, ActivityLimit: 1, ArtifactLimit: 1,
 		},
 		root,
 	))
@@ -117,7 +118,7 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 		protocol.MethodWaitAgent,
 		protocol.WaitAgentParams{
 			MailboxCursor: continuedResult.NextMailboxCursor,
-			MessageLimit:  1, ActivityLimit: 1,
+			MessageLimit:  1, ActivityLimit: 1, ArtifactLimit: 1,
 		},
 		root,
 	))
@@ -131,7 +132,7 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 	workerBypass := writeAndRead(t, workerConnection, principalRequest(
 		t,
 		protocol.MethodWaitAgent,
-		protocol.WaitAgentParams{MessageLimit: 1, ActivityLimit: 1},
+		protocol.WaitAgentParams{MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
 		worker,
 	))
 	if workerBypass.Error == nil || workerBypass.Error.Code != protocol.ErrorForbidden {
@@ -140,7 +141,7 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 	crossDeviceRoot := writeAndRead(t, workerConnection, principalRequest(
 		t,
 		protocol.MethodWaitAgent,
-		protocol.WaitAgentParams{MessageLimit: 1, ActivityLimit: 1},
+		protocol.WaitAgentParams{MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
 		root,
 	))
 	if crossDeviceRoot.Error == nil || crossDeviceRoot.Error.Code != protocol.ErrorForbidden {
@@ -151,7 +152,7 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 		protocol.MethodWaitAgent,
 		protocol.WaitAgentParams{
 			MailboxCursor: 1, LifecycleCursor: 1,
-			MessageLimit: 1, ActivityLimit: 1,
+			MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1,
 		},
 		root,
 	))
@@ -219,6 +220,7 @@ func TestAgentWaitWakesOnWorkerLifecycleNotification(t *testing.T) {
 	waitRequest := principalRequest(t, protocol.MethodWaitAgent, protocol.WaitAgentParams{
 		TimeoutMillis: 2_000,
 		MessageLimit:  protocol.MaximumAgentWaitMessages, ActivityLimit: protocol.MaximumAgentWaitActivities,
+		ArtifactLimit: protocol.MaximumAgentWaitArtifacts,
 	}, root)
 	writeEnvelope(t, rootConnection, waitRequest)
 	rootSession := activeBrokerSession(t, harness.server, brokerTestDeviceID)
@@ -264,6 +266,7 @@ func TestAgentWaitCancellationReleasesCapacityAndSubscriptions(t *testing.T) {
 	waitRequest := principalRequest(t, protocol.MethodWaitAgent, protocol.WaitAgentParams{
 		TimeoutMillis: protocol.MaximumAgentWaitMillis,
 		MessageLimit:  protocol.MaximumAgentWaitMessages, ActivityLimit: protocol.MaximumAgentWaitActivities,
+		ArtifactLimit: protocol.MaximumAgentWaitArtifacts,
 	}, root)
 	writeEnvelope(t, connection, waitRequest)
 	waitForPendingAgentWait(t, harness.server, session, root, waitRequest.RequestID)
@@ -277,7 +280,7 @@ func TestAgentWaitCancellationReleasesCapacityAndSubscriptions(t *testing.T) {
 	immediate := writeAndRead(t, connection, principalRequest(
 		t,
 		protocol.MethodWaitAgent,
-		protocol.WaitAgentParams{MessageLimit: 1, ActivityLimit: 1},
+		protocol.WaitAgentParams{MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
 		root,
 	))
 	result := decodeResult[protocol.WaitAgentResult](t, immediate)
@@ -298,6 +301,7 @@ func waitForPendingAgentWait(
 		controllerID: root.ControllerID, treeID: root.TreeID, agentID: root.AgentID,
 	}
 	lifecycle := treeKey{controllerID: root.ControllerID, treeID: root.TreeID}
+	artifact := lifecycle
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		server.mailboxNotifier.mu.Lock()
@@ -314,15 +318,23 @@ func waitForPendingAgentWait(
 			lifecycleWaiters = lifecycleWatch.waiters
 		}
 		server.lifecycleNotifier.mu.Unlock()
+		server.artifactNotifier.mu.Lock()
+		artifactWatch := server.artifactNotifier.watches[artifact]
+		artifactWaiters := 0
+		if artifactWatch != nil {
+			artifactWaiters = artifactWatch.waiters
+		}
+		server.artifactNotifier.mu.Unlock()
 		session.asyncMu.Lock()
 		_, cancellable := session.asyncCancels[requestID]
 		session.asyncMu.Unlock()
-		if len(session.asyncSem) == 1 && mailboxWaiters == 1 && lifecycleWaiters == 1 && cancellable {
+		if len(session.asyncSem) == 1 && mailboxWaiters == 1 && lifecycleWaiters == 1 &&
+			artifactWaiters == 1 && cancellable {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("agent wait did not enter both notifier paths")
+	t.Fatal("agent wait did not enter all notifier paths")
 }
 
 func assertAgentWaitCleanedUp(
@@ -351,10 +363,14 @@ func assertAgentWaitCleanedUp(
 	server.lifecycleNotifier.mu.Lock()
 	lifecycleWatches := len(server.lifecycleNotifier.watches)
 	server.lifecycleNotifier.mu.Unlock()
-	if len(session.asyncSem) != 0 || cancellable || mailboxWatches != 0 || lifecycleWatches != 0 {
+	server.artifactNotifier.mu.Lock()
+	artifactWatches := len(server.artifactNotifier.watches)
+	server.artifactNotifier.mu.Unlock()
+	if len(session.asyncSem) != 0 || cancellable || mailboxWatches != 0 ||
+		lifecycleWatches != 0 || artifactWatches != 0 {
 		t.Fatalf(
-			"agent wait cleanup = slots %d, cancellable %v, mailbox watches %d, lifecycle watches %d",
-			len(session.asyncSem), cancellable, mailboxWatches, lifecycleWatches,
+			"agent wait cleanup = slots %d, cancellable %v, mailbox watches %d, lifecycle watches %d, artifact watches %d",
+			len(session.asyncSem), cancellable, mailboxWatches, lifecycleWatches, artifactWatches,
 		)
 	}
 }

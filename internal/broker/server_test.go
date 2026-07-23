@@ -233,6 +233,7 @@ func TestUnsupportedProtocolHelloFailsBeforeRegistryMutation(t *testing.T) {
 
 func TestHelloRequiresEveryPeerFeatureBeforeRegistryMutation(t *testing.T) {
 	required := []string{
+		protocol.FeatureChangesArtifact,
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
 		protocol.FeatureMailbox,
@@ -891,6 +892,7 @@ func hello() protocol.Hello {
 		Arch:           "amd64",
 		RuntimeVersion: "0.1.0-alpha.0.m1.1",
 		Features: []string{
+			protocol.FeatureChangesArtifact,
 			protocol.FeatureDeviceRegistry,
 			protocol.FeatureFullDuplexRPC,
 			protocol.FeatureMailbox,

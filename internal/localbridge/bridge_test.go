@@ -232,7 +232,7 @@ func TestBridgeForwardsRootAgentControlsAndRejectsWorkers(t *testing.T) {
 		{
 			method: protocol.MethodWaitAgent,
 			params: protocol.WaitAgentParams{
-				TimeoutMillis: 1, MessageLimit: 1, ActivityLimit: 1,
+				TimeoutMillis: 1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1,
 			},
 		},
 	}
@@ -276,7 +276,7 @@ func TestBridgeForwardsRootAgentControlsAndRejectsWorkers(t *testing.T) {
 	assertRPCCode(t, err, protocol.ErrorForbidden)
 	err = client.Call(
 		context.Background(), protocol.MethodWaitAgent, worker.TreeID, &worker,
-		protocol.WaitAgentParams{TimeoutMillis: 1, MessageLimit: 1, ActivityLimit: 1},
+		protocol.WaitAgentParams{TimeoutMillis: 1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
 		nil,
 	)
 	assertRPCCode(t, err, protocol.ErrorForbidden)
@@ -631,7 +631,7 @@ func TestBridgeWorkerWaitCapacityPreservesControlHeadroom(t *testing.T) {
 	}{
 		{method: protocol.MethodListDevices, params: protocol.ListDevicesParams{Limit: 1}},
 		{method: protocol.MethodWaitAgent, params: protocol.WaitAgentParams{
-			MessageLimit: 1, ActivityLimit: 1,
+			MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1,
 		}},
 		{method: protocol.MethodSendMessage, params: protocol.SendMessageParams{
 			MessageID: "123e4567-e89b-42d3-a456-426614174399",

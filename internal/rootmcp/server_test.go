@@ -204,7 +204,9 @@ func (b *fakeRootBackend) Call(
 		}
 		*result.(*protocol.WaitAgentResult) = protocol.WaitAgentResult{
 			Messages: []protocol.MailboxMessage{}, Activities: []protocol.AgentLifecycleActivity{},
+			Artifacts:         []protocol.ChangesArtifactMetadata{},
 			NextMailboxCursor: input.MailboxCursor, NextLifecycleCursor: input.LifecycleCursor,
+			NextArtifactCursor: input.ArtifactCursor,
 		}
 	default:
 		return fmt.Errorf("unexpected method %q", method)

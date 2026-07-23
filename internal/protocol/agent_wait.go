@@ -19,13 +19,16 @@ const (
 type WaitAgentParams struct {
 	MailboxCursor   uint64 `json:"mailboxCursor,omitempty"`
 	LifecycleCursor uint64 `json:"lifecycleCursor,omitempty"`
+	ArtifactCursor  uint64 `json:"artifactCursor,omitempty"`
 	TimeoutMillis   int    `json:"timeoutMillis"`
 	MessageLimit    int    `json:"messageLimit"`
 	ActivityLimit   int    `json:"activityLimit"`
+	ArtifactLimit   int    `json:"artifactLimit"`
 }
 
 func (p WaitAgentParams) Validate() error {
-	if p.MailboxCursor > math.MaxInt64 || p.LifecycleCursor > math.MaxInt64 {
+	if p.MailboxCursor > math.MaxInt64 || p.LifecycleCursor > math.MaxInt64 ||
+		p.ArtifactCursor > math.MaxInt64 {
 		return errors.New("agent wait cursor exceeds the supported range")
 	}
 	if p.TimeoutMillis < 0 || p.TimeoutMillis > MaximumAgentWaitMillis {
@@ -36,6 +39,9 @@ func (p WaitAgentParams) Validate() error {
 	}
 	if p.ActivityLimit < 1 || p.ActivityLimit > MaximumAgentWaitActivities {
 		return fmt.Errorf("activityLimit must be from 1 through %d", MaximumAgentWaitActivities)
+	}
+	if p.ArtifactLimit < 1 || p.ArtifactLimit > MaximumAgentWaitArtifacts {
+		return fmt.Errorf("artifactLimit must be from 1 through %d", MaximumAgentWaitArtifacts)
 	}
 	return nil
 }
@@ -68,10 +74,13 @@ func (a AgentLifecycleActivity) Validate() error {
 }
 
 type WaitAgentResult struct {
-	Messages            []MailboxMessage         `json:"messages"`
-	Activities          []AgentLifecycleActivity `json:"activities"`
-	NextMailboxCursor   uint64                   `json:"nextMailboxCursor"`
-	NextLifecycleCursor uint64                   `json:"nextLifecycleCursor"`
-	MoreMessages        bool                     `json:"moreMessages"`
-	MoreActivities      bool                     `json:"moreActivities"`
+	Messages            []MailboxMessage          `json:"messages"`
+	Activities          []AgentLifecycleActivity  `json:"activities"`
+	Artifacts           []ChangesArtifactMetadata `json:"artifacts"`
+	NextMailboxCursor   uint64                    `json:"nextMailboxCursor"`
+	NextLifecycleCursor uint64                    `json:"nextLifecycleCursor"`
+	NextArtifactCursor  uint64                    `json:"nextArtifactCursor"`
+	MoreMessages        bool                      `json:"moreMessages"`
+	MoreActivities      bool                      `json:"moreActivities"`
+	MoreArtifacts       bool                      `json:"moreArtifacts"`
 }

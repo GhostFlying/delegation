@@ -18,9 +18,11 @@ const (
 	maximumAgentWaitStates  = 128
 	maximumAgentWaitBytes   = 16 * 1024
 	// A model-visible page contains at most one 1 KiB worker message plus four
-	// lifecycle records. The worst valid JSON expansion is covered by a test.
+	// lifecycle records and one changes artifact. The worst valid JSON
+	// expansion is covered by a test.
 	agentWaitMessageLimit   = 1
 	agentWaitActivityLimit  = 4
+	agentWaitArtifactLimit  = 1
 	minimumAgentRepollDelay = 10 * time.Millisecond
 )
 
@@ -47,9 +49,38 @@ type AgentActivityOutput struct {
 	ObservedAt     int64                         `json:"observed_at"`
 }
 
+type AgentArtifactPartOutput struct {
+	Kind   protocol.WorkspaceArtifactKind `json:"kind"`
+	Size   int64                          `json:"size"`
+	SHA256 string                         `json:"sha256"`
+}
+
+type AgentArtifactOutput struct {
+	ArtifactID         string                         `json:"artifact_id"`
+	TurnID             string                         `json:"turn_id"`
+	WorkspaceID        string                         `json:"workspace_id"`
+	Status             protocol.ChangesArtifactStatus `json:"status"`
+	SourceAgentID      string                         `json:"source_agent_id"`
+	SourceDeviceID     string                         `json:"source_device_id"`
+	ObjectFormat       string                         `json:"object_format"`
+	BaseHeadOID        string                         `json:"base_head_oid"`
+	BaseManifestHash   string                         `json:"base_manifest_hash"`
+	BaseSnapshotHash   string                         `json:"base_snapshot_hash"`
+	BaseClean          bool                           `json:"base_clean"`
+	ResultHeadOID      string                         `json:"result_head_oid,omitempty"`
+	ResultSnapshotHash string                         `json:"result_snapshot_hash,omitempty"`
+	ResultClean        bool                           `json:"result_clean"`
+	Parts              []AgentArtifactPartOutput      `json:"parts"`
+	Warnings           []string                       `json:"warnings"`
+	FailureCode        string                         `json:"failure_code,omitempty"`
+	Sequence           uint64                         `json:"sequence"`
+	ObservedAt         int64                          `json:"observed_at"`
+}
+
 type WaitAgentOutput struct {
 	Messages   []AgentMessageOutput  `json:"messages"`
 	Activities []AgentActivityOutput `json:"activities"`
+	Artifacts  []AgentArtifactOutput `json:"artifacts"`
 	HasMore    bool                  `json:"has_more"`
 }
 
@@ -58,6 +89,7 @@ type agentWaitState struct {
 	treeID          string
 	mailboxCursor   uint64
 	lifecycleCursor uint64
+	artifactCursor  uint64
 	users           int
 	lastUsed        uint64
 }
@@ -105,6 +137,7 @@ func (r *Root) waitAgent(
 		state.treeID = tree.TreeID
 		state.mailboxCursor = 0
 		state.lifecycleCursor = 0
+		state.artifactCursor = 0
 	}
 
 	deadline := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
@@ -115,8 +148,10 @@ func (r *Root) waitAgent(
 		}
 		params := protocol.WaitAgentParams{
 			MailboxCursor: state.mailboxCursor, LifecycleCursor: state.lifecycleCursor,
-			TimeoutMillis: int(min(remaining, time.Duration(protocol.MaximumAgentWaitMillis)*time.Millisecond).Milliseconds()),
-			MessageLimit:  agentWaitMessageLimit, ActivityLimit: agentWaitActivityLimit,
+			ArtifactCursor: state.artifactCursor,
+			TimeoutMillis:  int(min(remaining, time.Duration(protocol.MaximumAgentWaitMillis)*time.Millisecond).Milliseconds()),
+			MessageLimit:   agentWaitMessageLimit, ActivityLimit: agentWaitActivityLimit,
+			ArtifactLimit: agentWaitArtifactLimit,
 		}
 		source := principal.Identity()
 		var result protocol.WaitAgentResult
@@ -134,7 +169,9 @@ func (r *Root) waitAgent(
 		}
 		state.mailboxCursor = result.NextMailboxCursor
 		state.lifecycleCursor = result.NextLifecycleCursor
-		if len(output.Messages) != 0 || len(output.Activities) != 0 || time.Until(deadline) <= 0 {
+		state.artifactCursor = result.NextArtifactCursor
+		if len(output.Messages) != 0 || len(output.Activities) != 0 ||
+			len(output.Artifacts) != 0 || time.Until(deadline) <= 0 {
 			return nil, output, nil
 		}
 		delay := min(time.Until(deadline), minimumAgentRepollDelay)
@@ -195,11 +232,13 @@ func validateWaitAgentResult(
 	params protocol.WaitAgentParams,
 	root control.Principal,
 ) error {
-	if len(result.Messages) > params.MessageLimit || len(result.Activities) > params.ActivityLimit {
+	if len(result.Messages) > params.MessageLimit || len(result.Activities) > params.ActivityLimit ||
+		len(result.Artifacts) > params.ArtifactLimit {
 		return errors.New("delegation service returned too much agent activity")
 	}
 	if result.MoreMessages && len(result.Messages) != params.MessageLimit ||
-		result.MoreActivities && len(result.Activities) != params.ActivityLimit {
+		result.MoreActivities && len(result.Activities) != params.ActivityLimit ||
+		result.MoreArtifacts && len(result.Artifacts) != params.ArtifactLimit {
 		return errors.New("delegation service returned invalid agent continuation state")
 	}
 	mailboxCursor := params.MailboxCursor
@@ -229,6 +268,20 @@ func validateWaitAgentResult(
 	if result.NextLifecycleCursor != lifecycleCursor {
 		return errors.New("delegation service returned an invalid lifecycle cursor")
 	}
+	artifactCursor := params.ArtifactCursor
+	for _, artifact := range result.Artifacts {
+		if err := artifact.Validate(); err != nil {
+			return fmt.Errorf("delegation service returned invalid changes artifact: %w", err)
+		}
+		if artifact.Sequence <= artifactCursor || artifact.TreeID != root.TreeID ||
+			artifact.SourceAgentID == root.AgentID {
+			return errors.New("delegation service returned a mismatched or unordered changes artifact")
+		}
+		artifactCursor = artifact.Sequence
+	}
+	if result.NextArtifactCursor != artifactCursor {
+		return errors.New("delegation service returned an invalid artifact cursor")
+	}
 	return nil
 }
 
@@ -236,7 +289,8 @@ func waitAgentOutput(result protocol.WaitAgentResult) WaitAgentOutput {
 	output := WaitAgentOutput{
 		Messages:   make([]AgentMessageOutput, 0, len(result.Messages)),
 		Activities: make([]AgentActivityOutput, 0, len(result.Activities)),
-		HasMore:    result.MoreMessages || result.MoreActivities,
+		Artifacts:  make([]AgentArtifactOutput, 0, len(result.Artifacts)),
+		HasMore:    result.MoreMessages || result.MoreActivities || result.MoreArtifacts,
 	}
 	for _, message := range result.Messages {
 		output.Messages = append(output.Messages, AgentMessageOutput{
@@ -251,6 +305,27 @@ func waitAgentOutput(result protocol.WaitAgentResult) WaitAgentOutput {
 			TargetRevision: activity.TargetRevision, Phase: activity.Phase,
 			FailureCode: activity.FailureCode, Sequence: activity.Sequence,
 			ObservedAt: activity.ObservedAt,
+		})
+	}
+	for _, artifact := range result.Artifacts {
+		parts := make([]AgentArtifactPartOutput, 0, len(artifact.Parts))
+		for _, part := range artifact.Parts {
+			parts = append(parts, AgentArtifactPartOutput{
+				Kind: part.Kind, Size: part.Size, SHA256: part.SHA256,
+			})
+		}
+		output.Artifacts = append(output.Artifacts, AgentArtifactOutput{
+			ArtifactID: artifact.ArtifactID, TurnID: artifact.TurnID,
+			WorkspaceID: artifact.WorkspaceID, Status: artifact.Status,
+			SourceAgentID: artifact.SourceAgentID, SourceDeviceID: artifact.SourceDeviceID,
+			ObjectFormat: artifact.ObjectFormat, BaseHeadOID: artifact.BaseHeadOID,
+			BaseManifestHash: artifact.BaseManifestHash,
+			BaseSnapshotHash: artifact.BaseSnapshotHash, BaseClean: artifact.BaseClean,
+			ResultHeadOID:      artifact.ResultHeadOID,
+			ResultSnapshotHash: artifact.ResultSnapshotHash, ResultClean: artifact.ResultClean,
+			Parts: parts, Warnings: append([]string{}, artifact.Warnings...),
+			FailureCode: artifact.FailureCode, Sequence: artifact.Sequence,
+			ObservedAt: artifact.ObservedAt,
 		})
 	}
 	return output

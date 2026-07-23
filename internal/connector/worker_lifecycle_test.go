@@ -338,6 +338,7 @@ func writeLifecycleHello(
 	writeTestResult(t, connection, request, protocol.HelloResult{
 		ConnectionID: connectorTestConnectionID,
 		Features: []string{
+			protocol.FeatureChangesArtifact,
 			protocol.FeatureDeviceRegistry,
 			protocol.FeatureFullDuplexRPC,
 			protocol.FeatureMailbox,
