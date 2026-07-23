@@ -183,7 +183,8 @@ func protocolChangesArtifactParams(
 		BaseHeadOID: artifact.BaseHeadOID, BaseManifestHash: artifact.BaseManifestHash,
 		BaseSnapshotHash: artifact.BaseSnapshotHash, ResultHeadOID: artifact.ResultHeadOID,
 		ResultSnapshotHash: artifact.ResultSnapshotHash, ResultClean: artifact.ResultClean,
-		Parts: parts, Warnings: slices.Clone(artifact.Warnings), FailureCode: artifact.FailureCode,
+		Parts: parts, BaseWarnings: slices.Clone(artifact.BaseWarnings),
+		ResultWarnings: slices.Clone(artifact.ResultWarnings), FailureCode: artifact.FailureCode,
 	}
 	if err := params.Validate(); err != nil {
 		return protocol.PublishChangesArtifactParams{}, err

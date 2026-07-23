@@ -53,8 +53,10 @@ Use `send_message` to steer a running worker or queue a message for an idle work
 active turn. `wait_agent` consumes bounded lifecycle and worker-message pages; call it again
 immediately while `has_more` is true before concluding that no unread result remains. For a
 workspace-backed turn it also reports bounded changes-artifact metadata after the target captures
-the descendant Git bundle and dirty overlay. Those payloads remain on the target peer. Reuse the
-same operation ID only when retrying the exact same logical action.
+the descendant Git bundle and dirty overlay. Read `base_warnings` as conditions inherited from the
+prepared workspace and `result_warnings` as conditions observed while capturing the worker result;
+neither list supersedes the other. Those payloads remain on the target peer. Reuse the same operation
+ID only when retrying the exact same logical action.
 
 Remote workers do not receive the peer roster and cannot recursively delegate in v0. A managed
 worker thread permanently remains a worker; opening its history does not promote it to a root. Start
@@ -64,9 +66,9 @@ environment question from the root or change the target from the root tools.
 ## Review Results
 
 Treat worker output as evidence from a different environment, not as an automatically accepted
-change. Check the reported commands, platform, workspace revision, warnings, and artifact metadata.
-The v0 flow does not expose artifact payload download or apply and does not write worker changes
-back into the root workspace automatically.
+change. Check the reported commands, platform, workspace revision, both warning lists, and artifact
+metadata. The v0 flow does not expose artifact payload download or apply and does not write worker
+changes back into the root workspace automatically.
 
 Summarize the delegated task, target peer, result, verification evidence, and any artifact that
 still requires an explicit root-side apply decision.

@@ -58,7 +58,7 @@ type workspaceE2EScenario struct {
 	workerCommitMarker string
 	workerMarker       string
 	strategy           protocol.WorkspaceStrategy
-	warnings           []string
+	baseWarnings       []string
 }
 
 func createTopologyGitRepositories(
@@ -112,7 +112,7 @@ func createTopologyGitRepositories(
 			workerCommitMarker: "delegation-workspace-full-worker-commit",
 			workerMarker:       "delegation-workspace-full-worker-write",
 			strategy:           protocol.WorkspaceStrategyFull,
-			warnings:           []string{protocol.WorkspaceWarningFullHistoryFallback},
+			baseWarnings:       []string{protocol.WorkspaceWarningFullHistoryFallback},
 		},
 	}
 	for index := range scenarios {
@@ -332,10 +332,10 @@ func assertWorkspaceStrategyAndWarnings(
 		t.Fatalf("%s warnings %q are invalid: %v", location, warningsJSON, err)
 	}
 	if len(sourceWarnings) != 0 || strategy != string(scenario.strategy) ||
-		!slices.Equal(warnings, scenario.warnings) {
+		!slices.Equal(warnings, scenario.baseWarnings) {
 		t.Fatalf(
 			"%s strategy/source/final warnings = %q/%v/%v, want %q/[]/%v",
-			location, strategy, sourceWarnings, warnings, scenario.strategy, scenario.warnings,
+			location, strategy, sourceWarnings, warnings, scenario.strategy, scenario.baseWarnings,
 		)
 	}
 }
@@ -410,7 +410,8 @@ func waitForWorkspaceArtifact(
 		artifact.BaseManifestHash != manifestHash || artifact.BaseSnapshotHash != sourceSnapshotHash ||
 		artifact.ResultHeadOID != resultHead || artifact.ResultClean ||
 		len(artifact.ResultSnapshotHash) != 64 || artifact.FailureCode != "" ||
-		!slices.Equal(artifact.Warnings, scenario.warnings) {
+		!slices.Equal(artifact.BaseWarnings, scenario.baseWarnings) ||
+		len(artifact.ResultWarnings) != 0 {
 		t.Fatalf("workspace artifact metadata = %#v", artifact)
 	}
 	if len(artifact.Parts) != 2 || artifact.Parts[0].Kind != protocol.WorkspaceArtifactBundle ||
@@ -434,7 +435,8 @@ func assertPeerChangesArtifact(
 	var (
 		state, status, baseHead, baseManifest, baseSnapshot   string
 		resultHead, resultSnapshot, bundleName, bundleSHA     string
-		overlayName, overlaySHA, warningsJSON                 string
+		overlayName, overlaySHA, baseWarningsJSON             string
+		resultWarningsJSON                                    string
 		resultClean, baseClean                                bool
 		bundleSize, overlaySize, payloadBytes, brokerSequence int64
 	)
@@ -443,19 +445,22 @@ SELECT state, capture_status, base_head_oid, base_manifest_hash, base_snapshot_h
        base_clean, result_head_oid, result_snapshot_hash, result_clean,
        bundle_part_name, bundle_size_bytes, bundle_sha256,
        overlay_part_name, overlay_size_bytes, overlay_sha256,
-       warnings_json, payload_bytes, broker_sequence
+       base_warnings_json, result_warnings_json, payload_bytes, broker_sequence
 FROM peer_changes_artifacts
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND artifact_id = ?
 `, networkID, artifact.TreeID, artifact.SourceAgentID, artifact.ArtifactID).Scan(
 		&state, &status, &baseHead, &baseManifest, &baseSnapshot, &baseClean,
 		&resultHead, &resultSnapshot, &resultClean,
 		&bundleName, &bundleSize, &bundleSHA, &overlayName, &overlaySize, &overlaySHA,
-		&warningsJSON, &payloadBytes, &brokerSequence,
+		&baseWarningsJSON, &resultWarningsJSON, &payloadBytes, &brokerSequence,
 	); err != nil {
 		t.Fatal(err)
 	}
-	var warnings []string
-	if err := json.Unmarshal([]byte(warningsJSON), &warnings); err != nil {
+	var baseWarnings, resultWarnings []string
+	if err := json.Unmarshal([]byte(baseWarningsJSON), &baseWarnings); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(resultWarningsJSON), &resultWarnings); err != nil {
 		t.Fatal(err)
 	}
 	if state != "published" || status != string(artifact.Status) ||
@@ -466,7 +471,9 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND artifact_id = ?
 		bundleSize != artifact.Parts[0].Size || bundleSHA != artifact.Parts[0].SHA256 ||
 		overlayName != "changes-overlay.tar.zst" || overlaySize != artifact.Parts[1].Size ||
 		overlaySHA != artifact.Parts[1].SHA256 || payloadBytes != bundleSize+overlaySize ||
-		uint64(brokerSequence) != artifact.Sequence || !slices.Equal(warnings, artifact.Warnings) {
+		uint64(brokerSequence) != artifact.Sequence ||
+		!slices.Equal(baseWarnings, artifact.BaseWarnings) ||
+		!slices.Equal(resultWarnings, artifact.ResultWarnings) {
 		t.Fatalf("peer changes artifact does not match root metadata")
 	}
 }
@@ -482,30 +489,35 @@ func assertBrokerChangesArtifact(
 	var (
 		status, workspaceID, sourceAgentID, sourceDeviceID, baseHead string
 		baseManifest, baseSnapshot, resultHead, resultSnapshot       string
-		partsJSON, warningsJSON, failureCode                         string
+		partsJSON, baseWarningsJSON, resultWarningsJSON              string
+		failureCode                                                  string
 		baseClean, resultClean                                       bool
 		sequence                                                     uint64
 	)
 	if err := database.QueryRow(`
 SELECT status, workspace_id, source_agent_id, source_device_id, base_head_oid,
        base_manifest_hash, base_snapshot_hash, base_clean, result_head_oid,
-       result_snapshot_hash, result_clean, parts_json, warnings_json, failure_code,
-       artifact_sequence
+       result_snapshot_hash, result_clean, parts_json, base_warnings_json,
+       result_warnings_json, failure_code, artifact_sequence
 FROM changes_artifacts
 WHERE controller_id = ? AND tree_id = ? AND artifact_id = ?
 `, networkID, artifact.TreeID, artifact.ArtifactID).Scan(
 		&status, &workspaceID, &sourceAgentID, &sourceDeviceID, &baseHead,
 		&baseManifest, &baseSnapshot, &baseClean, &resultHead, &resultSnapshot,
-		&resultClean, &partsJSON, &warningsJSON, &failureCode, &sequence,
+		&resultClean, &partsJSON, &baseWarningsJSON, &resultWarningsJSON,
+		&failureCode, &sequence,
 	); err != nil {
 		t.Fatal(err)
 	}
 	var parts []protocol.WorkspaceArtifactDescriptor
-	var warnings []string
+	var baseWarnings, resultWarnings []string
 	if err := json.Unmarshal([]byte(partsJSON), &parts); err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal([]byte(warningsJSON), &warnings); err != nil {
+	if err := json.Unmarshal([]byte(baseWarningsJSON), &baseWarnings); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(resultWarningsJSON), &resultWarnings); err != nil {
 		t.Fatal(err)
 	}
 	if status != string(artifact.Status) || workspaceID != artifact.WorkspaceID ||
@@ -514,7 +526,9 @@ WHERE controller_id = ? AND tree_id = ? AND artifact_id = ?
 		baseSnapshot != artifact.BaseSnapshotHash || baseClean != artifact.BaseClean ||
 		resultHead != artifact.ResultHeadOID || resultSnapshot != artifact.ResultSnapshotHash ||
 		resultClean != artifact.ResultClean || !slices.Equal(parts, artifact.Parts) ||
-		!slices.Equal(warnings, artifact.Warnings) || failureCode != artifact.FailureCode ||
+		!slices.Equal(baseWarnings, artifact.BaseWarnings) ||
+		!slices.Equal(resultWarnings, artifact.ResultWarnings) ||
+		failureCode != artifact.FailureCode ||
 		sequence != artifact.Sequence {
 		t.Fatalf("broker changes artifact does not match root metadata")
 	}

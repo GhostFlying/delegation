@@ -193,6 +193,10 @@ untracked files. The target applies it only inside the managed workspace and ver
 Git snapshot before publishing it. Non-portable paths, unsupported index states or special files,
 and absolute or escaping dirty symlinks fail closed instead of being partially synchronized. LFS
 payloads and submodule repositories are not embedded; heed the corresponding sync warnings.
+Changes-artifact metadata keeps those prepared-workspace conditions in `base_warnings` and reports
+conditions observed while capturing the worker result separately in `result_warnings`. Treat the
+two lists as independent evidence; a clean result-warning list does not erase a base transfer
+warning.
 
 Call `spawn_agent` with a fresh `spawn_id` UUID, the same target, the returned `workspace_id`, a
 unique lowercase `task_name`, and a self-contained `message`. Tasks that do not need repository

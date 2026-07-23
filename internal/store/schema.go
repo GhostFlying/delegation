@@ -246,7 +246,11 @@ CREATE TABLE changes_artifacts (
 	),
 	result_clean INTEGER NOT NULL CHECK (result_clean IN (0, 1)),
 	parts_json TEXT NOT NULL CHECK (length(CAST(parts_json AS BLOB)) <= 1024),
-	warnings_json TEXT NOT NULL CHECK (length(CAST(warnings_json AS BLOB)) <= 2048),
+	base_warnings_json TEXT NOT NULL CHECK (length(CAST(base_warnings_json AS BLOB)) <= 2048),
+	result_warnings_json TEXT NOT NULL CHECK (
+		length(CAST(result_warnings_json AS BLOB)) <= 2048 AND
+		(status != 'captureFailed' OR result_warnings_json = '[]')
+	),
 	failure_code TEXT NOT NULL CHECK (
 		length(CAST(failure_code AS BLOB)) <= 64 AND
 		((status = 'captureFailed' AND length(failure_code) > 0) OR

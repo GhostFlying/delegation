@@ -29,7 +29,8 @@ type PublishChangesArtifactParams struct {
 	ResultSnapshotHash string                        `json:"resultSnapshotHash"`
 	ResultClean        bool                          `json:"resultClean"`
 	Parts              []WorkspaceArtifactDescriptor `json:"parts"`
-	Warnings           []string                      `json:"warnings"`
+	BaseWarnings       []string                      `json:"baseWarnings"`
+	ResultWarnings     []string                      `json:"resultWarnings"`
 	FailureCode        string                        `json:"failureCode"`
 }
 
@@ -52,8 +53,14 @@ func (p PublishChangesArtifactParams) Validate() error {
 	if !sha256DigestPattern.MatchString(p.BaseSnapshotHash) {
 		return errors.New("baseSnapshotHash must be a lowercase SHA-256 digest")
 	}
-	if err := ValidateWorkspaceWarnings(p.Warnings); err != nil {
-		return err
+	if err := ValidateWorkspaceWarnings(p.BaseWarnings); err != nil {
+		return fmt.Errorf("baseWarnings: %w", err)
+	}
+	if err := ValidateWorkspaceSourceWarnings(p.ResultWarnings); err != nil {
+		return fmt.Errorf("resultWarnings: %w", err)
+	}
+	if p.Status == ChangesArtifactCaptureFailed && len(p.ResultWarnings) != 0 {
+		return errors.New("failed changes artifact must not contain resultWarnings")
 	}
 
 	switch p.Status {
@@ -169,7 +176,8 @@ type ChangesArtifactMetadata struct {
 	ResultSnapshotHash string                        `json:"resultSnapshotHash"`
 	ResultClean        bool                          `json:"resultClean"`
 	Parts              []WorkspaceArtifactDescriptor `json:"parts"`
-	Warnings           []string                      `json:"warnings"`
+	BaseWarnings       []string                      `json:"baseWarnings"`
+	ResultWarnings     []string                      `json:"resultWarnings"`
 	FailureCode        string                        `json:"failureCode"`
 	Sequence           uint64                        `json:"sequence"`
 	ObservedAt         int64                         `json:"observedAt"`
@@ -190,8 +198,8 @@ func (m ChangesArtifactMetadata) Validate() error {
 		Status: m.Status, BaseHeadOID: m.BaseHeadOID,
 		BaseManifestHash: m.BaseManifestHash, BaseSnapshotHash: m.BaseSnapshotHash,
 		ResultHeadOID: m.ResultHeadOID, ResultSnapshotHash: m.ResultSnapshotHash,
-		ResultClean: m.ResultClean, Parts: m.Parts, Warnings: m.Warnings,
-		FailureCode: m.FailureCode,
+		ResultClean: m.ResultClean, Parts: m.Parts, BaseWarnings: m.BaseWarnings,
+		ResultWarnings: m.ResultWarnings, FailureCode: m.FailureCode,
 	}
 	if err := p.Validate(); err != nil {
 		return err
@@ -223,6 +231,7 @@ func SameChangesArtifactParams(left, right PublishChangesArtifactParams) bool {
 		left.BaseHeadOID == right.BaseHeadOID && left.BaseManifestHash == right.BaseManifestHash &&
 		left.BaseSnapshotHash == right.BaseSnapshotHash && left.ResultHeadOID == right.ResultHeadOID &&
 		left.ResultSnapshotHash == right.ResultSnapshotHash && left.ResultClean == right.ResultClean &&
-		slices.Equal(left.Parts, right.Parts) && slices.Equal(left.Warnings, right.Warnings) &&
+		slices.Equal(left.Parts, right.Parts) && slices.Equal(left.BaseWarnings, right.BaseWarnings) &&
+		slices.Equal(left.ResultWarnings, right.ResultWarnings) &&
 		left.FailureCode == right.FailureCode
 }

@@ -174,7 +174,7 @@ func (m *mockResponses) rootAgentScriptFor(testCase string) (rootAgentScript, bo
 		switch phase {
 		case "sync":
 			expected := []string{scenario.syncID, string(scenario.strategy)}
-			expected = append(expected, scenario.warnings...)
+			expected = append(expected, scenario.baseWarnings...)
 			return rootAgentScript{
 				tool: "sync_workspace", query: "delegation synchronize exact Git workspace on peer",
 				arguments: map[string]any{

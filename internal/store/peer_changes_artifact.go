@@ -83,11 +83,12 @@ type ChangesArtifact struct {
 	BaseClean             bool
 	BaseManifestHash      string
 	BaseSnapshotHash      string
+	BaseWarnings          []string
 	ResultHeadOID         string
 	ResultSnapshotHash    string
 	ResultClean           bool
 	Parts                 []ChangesArtifactPart
-	Warnings              []string
+	ResultWarnings        []string
 	FailureCode           string
 	RetentionReserved     bool
 	ReservedBytes         int64
@@ -108,7 +109,7 @@ type ChangesCaptureResult struct {
 	ResultSnapshotHash string
 	ResultClean        bool
 	Parts              []ChangesArtifactPart
-	Warnings           []string
+	ResultWarnings     []string
 	FailureCode        string
 }
 
@@ -279,7 +280,7 @@ func (s *PeerStore) CompleteChangesArtifactCapture(
 	if err != nil {
 		return ChangesArtifact{}, err
 	}
-	warningsJSON, err := json.Marshal(result.Warnings)
+	resultWarningsJSON, err := json.Marshal(append([]string{}, result.ResultWarnings...))
 	if err != nil {
 		return ChangesArtifact{}, err
 	}
@@ -315,7 +316,7 @@ func (s *PeerStore) CompleteChangesArtifactCapture(
 		artifact.ResultSnapshotHash = result.ResultSnapshotHash
 		artifact.ResultClean = result.ResultClean
 		artifact.Parts = slices.Clone(result.Parts)
-		artifact.Warnings = slices.Clone(result.Warnings)
+		artifact.ResultWarnings = slices.Clone(result.ResultWarnings)
 		artifact.FailureCode = result.FailureCode
 		artifact.PayloadBytes = changesPayloadBytes(result.Parts)
 		artifact.UpdatedAt = max(timestamp, artifact.UpdatedAt)
@@ -334,12 +335,12 @@ func (s *PeerStore) CompleteChangesArtifactCapture(
 UPDATE peer_changes_artifacts SET
 	state = ?, capture_status = ?, result_head_oid = ?, result_snapshot_hash = ?,
 	result_clean = ?, bundle_part_name = ?, bundle_size_bytes = ?, bundle_sha256 = ?,
-	overlay_part_name = ?, overlay_size_bytes = ?, overlay_sha256 = ?, warnings_json = ?,
+	overlay_part_name = ?, overlay_size_bytes = ?, overlay_sha256 = ?, result_warnings_json = ?,
 	failure_code = ?, retention_reserved = ?, reserved_bytes = ?, payload_bytes = ?, updated_at = ?
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND artifact_id = ?
 `, artifact.State, artifact.Status, artifact.ResultHeadOID, artifact.ResultSnapshotHash,
 			artifact.ResultClean, bundle.Name, bundle.SizeBytes, bundle.SHA256,
-			overlay.Name, overlay.SizeBytes, overlay.SHA256, string(warningsJSON),
+			overlay.Name, overlay.SizeBytes, overlay.SHA256, string(resultWarningsJSON),
 			artifact.FailureCode, artifact.RetentionReserved, artifact.ReservedBytes,
 			artifact.PayloadBytes, artifact.UpdatedAt,
 			artifact.ControllerID, artifact.TreeID, artifact.AgentID, artifact.ArtifactID); execErr != nil {
@@ -547,9 +548,14 @@ func beginWorkerFinalization(
 		ObjectFormat: workspace.ObjectFormat, BaseHeadOID: workspace.HeadOID,
 		BaseClean:        workspace.Clean,
 		BaseManifestHash: workspace.ManifestHash, BaseSnapshotHash: workspace.SourceSnapshotHash,
-		CreatedAt: timestamp, UpdatedAt: timestamp,
+		BaseWarnings: slices.Clone(workspace.Warnings),
+		CreatedAt:    timestamp, UpdatedAt: timestamp,
 	}
 	if err := artifact.Validate(); err != nil {
+		return WorkerFinalization{}, err
+	}
+	baseWarningsJSON, err := json.Marshal(append([]string{}, artifact.BaseWarnings...))
+	if err != nil {
 		return WorkerFinalization{}, err
 	}
 	if _, err := connection.ExecContext(ctx, `
@@ -565,12 +571,14 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND active_turn_id = ?
 INSERT INTO peer_changes_artifacts(
 	controller_id, tree_id, agent_id, turn_id, artifact_id, workspace_id,
 	completion_target_status, completion_failure_code, state, object_format,
-	base_head_oid, base_clean, base_manifest_hash, base_snapshot_hash, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	base_head_oid, base_clean, base_manifest_hash, base_snapshot_hash, base_warnings_json,
+	created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, artifact.ControllerID, artifact.TreeID, artifact.AgentID, artifact.TurnID,
 		artifact.ArtifactID, artifact.WorkspaceID, artifact.CompletionTarget,
 		artifact.CompletionFailureCode, artifact.State, artifact.ObjectFormat,
 		artifact.BaseHeadOID, artifact.BaseClean, artifact.BaseManifestHash, artifact.BaseSnapshotHash,
+		string(baseWarningsJSON),
 		artifact.CreatedAt, artifact.UpdatedAt); err != nil {
 		return WorkerFinalization{}, fmt.Errorf("create changes artifact: %w", err)
 	}
@@ -635,10 +643,11 @@ SELECT artifact.controller_id, artifact.tree_id, artifact.agent_id,
 	artifact.completion_target_status, artifact.completion_failure_code,
 	artifact.state, artifact.capture_status, artifact.object_format,
 	artifact.base_head_oid, artifact.base_clean, artifact.base_manifest_hash, artifact.base_snapshot_hash,
+	artifact.base_warnings_json,
 	artifact.result_head_oid, artifact.result_snapshot_hash, artifact.result_clean,
 	artifact.bundle_part_name, artifact.bundle_size_bytes, artifact.bundle_sha256,
 	artifact.overlay_part_name, artifact.overlay_size_bytes, artifact.overlay_sha256,
-	artifact.warnings_json, artifact.failure_code, artifact.retention_reserved,
+	artifact.result_warnings_json, artifact.failure_code, artifact.retention_reserved,
 	artifact.reserved_bytes, artifact.payload_bytes, artifact.broker_sequence,
 	artifact.created_at, artifact.updated_at
 FROM peer_changes_artifacts AS artifact
@@ -647,17 +656,18 @@ FROM peer_changes_artifacts AS artifact
 func scanPeerChangesArtifact(scanner rowScanner) (ChangesArtifact, error) {
 	var artifact ChangesArtifact
 	var bundle, overlay ChangesArtifactPart
-	var warningsJSON string
+	var baseWarningsJSON, resultWarningsJSON string
 	if err := scanner.Scan(
 		&artifact.ControllerID, &artifact.TreeID, &artifact.AgentID,
 		&artifact.TurnID, &artifact.ArtifactID, &artifact.WorkspaceID,
 		&artifact.CompletionTarget, &artifact.CompletionFailureCode,
 		&artifact.State, &artifact.Status, &artifact.ObjectFormat,
 		&artifact.BaseHeadOID, &artifact.BaseClean, &artifact.BaseManifestHash, &artifact.BaseSnapshotHash,
+		&baseWarningsJSON,
 		&artifact.ResultHeadOID, &artifact.ResultSnapshotHash, &artifact.ResultClean,
 		&bundle.Name, &bundle.SizeBytes, &bundle.SHA256,
 		&overlay.Name, &overlay.SizeBytes, &overlay.SHA256,
-		&warningsJSON, &artifact.FailureCode, &artifact.RetentionReserved,
+		&resultWarningsJSON, &artifact.FailureCode, &artifact.RetentionReserved,
 		&artifact.ReservedBytes, &artifact.PayloadBytes, &artifact.BrokerSequence,
 		&artifact.CreatedAt, &artifact.UpdatedAt,
 	); errors.Is(err, sql.ErrNoRows) {
@@ -673,8 +683,11 @@ func scanPeerChangesArtifact(scanner rowScanner) (ChangesArtifact, error) {
 		overlay.Kind = ChangesArtifactOverlay
 		artifact.Parts = append(artifact.Parts, overlay)
 	}
-	if err := json.Unmarshal([]byte(warningsJSON), &artifact.Warnings); err != nil {
-		return ChangesArtifact{}, errors.New("stored changes artifact warnings are invalid")
+	if err := json.Unmarshal([]byte(baseWarningsJSON), &artifact.BaseWarnings); err != nil {
+		return ChangesArtifact{}, errors.New("stored changes artifact base warnings are invalid")
+	}
+	if err := json.Unmarshal([]byte(resultWarningsJSON), &artifact.ResultWarnings); err != nil {
+		return ChangesArtifact{}, errors.New("stored changes artifact result warnings are invalid")
 	}
 	if err := artifact.Validate(); err != nil {
 		return ChangesArtifact{}, fmt.Errorf("stored changes artifact is invalid: %w", err)
@@ -707,6 +720,9 @@ func (a ChangesArtifact) Validate() error {
 	if err := validateDigest("baseSnapshotHash", a.BaseSnapshotHash); err != nil {
 		return err
 	}
+	if err := protocol.ValidateWorkspaceWarnings(a.BaseWarnings); err != nil {
+		return fmt.Errorf("base warnings: %w", err)
+	}
 	if a.CreatedAt < 0 || a.UpdatedAt < a.CreatedAt {
 		return errors.New("changes artifact timestamps are invalid")
 	}
@@ -720,7 +736,7 @@ func (a ChangesArtifact) Validate() error {
 	switch a.State {
 	case ChangesCapturePending:
 		if a.Status != "" || a.ResultHeadOID != "" || a.ResultSnapshotHash != "" ||
-			a.ResultClean || len(a.Parts) != 0 || len(a.Warnings) != 0 || a.FailureCode != "" ||
+			a.ResultClean || len(a.Parts) != 0 || len(a.ResultWarnings) != 0 || a.FailureCode != "" ||
 			a.PayloadBytes != 0 || a.BrokerSequence != 0 {
 			return errors.New("capture-pending changes artifact contains capture output")
 		}
@@ -728,7 +744,7 @@ func (a ChangesArtifact) Validate() error {
 		result := ChangesCaptureResult{
 			Status: a.Status, ResultHeadOID: a.ResultHeadOID,
 			ResultSnapshotHash: a.ResultSnapshotHash, ResultClean: a.ResultClean,
-			Parts: a.Parts, Warnings: a.Warnings, FailureCode: a.FailureCode,
+			Parts: a.Parts, ResultWarnings: a.ResultWarnings, FailureCode: a.FailureCode,
 		}
 		if err := validateChangesCaptureForArtifact(a, result); err != nil {
 			return err
@@ -788,8 +804,8 @@ func validateChangesCaptureResult(result ChangesCaptureResult) error {
 	if !result.Status.valid() {
 		return fmt.Errorf("unsupported changes capture status %q", result.Status)
 	}
-	if err := protocol.ValidateWorkspaceWarnings(result.Warnings); err != nil {
-		return err
+	if err := protocol.ValidateWorkspaceSourceWarnings(result.ResultWarnings); err != nil {
+		return fmt.Errorf("result warnings: %w", err)
 	}
 	if err := validateFailureCode(result.FailureCode); err != nil {
 		return err
@@ -819,7 +835,7 @@ func validateChangesCaptureResult(result ChangesCaptureResult) error {
 		}
 	case ChangesCaptureFailed:
 		if result.ResultHeadOID != "" || result.ResultSnapshotHash != "" || result.ResultClean ||
-			len(result.Parts) != 0 || result.FailureCode == "" {
+			len(result.Parts) != 0 || len(result.ResultWarnings) != 0 || result.FailureCode == "" {
 			return errors.New("failed changes capture details are invalid")
 		}
 	}
@@ -949,7 +965,7 @@ func sameChangesCapture(artifact ChangesArtifact, result ChangesCaptureResult) b
 		artifact.ResultSnapshotHash == result.ResultSnapshotHash &&
 		artifact.ResultClean == result.ResultClean &&
 		slices.Equal(artifact.Parts, result.Parts) &&
-		slices.Equal(artifact.Warnings, result.Warnings) &&
+		slices.Equal(artifact.ResultWarnings, result.ResultWarnings) &&
 		artifact.FailureCode == result.FailureCode
 }
 

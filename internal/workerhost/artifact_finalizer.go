@@ -175,7 +175,7 @@ func (h *Host) processPendingArtifactFinalizations(ctx context.Context) error {
 func (h *Host) captureChangesArtifact(ctx context.Context, artifact store.ChangesArtifact) error {
 	workspace, err := h.loadChangesWorkspace(ctx, artifact)
 	if err != nil {
-		return h.completeFailedChangesCapture(ctx, artifact, nil, changesCaptureFailureCode, err)
+		return h.completeFailedChangesCapture(ctx, artifact, changesCaptureFailureCode, err)
 	}
 	_, err = h.state.ReserveChangesArtifactPayload(
 		ctx,
@@ -186,7 +186,7 @@ func (h *Host) captureChangesArtifact(ctx context.Context, artifact store.Change
 	)
 	if errors.Is(err, store.ErrChangesArtifactQuota) {
 		return h.completeFailedChangesCapture(
-			ctx, artifact, workspace.Warnings, changesArtifactQuotaCode, err,
+			ctx, artifact, changesArtifactQuotaCode, err,
 		)
 	}
 	if err != nil {
@@ -198,7 +198,7 @@ func (h *Host) captureChangesArtifact(ctx context.Context, artifact store.Change
 	}
 	if err := h.removeChangesArtifactDirectories(ctx, pendingName, finalName); err != nil {
 		return h.completeFailedChangesCapture(
-			ctx, artifact, workspace.Warnings, changesCaptureFailureCode, err,
+			ctx, artifact, changesCaptureFailureCode, err,
 		)
 	}
 	manifest := protocol.WorkspaceManifest{
@@ -217,27 +217,27 @@ func (h *Host) captureChangesArtifact(ctx context.Context, artifact store.Change
 			return ctx.Err()
 		}
 		return h.completeFailedChangesCapture(
-			ctx, artifact, workspace.Warnings, changesCaptureFailureCode, err,
+			ctx, artifact, changesCaptureFailureCode, err,
 		)
 	}
-	result, err := changesCaptureResult(capture, pendingPath, workspace.Warnings)
+	result, err := changesCaptureResult(capture, pendingPath)
 	if err != nil {
 		_ = h.removeChangesArtifactDirectories(context.Background(), pendingName, finalName)
 		return h.completeFailedChangesCapture(
-			ctx, artifact, workspace.Warnings, changesCaptureFailureCode, err,
+			ctx, artifact, changesCaptureFailureCode, err,
 		)
 	}
 	if err := h.artifactRoot.Rename(pendingName, finalName); err != nil {
 		_ = h.removeChangesArtifactDirectories(context.Background(), pendingName, finalName)
 		return h.completeFailedChangesCapture(
-			ctx, artifact, workspace.Warnings, changesCaptureFailureCode, err,
+			ctx, artifact, changesCaptureFailureCode, err,
 		)
 	}
 	if err := syncDirectory(h.artifactRoot); err != nil {
 		_ = h.artifactRoot.RemoveAll(finalName)
 		_ = syncDirectory(h.artifactRoot)
 		return h.completeFailedChangesCapture(
-			ctx, artifact, workspace.Warnings, changesCaptureFailureCode, err,
+			ctx, artifact, changesCaptureFailureCode, err,
 		)
 	}
 	if _, err := h.state.CompleteChangesArtifactCapture(
@@ -282,7 +282,8 @@ func (h *Host) loadChangesWorkspace(
 		workspace.TargetDeviceID != h.deviceID || artifact.BaseHeadOID != workspace.HeadOID ||
 		artifact.ObjectFormat != workspace.ObjectFormat || artifact.BaseClean != workspace.Clean ||
 		artifact.BaseManifestHash != manifestHash || artifact.BaseManifestHash != workspace.ManifestHash ||
-		artifact.BaseSnapshotHash != workspace.SourceSnapshotHash {
+		artifact.BaseSnapshotHash != workspace.SourceSnapshotHash ||
+		!slices.Equal(artifact.BaseWarnings, workspace.Warnings) {
 		return store.PreparedWorkspace{}, store.ErrChangesArtifactAuthority
 	}
 	if err := h.verifyPreparedWorkspace(ctx, workspace); err != nil {
@@ -294,7 +295,6 @@ func (h *Host) loadChangesWorkspace(
 func (h *Host) completeFailedChangesCapture(
 	ctx context.Context,
 	artifact store.ChangesArtifact,
-	warnings []string,
 	failureCode string,
 	cause error,
 ) error {
@@ -312,7 +312,6 @@ func (h *Host) completeFailedChangesCapture(
 		artifact.ArtifactID,
 		store.ChangesCaptureResult{
 			Status:      store.ChangesCaptureFailed,
-			Warnings:    slices.Clone(warnings),
 			FailureCode: failureCode,
 		},
 		time.Now(),
@@ -344,7 +343,6 @@ func (h *Host) removeChangesArtifactDirectories(ctx context.Context, names ...st
 func changesCaptureResult(
 	capture gitworkspace.ResultCapture,
 	expectedDirectory string,
-	warnings []string,
 ) (store.ChangesCaptureResult, error) {
 	if capture.ArtifactDirectory != expectedDirectory {
 		return store.ChangesCaptureResult{}, errors.New("Git capture returned an unexpected artifact directory")
@@ -354,7 +352,7 @@ func changesCaptureResult(
 		ResultHeadOID:      capture.ResultHeadOID,
 		ResultSnapshotHash: capture.ResultSnapshotHash,
 		ResultClean:        capture.ResultClean,
-		Warnings:           slices.Clone(warnings),
+		ResultWarnings:     slices.Clone(capture.ResultWarnings),
 	}
 	if capture.Unchanged {
 		result.Status = store.ChangesUnchanged

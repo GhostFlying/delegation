@@ -320,7 +320,7 @@ func testChangesArtifactPublication() ChangesArtifactPublication {
 			Parts: []protocol.WorkspaceArtifactDescriptor{{
 				Kind: protocol.WorkspaceArtifactBundle, Size: 32, SHA256: strings.Repeat("f", 64),
 			}},
-			Warnings: []string{},
+			BaseWarnings: []string{}, ResultWarnings: []string{},
 		},
 	}
 }
@@ -402,6 +402,7 @@ func cloneChangesArtifactPublications(
 
 func cloneChangesArtifactPublication(publication ChangesArtifactPublication) ChangesArtifactPublication {
 	publication.Params.Parts = append([]protocol.WorkspaceArtifactDescriptor(nil), publication.Params.Parts...)
-	publication.Params.Warnings = append([]string(nil), publication.Params.Warnings...)
+	publication.Params.BaseWarnings = append([]string(nil), publication.Params.BaseWarnings...)
+	publication.Params.ResultWarnings = append([]string(nil), publication.Params.ResultWarnings...)
 	return publication
 }

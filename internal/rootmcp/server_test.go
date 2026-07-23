@@ -654,6 +654,11 @@ func TestRootMCPOutputIsBounded(t *testing.T) {
 		!strings.Contains(serverInstructions, "may contain deleted content") {
 		t.Fatal("root MCP instructions do not explain the full-history fallback warning")
 	}
+	for _, expected := range []string{"base_warnings", "result_warnings"} {
+		if !strings.Contains(serverInstructions, expected) {
+			t.Fatalf("root MCP instructions do not explain artifact metadata %q", expected)
+		}
+	}
 	features := make([]string, 64)
 	for index := range features {
 		features[index] = fmt.Sprintf("F%02d%s", index, strings.Repeat("x", 61))

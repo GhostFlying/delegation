@@ -71,7 +71,8 @@ type AgentArtifactOutput struct {
 	ResultSnapshotHash string                         `json:"result_snapshot_hash,omitempty"`
 	ResultClean        bool                           `json:"result_clean"`
 	Parts              []AgentArtifactPartOutput      `json:"parts"`
-	Warnings           []string                       `json:"warnings"`
+	BaseWarnings       []string                       `json:"base_warnings"`
+	ResultWarnings     []string                       `json:"result_warnings"`
 	FailureCode        string                         `json:"failure_code,omitempty"`
 	Sequence           uint64                         `json:"sequence"`
 	ObservedAt         int64                          `json:"observed_at"`
@@ -323,8 +324,10 @@ func waitAgentOutput(result protocol.WaitAgentResult) WaitAgentOutput {
 			BaseSnapshotHash: artifact.BaseSnapshotHash, BaseClean: artifact.BaseClean,
 			ResultHeadOID:      artifact.ResultHeadOID,
 			ResultSnapshotHash: artifact.ResultSnapshotHash, ResultClean: artifact.ResultClean,
-			Parts: parts, Warnings: append([]string{}, artifact.Warnings...),
-			FailureCode: artifact.FailureCode, Sequence: artifact.Sequence,
+			Parts:          parts,
+			BaseWarnings:   append([]string{}, artifact.BaseWarnings...),
+			ResultWarnings: append([]string{}, artifact.ResultWarnings...),
+			FailureCode:    artifact.FailureCode, Sequence: artifact.Sequence,
 			ObservedAt: artifact.ObservedAt,
 		})
 	}

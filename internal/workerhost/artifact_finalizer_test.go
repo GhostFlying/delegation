@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,7 +40,21 @@ func TestWorkspaceCompletionPublishesCommittedAndDirtyChangesBeforeTerminalState
 	); err != nil {
 		t.Fatal(err)
 	}
-	runTestGit(t, workspacePath, "add", "nested/source.txt")
+	if err := os.WriteFile(
+		filepath.Join(workspacePath, ".gitattributes"), []byte("*.bin filter=lfs\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(workspacePath, "large.bin"),
+		[]byte("version https://git-lfs.github.com/spec/v1\noid sha256:"+strings.Repeat("a", 64)+"\nsize 1\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	baseHead := outputTestGit(t, workspacePath, "rev-parse", "HEAD^{commit}")
+	runTestGit(t, workspacePath, "add", "nested/source.txt", ".gitattributes", "large.bin")
+	runTestGit(t, workspacePath, "update-index", "--add", "--cacheinfo", "160000,"+baseHead+",vendor/module")
 	runTestGit(
 		t, workspacePath, "-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid",
 		"commit", "-m", "worker commit",
@@ -54,7 +70,11 @@ func TestWorkspaceCompletionPublishesCommittedAndDirtyChangesBeforeTerminalState
 	worker := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerFinalizing)
 	if worker.FinalTarget != store.WorkerIdle || artifact.Status != store.ChangesAvailable ||
 		len(artifact.Parts) != 2 || artifact.Parts[0].Kind != store.ChangesArtifactBundle ||
-		artifact.Parts[1].Kind != store.ChangesArtifactOverlay {
+		artifact.Parts[1].Kind != store.ChangesArtifactOverlay || len(artifact.BaseWarnings) != 0 ||
+		!slices.Equal(artifact.ResultWarnings, []string{
+			protocol.WorkspaceWarningLFSPayloadNotTransferred,
+			protocol.WorkspaceWarningSubmoduleRepositoryNotTransferred,
+		}) {
 		t.Fatalf("finalizing worker/artifact = %#v / %#v", worker, artifact)
 	}
 	artifactDirectory := filepath.Join(
@@ -175,6 +195,23 @@ func TestCaptureFailureIsPublishedAndFailsOnlyAfterACK(t *testing.T) {
 	host, state, _ := newTestHostWithStateSetup(t, 1, "", func(state *store.PeerStore, root string) {
 		workspacePath = filepath.Join(root, workspaceSyncName(testTreeID, workspaceID))
 		initializeTestRepository(t, workspacePath)
+		if err := os.WriteFile(
+			filepath.Join(workspacePath, ".gitattributes"), []byte("*.bin filter=lfs\n"), 0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(workspacePath, "base.bin"),
+			[]byte("version https://git-lfs.github.com/spec/v1\noid sha256:"+strings.Repeat("b", 64)+"\nsize 1\n"),
+			0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		runTestGit(t, workspacePath, "add", ".gitattributes", "base.bin")
+		runTestGit(
+			t, workspacePath, "-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid",
+			"commit", "-m", "add base LFS marker",
+		)
 		recordExactPreparedWorkspace(t, state, testTreeID, workspaceID, workspacePath)
 	}, application)
 	started, err := host.Spawn(context.Background(), SpawnRequest{
@@ -194,7 +231,10 @@ func TestCaptureFailureIsPublishedAndFailsOnlyAfterACK(t *testing.T) {
 	artifact := waitChangesPublication(t, host)
 	worker := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerFinalizing)
 	if artifact.Status != store.ChangesCaptureFailed ||
-		artifact.FailureCode != changesCaptureFailureCode || worker.FinalTarget != store.WorkerFailed {
+		artifact.FailureCode != changesCaptureFailureCode || worker.FinalTarget != store.WorkerFailed ||
+		!slices.Equal(artifact.BaseWarnings, []string{
+			protocol.WorkspaceWarningLFSPayloadNotTransferred,
+		}) || len(artifact.ResultWarnings) != 0 {
 		t.Fatalf("failed capture = %#v / %#v", worker, artifact)
 	}
 	finalization, err := host.AcknowledgeChangesArtifact(

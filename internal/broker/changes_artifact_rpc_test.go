@@ -94,8 +94,9 @@ func TestPublishChangesArtifactWakesRootAndReplaysExactly(t *testing.T) {
 		BaseSnapshotHash: fixture.params.BaseSnapshotHash, BaseClean: fixture.manifest.Clean,
 		ResultHeadOID:      fixture.params.ResultHeadOID,
 		ResultSnapshotHash: fixture.params.ResultSnapshotHash, ResultClean: fixture.params.ResultClean,
-		Parts: fixture.params.Parts, Warnings: fixture.params.Warnings,
-		FailureCode: fixture.params.FailureCode, Sequence: 1, ObservedAt: artifact.ObservedAt,
+		Parts: fixture.params.Parts, BaseWarnings: fixture.params.BaseWarnings,
+		ResultWarnings: fixture.params.ResultWarnings,
+		FailureCode:    fixture.params.FailureCode, Sequence: 1, ObservedAt: artifact.ObservedAt,
 	}
 	if artifact.ObservedAt <= 0 || !reflect.DeepEqual(artifact, wantArtifact) {
 		t.Fatalf("published artifact metadata = %#v, want %#v", artifact, wantArtifact)
@@ -329,7 +330,7 @@ func prepareBrokerChangesFixture(
 		Parts: []protocol.WorkspaceArtifactDescriptor{{
 			Kind: protocol.WorkspaceArtifactBundle, Size: 64, SHA256: strings.Repeat("f", 64),
 		}},
-		Warnings: []string{},
+		BaseWarnings: append([]string{}, manifest.Warnings...), ResultWarnings: []string{},
 	}
 	return brokerChangesFixture{
 		worker: control.NewWorkerPrincipal(

@@ -24,6 +24,7 @@ const (
 func TestChangesArtifactPublishIsMetadataOnlyAndExactlyIdempotent(t *testing.T) {
 	registry, root, worker, manifest, manifestHash := prepareChangesArtifactStore(t, true, true)
 	params := testChangesArtifactParams(manifest, manifestHash)
+	params.ResultWarnings = []string{"submodule_repository_not_transferred"}
 	ctx := context.Background()
 	created, err := registry.PublishChangesArtifact(
 		ctx, worker.DeviceID, worker, params, time.Unix(20, 0),
@@ -54,7 +55,8 @@ func TestChangesArtifactPublishIsMetadataOnlyAndExactlyIdempotent(t *testing.T) 
 		BaseManifestHash: params.BaseManifestHash, BaseSnapshotHash: params.BaseSnapshotHash,
 		BaseClean: manifest.Clean, ResultHeadOID: params.ResultHeadOID,
 		ResultSnapshotHash: params.ResultSnapshotHash, ResultClean: params.ResultClean,
-		Parts: params.Parts, Warnings: params.Warnings, FailureCode: params.FailureCode,
+		Parts: params.Parts, BaseWarnings: params.BaseWarnings,
+		ResultWarnings: params.ResultWarnings, FailureCode: params.FailureCode,
 		Sequence: 1, ObservedAt: 20,
 	}
 	if !reflect.DeepEqual(page.Artifacts[0], want) {
@@ -84,6 +86,7 @@ func TestChangesArtifactPublishRejectsArtifactAndTurnConflictsAtomically(t *test
 	registry, _, worker, manifest, manifestHash := prepareChangesArtifactStore(t, true, true)
 	ctx := context.Background()
 	params := testChangesArtifactParams(manifest, manifestHash)
+	params.ResultWarnings = []string{"lfs_payload_not_transferred"}
 	if _, err := registry.PublishChangesArtifact(
 		ctx, worker.DeviceID, worker, params, time.Unix(20, 0),
 	); err != nil {
@@ -101,6 +104,9 @@ func TestChangesArtifactPublishRejectsArtifactAndTurnConflictsAtomically(t *test
 		}},
 		{name: "same keys changed result", mutate: func(value *protocol.PublishChangesArtifactParams) {
 			value.ResultSnapshotHash = strings.Repeat("9", 64)
+		}},
+		{name: "same keys changed result warnings", mutate: func(value *protocol.PublishChangesArtifactParams) {
+			value.ResultWarnings = []string{"submodule_repository_not_transferred"}
 		}},
 	}
 	for _, test := range tests {
@@ -153,7 +159,7 @@ func TestChangesArtifactPublishEnforcesConnectionPrincipalSpawnAndWorkspaceAutho
 			params.BaseSnapshotHash = strings.Repeat("9", 64)
 		}, wantError: ErrConflict},
 		{name: "changed workspace warnings", started: true, mutate: func(_ *string, _ *control.PrincipalIdentity, params *protocol.PublishChangesArtifactParams) {
-			params.Warnings = []string{"submodule_payload_not_included"}
+			params.BaseWarnings = []string{"submodule_repository_not_transferred"}
 		}, wantError: ErrConflict},
 	}
 	for _, test := range tests {
@@ -229,6 +235,7 @@ func TestChangesArtifactCaptureFailurePublishesBoundedDiagnosticMetadata(t *test
 	params.ResultSnapshotHash = ""
 	params.ResultClean = false
 	params.Parts = []protocol.WorkspaceArtifactDescriptor{}
+	params.ResultWarnings = []string{}
 	params.FailureCode = "changes_capture_failed"
 	if _, err := registry.PublishChangesArtifact(
 		context.Background(), worker.DeviceID, worker, params, time.Unix(20, 0),
@@ -240,7 +247,9 @@ func TestChangesArtifactCaptureFailurePublishesBoundedDiagnosticMetadata(t *test
 	)
 	if err != nil || len(page.Artifacts) != 1 ||
 		page.Artifacts[0].Status != protocol.ChangesArtifactCaptureFailed ||
-		page.Artifacts[0].FailureCode != params.FailureCode || len(page.Artifacts[0].Parts) != 0 {
+		page.Artifacts[0].FailureCode != params.FailureCode || len(page.Artifacts[0].Parts) != 0 ||
+		!reflect.DeepEqual(page.Artifacts[0].BaseWarnings, manifest.Warnings) ||
+		len(page.Artifacts[0].ResultWarnings) != 0 {
 		t.Fatalf("capture failure page = %#v, error %v", page, err)
 	}
 }
@@ -311,6 +320,7 @@ func prepareChangesArtifactStore(
 	ctx := context.Background()
 	manifest := testWorkspaceManifest("ssh://git@example.invalid/changes.git")
 	manifest.Clean = baseClean
+	manifest.Warnings = []string{"lfs_payload_not_transferred"}
 	intent := WorkspaceSyncIntent{
 		Source: root.Identity(), SyncID: changesWorkspaceID,
 		TargetDeviceID: agentSpawnTargetID, GitURL: manifest.GitURL,
@@ -367,6 +377,6 @@ func testChangesArtifactParams(
 		Parts: []protocol.WorkspaceArtifactDescriptor{{
 			Kind: protocol.WorkspaceArtifactBundle, Size: 64, SHA256: strings.Repeat("f", 64),
 		}},
-		Warnings: []string{},
+		BaseWarnings: append([]string{}, manifest.Warnings...), ResultWarnings: []string{},
 	}
 }

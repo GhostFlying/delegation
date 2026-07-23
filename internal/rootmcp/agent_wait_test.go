@@ -410,7 +410,8 @@ func TestMaximumWaitAgentPageFitsOutputLimit(t *testing.T) {
 	for index := range protocol.MaximumWorkspaceWarnings {
 		warnings = append(warnings, fmt.Sprintf("warning_%02d_%s", index, strings.Repeat("x", 53)))
 	}
-	result.Artifacts[0].Warnings = warnings
+	result.Artifacts[0].BaseWarnings = warnings
+	result.Artifacts[0].ResultWarnings = append([]string{}, warnings...)
 	result.Artifacts[0].ObjectFormat = "sha256"
 	result.Artifacts[0].BaseHeadOID = strings.Repeat("a", 64)
 	result.Artifacts[0].BaseClean = false
@@ -455,7 +456,7 @@ func rootMCPChangesArtifact(status protocol.ChangesArtifactStatus) protocol.Chan
 		ObjectFormat: "sha1", BaseHeadOID: strings.Repeat("a", 40),
 		BaseManifestHash: strings.Repeat("b", 64), BaseSnapshotHash: strings.Repeat("c", 64),
 		BaseClean: true, Sequence: 1, ObservedAt: 11,
-		Warnings: []string{},
+		BaseWarnings: []string{}, ResultWarnings: []string{},
 	}
 	switch status {
 	case protocol.ChangesArtifactAvailable:
@@ -465,7 +466,11 @@ func rootMCPChangesArtifact(status protocol.ChangesArtifactStatus) protocol.Chan
 			{Kind: protocol.WorkspaceArtifactBundle, Size: 32, SHA256: strings.Repeat("f", 64)},
 			{Kind: protocol.WorkspaceArtifactOverlay, Size: 48, SHA256: strings.Repeat("9", 64)},
 		}
-		artifact.Warnings = []string{"lfs_payload_not_transferred", "submodule_payload_not_included"}
+		artifact.BaseWarnings = []string{protocol.WorkspaceWarningFullHistoryFallback}
+		artifact.ResultWarnings = []string{
+			protocol.WorkspaceWarningLFSPayloadNotTransferred,
+			protocol.WorkspaceWarningSubmoduleRepositoryNotTransferred,
+		}
 	case protocol.ChangesArtifactUnchanged:
 		artifact.BaseClean = false
 		artifact.ResultHeadOID = artifact.BaseHeadOID
@@ -473,7 +478,7 @@ func rootMCPChangesArtifact(status protocol.ChangesArtifactStatus) protocol.Chan
 		artifact.Parts = []protocol.WorkspaceArtifactDescriptor{}
 	case protocol.ChangesArtifactCaptureFailed:
 		artifact.Parts = []protocol.WorkspaceArtifactDescriptor{}
-		artifact.Warnings = []string{"submodule_payload_not_included"}
+		artifact.BaseWarnings = []string{protocol.WorkspaceWarningSubmoduleRepositoryNotTransferred}
 		artifact.FailureCode = "changes_capture_failed"
 	}
 	return artifact
@@ -494,8 +499,9 @@ func agentArtifactOutput(artifact protocol.ChangesArtifactMetadata) AgentArtifac
 		BaseManifestHash: artifact.BaseManifestHash, BaseSnapshotHash: artifact.BaseSnapshotHash,
 		BaseClean: artifact.BaseClean, ResultHeadOID: artifact.ResultHeadOID,
 		ResultSnapshotHash: artifact.ResultSnapshotHash, ResultClean: artifact.ResultClean,
-		Parts: parts, Warnings: append([]string{}, artifact.Warnings...),
-		FailureCode: artifact.FailureCode, Sequence: artifact.Sequence, ObservedAt: artifact.ObservedAt,
+		Parts: parts, BaseWarnings: append([]string{}, artifact.BaseWarnings...),
+		ResultWarnings: append([]string{}, artifact.ResultWarnings...),
+		FailureCode:    artifact.FailureCode, Sequence: artifact.Sequence, ObservedAt: artifact.ObservedAt,
 	}
 }
 

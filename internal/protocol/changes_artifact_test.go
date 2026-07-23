@@ -13,6 +13,8 @@ const (
 
 func TestChangesArtifactStatusesValidateTheirPayloadShape(t *testing.T) {
 	available := validChangesArtifactParams()
+	available.BaseWarnings = []string{WorkspaceWarningFullHistoryFallback}
+	available.ResultWarnings = []string{"lfs_payload_not_transferred"}
 	if err := available.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -31,9 +33,36 @@ func TestChangesArtifactStatusesValidateTheirPayloadShape(t *testing.T) {
 	failed.ResultSnapshotHash = ""
 	failed.ResultClean = false
 	failed.Parts = []WorkspaceArtifactDescriptor{}
+	failed.ResultWarnings = []string{}
 	failed.FailureCode = "changes_capture_failed"
 	if err := failed.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestChangesArtifactSeparatesBaseAndResultWarnings(t *testing.T) {
+	params := validChangesArtifactParams()
+	params.BaseWarnings = []string{WorkspaceWarningFullHistoryFallback}
+	params.ResultWarnings = []string{"submodule_repository_not_transferred"}
+	if err := params.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	invalidResult := params
+	invalidResult.ResultWarnings = []string{WorkspaceWarningFullHistoryFallback}
+	if err := invalidResult.Validate(); err == nil {
+		t.Fatal("result warnings accepted a workspace transport fallback warning")
+	}
+
+	failed := params
+	failed.Status = ChangesArtifactCaptureFailed
+	failed.ResultHeadOID = ""
+	failed.ResultSnapshotHash = ""
+	failed.ResultClean = false
+	failed.Parts = []WorkspaceArtifactDescriptor{}
+	failed.FailureCode = "changes_capture_failed"
+	if err := failed.Validate(); err == nil {
+		t.Fatal("failed changes artifact accepted result warnings")
 	}
 }
 
@@ -114,7 +143,7 @@ func validChangesArtifactParams() PublishChangesArtifactParams {
 		Parts: []WorkspaceArtifactDescriptor{{
 			Kind: WorkspaceArtifactBundle, Size: 32, SHA256: strings.Repeat("f", 64),
 		}},
-		Warnings: []string{},
+		BaseWarnings: []string{}, ResultWarnings: []string{},
 	}
 }
 
@@ -126,7 +155,8 @@ func changesArtifactMetadata(params PublishChangesArtifactParams) ChangesArtifac
 		BaseManifestHash: params.BaseManifestHash, BaseSnapshotHash: params.BaseSnapshotHash,
 		BaseClean: true, ResultHeadOID: params.ResultHeadOID,
 		ResultSnapshotHash: params.ResultSnapshotHash, ResultClean: params.ResultClean,
-		Parts: params.Parts, Warnings: params.Warnings, FailureCode: params.FailureCode,
+		Parts: params.Parts, BaseWarnings: params.BaseWarnings,
+		ResultWarnings: params.ResultWarnings, FailureCode: params.FailureCode,
 		Sequence: 1, ObservedAt: 1,
 	}
 }

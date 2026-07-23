@@ -100,7 +100,8 @@ func TestManagedChangesArtifactSourceMapsAndAcknowledgesDurableOutbox(t *testing
 				{Kind: protocol.WorkspaceArtifactBundle, Size: 10, SHA256: strings.Repeat("e", 64)},
 				{Kind: protocol.WorkspaceArtifactOverlay, Size: 20, SHA256: strings.Repeat("f", 64)},
 			},
-			Warnings: []string{},
+			BaseWarnings:   []string{protocol.WorkspaceWarningFullHistoryFallback},
+			ResultWarnings: []string{protocol.WorkspaceWarningLFSPayloadNotTransferred},
 		},
 	}
 	if publication.Source != wantSource.Source ||
@@ -154,7 +155,9 @@ func validCLIChangesArtifactState() (store.WorkerReservation, store.ChangesArtif
 			{Kind: store.ChangesArtifactOverlay, Name: store.ChangesOverlayPartName, SizeBytes: 20, SHA256: strings.Repeat("f", 64)},
 			{Kind: store.ChangesArtifactBundle, Name: store.ChangesBundlePartName, SizeBytes: 10, SHA256: strings.Repeat("e", 64)},
 		},
-		Warnings: []string{}, RetentionReserved: true, ReservedBytes: 30, PayloadBytes: 30,
+		BaseWarnings:      []string{protocol.WorkspaceWarningFullHistoryFallback},
+		ResultWarnings:    []string{protocol.WorkspaceWarningLFSPayloadNotTransferred},
+		RetentionReserved: true, ReservedBytes: 30, PayloadBytes: 30,
 		CreatedAt: 1, UpdatedAt: 2,
 	}
 	return worker, artifact

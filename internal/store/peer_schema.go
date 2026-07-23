@@ -4,7 +4,7 @@ import "fmt"
 
 const (
 	peerStoreApplicationID = 0x444c4750 // "DLGP"
-	peerSchemaVersion      = 9
+	peerSchemaVersion      = 10
 )
 
 var peerSchemaCurrent = fmt.Sprintf(`
@@ -147,6 +147,7 @@ CREATE TABLE peer_changes_artifacts (
 	base_snapshot_hash TEXT NOT NULL CHECK (
 		length(base_snapshot_hash) = 64 AND base_snapshot_hash NOT GLOB '*[^0-9a-f]*'
 	),
+	base_warnings_json TEXT NOT NULL,
 	result_head_oid TEXT NOT NULL DEFAULT '',
 	result_snapshot_hash TEXT NOT NULL DEFAULT '',
 	result_clean INTEGER NOT NULL DEFAULT 0 CHECK (result_clean IN (0, 1)),
@@ -156,7 +157,7 @@ CREATE TABLE peer_changes_artifacts (
 	overlay_part_name TEXT NOT NULL DEFAULT '' CHECK (overlay_part_name IN ('', 'changes-overlay.tar.zst')),
 	overlay_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (overlay_size_bytes BETWEEN 0 AND 268435456),
 	overlay_sha256 TEXT NOT NULL DEFAULT '',
-	warnings_json TEXT NOT NULL DEFAULT '[]',
+	result_warnings_json TEXT NOT NULL DEFAULT '[]',
 	failure_code TEXT NOT NULL DEFAULT '',
 	retention_reserved INTEGER NOT NULL DEFAULT 0 CHECK (retention_reserved IN (0, 1)),
 	reserved_bytes INTEGER NOT NULL DEFAULT 0 CHECK (reserved_bytes BETWEEN 0 AND 536870912),
@@ -185,13 +186,13 @@ CREATE TABLE peer_changes_artifacts (
 	CHECK (
 		(state = 'capturePending' AND capture_status = '' AND result_head_oid = '' AND
 		 result_snapshot_hash = '' AND result_clean = 0 AND bundle_part_name = '' AND
-		 overlay_part_name = '' AND warnings_json = '[]' AND failure_code = '' AND
+		 overlay_part_name = '' AND result_warnings_json = '[]' AND failure_code = '' AND
 		 payload_bytes = 0 AND broker_sequence = 0) OR
 		(state = 'publishPending' AND capture_status <> '' AND broker_sequence = 0) OR
 		(state = 'published' AND capture_status <> '' AND broker_sequence > 0)
 	),
 	CHECK (
-		(capture_status = '' AND payload_bytes = 0) OR
+		(capture_status = '' AND result_warnings_json = '[]' AND payload_bytes = 0) OR
 		(capture_status = 'available' AND result_head_oid <> '' AND result_snapshot_hash <> '' AND
 		 failure_code = '' AND (
 			(payload_bytes > 0 AND retention_reserved = 1 AND reserved_bytes = payload_bytes) OR
@@ -203,7 +204,8 @@ CREATE TABLE peer_changes_artifacts (
 		 retention_reserved = 0 AND reserved_bytes = 0 AND failure_code = '') OR
 		(capture_status = 'captureFailed' AND result_head_oid = '' AND
 		 result_snapshot_hash = '' AND result_clean = 0 AND payload_bytes = 0 AND
-		 retention_reserved = 0 AND reserved_bytes = 0 AND failure_code <> '')
+		 result_warnings_json = '[]' AND retention_reserved = 0 AND reserved_bytes = 0 AND
+		 failure_code <> '')
 	),
 	CHECK (
 		(retention_reserved = 0 AND reserved_bytes = 0) OR

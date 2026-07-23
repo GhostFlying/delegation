@@ -80,7 +80,7 @@ func (s *Store) PublishChangesArtifact(
 		if authority.HeadOID != params.BaseHeadOID ||
 			authority.ManifestHash != params.BaseManifestHash ||
 			authority.SourceSnapshotHash != params.BaseSnapshotHash ||
-			!slices.Equal(authority.Warnings, params.Warnings) {
+			!slices.Equal(authority.Warnings, params.BaseWarnings) {
 			return fmt.Errorf("%w: changes artifact base differs from the prepared workspace", ErrConflict)
 		}
 		metadata := protocol.ChangesArtifactMetadata{
@@ -91,9 +91,11 @@ func (s *Store) PublishChangesArtifact(
 			BaseManifestHash: params.BaseManifestHash, BaseSnapshotHash: params.BaseSnapshotHash,
 			BaseClean: authority.SourceClean, ResultHeadOID: params.ResultHeadOID,
 			ResultSnapshotHash: params.ResultSnapshotHash, ResultClean: params.ResultClean,
-			Parts:    append([]protocol.WorkspaceArtifactDescriptor{}, params.Parts...),
-			Warnings: append([]string{}, params.Warnings...), FailureCode: params.FailureCode,
-			Sequence: 1, ObservedAt: timestamp,
+			Parts:          append([]protocol.WorkspaceArtifactDescriptor{}, params.Parts...),
+			BaseWarnings:   append([]string{}, params.BaseWarnings...),
+			ResultWarnings: append([]string{}, params.ResultWarnings...),
+			FailureCode:    params.FailureCode,
+			Sequence:       1, ObservedAt: timestamp,
 		}
 		if err := metadata.Validate(); err != nil {
 			return fmt.Errorf("%w: changes artifact does not match its prepared base: %v", ErrConflict, err)
@@ -129,24 +131,29 @@ func (s *Store) PublishChangesArtifact(
 		if err != nil {
 			return fmt.Errorf("encode changes artifact parts: %w", err)
 		}
-		warningsJSON, err := json.Marshal(metadata.Warnings)
+		baseWarningsJSON, err := json.Marshal(metadata.BaseWarnings)
 		if err != nil {
-			return fmt.Errorf("encode changes artifact warnings: %w", err)
+			return fmt.Errorf("encode changes artifact base warnings: %w", err)
+		}
+		resultWarningsJSON, err := json.Marshal(metadata.ResultWarnings)
+		if err != nil {
+			return fmt.Errorf("encode changes artifact result warnings: %w", err)
 		}
 		if _, err := connection.ExecContext(ctx, `
 INSERT INTO changes_artifacts(
     controller_id, tree_id, artifact_id, turn_id, workspace_id, status,
     source_agent_id, source_device_id, object_format, base_head_oid,
     base_manifest_hash, base_snapshot_hash, base_clean, result_head_oid,
-    result_snapshot_hash, result_clean, parts_json, warnings_json, failure_code,
-    artifact_sequence, observed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    result_snapshot_hash, result_clean, parts_json, base_warnings_json,
+    result_warnings_json, failure_code, artifact_sequence, observed_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, source.ControllerID, source.TreeID, metadata.ArtifactID, metadata.TurnID,
 			metadata.WorkspaceID, metadata.Status, metadata.SourceAgentID, metadata.SourceDeviceID,
 			metadata.ObjectFormat, metadata.BaseHeadOID, metadata.BaseManifestHash,
 			metadata.BaseSnapshotHash, metadata.BaseClean, metadata.ResultHeadOID,
 			metadata.ResultSnapshotHash, metadata.ResultClean, string(partsJSON),
-			string(warningsJSON), metadata.FailureCode, metadata.Sequence, metadata.ObservedAt); err != nil {
+			string(baseWarningsJSON), string(resultWarningsJSON), metadata.FailureCode,
+			metadata.Sequence, metadata.ObservedAt); err != nil {
 			return fmt.Errorf("create changes artifact metadata: %w", err)
 		}
 		result = protocol.PublishChangesArtifactResult{
@@ -313,7 +320,8 @@ func changesArtifactParams(metadata protocol.ChangesArtifactMetadata) protocol.P
 		Status: metadata.Status, BaseHeadOID: metadata.BaseHeadOID,
 		BaseManifestHash: metadata.BaseManifestHash, BaseSnapshotHash: metadata.BaseSnapshotHash,
 		ResultHeadOID: metadata.ResultHeadOID, ResultSnapshotHash: metadata.ResultSnapshotHash,
-		ResultClean: metadata.ResultClean, Parts: metadata.Parts, Warnings: metadata.Warnings,
+		ResultClean: metadata.ResultClean, Parts: metadata.Parts,
+		BaseWarnings: metadata.BaseWarnings, ResultWarnings: metadata.ResultWarnings,
 		FailureCode: metadata.FailureCode,
 	}
 }
@@ -340,14 +348,14 @@ WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND turn_id = ?
 
 func scanChangesArtifact(scanner rowScanner) (protocol.ChangesArtifactMetadata, error) {
 	var metadata protocol.ChangesArtifactMetadata
-	var partsJSON, warningsJSON string
+	var partsJSON, baseWarningsJSON, resultWarningsJSON string
 	err := scanner.Scan(
 		&metadata.TreeID, &metadata.ArtifactID, &metadata.TurnID, &metadata.WorkspaceID,
 		&metadata.Status, &metadata.SourceAgentID, &metadata.SourceDeviceID,
 		&metadata.ObjectFormat, &metadata.BaseHeadOID, &metadata.BaseManifestHash,
 		&metadata.BaseSnapshotHash, &metadata.BaseClean, &metadata.ResultHeadOID,
-		&metadata.ResultSnapshotHash, &metadata.ResultClean, &partsJSON, &warningsJSON,
-		&metadata.FailureCode, &metadata.Sequence, &metadata.ObservedAt,
+		&metadata.ResultSnapshotHash, &metadata.ResultClean, &partsJSON, &baseWarningsJSON,
+		&resultWarningsJSON, &metadata.FailureCode, &metadata.Sequence, &metadata.ObservedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.ChangesArtifactMetadata{}, ErrNotFound
@@ -358,8 +366,11 @@ func scanChangesArtifact(scanner rowScanner) (protocol.ChangesArtifactMetadata, 
 	if err := json.Unmarshal([]byte(partsJSON), &metadata.Parts); err != nil {
 		return protocol.ChangesArtifactMetadata{}, fmt.Errorf("decode changes artifact parts: %w", err)
 	}
-	if err := json.Unmarshal([]byte(warningsJSON), &metadata.Warnings); err != nil {
-		return protocol.ChangesArtifactMetadata{}, fmt.Errorf("decode changes artifact warnings: %w", err)
+	if err := json.Unmarshal([]byte(baseWarningsJSON), &metadata.BaseWarnings); err != nil {
+		return protocol.ChangesArtifactMetadata{}, fmt.Errorf("decode changes artifact base warnings: %w", err)
+	}
+	if err := json.Unmarshal([]byte(resultWarningsJSON), &metadata.ResultWarnings); err != nil {
+		return protocol.ChangesArtifactMetadata{}, fmt.Errorf("decode changes artifact result warnings: %w", err)
 	}
 	if err := metadata.Validate(); err != nil {
 		return protocol.ChangesArtifactMetadata{}, fmt.Errorf("stored changes artifact is invalid: %w", err)
@@ -408,7 +419,7 @@ const changesArtifactSelect = `
 SELECT tree_id, artifact_id, turn_id, workspace_id, status, source_agent_id,
        source_device_id, object_format, base_head_oid, base_manifest_hash,
        base_snapshot_hash, base_clean, result_head_oid, result_snapshot_hash,
-       result_clean, parts_json, warnings_json, failure_code, artifact_sequence,
-       observed_at
+       result_clean, parts_json, base_warnings_json, result_warnings_json,
+       failure_code, artifact_sequence, observed_at
 FROM changes_artifacts
 `

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -32,7 +33,9 @@ func TestChangesArtifactFinalizationPersistsThroughBrokerAcknowledgement(t *test
 		finalization.Worker.FinalTarget != WorkerIdle ||
 		finalization.Artifact.State != ChangesCapturePending ||
 		finalization.Artifact.BaseHeadOID != workspace.HeadOID ||
-		finalization.Artifact.BaseClean != workspace.Clean {
+		finalization.Artifact.BaseClean != workspace.Clean ||
+		!slices.Equal(finalization.Artifact.BaseWarnings, workspace.Warnings) ||
+		len(finalization.Artifact.ResultWarnings) != 0 {
 		t.Fatalf("initial finalization = %#v", finalization)
 	}
 	artifactID := finalization.Artifact.ArtifactID
@@ -90,7 +93,7 @@ func TestChangesArtifactFinalizationPersistsThroughBrokerAcknowledgement(t *test
 			{Kind: ChangesArtifactOverlay, Name: ChangesOverlayPartName, SizeBytes: 20, SHA256: strings.Repeat("d", 64)},
 			{Kind: ChangesArtifactBundle, Name: ChangesBundlePartName, SizeBytes: 10, SHA256: strings.Repeat("e", 64)},
 		},
-		Warnings: []string{"lfs_payload_not_transferred"},
+		ResultWarnings: []string{"lfs_payload_not_transferred"},
 	}
 	ready, err := state.CompleteChangesArtifactCapture(
 		ctx, worker.WorkerKey, artifactID, result, start.Add(5*time.Second),
@@ -100,6 +103,8 @@ func TestChangesArtifactFinalizationPersistsThroughBrokerAcknowledgement(t *test
 	}
 	if ready.State != ChangesPublishPending || ready.PayloadBytes != 30 ||
 		ready.ReservedBytes != 30 || len(ready.Parts) != 2 ||
+		!slices.Equal(ready.BaseWarnings, workspace.Warnings) ||
+		!slices.Equal(ready.ResultWarnings, result.ResultWarnings) ||
 		ready.Parts[0].Kind != ChangesArtifactBundle || ready.Parts[1].Kind != ChangesArtifactOverlay {
 		t.Fatalf("publication-ready artifact = %#v", ready)
 	}
@@ -108,6 +113,13 @@ func TestChangesArtifactFinalizationPersistsThroughBrokerAcknowledgement(t *test
 	)
 	if err != nil || replayedReady.UpdatedAt != ready.UpdatedAt {
 		t.Fatalf("replayed capture = %#v, %v", replayedReady, err)
+	}
+	changedWarnings := result
+	changedWarnings.ResultWarnings = []string{"submodule_payload_not_included"}
+	if _, err := state.CompleteChangesArtifactCapture(
+		ctx, worker.WorkerKey, artifactID, changedWarnings, start.Add(6*time.Second),
+	); !errors.Is(err, ErrChangesArtifactConflict) {
+		t.Fatalf("changed capture warnings replay error = %v", err)
 	}
 	changed := result
 	changed.ResultSnapshotHash = strings.Repeat("f", 64)
@@ -216,11 +228,20 @@ func TestChangesArtifactPreservesDirtyBaseAndCaptureFailureSemantics(t *testing.
 		); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := state.CompleteChangesArtifactCapture(ctx, worker.WorkerKey,
+			finalization.Artifact.ArtifactID, ChangesCaptureResult{
+				Status: ChangesCaptureFailed, FailureCode: "git_history_diverged",
+				ResultWarnings: []string{"lfs_payload_not_transferred"},
+			}, start.Add(3*time.Second)); err == nil {
+			t.Fatal("failed capture accepted result warnings")
+		}
 		ready, err := state.CompleteChangesArtifactCapture(ctx, worker.WorkerKey,
 			finalization.Artifact.ArtifactID, ChangesCaptureResult{
 				Status: ChangesCaptureFailed, FailureCode: "git_history_diverged",
 			}, start.Add(3*time.Second))
-		if err != nil || ready.RetentionReserved || ready.ReservedBytes != 0 {
+		if err != nil || ready.RetentionReserved || ready.ReservedBytes != 0 ||
+			!slices.Equal(ready.BaseWarnings, finalization.Artifact.BaseWarnings) ||
+			len(ready.ResultWarnings) != 0 {
 			t.Fatalf("failed capture = %#v, %v", ready, err)
 		}
 		finalWorker, err := state.GetWorker(ctx, worker.WorkerKey)
@@ -242,7 +263,7 @@ func TestChangesArtifactRejectsUnclaimedWorkspaceAndArbitraryPartNames(t *testin
 	ctx := context.Background()
 	state := openPeerTestStore(t)
 	start := time.Unix(5_000, 0)
-	worker, _, turnID := prepareRunningChangesWorker(t, state, 20, true, start)
+	worker, workspace, turnID := prepareRunningChangesWorker(t, state, 20, true, start)
 	finalization, err := state.BeginWorkerFinalization(
 		ctx, worker.WorkerKey, turnID, WorkerIdle, "", start.Add(time.Second),
 	)
@@ -253,6 +274,23 @@ func TestChangesArtifactRejectsUnclaimedWorkspaceAndArbitraryPartNames(t *testin
 		ctx, worker.WorkerKey, finalization.Artifact.ArtifactID, 1, start.Add(2*time.Second),
 	); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := state.CompleteChangesArtifactCapture(ctx, worker.WorkerKey,
+		finalization.Artifact.ArtifactID, ChangesCaptureResult{
+			Status: ChangesAvailable, ResultHeadOID: strings.Repeat("b", 40),
+			ResultSnapshotHash: strings.Repeat("c", 64), ResultClean: true,
+			Parts: []ChangesArtifactPart{{
+				Kind: ChangesArtifactBundle, Name: ChangesBundlePartName, SizeBytes: 1,
+				SHA256: strings.Repeat("d", 64),
+			}},
+			ResultWarnings: []string{protocol.WorkspaceWarningFullHistoryFallback},
+		}, start.Add(3*time.Second)); err == nil || !strings.Contains(err.Error(), "source workspace warnings") {
+		t.Fatalf("capture result transfer-only warning error = %v", err)
+	}
+	pending, err := state.GetChangesArtifact(ctx, worker.WorkerKey, finalization.Artifact.ArtifactID)
+	if err != nil || pending.State != ChangesCapturePending ||
+		!slices.Equal(pending.BaseWarnings, workspace.Warnings) || len(pending.ResultWarnings) != 0 {
+		t.Fatalf("rejected result changed pending warning authority = %#v, %v", pending, err)
 	}
 	for _, name := range []string{"../changes.bundle", "/tmp/changes.bundle", "bundle"} {
 		_, err := state.CompleteChangesArtifactCapture(ctx, worker.WorkerKey,
@@ -280,8 +318,8 @@ func TestChangesArtifactRejectsUnclaimedWorkspaceAndArbitraryPartNames(t *testin
 	unclaimed := workerReservation(t, changesTestID(21), "unclaimed")
 	unclaimed.WorkspaceID = changesTestID(1_021)
 	unclaimed.WorkingDirectory = ""
-	workspace := changesPreparedWorkspace(t, unclaimed, true)
-	if _, err := state.RecordPreparedWorkspace(ctx, workspace, start.Add(4*time.Second)); err != nil {
+	unclaimedWorkspace := changesPreparedWorkspace(t, unclaimed, true)
+	if _, err := state.RecordPreparedWorkspace(ctx, unclaimedWorkspace, start.Add(4*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	unclaimed, err = state.ReserveWorkerStart(ctx, unclaimed, 3, start.Add(5*time.Second))
@@ -405,7 +443,7 @@ func TestRecoverWorkersRestoresFinalizingWorkspaceCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Unix(8_000, 0)
-	worker, _, turnID := prepareRunningChangesWorker(t, state, 600, true, start)
+	worker, workspace, turnID := prepareRunningChangesWorker(t, state, 600, true, start)
 	recovered, err := state.RecoverWorkers(
 		ctx, worker.ControllerID, worker.DeviceID, start.Add(time.Second),
 	)
@@ -417,6 +455,10 @@ func TestRecoverWorkersRestoresFinalizingWorkspaceCapture(t *testing.T) {
 	captures, err := state.ListPendingChangesCaptures(ctx, worker.ControllerID, worker.DeviceID, 10)
 	if err != nil || len(captures) != 1 || captures[0].TurnID != turnID {
 		t.Fatalf("recovered captures = %#v, %v", captures, err)
+	}
+	if !slices.Equal(captures[0].BaseWarnings, workspace.Warnings) ||
+		len(captures[0].ResultWarnings) != 0 {
+		t.Fatalf("capture-pending warnings = %#v, want base %v", captures[0], workspace.Warnings)
 	}
 	artifactID := captures[0].ArtifactID
 	if again, err := state.RecoverWorkers(
@@ -433,7 +475,9 @@ func TestRecoverWorkersRestoresFinalizingWorkspaceCapture(t *testing.T) {
 	}
 	defer state.Close()
 	captures, err = state.ListPendingChangesCaptures(ctx, worker.ControllerID, worker.DeviceID, 10)
-	if err != nil || len(captures) != 1 || captures[0].ArtifactID != artifactID {
+	if err != nil || len(captures) != 1 || captures[0].ArtifactID != artifactID ||
+		!slices.Equal(captures[0].BaseWarnings, workspace.Warnings) ||
+		len(captures[0].ResultWarnings) != 0 {
 		t.Fatalf("reopened captures = %#v, %v", captures, err)
 	}
 }
@@ -516,7 +560,12 @@ func changesPreparedWorkspace(t *testing.T, worker WorkerReservation, clean bool
 		HeadOID: strings.Repeat("a", 40), ObjectFormat: "sha1",
 		WorkingDirectory: worker.WorkingDirectory, Clean: clean,
 		SourceSnapshotHash: strings.Repeat("b", 64), WorkspacePath: worker.WorkspacePath,
-		Strategy: protocol.WorkspaceStrategyDirect, SourceWarnings: []string{}, Warnings: []string{},
+		Strategy:       protocol.WorkspaceStrategyFull,
+		SourceWarnings: []string{"lfs_payload_not_transferred"},
+		Warnings: []string{
+			"lfs_payload_not_transferred",
+			protocol.WorkspaceWarningFullHistoryFallback,
+		},
 	}
 	manifestHash, err := protocol.WorkspaceManifestHash(protocol.WorkspaceManifest{
 		GitURL: workspace.GitURL, HeadOID: workspace.HeadOID,
