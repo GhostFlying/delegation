@@ -144,9 +144,14 @@ func isPendingWorkspaceDirectoryName(name string) bool {
 	if !strings.HasPrefix(name, workspaceDirectoryPrefix) || !strings.HasSuffix(name, pendingDirectorySuffix) {
 		return false
 	}
-	identityPair := strings.TrimSuffix(strings.TrimPrefix(name, workspaceDirectoryPrefix), pendingDirectorySuffix)
-	if len(identityPair) != 73 || identityPair[36] != '-' {
+	digest := strings.TrimSuffix(strings.TrimPrefix(name, workspaceDirectoryPrefix), pendingDirectorySuffix)
+	if len(digest) != 32 {
 		return false
 	}
-	return identity.ValidateID(identityPair[:36]) == nil && identity.ValidateID(identityPair[37:]) == nil
+	for _, character := range digest {
+		if character < '0' || character > '9' && character < 'a' || character > 'f' {
+			return false
+		}
+	}
+	return true
 }

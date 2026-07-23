@@ -2,6 +2,8 @@ package workerhost
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -90,6 +92,8 @@ func (h *Host) PrepareWorkspace(
 			existing.HeadOID != request.Params.Manifest.HeadOID ||
 			existing.ObjectFormat != request.Params.Manifest.ObjectFormat ||
 			existing.WorkingDirectory != request.Params.Manifest.WorkingDirectory ||
+			existing.Clean != request.Params.Manifest.Clean ||
+			existing.SourceSnapshotHash != request.Params.Manifest.SourceSnapshotHash ||
 			existing.ManifestHash != manifestHash {
 			return protocol.PrepareWorkspaceResult{}, store.ErrWorkerReservationConflict
 		}
@@ -223,7 +227,13 @@ func (h *Host) verifyPreparedWorkspace(ctx context.Context, workspace store.Prep
 		}
 	}
 	if workspace.Status == store.PreparedWorkspaceReady {
-		if err := h.git.VerifyDirect(ctx, workspace.WorkspacePath, workspace.HeadOID, workspace.ObjectFormat); err != nil {
+		manifest := protocol.WorkspaceManifest{
+			GitURL: workspace.GitURL, HeadOID: workspace.HeadOID,
+			ObjectFormat: workspace.ObjectFormat, WorkingDirectory: workspace.WorkingDirectory,
+			Clean: workspace.Clean, SourceSnapshotHash: workspace.SourceSnapshotHash,
+			Warnings: append([]string(nil), workspace.Warnings...),
+		}
+		if err := h.git.VerifySnapshot(ctx, workspace.WorkspacePath, manifest); err != nil {
 			return err
 		}
 	}
@@ -258,7 +268,8 @@ func (h *Host) syncWorkspaceDirectory() error {
 }
 
 func workspaceSyncName(treeID, workspaceID string) string {
-	return "workspace-" + treeID + "-" + workspaceID
+	digest := sha256.Sum256([]byte(treeID + "\x00" + workspaceID))
+	return "workspace-" + hex.EncodeToString(digest[:16])
 }
 
 func (h *Host) workerCWD(worker store.WorkerReservation) string {

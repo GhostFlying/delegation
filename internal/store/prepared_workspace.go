@@ -29,21 +29,23 @@ type PreparedWorkspaceKey struct {
 
 type PreparedWorkspace struct {
 	PreparedWorkspaceKey
-	SourceAgentID    string
-	SourceDeviceID   string
-	TargetDeviceID   string
-	GitURL           string
-	HeadOID          string
-	ObjectFormat     string
-	WorkingDirectory string
-	WorkspacePath    string
-	Strategy         protocol.WorkspaceStrategy
-	ManifestHash     string
-	Warnings         []string
-	Status           PreparedWorkspaceStatus
-	ClaimedAgentID   string
-	CreatedAt        int64
-	UpdatedAt        int64
+	SourceAgentID      string
+	SourceDeviceID     string
+	TargetDeviceID     string
+	GitURL             string
+	HeadOID            string
+	ObjectFormat       string
+	WorkingDirectory   string
+	Clean              bool
+	SourceSnapshotHash string
+	WorkspacePath      string
+	Strategy           protocol.WorkspaceStrategy
+	ManifestHash       string
+	Warnings           []string
+	Status             PreparedWorkspaceStatus
+	ClaimedAgentID     string
+	CreatedAt          int64
+	UpdatedAt          int64
 }
 
 func (s *PeerStore) RecordPreparedWorkspace(
@@ -81,12 +83,14 @@ func (s *PeerStore) RecordPreparedWorkspace(
 INSERT INTO prepared_workspaces(
 	controller_id, tree_id, workspace_id, source_agent_id, source_device_id,
 	target_device_id, git_url, head_oid, object_format, working_directory,
+	source_clean, source_snapshot_hash,
 	workspace_path, strategy, manifest_hash, warnings_json, status, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)
 `, workspace.ControllerID, workspace.TreeID, workspace.WorkspaceID,
 			workspace.SourceAgentID, workspace.SourceDeviceID, workspace.TargetDeviceID,
 			workspace.GitURL, workspace.HeadOID, workspace.ObjectFormat,
-			workspace.WorkingDirectory, workspace.WorkspacePath, workspace.Strategy,
+			workspace.WorkingDirectory, workspace.Clean, workspace.SourceSnapshotHash,
+			workspace.WorkspacePath, workspace.Strategy,
 			workspace.ManifestHash, string(warningsJSON), timestamp, timestamp); err != nil {
 			return fmt.Errorf("record prepared workspace: %w", err)
 		}
@@ -110,6 +114,7 @@ func (s *PeerStore) ListPreparedWorkspaces(ctx context.Context) ([]PreparedWorks
 	rows, err := s.db.QueryContext(ctx, `
 SELECT controller_id, tree_id, workspace_id, source_agent_id, source_device_id,
 	target_device_id, git_url, head_oid, object_format, working_directory,
+	source_clean, source_snapshot_hash,
 	workspace_path, strategy, manifest_hash, warnings_json, status,
 	claimed_agent_id, created_at, updated_at
 FROM prepared_workspaces
@@ -128,6 +133,7 @@ ORDER BY created_at, controller_id, tree_id, workspace_id
 			&workspace.SourceAgentID, &workspace.SourceDeviceID,
 			&workspace.TargetDeviceID, &workspace.GitURL, &workspace.HeadOID,
 			&workspace.ObjectFormat, &workspace.WorkingDirectory,
+			&workspace.Clean, &workspace.SourceSnapshotHash,
 			&workspace.WorkspacePath, &workspace.Strategy, &workspace.ManifestHash,
 			&warningsJSON, &workspace.Status, &workspace.ClaimedAgentID,
 			&workspace.CreatedAt, &workspace.UpdatedAt,
@@ -183,6 +189,14 @@ func (w PreparedWorkspace) Validate() error {
 	if err := summary.Validate(); err != nil {
 		return err
 	}
+	manifest := protocol.WorkspaceManifest{
+		GitURL: w.GitURL, HeadOID: w.HeadOID, ObjectFormat: w.ObjectFormat,
+		WorkingDirectory: w.WorkingDirectory, Clean: w.Clean,
+		SourceSnapshotHash: w.SourceSnapshotHash, Warnings: w.Warnings,
+	}
+	if err := manifest.Validate(); err != nil {
+		return err
+	}
 	if !filepath.IsAbs(w.WorkspacePath) || len(w.WorkspacePath) > maximumWorkspacePath {
 		return errors.New("prepared workspacePath must be a bounded absolute path")
 	}
@@ -221,6 +235,8 @@ func samePreparedWorkspace(stored, requested PreparedWorkspace) bool {
 		stored.GitURL == requested.GitURL && stored.HeadOID == requested.HeadOID &&
 		stored.ObjectFormat == requested.ObjectFormat &&
 		stored.WorkingDirectory == requested.WorkingDirectory &&
+		stored.Clean == requested.Clean &&
+		stored.SourceSnapshotHash == requested.SourceSnapshotHash &&
 		stored.WorkspacePath == requested.WorkspacePath &&
 		stored.Strategy == requested.Strategy && stored.ManifestHash == requested.ManifestHash &&
 		slices.Equal(stored.Warnings, requested.Warnings)
@@ -238,15 +254,17 @@ func queryPreparedWorkspace(
 	var warningsJSON string
 	err := queryer.QueryRowContext(ctx, `
 SELECT source_agent_id, source_device_id, target_device_id, git_url, head_oid,
-	object_format, working_directory, workspace_path, strategy, manifest_hash,
+	object_format, working_directory, source_clean, source_snapshot_hash,
+	workspace_path, strategy, manifest_hash,
 	warnings_json, status, claimed_agent_id, created_at, updated_at
 FROM prepared_workspaces
 WHERE controller_id = ? AND tree_id = ? AND workspace_id = ?
 `, key.ControllerID, key.TreeID, key.WorkspaceID).Scan(
 		&workspace.SourceAgentID, &workspace.SourceDeviceID, &workspace.TargetDeviceID,
 		&workspace.GitURL, &workspace.HeadOID, &workspace.ObjectFormat,
-		&workspace.WorkingDirectory, &workspace.WorkspacePath, &workspace.Strategy,
-		&workspace.ManifestHash, &warningsJSON, &workspace.Status,
+		&workspace.WorkingDirectory, &workspace.Clean, &workspace.SourceSnapshotHash,
+		&workspace.WorkspacePath, &workspace.Strategy, &workspace.ManifestHash,
+		&warningsJSON, &workspace.Status,
 		&workspace.ClaimedAgentID, &workspace.CreatedAt, &workspace.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

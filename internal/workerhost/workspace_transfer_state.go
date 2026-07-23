@@ -166,9 +166,10 @@ func (h *Host) publishPreparedWorkspace(
 		SourceAgentID: source.AgentID, SourceDeviceID: source.DeviceID,
 		TargetDeviceID: h.deviceID, GitURL: manifest.GitURL,
 		HeadOID: manifest.HeadOID, ObjectFormat: manifest.ObjectFormat,
-		WorkingDirectory: manifest.WorkingDirectory,
-		WorkspacePath:    filepath.Join(h.workspaceRoot.Name(), finalName),
-		Strategy:         strategy, ManifestHash: manifestHash,
+		WorkingDirectory: manifest.WorkingDirectory, Clean: manifest.Clean,
+		SourceSnapshotHash: manifest.SourceSnapshotHash,
+		WorkspacePath:      filepath.Join(h.workspaceRoot.Name(), finalName),
+		Strategy:           strategy, ManifestHash: manifestHash,
 		Warnings: append([]string(nil), warnings...),
 	}
 	stored, err := h.state.RecordPreparedWorkspace(ctx, workspace, time.Now())

@@ -2131,6 +2131,7 @@ func recordPreparedWorkspaceForTree(
 		SourceAgentID: testParentID, SourceDeviceID: testParentID,
 		TargetDeviceID: testDeviceID, GitURL: manifest.GitURL,
 		HeadOID: head, ObjectFormat: "sha1", WorkingDirectory: "nested",
+		Clean: manifest.Clean, SourceSnapshotHash: manifest.SourceSnapshotHash,
 		WorkspacePath: workspacePath, Strategy: protocol.WorkspaceStrategyDirect,
 		ManifestHash: hash, Warnings: []string{},
 	}, time.Unix(1_700_000_000, 0)); err != nil {

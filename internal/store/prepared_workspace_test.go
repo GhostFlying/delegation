@@ -108,9 +108,10 @@ func newPreparedWorkspace(t *testing.T) PreparedWorkspace {
 		SourceAgentID: workerParentID, SourceDeviceID: workerParentID,
 		TargetDeviceID: workerDeviceID, GitURL: manifest.GitURL,
 		HeadOID: manifest.HeadOID, ObjectFormat: manifest.ObjectFormat,
-		WorkingDirectory: manifest.WorkingDirectory,
-		WorkspacePath:    filepath.Join(t.TempDir(), "workspace"),
-		Strategy:         protocol.WorkspaceStrategyDirect, ManifestHash: hash,
+		WorkingDirectory: manifest.WorkingDirectory, Clean: manifest.Clean,
+		SourceSnapshotHash: manifest.SourceSnapshotHash,
+		WorkspacePath:      filepath.Join(t.TempDir(), "workspace"),
+		Strategy:           protocol.WorkspaceStrategyDirect, ManifestHash: hash,
 		Warnings: []string{},
 	}
 }

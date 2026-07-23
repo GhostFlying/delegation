@@ -33,9 +33,6 @@ func (h *Host) CreateWorkspaceTransfer(
 	if err := request.Params.Validate(); err != nil {
 		return protocol.CreateWorkspaceTransferResult{}, err
 	}
-	if request.Params.OverlayRequired {
-		return protocol.CreateWorkspaceTransferResult{}, errors.New("dirty workspace overlay transport is not implemented")
-	}
 	manifestHash, err := protocol.WorkspaceManifestHash(request.Params.Manifest)
 	if err != nil {
 		return protocol.CreateWorkspaceTransferResult{}, err
@@ -78,16 +75,44 @@ func (h *Host) CreateWorkspaceTransfer(
 			_ = h.syncWorkspaceDirectory()
 		}
 	}()
-	artifactName := filepath.Join(directoryName, workspaceArtifactFileName(protocol.WorkspaceArtifactBundle))
-	strategy, err := h.git.CreateBundle(
-		ctx,
-		repository.Root,
-		filepath.Join(h.workspaceRoot.Name(), artifactName),
-		request.Params.Manifest,
-		request.Params.BasisOIDs,
-	)
-	if err != nil {
-		return protocol.CreateWorkspaceTransferResult{}, err
+	strategy := protocol.WorkspaceStrategyDirect
+	artifactNames := make(map[protocol.WorkspaceArtifactKind]string, 2)
+	descriptors := make([]protocol.WorkspaceArtifactDescriptor, 0, 2)
+	if request.Params.BundleRequired {
+		artifactName := filepath.Join(directoryName, workspaceArtifactFileName(protocol.WorkspaceArtifactBundle))
+		strategy, err = h.git.CreateBundle(
+			ctx,
+			repository.Root,
+			filepath.Join(h.workspaceRoot.Name(), artifactName),
+			request.Params.Manifest,
+			request.Params.BasisOIDs,
+		)
+		if err != nil {
+			return protocol.CreateWorkspaceTransferResult{}, err
+		}
+		descriptor, err := h.describeWorkspaceArtifact(artifactName, protocol.WorkspaceArtifactBundle)
+		if err != nil {
+			return protocol.CreateWorkspaceTransferResult{}, err
+		}
+		artifactNames[protocol.WorkspaceArtifactBundle] = artifactName
+		descriptors = append(descriptors, descriptor)
+	}
+	if request.Params.OverlayRequired {
+		artifactName := filepath.Join(directoryName, workspaceArtifactFileName(protocol.WorkspaceArtifactOverlay))
+		if err := h.git.CreateOverlay(
+			ctx,
+			repository.Root,
+			filepath.Join(h.workspaceRoot.Name(), artifactName),
+			request.Params.Manifest,
+		); err != nil {
+			return protocol.CreateWorkspaceTransferResult{}, err
+		}
+		descriptor, err := h.describeWorkspaceArtifact(artifactName, protocol.WorkspaceArtifactOverlay)
+		if err != nil {
+			return protocol.CreateWorkspaceTransferResult{}, err
+		}
+		artifactNames[protocol.WorkspaceArtifactOverlay] = artifactName
+		descriptors = append(descriptors, descriptor)
 	}
 	repository, err = h.git.Inspect(ctx, request.Params.SourcePath, request.Params.GitURL)
 	if err != nil {
@@ -97,10 +122,6 @@ func (h *Host) CreateWorkspaceTransfer(
 	if err != nil || actualHash != manifestHash {
 		return protocol.CreateWorkspaceTransferResult{}, errors.New("source workspace changed during transfer creation")
 	}
-	descriptor, err := h.describeWorkspaceArtifact(artifactName, protocol.WorkspaceArtifactBundle)
-	if err != nil {
-		return protocol.CreateWorkspaceTransferResult{}, err
-	}
 	warnings, err := protocol.WorkspaceWarningsForStrategy(request.Params.Manifest.Warnings, strategy)
 	if err != nil {
 		return protocol.CreateWorkspaceTransferResult{}, err
@@ -108,7 +129,7 @@ func (h *Host) CreateWorkspaceTransfer(
 	transfer := protocol.WorkspaceTransferManifest{
 		TransferID: request.Params.TransferID, WorkspaceID: request.Params.WorkspaceID,
 		Strategy: strategy, ManifestHash: manifestHash,
-		Artifacts: []protocol.WorkspaceArtifactDescriptor{descriptor}, Warnings: warnings,
+		Artifacts: descriptors, Warnings: warnings,
 	}
 	if err := transfer.Validate(); err != nil {
 		return protocol.CreateWorkspaceTransferResult{}, err
@@ -116,9 +137,7 @@ func (h *Host) CreateWorkspaceTransfer(
 	state := outboundWorkspaceTransfer{
 		TreeID: request.TreeID, Source: request.Source, WorkspaceID: request.Params.WorkspaceID,
 		DirectoryName: directoryName, Transfer: transfer,
-		ArtifactNames: map[protocol.WorkspaceArtifactKind]string{
-			protocol.WorkspaceArtifactBundle: artifactName,
-		},
+		ArtifactNames: artifactNames,
 	}
 	h.workspaceTransferMu.Lock()
 	h.outboundTransfers[request.Params.TransferID] = state
@@ -200,11 +219,6 @@ func (h *Host) BeginWorkspaceTransfer(
 	if err := request.Params.Validate(); err != nil {
 		return protocol.BeginWorkspaceTransferResult{}, err
 	}
-	if _, found := workspaceArtifactDescriptor(
-		request.Params.Transfer.Artifacts, protocol.WorkspaceArtifactOverlay,
-	); found {
-		return protocol.BeginWorkspaceTransferResult{}, errors.New("dirty workspace overlay transport is not implemented")
-	}
 	workspaceID := request.Params.Transfer.WorkspaceID
 	lock := h.lockFor(store.WorkerKey{
 		ControllerID: h.controllerID, TreeID: request.TreeID, AgentID: workspaceID,
@@ -232,7 +246,10 @@ func (h *Host) BeginWorkspaceTransfer(
 	_, hasBundle := workspaceArtifactDescriptor(
 		request.Params.Transfer.Artifacts, protocol.WorkspaceArtifactBundle,
 	)
-	if pending.Base.BundleRequired != hasBundle || pending.Base.OverlayRequired {
+	_, hasOverlay := workspaceArtifactDescriptor(
+		request.Params.Transfer.Artifacts, protocol.WorkspaceArtifactOverlay,
+	)
+	if pending.Base.BundleRequired != hasBundle || pending.Base.OverlayRequired != hasOverlay {
 		return protocol.BeginWorkspaceTransferResult{}, errors.New("workspace transfer artifacts do not match target preparation")
 	}
 	directoryName := targetTransferDirectoryName(request.Params.Transfer.TransferID)
@@ -380,6 +397,8 @@ func (h *Host) FinishWorkspaceTransfer(
 			prepared.GitURL != state.Manifest.GitURL || prepared.HeadOID != state.Manifest.HeadOID ||
 			prepared.ObjectFormat != state.Manifest.ObjectFormat ||
 			prepared.WorkingDirectory != state.Manifest.WorkingDirectory ||
+			prepared.Clean != state.Manifest.Clean ||
+			prepared.SourceSnapshotHash != state.Manifest.SourceSnapshotHash ||
 			prepared.Strategy != state.Transfer.Strategy ||
 			prepared.ManifestHash != state.Transfer.ManifestHash ||
 			!slices.Equal(prepared.Warnings, state.Transfer.Warnings) {
@@ -404,17 +423,28 @@ func (h *Host) FinishWorkspaceTransfer(
 			return protocol.FinishWorkspaceTransferResult{}, errors.Join(syncErr, closeErr)
 		}
 	}
-	bundleName, found := state.ArtifactNames[protocol.WorkspaceArtifactBundle]
-	if !found {
-		return protocol.FinishWorkspaceTransferResult{}, errors.New("clean workspace transfer is missing its Git bundle")
+	pendingPath := filepath.Join(h.workspaceRoot.Name(), state.PendingName)
+	if bundleName, found := state.ArtifactNames[protocol.WorkspaceArtifactBundle]; found {
+		if err := h.git.ApplyBundle(
+			ctx,
+			pendingPath,
+			filepath.Join(h.workspaceRoot.Name(), bundleName),
+			state.Manifest,
+		); err != nil {
+			return protocol.FinishWorkspaceTransferResult{}, err
+		}
 	}
-	if err := h.git.ApplyBundle(
-		ctx,
-		filepath.Join(h.workspaceRoot.Name(), state.PendingName),
-		filepath.Join(h.workspaceRoot.Name(), bundleName),
-		state.Manifest,
-	); err != nil {
-		return protocol.FinishWorkspaceTransferResult{}, err
+	if overlayName, found := state.ArtifactNames[protocol.WorkspaceArtifactOverlay]; found {
+		if err := h.git.ApplyOverlay(
+			ctx,
+			pendingPath,
+			filepath.Join(h.workspaceRoot.Name(), overlayName),
+			state.Manifest,
+		); err != nil {
+			return protocol.FinishWorkspaceTransferResult{}, err
+		}
+	} else if !state.Manifest.Clean {
+		return protocol.FinishWorkspaceTransferResult{}, errors.New("dirty workspace transfer is missing its overlay")
 	}
 	prepared, err := h.publishPreparedWorkspace(
 		ctx, request.TreeID, request.Source, request.Params.WorkspaceID,

@@ -4,7 +4,7 @@ import "fmt"
 
 const (
 	peerStoreApplicationID = 0x444c4750 // "DLGP"
-	peerSchemaVersion      = 6
+	peerSchemaVersion      = 7
 )
 
 var peerSchemaCurrent = fmt.Sprintf(`
@@ -26,6 +26,10 @@ CREATE TABLE prepared_workspaces (
 	head_oid TEXT NOT NULL,
 	object_format TEXT NOT NULL CHECK (object_format IN ('sha1', 'sha256')),
 	working_directory TEXT NOT NULL,
+	source_clean INTEGER NOT NULL CHECK (source_clean IN (0, 1)),
+	source_snapshot_hash TEXT NOT NULL CHECK (
+		length(source_snapshot_hash) = 64 AND source_snapshot_hash NOT GLOB '*[^0-9a-f]*'
+	),
 	workspace_path TEXT NOT NULL,
 	strategy TEXT NOT NULL CHECK (strategy IN ('direct', 'thinBundle', 'selfContainedBundle')),
 	manifest_hash TEXT NOT NULL CHECK (
