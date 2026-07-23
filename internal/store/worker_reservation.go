@@ -36,6 +36,7 @@ const (
 	WorkerPreflight   WorkerStatus = "preflight"
 	WorkerReady       WorkerStatus = "ready"
 	WorkerRunning     WorkerStatus = "running"
+	WorkerFinalizing  WorkerStatus = "finalizing"
 	WorkerIdle        WorkerStatus = "idle"
 	WorkerInterrupted WorkerStatus = "interrupted"
 	WorkerFailed      WorkerStatus = "failed"
@@ -62,6 +63,8 @@ type WorkerReservation struct {
 	RetryTarget      WorkerStatus
 	ActiveTurnID     string
 	FailureCode      string
+	FinalTarget      WorkerStatus
+	FinalFailureCode string
 	Revision         uint64
 	CreatedAt        int64
 	UpdatedAt        int64
@@ -480,6 +483,8 @@ func (s *PeerStore) transitionWorker(
 			return err
 		}
 		worker.FailureCode = ""
+		worker.FinalTarget = ""
+		worker.FinalFailureCode = ""
 		switch to {
 		case WorkerStarting:
 			switch fromStatus {
@@ -566,7 +571,7 @@ func requireWorkerSlot(ctx context.Context, queryer rowQueryer, maxActive int) e
 	var active int
 	if err := queryer.QueryRowContext(ctx, `
 SELECT count(*) FROM worker_reservations
-WHERE status IN ('reserved', 'starting', 'preflight', 'ready', 'running')
+WHERE status IN ('reserved', 'starting', 'preflight', 'ready', 'running', 'finalizing')
 `).Scan(&active); err != nil {
 		return fmt.Errorf("count active worker reservations: %w", err)
 	}
@@ -600,7 +605,8 @@ const workerSelect = `
 SELECT controller_id, tree_id, agent_id, parent_agent_id, device_id,
 	   task_name, prompt_digest, workspace_id, workspace_path, working_directory,
 	   codex_thread_id, profile_version,
-       status, retry_target, active_turn_id, failure_code, revision, created_at, updated_at
+	   status, retry_target, active_turn_id, failure_code,
+	   final_target_status, final_failure_code, revision, created_at, updated_at
 FROM worker_reservations
 `
 
@@ -623,6 +629,8 @@ func scanWorker(scanner rowScanner) (WorkerReservation, error) {
 		&worker.RetryTarget,
 		&worker.ActiveTurnID,
 		&worker.FailureCode,
+		&worker.FinalTarget,
+		&worker.FinalFailureCode,
 		&worker.Revision,
 		&worker.CreatedAt,
 		&worker.UpdatedAt,
@@ -709,6 +717,12 @@ func (w WorkerReservation) Validate() error {
 	if err := validateFailureCode(w.FailureCode); err != nil {
 		return err
 	}
+	if err := validateFailureCode(w.FinalFailureCode); err != nil {
+		return fmt.Errorf("final %w", err)
+	}
+	if w.Status != WorkerFinalizing && (w.FinalTarget != "" || w.FinalFailureCode != "") {
+		return errors.New("non-finalizing worker contains final lifecycle details")
+	}
 	switch w.Status {
 	case WorkerReserved:
 		if w.CodexThreadID != "" || w.RetryTarget != "" || w.ActiveTurnID != "" || w.FailureCode != "" {
@@ -742,6 +756,13 @@ func (w WorkerReservation) Validate() error {
 		if w.CodexThreadID == "" || w.ActiveTurnID == "" || w.FailureCode != "" || w.RetryTarget != "" {
 			return errors.New("worker lifecycle details do not match its status")
 		}
+	case WorkerFinalizing:
+		if w.CodexThreadID == "" || w.ActiveTurnID == "" || w.FailureCode != "" || w.RetryTarget != "" ||
+			!w.FinalTarget.finalTarget() ||
+			(w.FinalTarget == WorkerIdle && w.FinalFailureCode != "") ||
+			(w.FinalTarget != WorkerIdle && w.FinalFailureCode == "") {
+			return errors.New("worker finalization details do not match its status")
+		}
 	case WorkerInterrupted:
 		if w.CodexThreadID == "" || w.FailureCode == "" || w.RetryTarget != "" {
 			return errors.New("worker lifecycle details do not match its status")
@@ -763,6 +784,7 @@ func (w WorkerReservation) Validate() error {
 func validateNewWorkerReservation(reservation WorkerReservation) error {
 	if reservation.Status != "" || reservation.RetryTarget != "" || reservation.CodexThreadID != "" ||
 		reservation.ActiveTurnID != "" || reservation.FailureCode != "" ||
+		reservation.FinalTarget != "" || reservation.FinalFailureCode != "" ||
 		reservation.Revision != 0 || reservation.CreatedAt != 0 || reservation.UpdatedAt != 0 {
 		return errors.New("new worker reservation must not contain lifecycle state")
 	}
@@ -780,7 +802,16 @@ func validateFailureCode(code string) error {
 
 func (s WorkerStatus) valid() bool {
 	switch s {
-	case WorkerReserved, WorkerPending, WorkerStarting, WorkerPreflight, WorkerReady, WorkerRunning, WorkerIdle, WorkerInterrupted, WorkerFailed:
+	case WorkerReserved, WorkerPending, WorkerStarting, WorkerPreflight, WorkerReady, WorkerRunning, WorkerFinalizing, WorkerIdle, WorkerInterrupted, WorkerFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s WorkerStatus) finalTarget() bool {
+	switch s {
+	case WorkerIdle, WorkerInterrupted, WorkerFailed:
 		return true
 	default:
 		return false

@@ -64,6 +64,31 @@ ORDER BY created_at, tree_id, agent_id
 		for index := range recovered {
 			worker := &recovered[index]
 			worker.UpdatedAt = max(timestamp, worker.UpdatedAt)
+			if worker.Status == WorkerRunning && worker.WorkspaceID != "" {
+				workspace, workspaceErr := requireFinalizationWorkspace(ctx, connection, *worker)
+				if workspaceErr != nil {
+					return workspaceErr
+				}
+				artifactID, identityErr := identity.NewID()
+				if identityErr != nil {
+					return fmt.Errorf("create recovered changes artifact ID: %w", identityErr)
+				}
+				finalization, finalizationErr := beginWorkerFinalization(
+					ctx,
+					connection,
+					*worker,
+					workspace,
+					artifactID,
+					WorkerInterrupted,
+					workerRunningTurnInterruptedFailure,
+					timestamp,
+				)
+				if finalizationErr != nil {
+					return finalizationErr
+				}
+				*worker = finalization.Worker
+				continue
+			}
 			worker.Revision, err = nextWorkerRevision(ctx, connection)
 			if err != nil {
 				return err
@@ -113,7 +138,7 @@ ORDER BY created_at, tree_id, agent_id
 				worker.RetryTarget = ""
 				worker.ActiveTurnID = ""
 				worker.FailureCode = workerStartupInterruptedFailure
-			case WorkerPending, WorkerIdle, WorkerInterrupted, WorkerFailed:
+			case WorkerPending, WorkerFinalizing, WorkerIdle, WorkerInterrupted, WorkerFailed:
 				return fmt.Errorf("unexpected recovery status %q", worker.Status)
 			}
 			if _, err := connection.ExecContext(ctx, `
