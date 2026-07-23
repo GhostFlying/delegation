@@ -429,7 +429,8 @@ func TestConnectorRequiresWorkspaceTransferImplementation(t *testing.T) {
 		DeviceID: connectorTestDeviceID, DeviceName: "builder", AuthMode: config.AuthModeNone,
 		RuntimeVersion: "test", OperatingSystem: "linux", Architecture: "amd64",
 		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: testWorkerSpawner{},
-		WorkspaceManager: workspaceManagerWithoutTransfer{},
+		ChangesArtifactSource: testWorkerSpawner{},
+		WorkspaceManager:      workspaceManagerWithoutTransfer{},
 	})
 	if err == nil || !strings.Contains(err.Error(), "workspace transfer manager is required") {
 		t.Fatalf("connector without workspace transfer implementation error = %v", err)
@@ -460,7 +461,8 @@ func TestConnectorDrainsWorkspaceRPCBeforeSessionCleanup(t *testing.T) {
 		DeviceID: connectorTestDeviceID, DeviceName: "builder", AuthMode: config.AuthModeNone,
 		RuntimeVersion: "test", OperatingSystem: "linux", Architecture: "amd64",
 		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: testWorkerSpawner{},
-		WorkspaceManager: manager,
+		ChangesArtifactSource: testWorkerSpawner{},
+		WorkspaceManager:      manager,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -498,7 +500,8 @@ func TestConnectorRequiresWorkspaceCleanupBeforeReconnecting(t *testing.T) {
 		RuntimeVersion: "test", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: testWorkerSpawner{},
-		WorkspaceManager: manager,
+		ChangesArtifactSource: testWorkerSpawner{},
+		WorkspaceManager:      manager,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -568,7 +571,8 @@ func TestConnectorPreservesCleanupFenceAcrossRunCalls(t *testing.T) {
 		RuntimeVersion: "test", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 100 * time.Millisecond, ReconnectMax: 100 * time.Millisecond,
 		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: testWorkerSpawner{},
-		WorkspaceManager: manager,
+		ChangesArtifactSource: testWorkerSpawner{},
+		WorkspaceManager:      manager,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -692,7 +696,8 @@ func runWorkspaceTransferRPC(
 		RuntimeVersion: "test", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: testWorkerSpawner{},
-		WorkspaceManager: manager,
+		ChangesArtifactSource: testWorkerSpawner{},
+		WorkspaceManager:      manager,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -73,7 +73,7 @@ func (h *Host) sendLocked(
 		return result, nil, err
 	}
 	switch result.Worker.Status {
-	case store.WorkerIdle, store.WorkerInterrupted:
+	case store.WorkerIdle, store.WorkerInterrupted, store.WorkerFinalizing:
 		result, err = h.completeWorkerOperation(operationContext, result, store.WorkerOutcomeQueued, "")
 		return result, nil, err
 	case store.WorkerFailed:
@@ -247,7 +247,7 @@ func (h *Host) interruptLocked(
 		return result, nil, err
 	}
 	switch result.Worker.Status {
-	case store.WorkerIdle, store.WorkerInterrupted:
+	case store.WorkerIdle, store.WorkerInterrupted, store.WorkerFinalizing:
 		result, err = h.completeWorkerOperation(
 			operationContext,
 			result,

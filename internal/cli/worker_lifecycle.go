@@ -84,6 +84,8 @@ func workerLifecyclePhase(status store.WorkerStatus) (protocol.WorkerLifecyclePh
 		return protocol.WorkerLifecycleReady, nil
 	case store.WorkerRunning:
 		return protocol.WorkerLifecycleRunning, nil
+	case store.WorkerFinalizing:
+		return protocol.WorkerLifecycleFinalizing, nil
 	case store.WorkerIdle:
 		return protocol.WorkerLifecycleIdle, nil
 	case store.WorkerInterrupted:

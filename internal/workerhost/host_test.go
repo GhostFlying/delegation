@@ -2133,7 +2133,7 @@ func recordPreparedWorkspaceForTree(
 		HeadOID: head, ObjectFormat: "sha1", WorkingDirectory: "nested",
 		Clean: manifest.Clean, SourceSnapshotHash: manifest.SourceSnapshotHash,
 		WorkspacePath: workspacePath, Strategy: protocol.WorkspaceStrategyDirect,
-		ManifestHash: hash, Warnings: []string{},
+		ManifestHash: hash, SourceWarnings: []string{}, Warnings: []string{},
 	}, time.Unix(1_700_000_000, 0)); err != nil {
 		t.Fatal(err)
 	}

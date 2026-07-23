@@ -150,23 +150,41 @@ func TestWorkspaceSyncAcceptsFullFallbackWarningOnlyForFullStrategy(t *testing.T
 				t.Fatal(err)
 			}
 			manifest := testWorkspaceManifest(intent.GitURL)
+			manifest.Warnings = []string{"lfs_payload_not_transferred"}
 			pinned, err := registry.PinWorkspaceSyncManifest(ctx, created.Key, manifest, time.Unix(31, 0))
 			if err != nil {
 				t.Fatal(err)
 			}
-			warnings := []string{protocol.WorkspaceWarningFullHistoryFallback}
+			warnings, err := protocol.WorkspaceWarningsForStrategy(
+				manifest.Warnings, protocol.WorkspaceStrategyFull,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
 			summary := protocol.WorkspaceSummary{
 				WorkspaceID: workspaceSyncID, SourceDeviceID: root.DeviceID,
 				TargetDeviceID: agentSpawnTargetID, HeadOID: manifest.HeadOID,
 				ObjectFormat: manifest.ObjectFormat, WorkingDirectory: manifest.WorkingDirectory,
 				Strategy: test.strategy, ManifestHash: pinned.ManifestHash, Warnings: warnings,
 			}
-			_, err = registry.FinishWorkspaceSync(ctx, created.Key, summary, time.Unix(32, 0))
-			if test.wantErr && !errors.Is(err, ErrConflict) {
-				t.Fatalf("FinishWorkspaceSync() = %v, want ErrConflict", err)
+			finished, err := registry.FinishWorkspaceSync(ctx, created.Key, summary, time.Unix(32, 0))
+			if test.wantErr && err == nil {
+				t.Fatal("FinishWorkspaceSync() accepted mismatched warning")
 			}
 			if !test.wantErr && err != nil {
 				t.Fatal(err)
+			}
+			if !test.wantErr {
+				if !reflect.DeepEqual(finished.SourceWarnings, manifest.Warnings) ||
+					!reflect.DeepEqual(finished.Warnings, warnings) {
+					t.Fatalf("full fallback warnings = source %v, final %v", finished.SourceWarnings, finished.Warnings)
+				}
+				replayed, replayErr := registry.PinWorkspaceSyncManifest(
+					ctx, created.Key, manifest, time.Unix(33, 0),
+				)
+				if replayErr != nil || !reflect.DeepEqual(replayed, finished) {
+					t.Fatalf("prepared source manifest replay = %#v, %v", replayed, replayErr)
+				}
 			}
 		})
 	}

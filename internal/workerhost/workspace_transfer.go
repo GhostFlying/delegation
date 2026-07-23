@@ -401,6 +401,7 @@ func (h *Host) FinishWorkspaceTransfer(
 			prepared.SourceSnapshotHash != state.Manifest.SourceSnapshotHash ||
 			prepared.Strategy != state.Transfer.Strategy ||
 			prepared.ManifestHash != state.Transfer.ManifestHash ||
+			!slices.Equal(prepared.SourceWarnings, state.Manifest.Warnings) ||
 			!slices.Equal(prepared.Warnings, state.Transfer.Warnings) {
 			return protocol.FinishWorkspaceTransferResult{}, store.ErrWorkerReservationConflict
 		}

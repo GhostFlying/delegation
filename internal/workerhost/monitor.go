@@ -92,6 +92,7 @@ func (h *Host) handleNotification(client application, notification appserver.Not
 
 func (h *Host) processCompletions() {
 	defer h.background.Done()
+	defer close(h.completionDone)
 	for queued := range h.completionEvents {
 		if queued.drained {
 			h.closeCompletionDrain(queued.client)
@@ -171,6 +172,25 @@ func (h *Host) completeTurn(completed turnCompletedNotification) error {
 		worker.ActiveTurnID != completed.Turn.ID {
 		return nil
 	}
+	if worker.WorkspaceID != "" {
+		target := store.WorkerFailed
+		failureCode := "unsupported_turn_status"
+		switch completed.Turn.Status {
+		case "completed", "interrupted":
+			target = store.WorkerIdle
+			failureCode = ""
+		case "failed":
+			failureCode = "turn_failed"
+		}
+		finalization, err := h.state.BeginWorkerFinalization(
+			ctx, worker.WorkerKey, completed.Turn.ID, target, failureCode, time.Now(),
+		)
+		if _, err := h.recordWorkerChange(finalization.Worker, err); err != nil {
+			return fmt.Errorf("begin completed worker finalization: %w", err)
+		}
+		h.signalArtifactWork()
+		return nil
+	}
 	switch completed.Turn.Status {
 	case "completed", "interrupted":
 		if _, err := h.recordWorkerChange(
@@ -232,9 +252,17 @@ func (h *Host) closeAndRecover(client application, cause error, recovering chan 
 		return
 	}
 
+	for _, completed := range h.takeDeferredCompletions(client) {
+		if err := h.applyCompletion(completed); err != nil {
+			fatalErr := fmt.Errorf("retry managed completion before recovery: %w", err)
+			h.reportError(fatalErr)
+			h.finishRecovery(recovering, fatalErr)
+			return
+		}
+	}
 	h.operations.Lock()
 	recoveryContext, cancel := context.WithTimeout(context.Background(), stateTimeout)
-	_, recoveryErr := h.recordWorkerRecovery(h.state.RecoverWorkers(
+	recovered, recoveryErr := h.recordWorkerRecovery(h.state.RecoverWorkers(
 		recoveryContext, h.controllerID, h.deviceID, time.Now(),
 	))
 	cancel()
@@ -245,12 +273,9 @@ func (h *Host) closeAndRecover(client application, cause error, recovering chan 
 		h.finishRecovery(recovering, fatalErr)
 		return
 	}
-	for _, completed := range h.takeDeferredCompletions(client) {
-		if err := h.applyCompletion(completed); err != nil {
-			fatalErr := fmt.Errorf("retry managed completion after recovery: %w", err)
-			h.reportError(fatalErr)
-			h.finishRecovery(recovering, fatalErr)
-			return
+	for _, worker := range recovered {
+		if worker.Status == store.WorkerFinalizing {
+			h.signalArtifactWork()
 		}
 	}
 	if cause == nil && closeErr != nil {
@@ -327,12 +352,15 @@ func (h *Host) shutdown(
 	}
 	h.monitors.Wait()
 	close(h.completionEvents)
+	<-h.completionDone
+	h.artifactCancel()
 	h.background.Wait()
 	h.operations.Lock()
 	h.workspaceOperations.Lock()
 	cleanupErr := h.cleanupWorkspaceTransfers(context.Background())
+	artifactErr := h.artifactRoot.Close()
 	workspaceErr := h.workspaceRoot.Close()
 	h.workspaceOperations.Unlock()
 	h.operations.Unlock()
-	h.shutdownErr = errors.Join(cleanupErr, workspaceErr, h.Err())
+	h.shutdownErr = errors.Join(cleanupErr, artifactErr, workspaceErr, h.Err())
 }

@@ -94,6 +94,47 @@ func TestBusyWorkerDoesNotConsumePreparedWorkspace(t *testing.T) {
 	}
 }
 
+func TestPreparedWorkspaceSeparatesSourceAndFinalWarnings(t *testing.T) {
+	ctx := context.Background()
+	state, err := OpenPeer(ctx, filepath.Join(t.TempDir(), "state", "peer.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	workspace := newPreparedWorkspace(t)
+	workspace.SourceWarnings = []string{"lfs_payload_not_transferred"}
+	workspace.Strategy = protocol.WorkspaceStrategyFull
+	workspace.Warnings, err = protocol.WorkspaceWarningsForStrategy(
+		workspace.SourceWarnings, workspace.Strategy,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace.ManifestHash, err = protocol.WorkspaceManifestHash(protocol.WorkspaceManifest{
+		GitURL: workspace.GitURL, HeadOID: workspace.HeadOID,
+		ObjectFormat: workspace.ObjectFormat, WorkingDirectory: workspace.WorkingDirectory,
+		Clean: workspace.Clean, SourceSnapshotHash: workspace.SourceSnapshotHash,
+		Warnings: workspace.SourceWarnings,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := state.RecordPreparedWorkspace(ctx, workspace, time.Unix(50, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := state.GetPreparedWorkspace(ctx, workspace.PreparedWorkspaceKey)
+	if err != nil || !reflect.DeepEqual(loaded, stored) {
+		t.Fatalf("full fallback prepared workspace = %#v, %v", loaded, err)
+	}
+
+	workspace.PreparedWorkspaceKey.WorkspaceID = "123e4567-e89b-42d3-a456-426614174081"
+	workspace.Warnings = append([]string(nil), workspace.SourceWarnings...)
+	if _, err := state.RecordPreparedWorkspace(ctx, workspace, time.Unix(51, 0)); err == nil {
+		t.Fatal("prepared workspace accepted final warnings without the full fallback disclosure")
+	}
+}
+
 func newPreparedWorkspace(t *testing.T) PreparedWorkspace {
 	t.Helper()
 	manifest := testWorkspaceManifest("ssh://git@example.invalid/repository.git")
@@ -112,6 +153,6 @@ func newPreparedWorkspace(t *testing.T) PreparedWorkspace {
 		SourceSnapshotHash: manifest.SourceSnapshotHash,
 		WorkspacePath:      filepath.Join(t.TempDir(), "workspace"),
 		Strategy:           protocol.WorkspaceStrategyDirect, ManifestHash: hash,
-		Warnings: []string{},
+		SourceWarnings: []string{}, Warnings: []string{},
 	}
 }

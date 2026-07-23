@@ -41,6 +41,7 @@ type PreparedWorkspace struct {
 	WorkspacePath      string
 	Strategy           protocol.WorkspaceStrategy
 	ManifestHash       string
+	SourceWarnings     []string
 	Warnings           []string
 	Status             PreparedWorkspaceStatus
 	ClaimedAgentID     string
@@ -60,7 +61,11 @@ func (s *PeerStore) RecordPreparedWorkspace(
 	if err != nil {
 		return PreparedWorkspace{}, err
 	}
-	warningsJSON, err := json.Marshal(workspace.Warnings)
+	sourceWarningsJSON, err := json.Marshal(append([]string{}, workspace.SourceWarnings...))
+	if err != nil {
+		return PreparedWorkspace{}, err
+	}
+	warningsJSON, err := json.Marshal(append([]string{}, workspace.Warnings...))
 	if err != nil {
 		return PreparedWorkspace{}, err
 	}
@@ -84,14 +89,16 @@ INSERT INTO prepared_workspaces(
 	controller_id, tree_id, workspace_id, source_agent_id, source_device_id,
 	target_device_id, git_url, head_oid, object_format, working_directory,
 	source_clean, source_snapshot_hash,
-	workspace_path, strategy, manifest_hash, warnings_json, status, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)
+	workspace_path, strategy, manifest_hash, source_warnings_json, warnings_json,
+	status, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)
 `, workspace.ControllerID, workspace.TreeID, workspace.WorkspaceID,
 			workspace.SourceAgentID, workspace.SourceDeviceID, workspace.TargetDeviceID,
 			workspace.GitURL, workspace.HeadOID, workspace.ObjectFormat,
 			workspace.WorkingDirectory, workspace.Clean, workspace.SourceSnapshotHash,
 			workspace.WorkspacePath, workspace.Strategy,
-			workspace.ManifestHash, string(warningsJSON), timestamp, timestamp); err != nil {
+			workspace.ManifestHash, string(sourceWarningsJSON), string(warningsJSON),
+			timestamp, timestamp); err != nil {
 			return fmt.Errorf("record prepared workspace: %w", err)
 		}
 		stored = workspace
@@ -115,7 +122,7 @@ func (s *PeerStore) ListPreparedWorkspaces(ctx context.Context) ([]PreparedWorks
 SELECT controller_id, tree_id, workspace_id, source_agent_id, source_device_id,
 	target_device_id, git_url, head_oid, object_format, working_directory,
 	source_clean, source_snapshot_hash,
-	workspace_path, strategy, manifest_hash, warnings_json, status,
+	workspace_path, strategy, manifest_hash, source_warnings_json, warnings_json, status,
 	claimed_agent_id, created_at, updated_at
 FROM prepared_workspaces
 ORDER BY created_at, controller_id, tree_id, workspace_id
@@ -127,7 +134,7 @@ ORDER BY created_at, controller_id, tree_id, workspace_id
 	workspaces := make([]PreparedWorkspace, 0)
 	for rows.Next() {
 		var workspace PreparedWorkspace
-		var warningsJSON string
+		var sourceWarningsJSON, warningsJSON string
 		if err := rows.Scan(
 			&workspace.ControllerID, &workspace.TreeID, &workspace.WorkspaceID,
 			&workspace.SourceAgentID, &workspace.SourceDeviceID,
@@ -135,10 +142,13 @@ ORDER BY created_at, controller_id, tree_id, workspace_id
 			&workspace.ObjectFormat, &workspace.WorkingDirectory,
 			&workspace.Clean, &workspace.SourceSnapshotHash,
 			&workspace.WorkspacePath, &workspace.Strategy, &workspace.ManifestHash,
-			&warningsJSON, &workspace.Status, &workspace.ClaimedAgentID,
+			&sourceWarningsJSON, &warningsJSON, &workspace.Status, &workspace.ClaimedAgentID,
 			&workspace.CreatedAt, &workspace.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan prepared workspace: %w", err)
+		}
+		if err := json.Unmarshal([]byte(sourceWarningsJSON), &workspace.SourceWarnings); err != nil {
+			return nil, errors.New("stored prepared workspace source warnings are invalid")
 		}
 		if err := json.Unmarshal([]byte(warningsJSON), &workspace.Warnings); err != nil {
 			return nil, errors.New("stored prepared workspace warnings are invalid")
@@ -192,10 +202,18 @@ func (w PreparedWorkspace) Validate() error {
 	manifest := protocol.WorkspaceManifest{
 		GitURL: w.GitURL, HeadOID: w.HeadOID, ObjectFormat: w.ObjectFormat,
 		WorkingDirectory: w.WorkingDirectory, Clean: w.Clean,
-		SourceSnapshotHash: w.SourceSnapshotHash, Warnings: w.Warnings,
+		SourceSnapshotHash: w.SourceSnapshotHash, Warnings: w.SourceWarnings,
 	}
 	if err := manifest.Validate(); err != nil {
 		return err
+	}
+	manifestHash, err := protocol.WorkspaceManifestHash(manifest)
+	if err != nil || manifestHash != w.ManifestHash {
+		return errors.New("prepared workspace manifest hash is invalid")
+	}
+	expectedWarnings, err := protocol.WorkspaceWarningsForStrategy(w.SourceWarnings, w.Strategy)
+	if err != nil || !slices.Equal(expectedWarnings, w.Warnings) {
+		return errors.New("prepared workspace warnings do not match its source manifest and strategy")
 	}
 	if !filepath.IsAbs(w.WorkspacePath) || len(w.WorkspacePath) > maximumWorkspacePath {
 		return errors.New("prepared workspacePath must be a bounded absolute path")
@@ -239,6 +257,7 @@ func samePreparedWorkspace(stored, requested PreparedWorkspace) bool {
 		stored.SourceSnapshotHash == requested.SourceSnapshotHash &&
 		stored.WorkspacePath == requested.WorkspacePath &&
 		stored.Strategy == requested.Strategy && stored.ManifestHash == requested.ManifestHash &&
+		slices.Equal(stored.SourceWarnings, requested.SourceWarnings) &&
 		slices.Equal(stored.Warnings, requested.Warnings)
 }
 
@@ -251,11 +270,11 @@ func queryPreparedWorkspace(
 		return PreparedWorkspace{}, err
 	}
 	workspace := PreparedWorkspace{PreparedWorkspaceKey: key}
-	var warningsJSON string
+	var sourceWarningsJSON, warningsJSON string
 	err := queryer.QueryRowContext(ctx, `
 SELECT source_agent_id, source_device_id, target_device_id, git_url, head_oid,
 	object_format, working_directory, source_clean, source_snapshot_hash,
-	workspace_path, strategy, manifest_hash,
+	workspace_path, strategy, manifest_hash, source_warnings_json,
 	warnings_json, status, claimed_agent_id, created_at, updated_at
 FROM prepared_workspaces
 WHERE controller_id = ? AND tree_id = ? AND workspace_id = ?
@@ -264,7 +283,7 @@ WHERE controller_id = ? AND tree_id = ? AND workspace_id = ?
 		&workspace.GitURL, &workspace.HeadOID, &workspace.ObjectFormat,
 		&workspace.WorkingDirectory, &workspace.Clean, &workspace.SourceSnapshotHash,
 		&workspace.WorkspacePath, &workspace.Strategy, &workspace.ManifestHash,
-		&warningsJSON, &workspace.Status,
+		&sourceWarningsJSON, &warningsJSON, &workspace.Status,
 		&workspace.ClaimedAgentID, &workspace.CreatedAt, &workspace.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -272,6 +291,9 @@ WHERE controller_id = ? AND tree_id = ? AND workspace_id = ?
 	}
 	if err != nil {
 		return PreparedWorkspace{}, fmt.Errorf("load prepared workspace: %w", err)
+	}
+	if err := json.Unmarshal([]byte(sourceWarningsJSON), &workspace.SourceWarnings); err != nil {
+		return PreparedWorkspace{}, errors.New("stored prepared workspace source warnings are invalid")
 	}
 	if err := json.Unmarshal([]byte(warningsJSON), &workspace.Warnings); err != nil {
 		return PreparedWorkspace{}, errors.New("stored prepared workspace warnings are invalid")

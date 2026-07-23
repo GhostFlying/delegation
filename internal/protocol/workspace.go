@@ -133,7 +133,7 @@ func (m WorkspaceManifest) Validate() error {
 	if !sha256DigestPattern.MatchString(m.SourceSnapshotHash) {
 		return errors.New("sourceSnapshotHash must be a lowercase SHA-256 digest")
 	}
-	return ValidateWorkspaceWarnings(m.Warnings)
+	return ValidateWorkspaceSourceWarnings(m.Warnings)
 }
 
 func WorkspaceManifestHash(manifest WorkspaceManifest) (string, error) {
@@ -216,6 +216,9 @@ func (r PrepareWorkspaceResult) Validate() error {
 		return errors.New("basisOids must be sorted and unique")
 	}
 	if r.Outcome == WorkspacePrepareTransferRequired {
+		if err := ValidateWorkspaceSourceWarnings(r.Warnings); err != nil {
+			return err
+		}
 		if r.Strategy != "" || !sha256DigestPattern.MatchString(r.ManifestHash) {
 			return errors.New("transfer-required result must bind the source manifest without claiming a strategy")
 		}
@@ -229,6 +232,10 @@ func (r PrepareWorkspaceResult) Validate() error {
 	}
 	if err := r.Strategy.Validate(); err != nil {
 		return err
+	}
+	if (r.Strategy == WorkspaceStrategyFull) !=
+		slices.Contains(r.Warnings, WorkspaceWarningFullHistoryFallback) {
+		return errors.New("ready workspace warning does not match its strategy")
 	}
 	if r.BundleRequired || r.OverlayRequired || len(r.BasisOIDs) != 0 {
 		return errors.New("ready prepare result must not request transfer artifacts")
@@ -266,13 +273,20 @@ func (s WorkspaceSummary) Validate() error {
 	manifest := WorkspaceManifest{
 		GitURL: "ssh://validated.invalid/repository", HeadOID: s.HeadOID,
 		ObjectFormat: s.ObjectFormat, WorkingDirectory: s.WorkingDirectory,
-		Clean: true, SourceSnapshotHash: strings.Repeat("0", sha256.Size*2), Warnings: s.Warnings,
+		Clean: true, SourceSnapshotHash: strings.Repeat("0", sha256.Size*2), Warnings: []string{},
 	}
 	if err := manifest.Validate(); err != nil {
 		return err
 	}
+	if err := ValidateWorkspaceWarnings(s.Warnings); err != nil {
+		return err
+	}
 	if err := s.Strategy.Validate(); err != nil {
 		return err
+	}
+	if (s.Strategy == WorkspaceStrategyFull) !=
+		slices.Contains(s.Warnings, WorkspaceWarningFullHistoryFallback) {
+		return errors.New("workspace summary warning does not match its strategy")
 	}
 	if !sha256DigestPattern.MatchString(s.ManifestHash) {
 		return errors.New("manifestHash must be a lowercase SHA-256 digest")

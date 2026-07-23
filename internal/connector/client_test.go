@@ -890,6 +890,7 @@ func TestConnectorValidatesStaticOptionsAndOfflineCalls(t *testing.T) {
 		Architecture:          "amd64",
 		WorkerSpawner:         testWorkerSpawner{},
 		WorkerLifecycleSource: testWorkerSpawner{},
+		ChangesArtifactSource: testWorkerSpawner{},
 		WorkspaceManager:      testWorkerSpawner{},
 	}
 	client, err := New(base)
@@ -930,6 +931,16 @@ func TestConnectorValidatesStaticOptionsAndOfflineCalls(t *testing.T) {
 		t.Fatalf("connector accepted a missing worker lifecycle source: %v", err)
 	}
 	invalid = base
+	invalid.ChangesArtifactSource = nil
+	if _, err := New(invalid); err == nil || !strings.Contains(err.Error(), "changes artifact source") {
+		t.Fatalf("connector accepted a missing changes artifact source: %v", err)
+	}
+	invalid = base
+	invalid.ChangesArtifactSource = nilChangesArtifactSource{}
+	if _, err := New(invalid); err == nil || !strings.Contains(err.Error(), "notification channel") {
+		t.Fatalf("connector accepted a changes artifact source without notifications: %v", err)
+	}
+	invalid = base
 	invalid.WorkspaceManager = nil
 	if _, err := New(invalid); err == nil || !strings.Contains(err.Error(), "workspace manager") {
 		t.Fatalf("connector accepted a missing workspace manager: %v", err)
@@ -952,6 +963,7 @@ func TestConnectorAmbientProxyPolicy(t *testing.T) {
 			Architecture:             "amd64",
 			WorkerSpawner:            testWorkerSpawner{},
 			WorkerLifecycleSource:    testWorkerSpawner{},
+			ChangesArtifactSource:    testWorkerSpawner{},
 			WorkspaceManager:         testWorkerSpawner{},
 		}
 		plaintext, err := New(base)
@@ -1085,7 +1097,8 @@ func newTestClient(
 		RuntimeVersion: "0.1.0-alpha.0.m1.1", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: testWorkerSpawner{},
-		WorkspaceManager: testWorkerSpawner{},
+		ChangesArtifactSource: testWorkerSpawner{},
+		WorkspaceManager:      testWorkerSpawner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1097,6 +1110,10 @@ type testWorkerSpawner struct{}
 
 type spawnOnlyWorkerSpawner struct{}
 
+type nilChangesArtifactSource struct{}
+
+var testArtifactChanges = make(chan struct{})
+
 func (testWorkerSpawner) WorkerRevision() uint64 { return 0 }
 
 func (testWorkerSpawner) WorkerLifecycleChanges() <-chan struct{} { return nil }
@@ -1105,6 +1122,38 @@ func (testWorkerSpawner) ListWorkerLifecycles(
 	context.Context,
 ) ([]protocol.WorkerLifecycleSnapshot, error) {
 	return []protocol.WorkerLifecycleSnapshot{}, nil
+}
+
+func (testWorkerSpawner) ArtifactChanges() <-chan struct{} { return testArtifactChanges }
+
+func (testWorkerSpawner) ListPendingChangesPublications(
+	context.Context,
+) ([]ChangesArtifactPublication, error) {
+	return []ChangesArtifactPublication{}, nil
+}
+
+func (testWorkerSpawner) AcknowledgeChangesArtifact(
+	context.Context,
+	ChangesArtifactPublication,
+	uint64,
+) error {
+	return errors.New("not used")
+}
+
+func (nilChangesArtifactSource) ArtifactChanges() <-chan struct{} { return nil }
+
+func (nilChangesArtifactSource) ListPendingChangesPublications(
+	context.Context,
+) ([]ChangesArtifactPublication, error) {
+	return nil, errors.New("not used")
+}
+
+func (nilChangesArtifactSource) AcknowledgeChangesArtifact(
+	context.Context,
+	ChangesArtifactPublication,
+	uint64,
+) error {
+	return errors.New("not used")
 }
 
 func (testWorkerSpawner) InspectWorkspace(

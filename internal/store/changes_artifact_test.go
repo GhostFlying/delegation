@@ -152,6 +152,9 @@ func TestChangesArtifactPublishEnforcesConnectionPrincipalSpawnAndWorkspaceAutho
 		{name: "changed base snapshot", started: true, mutate: func(_ *string, _ *control.PrincipalIdentity, params *protocol.PublishChangesArtifactParams) {
 			params.BaseSnapshotHash = strings.Repeat("9", 64)
 		}, wantError: ErrConflict},
+		{name: "changed workspace warnings", started: true, mutate: func(_ *string, _ *control.PrincipalIdentity, params *protocol.PublishChangesArtifactParams) {
+			params.Warnings = []string{"submodule_payload_not_included"}
+		}, wantError: ErrConflict},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -226,7 +229,6 @@ func TestChangesArtifactCaptureFailurePublishesBoundedDiagnosticMetadata(t *test
 	params.ResultSnapshotHash = ""
 	params.ResultClean = false
 	params.Parts = []protocol.WorkspaceArtifactDescriptor{}
-	params.Warnings = []string{"submodule_payload_not_included"}
 	params.FailureCode = "changes_capture_failed"
 	if _, err := registry.PublishChangesArtifact(
 		context.Background(), worker.DeviceID, worker, params, time.Unix(20, 0),

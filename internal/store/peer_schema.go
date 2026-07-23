@@ -4,7 +4,7 @@ import "fmt"
 
 const (
 	peerStoreApplicationID = 0x444c4750 // "DLGP"
-	peerSchemaVersion      = 8
+	peerSchemaVersion      = 9
 )
 
 var peerSchemaCurrent = fmt.Sprintf(`
@@ -35,6 +35,7 @@ CREATE TABLE prepared_workspaces (
 	manifest_hash TEXT NOT NULL CHECK (
 		length(manifest_hash) = 64 AND manifest_hash NOT GLOB '*[^0-9a-f]*'
 	),
+	source_warnings_json TEXT NOT NULL,
 	warnings_json TEXT NOT NULL,
 	status TEXT NOT NULL CHECK (status IN ('prepared', 'claimed')),
 	claimed_agent_id TEXT NOT NULL DEFAULT '',

@@ -135,6 +135,7 @@ type Host struct {
 	providerEnvironmentFile  string
 	codexHome                string
 	workspaceRoot            *os.Root
+	artifactRoot             *os.Root
 	removeWorkspaceTransfer  func(string) error
 	maxWorkerSlots           int
 	codexConfig              map[string]any
@@ -142,7 +143,11 @@ type Host struct {
 	startApplication         startApplication
 	reportError              func(error)
 	completionEvents         chan queuedCompletion
+	completionDone           chan struct{}
 	changes                  chan struct{}
+	artifactWake             chan struct{}
+	artifactChanges          chan struct{}
+	artifactCancel           context.CancelFunc
 	changesMu                sync.Mutex
 	workerRevision           uint64
 	completionDrains         map[application]chan struct{}
@@ -264,6 +269,11 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		_ = root.Close()
 		return nil, err
 	}
+	artifactRoot, err := openChangesArtifactRoot(root)
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
 	reportError := options.ReportError
 	if reportError == nil {
 		reportError = func(error) {}
@@ -296,13 +306,17 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		codexUnsetEnvironment:    uniqueEnvironmentNames(appServerUnsetEnvironment),
 		shellExcludedEnvironment: uniqueEnvironmentNames(shellExcludedEnvironment),
 		providerEnvironmentFile:  providerEnvironmentFile,
-		workspaceRoot:            root, maxWorkerSlots: options.MaxWorkerSlots,
+		workspaceRoot:            root, artifactRoot: artifactRoot,
+		maxWorkerSlots:          options.MaxWorkerSlots,
 		removeWorkspaceTransfer: root.RemoveAll,
 		codexConfig:             codexconfig.Clone(options.CodexConfig), state: options.Store,
 		startApplication: start, reportError: reportError,
 		loaded:              make(map[store.WorkerKey]string),
 		completionEvents:    make(chan queuedCompletion, options.MaxWorkerSlots),
+		completionDone:      make(chan struct{}),
 		changes:             make(chan struct{}, 1),
+		artifactWake:        make(chan struct{}, 1),
+		artifactChanges:     make(chan struct{}, 1),
 		completionDrains:    make(map[application]chan struct{}),
 		deferredCompletions: make(map[application][]turnCompletedNotification),
 		pendingWorkspaces:   make(map[string]pendingWorkspacePreparation),
@@ -313,21 +327,28 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	}
 	host.applyCompletion = host.completeTurn
 	if err := host.validateStoredAuthority(ctx); err != nil {
+		_ = artifactRoot.Close()
 		_ = root.Close()
 		return nil, err
 	}
 	if err := host.seedWorkerRevision(ctx); err != nil {
+		_ = artifactRoot.Close()
 		_ = root.Close()
 		return nil, err
 	}
 	if _, err := host.recordWorkerRecovery(
 		host.state.RecoverWorkers(ctx, host.controllerID, host.deviceID, time.Now()),
 	); err != nil {
+		_ = artifactRoot.Close()
 		_ = root.Close()
 		return nil, fmt.Errorf("recover managed workers: %w", err)
 	}
-	host.background.Add(1)
+	finalizerContext, finalizerCancel := context.WithCancel(context.Background())
+	host.artifactCancel = finalizerCancel
+	host.background.Add(2)
 	go host.processCompletions()
+	go host.processArtifactFinalizations(finalizerContext)
+	host.signalArtifactWork()
 	return host, nil
 }
 
@@ -459,7 +480,7 @@ func (h *Host) spawnLocked(
 		switch existing.Status {
 		case store.WorkerReserved, store.WorkerPending:
 			worker = existing
-		case store.WorkerRunning, store.WorkerIdle:
+		case store.WorkerRunning, store.WorkerIdle, store.WorkerFinalizing:
 			if err := h.prepareWorkerWorkspace(ctx, existing); err != nil {
 				return StartedTurn{Worker: existing}, nil, err
 			}

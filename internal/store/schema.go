@@ -93,6 +93,7 @@ CREATE TABLE workspace_sync_receipts (
 	source_snapshot_hash TEXT NOT NULL DEFAULT '',
 	strategy TEXT NOT NULL DEFAULT '' CHECK (strategy IN ('', 'direct', 'thinBundle', 'selfContainedBundle')),
 	manifest_hash TEXT NOT NULL DEFAULT '',
+	source_warnings_json TEXT NOT NULL DEFAULT '[]',
 	warnings_json TEXT NOT NULL DEFAULT '[]',
 	consumed_spawn_id TEXT NOT NULL DEFAULT '',
 	created_at INTEGER NOT NULL CHECK (created_at >= 0),

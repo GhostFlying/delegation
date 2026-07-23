@@ -84,6 +84,17 @@ type WorkerLifecycleSource interface {
 	ListWorkerLifecycles(context.Context) ([]protocol.WorkerLifecycleSnapshot, error)
 }
 
+type ChangesArtifactPublication struct {
+	Source control.PrincipalIdentity
+	Params protocol.PublishChangesArtifactParams
+}
+
+type ChangesArtifactSource interface {
+	ArtifactChanges() <-chan struct{}
+	ListPendingChangesPublications(context.Context) ([]ChangesArtifactPublication, error)
+	AcknowledgeChangesArtifact(context.Context, ChangesArtifactPublication, uint64) error
+}
+
 type WorkspaceInspectRequest struct {
 	TreeID string
 	Source control.PrincipalIdentity
@@ -159,6 +170,7 @@ type Options struct {
 	WorkerSpawner            WorkerSpawner
 	WorkerController         WorkerController
 	WorkerLifecycleSource    WorkerLifecycleSource
+	ChangesArtifactSource    ChangesArtifactSource
 	WorkspaceManager         WorkspaceManager
 }
 
@@ -192,6 +204,8 @@ type Client struct {
 	workerSpawner     WorkerSpawner
 	workerController  WorkerController
 	workerLifecycle   WorkerLifecycleSource
+	changesArtifacts  ChangesArtifactSource
+	artifactChanges   <-chan struct{}
 	workspaceManager  WorkspaceManager
 	workspaceTransfer WorkspaceTransferManager
 	running           atomic.Bool
@@ -229,6 +243,13 @@ func New(options Options) (*Client, error) {
 	}
 	if options.WorkerLifecycleSource == nil {
 		return nil, errors.New("connector worker lifecycle source is required")
+	}
+	if options.ChangesArtifactSource == nil {
+		return nil, errors.New("connector changes artifact source is required")
+	}
+	artifactChanges := options.ChangesArtifactSource.ArtifactChanges()
+	if artifactChanges == nil {
+		return nil, errors.New("connector changes artifact notification channel is required")
 	}
 	if options.WorkspaceManager == nil {
 		return nil, errors.New("connector workspace manager is required")
@@ -312,6 +333,8 @@ func New(options Options) (*Client, error) {
 		workerSpawner:    options.WorkerSpawner,
 		workerController: workerController,
 		workerLifecycle:  options.WorkerLifecycleSource,
+		changesArtifacts: options.ChangesArtifactSource,
+		artifactChanges:  artifactChanges,
 		workspaceManager: options.WorkspaceManager, workspaceTransfer: workspaceTransfer,
 		updates: make(chan struct{}),
 	}, nil
@@ -460,10 +483,18 @@ func (c *Client) runSession(ctx context.Context) (healthy bool, returnErr error)
 		return false, err
 	}
 	helloResult.WorkerAppliedRevision = appliedRevision
+	publicationContext, cancelPublication := context.WithTimeout(ctx, connectTimeout)
+	err = current.publishPendingChangesArtifacts(publicationContext)
+	cancelPublication()
+	if err != nil {
+		current.close(err)
+		return false, err
+	}
 	c.publish(current, helloResult)
 	defer c.unpublish(current)
 	go current.heartbeatLoop(helloResult.HeartbeatIntervalMS)
 	go current.workerLifecycleLoop(appliedRevision)
+	go current.changesArtifactLoop()
 	select {
 	case <-ctx.Done():
 		current.close(ctx.Err())

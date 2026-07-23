@@ -29,6 +29,7 @@ func TestManagedWorkerLifecycleSourceMapsPersistedState(t *testing.T) {
 		store.WorkerPreflight,
 		store.WorkerReady,
 		store.WorkerRunning,
+		store.WorkerFinalizing,
 		store.WorkerIdle,
 		store.WorkerInterrupted,
 		store.WorkerFailed,
@@ -106,5 +107,6 @@ func runtimeAgentIDFor(index int) string {
 		"123e4567-e89b-42d3-a456-426614174216",
 		"123e4567-e89b-42d3-a456-426614174217",
 		"123e4567-e89b-42d3-a456-426614174218",
+		"123e4567-e89b-42d3-a456-426614174219",
 	}[index]
 }

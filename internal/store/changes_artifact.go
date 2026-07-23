@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/control"
@@ -78,7 +79,8 @@ func (s *Store) PublishChangesArtifact(
 		}
 		if authority.HeadOID != params.BaseHeadOID ||
 			authority.ManifestHash != params.BaseManifestHash ||
-			authority.SourceSnapshotHash != params.BaseSnapshotHash {
+			authority.SourceSnapshotHash != params.BaseSnapshotHash ||
+			!slices.Equal(authority.Warnings, params.Warnings) {
 			return fmt.Errorf("%w: changes artifact base differs from the prepared workspace", ErrConflict)
 		}
 		metadata := protocol.ChangesArtifactMetadata{
@@ -248,6 +250,7 @@ type changesArtifactAuthority struct {
 	SourceClean             bool
 	SourceSnapshotHash      string
 	ManifestHash            string
+	Warnings                []string
 }
 
 func queryChangesArtifactAuthority(
@@ -256,10 +259,12 @@ func queryChangesArtifactAuthority(
 	source control.PrincipalIdentity,
 ) (changesArtifactAuthority, error) {
 	var authority changesArtifactAuthority
+	var warningsJSON string
 	err := queryer.QueryRowContext(ctx, `
 SELECT r.source_agent_id, r.spawn_id, r.target_device_id, r.workspace_id, r.status,
        w.target_device_id, w.status, w.consumed_spawn_id, w.head_oid,
-       w.object_format, w.source_clean, w.source_snapshot_hash, w.manifest_hash
+	   w.object_format, w.source_clean, w.source_snapshot_hash, w.manifest_hash,
+	   w.warnings_json
 FROM agent_spawn_receipts AS r
 JOIN workspace_sync_receipts AS w
   ON w.controller_id = r.controller_id AND w.tree_id = r.tree_id
@@ -271,12 +276,17 @@ WHERE r.controller_id = ? AND r.tree_id = ? AND r.agent_id = ?
 		&authority.WorkspaceTargetDeviceID, &authority.WorkspaceStatus,
 		&authority.ConsumedSpawnID, &authority.HeadOID, &authority.ObjectFormat,
 		&authority.SourceClean, &authority.SourceSnapshotHash, &authority.ManifestHash,
+		&warningsJSON,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return changesArtifactAuthority{}, ErrAuthorizationDenied
 	}
 	if err != nil {
 		return changesArtifactAuthority{}, fmt.Errorf("load changes artifact authority: %w", err)
+	}
+	if err := json.Unmarshal([]byte(warningsJSON), &authority.Warnings); err != nil ||
+		protocol.ValidateWorkspaceWarnings(authority.Warnings) != nil {
+		return changesArtifactAuthority{}, errors.New("stored changes artifact authority warnings are invalid")
 	}
 	return authority, nil
 }

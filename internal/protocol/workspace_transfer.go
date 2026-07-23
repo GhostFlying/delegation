@@ -110,7 +110,7 @@ func (m WorkspaceTransferManifest) Validate() error {
 }
 
 func WorkspaceWarningsForStrategy(source []string, strategy WorkspaceStrategy) ([]string, error) {
-	if err := ValidateWorkspaceWarnings(source); err != nil {
+	if err := ValidateWorkspaceSourceWarnings(source); err != nil {
 		return nil, err
 	}
 	if err := strategy.Validate(); err != nil {
@@ -126,6 +126,16 @@ func WorkspaceWarningsForStrategy(source []string, strategy WorkspaceStrategy) (
 		return nil, err
 	}
 	return warnings, nil
+}
+
+func ValidateWorkspaceSourceWarnings(warnings []string) error {
+	if err := ValidateWorkspaceWarnings(warnings); err != nil {
+		return err
+	}
+	if slices.Contains(warnings, WorkspaceWarningFullHistoryFallback) {
+		return errors.New("source workspace warnings must not contain transfer-only warnings")
+	}
+	return nil
 }
 
 type CreateWorkspaceTransferParams struct {

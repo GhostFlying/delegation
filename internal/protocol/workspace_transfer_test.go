@@ -217,6 +217,55 @@ func TestWorkspaceWarningsForStrategyAddsOnlyFullFallback(t *testing.T) {
 	}
 }
 
+func TestWorkspaceManifestRejectsTransferOnlyWarning(t *testing.T) {
+	manifest := testWorkspaceManifest(t, true)
+	manifest.Warnings = []string{WorkspaceWarningFullHistoryFallback}
+	if err := manifest.Validate(); err == nil {
+		t.Fatal("source manifest accepted a transfer-only warning")
+	}
+}
+
+func TestWorkspaceReadyMetadataBindsFullFallbackWarningToStrategy(t *testing.T) {
+	for _, strategy := range []WorkspaceStrategy{
+		WorkspaceStrategyDirect,
+		WorkspaceStrategyFull,
+	} {
+		warnings, err := WorkspaceWarningsForStrategy(nil, strategy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepare := PrepareWorkspaceResult{
+			WorkspaceID: testWorkspaceID, Outcome: WorkspacePrepareReady,
+			Strategy: strategy, ManifestHash: strings.Repeat("a", 64), Warnings: warnings,
+		}
+		if err := prepare.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		summary := WorkspaceSummary{
+			WorkspaceID: testWorkspaceID, SourceDeviceID: testDeviceID,
+			TargetDeviceID: testAgentID, HeadOID: strings.Repeat("1", 40),
+			ObjectFormat: "sha1", Strategy: strategy,
+			ManifestHash: strings.Repeat("a", 64), Warnings: warnings,
+		}
+		if err := summary.Validate(); err != nil {
+			t.Fatal(err)
+		}
+
+		prepare.Warnings = []string{WorkspaceWarningFullHistoryFallback}
+		summary.Warnings = []string{WorkspaceWarningFullHistoryFallback}
+		if strategy == WorkspaceStrategyFull {
+			prepare.Warnings = []string{}
+			summary.Warnings = []string{}
+		}
+		if err := prepare.Validate(); err == nil {
+			t.Fatal("ready prepare result accepted mismatched warning")
+		}
+		if err := summary.Validate(); err == nil {
+			t.Fatal("workspace summary accepted mismatched warning")
+		}
+	}
+}
+
 func TestSyncWorkspaceResultRejectsIntermediateTransferState(t *testing.T) {
 	result := SyncWorkspaceResult{
 		Outcome:  WorkspacePrepareTransferRequired,

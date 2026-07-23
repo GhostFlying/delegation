@@ -52,6 +52,7 @@ type WorkspaceSyncReceipt struct {
 	SourceSnapshotHash string
 	Strategy           protocol.WorkspaceStrategy
 	ManifestHash       string
+	SourceWarnings     []string
 	Warnings           []string
 	ConsumedSpawnID    string
 	CreatedAt          int64
@@ -63,7 +64,7 @@ func (r WorkspaceSyncReceipt) Manifest() protocol.WorkspaceManifest {
 		GitURL: r.GitURL, HeadOID: r.HeadOID, ObjectFormat: r.ObjectFormat,
 		WorkingDirectory: r.WorkingDirectory, Clean: r.SourceClean,
 		SourceSnapshotHash: r.SourceSnapshotHash,
-		Warnings:           append([]string{}, r.Warnings...),
+		Warnings:           append([]string{}, r.SourceWarnings...),
 	}
 }
 
@@ -129,7 +130,7 @@ INSERT INTO workspace_sync_receipts(
 			Key: key, SourceDeviceID: intent.Source.DeviceID,
 			TargetDeviceID: intent.TargetDeviceID, GitURL: intent.GitURL,
 			SourcePathHash: intent.SourcePathHash, Status: WorkspaceSyncPending,
-			Warnings: []string{}, CreatedAt: timestamp, UpdatedAt: timestamp,
+			SourceWarnings: []string{}, Warnings: []string{}, CreatedAt: timestamp, UpdatedAt: timestamp,
 		}
 		return nil
 	})
@@ -155,7 +156,7 @@ func (s *Store) FinishWorkspaceSync(
 	if err != nil {
 		return WorkspaceSyncReceipt{}, err
 	}
-	warningsJSON, err := json.Marshal(summary.Warnings)
+	warningsJSON, err := json.Marshal(append([]string{}, summary.Warnings...))
 	if err != nil {
 		return WorkspaceSyncReceipt{}, err
 	}
@@ -171,7 +172,9 @@ func (s *Store) FinishWorkspaceSync(
 			}
 			return nil
 		}
-		expectedWarnings, warningErr := protocol.WorkspaceWarningsForStrategy(receipt.Warnings, summary.Strategy)
+		expectedWarnings, warningErr := protocol.WorkspaceWarningsForStrategy(
+			receipt.SourceWarnings, summary.Strategy,
+		)
 		if warningErr != nil || receipt.Status != WorkspaceSyncInspected ||
 			receipt.ManifestHash != summary.ManifestHash ||
 			receipt.HeadOID != summary.HeadOID || receipt.ObjectFormat != summary.ObjectFormat ||
@@ -226,7 +229,7 @@ func (s *Store) PinWorkspaceSyncManifest(
 	if err != nil {
 		return WorkspaceSyncReceipt{}, err
 	}
-	warningsJSON, err := json.Marshal(manifest.Warnings)
+	sourceWarningsJSON, err := json.Marshal(append([]string{}, manifest.Warnings...))
 	if err != nil {
 		return WorkspaceSyncReceipt{}, err
 	}
@@ -251,10 +254,10 @@ func (s *Store) PinWorkspaceSyncManifest(
 		if _, err := connection.ExecContext(ctx, `
 UPDATE workspace_sync_receipts
 SET status = 'inspected', head_oid = ?, object_format = ?, working_directory = ?,
-	source_clean = ?, source_snapshot_hash = ?, manifest_hash = ?, warnings_json = ?, updated_at = ?
+	source_clean = ?, source_snapshot_hash = ?, manifest_hash = ?, source_warnings_json = ?, updated_at = ?
 WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND sync_id = ?
 `, manifest.HeadOID, manifest.ObjectFormat, manifest.WorkingDirectory,
-			manifest.Clean, manifest.SourceSnapshotHash, manifestHash, string(warningsJSON), timestamp,
+			manifest.Clean, manifest.SourceSnapshotHash, manifestHash, string(sourceWarningsJSON), timestamp,
 			key.ControllerID, key.TreeID, key.SourceAgentID, key.SyncID); err != nil {
 			return fmt.Errorf("pin workspace manifest: %w", err)
 		}
@@ -265,7 +268,7 @@ WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND sync_id = ?
 		receipt.SourceClean = manifest.Clean
 		receipt.SourceSnapshotHash = manifest.SourceSnapshotHash
 		receipt.ManifestHash = manifestHash
-		receipt.Warnings = append([]string{}, manifest.Warnings...)
+		receipt.SourceWarnings = append([]string{}, manifest.Warnings...)
 		receipt.UpdatedAt = timestamp
 		return nil
 	})
@@ -341,11 +344,11 @@ func queryWorkspaceSyncReceipt(
 	var receipt WorkspaceSyncReceipt
 	receipt.Key = key
 	var digest []byte
-	var warningsJSON string
+	var sourceWarningsJSON, warningsJSON string
 	err := queryer.QueryRowContext(ctx, `
 SELECT source_device_id, target_device_id, git_url, source_path_digest, status,
 	head_oid, object_format, working_directory, source_clean, source_snapshot_hash,
-	strategy, manifest_hash,
+	strategy, manifest_hash, source_warnings_json,
 	warnings_json, consumed_spawn_id, created_at, updated_at
 FROM workspace_sync_receipts
 WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND sync_id = ?
@@ -353,7 +356,7 @@ WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND sync_id = ?
 		&receipt.SourceDeviceID, &receipt.TargetDeviceID, &receipt.GitURL, &digest,
 		&receipt.Status, &receipt.HeadOID, &receipt.ObjectFormat,
 		&receipt.WorkingDirectory, &receipt.SourceClean, &receipt.SourceSnapshotHash,
-		&receipt.Strategy, &receipt.ManifestHash,
+		&receipt.Strategy, &receipt.ManifestHash, &sourceWarningsJSON,
 		&warningsJSON, &receipt.ConsumedSpawnID, &receipt.CreatedAt, &receipt.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -366,6 +369,9 @@ WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND sync_id = ?
 		return WorkspaceSyncReceipt{}, errors.New("stored source path digest is invalid")
 	}
 	copy(receipt.SourcePathHash[:], digest)
+	if err := json.Unmarshal([]byte(sourceWarningsJSON), &receipt.SourceWarnings); err != nil {
+		return WorkspaceSyncReceipt{}, errors.New("stored workspace source warnings are invalid")
+	}
 	if err := json.Unmarshal([]byte(warningsJSON), &receipt.Warnings); err != nil {
 		return WorkspaceSyncReceipt{}, errors.New("stored workspace warnings are invalid")
 	}
@@ -375,6 +381,14 @@ WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND sync_id = ?
 		}
 		if err := receipt.Manifest().Validate(); err != nil {
 			return WorkspaceSyncReceipt{}, fmt.Errorf("stored workspace source manifest is invalid: %w", err)
+		}
+		expectedHash, hashErr := protocol.WorkspaceManifestHash(receipt.Manifest())
+		expectedWarnings, warningErr := protocol.WorkspaceWarningsForStrategy(
+			receipt.SourceWarnings, receipt.Strategy,
+		)
+		if hashErr != nil || expectedHash != receipt.ManifestHash || warningErr != nil ||
+			!slices.Equal(expectedWarnings, receipt.Warnings) {
+			return WorkspaceSyncReceipt{}, errors.New("stored prepared workspace authority is invalid")
 		}
 	} else if receipt.Status == WorkspaceSyncInspected {
 		if err := receipt.Manifest().Validate(); err != nil {

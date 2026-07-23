@@ -231,7 +231,7 @@ func (h *Host) verifyPreparedWorkspace(ctx context.Context, workspace store.Prep
 			GitURL: workspace.GitURL, HeadOID: workspace.HeadOID,
 			ObjectFormat: workspace.ObjectFormat, WorkingDirectory: workspace.WorkingDirectory,
 			Clean: workspace.Clean, SourceSnapshotHash: workspace.SourceSnapshotHash,
-			Warnings: append([]string(nil), workspace.Warnings...),
+			Warnings: append([]string(nil), workspace.SourceWarnings...),
 		}
 		if err := h.git.VerifySnapshot(ctx, workspace.WorkspacePath, manifest); err != nil {
 			return err

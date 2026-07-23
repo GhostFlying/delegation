@@ -170,7 +170,8 @@ func (h *Host) publishPreparedWorkspace(
 		SourceSnapshotHash: manifest.SourceSnapshotHash,
 		WorkspacePath:      filepath.Join(h.workspaceRoot.Name(), finalName),
 		Strategy:           strategy, ManifestHash: manifestHash,
-		Warnings: append([]string(nil), warnings...),
+		SourceWarnings: append([]string(nil), manifest.Warnings...),
+		Warnings:       append([]string(nil), warnings...),
 	}
 	stored, err := h.state.RecordPreparedWorkspace(ctx, workspace, time.Now())
 	if err != nil {

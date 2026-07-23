@@ -284,7 +284,8 @@ func newLifecycleClient(
 		RuntimeVersion: "lifecycle-test", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 		WorkerSpawner: manager, WorkerController: manager, WorkerLifecycleSource: source,
-		WorkspaceManager: manager,
+		ChangesArtifactSource: manager,
+		WorkspaceManager:      manager,
 	})
 	if err != nil {
 		t.Fatal(err)

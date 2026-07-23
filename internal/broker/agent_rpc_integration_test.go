@@ -52,6 +52,8 @@ type agentRPCWorkerController struct{}
 
 type agentRPCLifecycleSource struct{}
 
+var agentRPCArtifactChanges = make(chan struct{})
+
 func (agentRPCLifecycleSource) WorkerRevision() uint64 { return 0 }
 
 func (agentRPCLifecycleSource) WorkerLifecycleChanges() <-chan struct{} { return nil }
@@ -60,6 +62,24 @@ func (agentRPCLifecycleSource) ListWorkerLifecycles(
 	context.Context,
 ) ([]protocol.WorkerLifecycleSnapshot, error) {
 	return []protocol.WorkerLifecycleSnapshot{}, nil
+}
+
+func (agentRPCLifecycleSource) ArtifactChanges() <-chan struct{} {
+	return agentRPCArtifactChanges
+}
+
+func (agentRPCLifecycleSource) ListPendingChangesPublications(
+	context.Context,
+) ([]connector.ChangesArtifactPublication, error) {
+	return []connector.ChangesArtifactPublication{}, nil
+}
+
+func (agentRPCLifecycleSource) AcknowledgeChangesArtifact(
+	context.Context,
+	connector.ChangesArtifactPublication,
+	uint64,
+) error {
+	return errors.New("changes artifact acknowledgement is outside this agent RPC test")
 }
 
 func (agentRPCWorkerController) InspectWorkspace(
@@ -252,6 +272,7 @@ func TestAgentRPCSelfDispatchIsDurableIdempotentAndNonBlocking(t *testing.T) {
 		WorkerSpawner:         spawner,
 		WorkerController:      agentRPCWorkerController{},
 		WorkerLifecycleSource: agentRPCLifecycleSource{},
+		ChangesArtifactSource: agentRPCLifecycleSource{},
 		WorkspaceManager:      agentRPCWorkerController{},
 	})
 	if err != nil {
@@ -778,6 +799,7 @@ func startAgentRPCConnectorWithAuth(
 		WorkerSpawner:         spawner,
 		WorkerController:      agentRPCWorkerController{},
 		WorkerLifecycleSource: agentRPCLifecycleSource{},
+		ChangesArtifactSource: agentRPCLifecycleSource{},
 		WorkspaceManager:      workspaceManager,
 	})
 	if err != nil {

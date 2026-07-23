@@ -280,7 +280,7 @@ func TestChangesArtifactRejectsUnclaimedWorkspaceAndArbitraryPartNames(t *testin
 	unclaimed := workerReservation(t, changesTestID(21), "unclaimed")
 	unclaimed.WorkspaceID = changesTestID(1_021)
 	unclaimed.WorkingDirectory = ""
-	workspace := changesPreparedWorkspace(unclaimed, true)
+	workspace := changesPreparedWorkspace(t, unclaimed, true)
 	if _, err := state.RecordPreparedWorkspace(ctx, workspace, start.Add(4*time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +464,7 @@ func prepareRunningChangesWorker(
 	worker := workerReservation(t, changesTestID(10_000+index), fmt.Sprintf("changes %d", index))
 	worker.WorkspaceID = changesTestID(20_000 + index)
 	worker.WorkingDirectory = ""
-	workspace := changesPreparedWorkspace(worker, clean)
+	workspace := changesPreparedWorkspace(t, worker, clean)
 	workspace, err := state.RecordPreparedWorkspace(ctx, workspace, start)
 	if err != nil {
 		t.Fatal(err)
@@ -503,8 +503,9 @@ func makeChangesWorkerRunning(
 	return state.MarkWorkerRunning(ctx, worker.WorkerKey, turnID, start.Add(2*time.Second))
 }
 
-func changesPreparedWorkspace(worker WorkerReservation, clean bool) PreparedWorkspace {
-	return PreparedWorkspace{
+func changesPreparedWorkspace(t *testing.T, worker WorkerReservation, clean bool) PreparedWorkspace {
+	t.Helper()
+	workspace := PreparedWorkspace{
 		PreparedWorkspaceKey: PreparedWorkspaceKey{
 			ControllerID: worker.ControllerID,
 			TreeID:       worker.TreeID,
@@ -515,9 +516,19 @@ func changesPreparedWorkspace(worker WorkerReservation, clean bool) PreparedWork
 		HeadOID: strings.Repeat("a", 40), ObjectFormat: "sha1",
 		WorkingDirectory: worker.WorkingDirectory, Clean: clean,
 		SourceSnapshotHash: strings.Repeat("b", 64), WorkspacePath: worker.WorkspacePath,
-		Strategy: protocol.WorkspaceStrategyDirect, ManifestHash: strings.Repeat("c", 64),
-		Warnings: []string{},
+		Strategy: protocol.WorkspaceStrategyDirect, SourceWarnings: []string{}, Warnings: []string{},
 	}
+	manifestHash, err := protocol.WorkspaceManifestHash(protocol.WorkspaceManifest{
+		GitURL: workspace.GitURL, HeadOID: workspace.HeadOID,
+		ObjectFormat: workspace.ObjectFormat, WorkingDirectory: workspace.WorkingDirectory,
+		Clean: workspace.Clean, SourceSnapshotHash: workspace.SourceSnapshotHash,
+		Warnings: workspace.SourceWarnings,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace.ManifestHash = manifestHash
+	return workspace
 }
 
 func changesTestID(value int) string {

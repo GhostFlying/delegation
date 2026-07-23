@@ -103,6 +103,8 @@ type integrationWorkerController struct{}
 
 type integrationWorkerLifecycleSource struct{}
 
+var integrationArtifactChanges = make(chan struct{})
+
 func (integrationWorkerLifecycleSource) WorkerRevision() uint64 { return 0 }
 
 func (integrationWorkerLifecycleSource) WorkerLifecycleChanges() <-chan struct{} { return nil }
@@ -111,6 +113,24 @@ func (integrationWorkerLifecycleSource) ListWorkerLifecycles(
 	context.Context,
 ) ([]protocol.WorkerLifecycleSnapshot, error) {
 	return []protocol.WorkerLifecycleSnapshot{}, nil
+}
+
+func (integrationWorkerLifecycleSource) ArtifactChanges() <-chan struct{} {
+	return integrationArtifactChanges
+}
+
+func (integrationWorkerLifecycleSource) ListPendingChangesPublications(
+	context.Context,
+) ([]connector.ChangesArtifactPublication, error) {
+	return []connector.ChangesArtifactPublication{}, nil
+}
+
+func (integrationWorkerLifecycleSource) AcknowledgeChangesArtifact(
+	context.Context,
+	connector.ChangesArtifactPublication,
+	uint64,
+) error {
+	return errors.New("changes artifact acknowledgement is outside this mailbox test")
 }
 
 func (integrationWorkerSpawner) SpawnWorker(
@@ -261,6 +281,7 @@ func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 		WorkerSpawner:         integrationWorkerSpawner{},
 		WorkerController:      integrationWorkerController{},
 		WorkerLifecycleSource: integrationWorkerLifecycleSource{},
+		ChangesArtifactSource: integrationWorkerLifecycleSource{},
 		WorkspaceManager:      integrationWorkerController{},
 	})
 	if err != nil {

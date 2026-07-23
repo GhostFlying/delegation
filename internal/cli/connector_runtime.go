@@ -153,6 +153,14 @@ func runConnectorServiceWithProviderEnvironment(
 	defer func() {
 		resultErr = errors.Join(resultErr, closeWorkerHost(workers, 30*time.Second))
 	}()
+	changesHost, ok := any(workers).(managedChangesArtifactHost)
+	if !ok {
+		return errors.New("managed worker host does not provide changes artifact publication")
+	}
+	changesSource := managedChangesArtifactSource{
+		host: changesHost, workers: workers,
+		controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
+	}
 	workerManager := managedWorkerSpawner{
 		host: workers, state: peerState,
 		controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
@@ -170,7 +178,8 @@ func runConnectorServiceWithProviderEnvironment(
 		WorkerLifecycleSource: managedWorkerLifecycleSource{
 			host: workers, controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 		},
-		WorkspaceManager: workerManager,
+		ChangesArtifactSource: changesSource,
+		WorkspaceManager:      workerManager,
 		ReportError: func(err error) {
 			_ = writeStderr("delegation: connector reconnecting: %v\n", err)
 		},
@@ -314,7 +323,7 @@ func (a peerAuthorizer) AuthorizeWorker(
 	case store.WorkerPreflight, store.WorkerReady, store.WorkerRunning, store.WorkerIdle:
 		return nil
 	case store.WorkerReserved, store.WorkerPending, store.WorkerStarting,
-		store.WorkerInterrupted, store.WorkerFailed:
+		store.WorkerFinalizing, store.WorkerInterrupted, store.WorkerFailed:
 		return errors.New("worker reservation is not active")
 	default:
 		return errors.New("worker reservation has an unsupported status")

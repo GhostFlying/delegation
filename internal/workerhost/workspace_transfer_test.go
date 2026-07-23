@@ -333,10 +333,16 @@ func TestWorkspaceOperationsRejectNonRootAndNonlocalAuthorities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pendingCount != 0 || outboundCount != 0 || inboundCount != 0 || len(entries) != 0 {
+	workspaceEntries := 0
+	for _, entry := range entries {
+		if entry.Name() != changesArtifactRootName {
+			workspaceEntries++
+		}
+	}
+	if pendingCount != 0 || outboundCount != 0 || inboundCount != 0 || workspaceEntries != 0 {
 		t.Fatalf(
 			"rejected authority changed workspace state: pending %d outbound %d inbound %d files %d",
-			pendingCount, outboundCount, inboundCount, len(entries),
+			pendingCount, outboundCount, inboundCount, workspaceEntries,
 		)
 	}
 }
