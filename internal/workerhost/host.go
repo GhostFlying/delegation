@@ -155,6 +155,12 @@ type Host struct {
 	operations sync.RWMutex
 	workerLock [workerLockCount]sync.Mutex
 
+	workspaceOperations sync.RWMutex
+	workspaceTransferMu sync.Mutex
+	pendingWorkspaces   map[string]pendingWorkspacePreparation
+	outboundTransfers   map[string]outboundWorkspaceTransfer
+	inboundTransfers    map[string]*inboundWorkspaceTransfer
+
 	clientMu   sync.Mutex
 	client     application
 	loaded     map[store.WorkerKey]string
@@ -253,6 +259,10 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open worker workspace root: %w", err)
 	}
+	if err := cleanupStartupWorkspaceOrphans(ctx, root); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
 	reportError := options.ReportError
 	if reportError == nil {
 		reportError = func(error) {}
@@ -293,6 +303,9 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		changes:             make(chan struct{}, 1),
 		completionDrains:    make(map[application]chan struct{}),
 		deferredCompletions: make(map[application][]turnCompletedNotification),
+		pendingWorkspaces:   make(map[string]pendingWorkspacePreparation),
+		outboundTransfers:   make(map[string]outboundWorkspaceTransfer),
+		inboundTransfers:    make(map[string]*inboundWorkspaceTransfer),
 		done:                make(chan struct{}),
 		shutdownDone:        make(chan struct{}),
 	}

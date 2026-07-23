@@ -123,6 +123,7 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 			protocol.FeaturePeerRoot,
 			protocol.FeatureWorkerLifecycle,
 			protocol.FeatureWorkspaceSync,
+			protocol.FeatureWorkspaceTransfer,
 		},
 	}
 	if _, err := fixture.registry.RegisterTrustedDevice(
@@ -440,6 +441,7 @@ func TestConnectorRequiresEveryBrokerFeatureBeforePublishingReadiness(t *testing
 		protocol.FeaturePeerRoot,
 		protocol.FeatureWorkerLifecycle,
 		protocol.FeatureWorkspaceSync,
+		protocol.FeatureWorkspaceTransfer,
 	}
 	for _, missing := range required {
 		t.Run(missing, func(t *testing.T) {
@@ -1104,6 +1106,50 @@ func (testWorkerSpawner) PrepareWorkspace(
 	return protocol.PrepareWorkspaceResult{}, errors.New("not used")
 }
 
+func (testWorkerSpawner) CreateWorkspaceTransfer(
+	context.Context,
+	WorkspaceCreateTransferRequest,
+) (protocol.CreateWorkspaceTransferResult, error) {
+	return protocol.CreateWorkspaceTransferResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) ReadWorkspaceArtifact(
+	context.Context,
+	WorkspaceReadArtifactRequest,
+) (protocol.ReadWorkspaceArtifactResult, error) {
+	return protocol.ReadWorkspaceArtifactResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) BeginWorkspaceTransfer(
+	context.Context,
+	WorkspaceBeginTransferRequest,
+) (protocol.BeginWorkspaceTransferResult, error) {
+	return protocol.BeginWorkspaceTransferResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) WriteWorkspaceArtifact(
+	context.Context,
+	WorkspaceWriteArtifactRequest,
+) (protocol.WriteWorkspaceArtifactResult, error) {
+	return protocol.WriteWorkspaceArtifactResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) FinishWorkspaceTransfer(
+	context.Context,
+	WorkspaceTransferControlRequest,
+) (protocol.FinishWorkspaceTransferResult, error) {
+	return protocol.FinishWorkspaceTransferResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) CancelWorkspaceTransfer(
+	context.Context,
+	WorkspaceTransferControlRequest,
+) (protocol.CancelWorkspaceTransferResult, error) {
+	return protocol.CancelWorkspaceTransferResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) CleanupWorkspaceTransfers(context.Context) error { return nil }
+
 func (spawnOnlyWorkerSpawner) SpawnWorker(
 	context.Context,
 	WorkerSpawnRequest,
@@ -1242,6 +1288,7 @@ func newFakeBroker(t *testing.T, afterHello func(*websocket.Conn)) *httptest.Ser
 		protocol.FeaturePeerRoot,
 		protocol.FeatureWorkerLifecycle,
 		protocol.FeatureWorkspaceSync,
+		protocol.FeatureWorkspaceTransfer,
 	}, afterHello)
 }
 

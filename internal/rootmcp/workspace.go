@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	workspaceCallTimeout        = 310 * time.Second
+	workspaceCallTimeout        = 30*time.Minute + 10*time.Second
 	maximumWorkspaceOutputBytes = 16 * 1024
 )
 

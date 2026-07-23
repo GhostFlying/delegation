@@ -53,6 +53,8 @@ type session struct {
 	inboundSem         chan struct{}
 	inboundMu          sync.Mutex
 	inbound            map[string]context.CancelFunc
+	workspaceInbound   sync.WaitGroup
+	workspaceStopping  bool
 	context            context.Context
 	cancel             context.CancelFunc
 }

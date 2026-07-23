@@ -22,7 +22,7 @@ const (
 	maximumConcurrentControlCalls = 32
 	maximumConcurrentCalls        = maximumConcurrentWaitCalls + maximumConcurrentControlCalls
 	localCallTimeout              = 130 * time.Second
-	localWorkspaceCallTimeout     = 305 * time.Second
+	localWorkspaceCallTimeout     = 30*time.Minute + 5*time.Second
 )
 
 type Backend interface {

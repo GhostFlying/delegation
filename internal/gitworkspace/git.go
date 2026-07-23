@@ -40,6 +40,12 @@ type Repository struct {
 	Manifest protocol.WorkspaceManifest
 }
 
+type BasePreparation struct {
+	BundleRequired  bool
+	OverlayRequired bool
+	BasisOIDs       []string
+}
+
 type Runner struct {
 	Binary              string
 	excludedEnvironment []string
@@ -192,24 +198,37 @@ func (r Runner) Inspect(ctx context.Context, sourcePath, gitURL string) (Reposit
 }
 
 func (r Runner) CloneDirect(ctx context.Context, destination string, manifest protocol.WorkspaceManifest) error {
-	if err := manifest.Validate(); err != nil {
+	prepared, err := r.PrepareBase(ctx, destination, manifest)
+	if err != nil {
 		return err
 	}
-	if !manifest.Clean {
+	if prepared.BundleRequired || prepared.OverlayRequired {
+		_ = os.RemoveAll(destination)
 		return ErrBundleRequired
 	}
+	return nil
+}
+
+func (r Runner) PrepareBase(
+	ctx context.Context,
+	destination string,
+	manifest protocol.WorkspaceManifest,
+) (BasePreparation, error) {
+	if err := manifest.Validate(); err != nil {
+		return BasePreparation{}, err
+	}
 	if err := ValidateRemoteURL(manifest.GitURL); err != nil {
-		return err
+		return BasePreparation{}, err
 	}
 	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
 		if err == nil {
-			return errors.New("clone destination already exists")
+			return BasePreparation{}, errors.New("clone destination already exists")
 		}
-		return fmt.Errorf("inspect clone destination: %w", err)
+		return BasePreparation{}, fmt.Errorf("inspect clone destination: %w", err)
 	}
 	parent := filepath.Dir(destination)
 	if err := os.Mkdir(destination, 0o700); err != nil {
-		return fmt.Errorf("create clone destination: %w", err)
+		return BasePreparation{}, fmt.Errorf("create clone destination: %w", err)
 	}
 	remove := true
 	defer func() {
@@ -225,50 +244,63 @@ func (r Runner) CloneDirect(ctx context.Context, destination string, manifest pr
 	}
 	if err := r.runWithTimeout(ctx, cloneCommandTimeout, parent, args...); err != nil {
 		if isContextError(err) {
-			return err
+			return BasePreparation{}, err
 		}
-		return ErrBundleRequired
+		return BasePreparation{
+			BundleRequired: true, OverlayRequired: !manifest.Clean,
+		}, nil
 	}
 	if err := r.run(ctx, destination, "config", "core.hooksPath", disabledHooksPath()); err != nil {
-		return preserveContextError(err, errors.New("disable target Git hooks"))
-	}
-	if err := r.run(ctx, destination, "cat-file", "-e", manifest.HeadOID+"^{commit}"); err != nil {
-		if isContextError(err) {
-			return err
-		}
-		return ErrBundleRequired
+		return BasePreparation{}, preserveContextError(err, errors.New("disable target Git hooks"))
 	}
 	actualFormat, err := r.output(ctx, destination, "rev-parse", "--show-object-format")
 	if err != nil {
-		return preserveContextError(err, errors.New("target Git object format does not match the source"))
+		return BasePreparation{}, preserveContextError(err, errors.New("inspect target Git object format"))
 	}
 	if strings.TrimSpace(string(actualFormat)) != manifest.ObjectFormat {
-		return errors.New("target Git object format does not match the source")
+		return BasePreparation{
+			BundleRequired: true, OverlayRequired: !manifest.Clean,
+		}, nil
+	}
+	if err := r.run(ctx, destination, "cat-file", "-e", manifest.HeadOID+"^{commit}"); err != nil {
+		if isContextError(err) {
+			return BasePreparation{}, err
+		}
+		basisOIDs, basisErr := r.bundleBasisOIDs(ctx, destination)
+		if basisErr != nil {
+			return BasePreparation{}, basisErr
+		}
+		remove = false
+		return BasePreparation{
+			BundleRequired: true, OverlayRequired: !manifest.Clean, BasisOIDs: basisOIDs,
+		}, nil
 	}
 	if err := r.run(ctx, destination, "checkout", "--detach", "--force", manifest.HeadOID); err != nil {
-		return preserveContextError(err, errors.New("check out exact source HEAD on target"))
+		return BasePreparation{}, preserveContextError(err, errors.New("check out exact source HEAD on target"))
 	}
 	actualHead, err := r.output(ctx, destination, "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
-		return preserveContextError(err, errors.New("target checkout does not match the exact source HEAD"))
+		return BasePreparation{}, preserveContextError(err, errors.New("target checkout does not match the exact source HEAD"))
 	}
 	if strings.TrimSpace(string(actualHead)) != manifest.HeadOID {
-		return errors.New("target checkout does not match the exact source HEAD")
+		return BasePreparation{}, errors.New("target checkout does not match the exact source HEAD")
 	}
 	status, err := r.output(ctx, destination, "status", "--porcelain=v2", "-z", "--untracked-files=normal")
 	if err != nil {
-		return preserveContextError(err, errors.New("target direct clone is not clean"))
+		return BasePreparation{}, preserveContextError(err, errors.New("target direct clone is not clean"))
 	}
 	if len(status) != 0 {
-		return errors.New("target direct clone is not clean")
+		return BasePreparation{}, errors.New("target direct clone is not clean")
 	}
 	if err := validateWorkingDirectory(destination, manifest.WorkingDirectory); errors.Is(err, os.ErrNotExist) {
-		return ErrBundleRequired
+		if manifest.Clean {
+			return BasePreparation{}, errors.New("target working directory is absent from the exact source HEAD")
+		}
 	} else if err != nil {
-		return err
+		return BasePreparation{}, err
 	}
 	remove = false
-	return nil
+	return BasePreparation{OverlayRequired: !manifest.Clean}, nil
 }
 
 func (r Runner) VerifyDirect(
@@ -374,12 +406,7 @@ func (r Runner) command(
 ) ([]byte, error) {
 	commandContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	safeArgs := []string{
-		"-c", "core.fsmonitor=",
-		"-c", "core.hooksPath=" + disabledHooksPath(),
-	}
-	args = append(safeArgs, args...)
-	command := exec.CommandContext(commandContext, r.Binary, args...)
+	command := exec.CommandContext(commandContext, r.Binary, safeGitArgs(args)...)
 	command.WaitDelay = commandWaitDelay
 	command.Dir = directory
 	command.Env = hardenedEnvironment(r.excludedEnvironment)
@@ -403,6 +430,17 @@ func (r Runner) command(
 		return nil, errors.New("Git command output exceeded the configured limit")
 	}
 	return output.Bytes(), nil
+}
+
+func safeGitArgs(args []string) []string {
+	safeArgs := []string{
+		"-c", "core.fsmonitor=",
+		"-c", "core.hooksPath=" + disabledHooksPath(),
+	}
+	if runtime.GOOS == "windows" {
+		safeArgs = append(safeArgs, "-c", "core.longpaths=true")
+	}
+	return append(safeArgs, args...)
 }
 
 func (r Runner) ensureSafeSourceConfig(ctx context.Context, root string) error {

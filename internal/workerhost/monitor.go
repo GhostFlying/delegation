@@ -329,7 +329,10 @@ func (h *Host) shutdown(
 	close(h.completionEvents)
 	h.background.Wait()
 	h.operations.Lock()
+	h.workspaceOperations.Lock()
+	cleanupErr := h.cleanupWorkspaceTransfers(context.Background())
 	workspaceErr := h.workspaceRoot.Close()
+	h.workspaceOperations.Unlock()
 	h.operations.Unlock()
-	h.shutdownErr = errors.Join(workspaceErr, h.Err())
+	h.shutdownErr = errors.Join(cleanupErr, workspaceErr, h.Err())
 }

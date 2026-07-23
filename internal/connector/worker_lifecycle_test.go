@@ -345,6 +345,7 @@ func writeLifecycleHello(
 			protocol.FeaturePeerRoot,
 			protocol.FeatureWorkerLifecycle,
 			protocol.FeatureWorkspaceSync,
+			protocol.FeatureWorkspaceTransfer,
 		},
 		HeartbeatIntervalMS:   time.Hour.Milliseconds(),
 		Revision:              1,

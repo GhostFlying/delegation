@@ -8,11 +8,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/gitworkspace"
-	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/store"
 )
@@ -33,6 +31,11 @@ func (h *Host) InspectWorkspace(
 	ctx context.Context,
 	request WorkspaceInspectRequest,
 ) (protocol.InspectWorkspaceResult, error) {
+	release, err := h.acquireWorkspaceOperation(ctx)
+	if err != nil {
+		return protocol.InspectWorkspaceResult{}, err
+	}
+	defer release()
 	if err := validateLocalWorkspaceRootRequest(
 		request.TreeID, request.Source, h.controllerID, h.deviceID,
 	); err != nil {
@@ -54,11 +57,13 @@ func (h *Host) PrepareWorkspace(
 	ctx context.Context,
 	request WorkspacePrepareRequest,
 ) (protocol.PrepareWorkspaceResult, error) {
-	if err := request.Source.Validate(); err != nil {
+	release, err := h.acquireWorkspaceOperation(ctx)
+	if err != nil {
 		return protocol.PrepareWorkspaceResult{}, err
 	}
-	if request.Source.ControllerID != h.controllerID || request.Source.TreeID != request.TreeID ||
-		request.Source.ParentAgentID != "" || request.Params.SourceAgentID != request.Source.AgentID ||
+	defer release()
+	if err := validateWorkspaceRootRequest(request.TreeID, request.Source, h.controllerID); err != nil ||
+		request.Params.SourceAgentID != request.Source.AgentID ||
 		request.Params.SourceDeviceID != request.Source.DeviceID {
 		return protocol.PrepareWorkspaceResult{}, errors.New("workspace prepare authority is invalid")
 	}
@@ -95,6 +100,16 @@ func (h *Host) PrepareWorkspace(
 	} else if !errors.Is(loadErr, store.ErrNotFound) {
 		return protocol.PrepareWorkspaceResult{}, loadErr
 	}
+	pendingKey := workspacePreparationKey(request.TreeID, request.Params.WorkspaceID)
+	h.workspaceTransferMu.Lock()
+	pending, alreadyPending := h.pendingWorkspaces[pendingKey]
+	h.workspaceTransferMu.Unlock()
+	if alreadyPending {
+		if !pending.matches(request.Source, request.Params.Manifest, manifestHash) {
+			return protocol.PrepareWorkspaceResult{}, store.ErrWorkerReservationConflict
+		}
+		return pending.result(), nil
+	}
 	finalName := workspaceSyncName(request.TreeID, request.Params.WorkspaceID)
 	if _, err := h.workspaceRoot.Lstat(finalName); err == nil {
 		if err := h.workspaceRoot.RemoveAll(finalName); err != nil {
@@ -106,62 +121,48 @@ func (h *Host) PrepareWorkspace(
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return protocol.PrepareWorkspaceResult{}, fmt.Errorf("inspect target workspace destination: %w", err)
 	}
-	temporaryID, err := identity.NewID()
-	if err != nil {
-		return protocol.PrepareWorkspaceResult{}, err
+	temporaryName := finalName + ".pending"
+	if _, err := h.workspaceRoot.Lstat(temporaryName); err == nil {
+		if err := h.workspaceRoot.RemoveAll(temporaryName); err != nil {
+			return protocol.PrepareWorkspaceResult{}, fmt.Errorf("remove orphaned pending workspace: %w", err)
+		}
+		if err := h.syncWorkspaceDirectory(); err != nil {
+			return protocol.PrepareWorkspaceResult{}, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return protocol.PrepareWorkspaceResult{}, fmt.Errorf("inspect pending workspace destination: %w", err)
 	}
-	temporaryName := finalName + ".tmp-" + temporaryID
 	temporaryPath := filepath.Join(h.workspaceRoot.Name(), temporaryName)
-	if err := h.git.CloneDirect(ctx, temporaryPath, request.Params.Manifest); err != nil {
-		if errors.Is(err, gitworkspace.ErrBundleRequired) {
-			return protocol.PrepareWorkspaceResult{
-				WorkspaceID: request.Params.WorkspaceID,
-				Outcome:     protocol.WorkspacePrepareBundleRequired,
-				Warnings:    append([]string(nil), request.Params.Manifest.Warnings...),
-			}, nil
-		}
-		return protocol.PrepareWorkspaceResult{}, err
-	}
-	committed := false
-	published := false
-	defer func() {
-		if !committed {
-			if published {
-				_ = h.workspaceRoot.RemoveAll(finalName)
-				_ = h.syncWorkspaceDirectory()
-			} else {
-				_ = h.workspaceRoot.RemoveAll(temporaryName)
-			}
-		}
-	}()
-	if err := h.workspaceRoot.Rename(temporaryName, finalName); err != nil {
-		return protocol.PrepareWorkspaceResult{}, fmt.Errorf("publish prepared workspace: %w", err)
-	}
-	published = true
-	if err := h.syncWorkspaceDirectory(); err != nil {
-		return protocol.PrepareWorkspaceResult{}, err
-	}
-	workspace := store.PreparedWorkspace{
-		PreparedWorkspaceKey: key,
-		SourceAgentID:        request.Source.AgentID, SourceDeviceID: request.Source.DeviceID,
-		TargetDeviceID: h.deviceID, GitURL: request.Params.Manifest.GitURL,
-		HeadOID: request.Params.Manifest.HeadOID, ObjectFormat: request.Params.Manifest.ObjectFormat,
-		WorkingDirectory: request.Params.Manifest.WorkingDirectory,
-		WorkspacePath:    filepath.Join(h.workspaceRoot.Name(), finalName),
-		Strategy:         protocol.WorkspaceStrategyDirect, ManifestHash: manifestHash,
-		Warnings: append([]string(nil), request.Params.Manifest.Warnings...),
-	}
-	stored, err := h.state.RecordPreparedWorkspace(ctx, workspace, time.Now())
+	base, err := h.git.PrepareBase(ctx, temporaryPath, request.Params.Manifest)
 	if err != nil {
 		return protocol.PrepareWorkspaceResult{}, err
 	}
-	committed = true
-	return preparedWorkspaceResult(stored), nil
+	if base.BundleRequired || base.OverlayRequired {
+		if err := ctx.Err(); err != nil {
+			_ = h.workspaceRoot.RemoveAll(temporaryName)
+			return protocol.PrepareWorkspaceResult{}, err
+		}
+		pending = pendingWorkspacePreparation{
+			TreeID: request.TreeID, Source: request.Source,
+			WorkspaceID: request.Params.WorkspaceID, Manifest: request.Params.Manifest,
+			TransferID:   request.Params.WorkspaceID,
+			ManifestHash: manifestHash, TemporaryName: temporaryName, Base: base,
+		}
+		h.workspaceTransferMu.Lock()
+		h.pendingWorkspaces[pendingKey] = pending
+		h.workspaceTransferMu.Unlock()
+		return pending.result(), nil
+	}
+	return h.publishPreparedWorkspace(
+		ctx, request.TreeID, request.Source, request.Params.WorkspaceID,
+		temporaryName, request.Params.Manifest, protocol.WorkspaceStrategyDirect,
+		request.Params.Manifest.Warnings,
+	)
 }
 
 func preparedWorkspaceResult(workspace store.PreparedWorkspace) protocol.PrepareWorkspaceResult {
 	return protocol.PrepareWorkspaceResult{
-		WorkspaceID: workspace.WorkspaceID, Outcome: protocol.WorkspacePrepareDirect,
+		WorkspaceID: workspace.WorkspaceID, Outcome: protocol.WorkspacePrepareReady,
 		Strategy: workspace.Strategy, ManifestHash: workspace.ManifestHash,
 		Warnings: append([]string(nil), workspace.Warnings...),
 	}
@@ -172,11 +173,10 @@ func validateLocalWorkspaceRootRequest(
 	source control.PrincipalIdentity,
 	controllerID, deviceID string,
 ) error {
-	if err := source.Validate(); err != nil {
+	if err := validateWorkspaceRootRequest(treeID, source, controllerID); err != nil {
 		return err
 	}
-	if source.ControllerID != controllerID || source.TreeID != treeID ||
-		source.DeviceID != deviceID || source.ParentAgentID != "" {
+	if source.DeviceID != deviceID {
 		return errors.New("workspace source is not a local tree root")
 	}
 	return nil
@@ -222,7 +222,7 @@ func (h *Host) verifyPreparedWorkspace(ctx context.Context, workspace store.Prep
 			return errors.New("prepared workspace working directory is unavailable")
 		}
 	}
-	if workspace.Status == store.PreparedWorkspaceReady && workspace.Strategy == protocol.WorkspaceStrategyDirect {
+	if workspace.Status == store.PreparedWorkspaceReady {
 		if err := h.git.VerifyDirect(ctx, workspace.WorkspacePath, workspace.HeadOID, workspace.ObjectFormat); err != nil {
 			return err
 		}

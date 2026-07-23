@@ -25,6 +25,13 @@ type managedWorkerHost interface {
 	Interrupt(context.Context, workerhost.InterruptRequest) (workerhost.OperationResult, error)
 	InspectWorkspace(context.Context, workerhost.WorkspaceInspectRequest) (protocol.InspectWorkspaceResult, error)
 	PrepareWorkspace(context.Context, workerhost.WorkspacePrepareRequest) (protocol.PrepareWorkspaceResult, error)
+	CreateWorkspaceTransfer(context.Context, workerhost.WorkspaceCreateTransferRequest) (protocol.CreateWorkspaceTransferResult, error)
+	ReadWorkspaceArtifact(context.Context, workerhost.WorkspaceReadArtifactRequest) (protocol.ReadWorkspaceArtifactResult, error)
+	BeginWorkspaceTransfer(context.Context, workerhost.WorkspaceBeginTransferRequest) (protocol.BeginWorkspaceTransferResult, error)
+	WriteWorkspaceArtifact(context.Context, workerhost.WorkspaceWriteArtifactRequest) (protocol.WriteWorkspaceArtifactResult, error)
+	FinishWorkspaceTransfer(context.Context, workerhost.WorkspaceTransferControlRequest) (protocol.FinishWorkspaceTransferResult, error)
+	CancelWorkspaceTransfer(context.Context, workerhost.WorkspaceTransferControlRequest) (protocol.CancelWorkspaceTransferResult, error)
+	CleanupWorkspaceTransfers(context.Context) error
 }
 
 type managedWorkerState interface {

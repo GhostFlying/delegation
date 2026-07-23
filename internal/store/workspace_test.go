@@ -128,6 +128,50 @@ func TestWorkspaceSyncRejectsResultThatDiffersFromPinnedManifest(t *testing.T) {
 	}
 }
 
+func TestWorkspaceSyncAcceptsFullFallbackWarningOnlyForFullStrategy(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		strategy protocol.WorkspaceStrategy
+		wantErr  bool
+	}{
+		{name: "self contained", strategy: protocol.WorkspaceStrategyFull},
+		{name: "direct", strategy: protocol.WorkspaceStrategyDirect, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			registry, root := prepareAgentSpawnStore(t)
+			ctx := context.Background()
+			intent := WorkspaceSyncIntent{
+				Source: root.Identity(), SyncID: workspaceSyncID,
+				TargetDeviceID: agentSpawnTargetID, GitURL: "https://example.invalid/repository.git",
+				SourcePathHash: sha256.Sum256([]byte("/trusted/source")),
+			}
+			created, err := registry.BeginWorkspaceSync(ctx, intent, time.Unix(30, 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest := testWorkspaceManifest(intent.GitURL)
+			pinned, err := registry.PinWorkspaceSyncManifest(ctx, created.Key, manifest, time.Unix(31, 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			warnings := []string{protocol.WorkspaceWarningFullHistoryFallback}
+			summary := protocol.WorkspaceSummary{
+				WorkspaceID: workspaceSyncID, SourceDeviceID: root.DeviceID,
+				TargetDeviceID: agentSpawnTargetID, HeadOID: manifest.HeadOID,
+				ObjectFormat: manifest.ObjectFormat, WorkingDirectory: manifest.WorkingDirectory,
+				Strategy: test.strategy, ManifestHash: pinned.ManifestHash, Warnings: warnings,
+			}
+			_, err = registry.FinishWorkspaceSync(ctx, created.Key, summary, time.Unix(32, 0))
+			if test.wantErr && !errors.Is(err, ErrConflict) {
+				t.Fatalf("FinishWorkspaceSync() = %v, want ErrConflict", err)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func testWorkspaceManifest(gitURL string) protocol.WorkspaceManifest {
 	return protocol.WorkspaceManifest{
 		GitURL: gitURL, HeadOID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

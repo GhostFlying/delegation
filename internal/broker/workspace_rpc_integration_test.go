@@ -29,10 +29,12 @@ type recordingWorkspacePeer struct {
 	prepareErr      error
 	prepareStarted  chan struct{}
 	prepareCanceled chan struct{}
+	cancelObserved  chan connector.WorkspaceTransferControlRequest
 
-	inspections  []connector.WorkspaceInspectRequest
-	preparations []connector.WorkspacePrepareRequest
-	spawns       []connector.WorkerSpawnRequest
+	inspections           []connector.WorkspaceInspectRequest
+	preparations          []connector.WorkspacePrepareRequest
+	transferCancellations []connector.WorkspaceTransferControlRequest
+	spawns                []connector.WorkerSpawnRequest
 }
 
 func (p *recordingWorkspacePeer) InspectWorkspace(
@@ -74,9 +76,164 @@ func (p *recordingWorkspacePeer) PrepareWorkspace(
 	}
 	return protocol.PrepareWorkspaceResult{
 		WorkspaceID: request.Params.WorkspaceID,
-		Outcome:     protocol.WorkspacePrepareDirect, Strategy: protocol.WorkspaceStrategyDirect,
+		Outcome:     protocol.WorkspacePrepareReady, Strategy: protocol.WorkspaceStrategyDirect,
 		ManifestHash: hash, Warnings: append([]string{}, request.Params.Manifest.Warnings...),
 	}, nil
+}
+
+func (p *recordingWorkspacePeer) CreateWorkspaceTransfer(
+	context.Context,
+	connector.WorkspaceCreateTransferRequest,
+) (protocol.CreateWorkspaceTransferResult, error) {
+	return protocol.CreateWorkspaceTransferResult{}, errors.New("not used")
+}
+
+func (p *recordingWorkspacePeer) ReadWorkspaceArtifact(
+	context.Context,
+	connector.WorkspaceReadArtifactRequest,
+) (protocol.ReadWorkspaceArtifactResult, error) {
+	return protocol.ReadWorkspaceArtifactResult{}, errors.New("not used")
+}
+
+func (p *recordingWorkspacePeer) BeginWorkspaceTransfer(
+	context.Context,
+	connector.WorkspaceBeginTransferRequest,
+) (protocol.BeginWorkspaceTransferResult, error) {
+	return protocol.BeginWorkspaceTransferResult{}, errors.New("not used")
+}
+
+func (p *recordingWorkspacePeer) WriteWorkspaceArtifact(
+	context.Context,
+	connector.WorkspaceWriteArtifactRequest,
+) (protocol.WriteWorkspaceArtifactResult, error) {
+	return protocol.WriteWorkspaceArtifactResult{}, errors.New("not used")
+}
+
+func (p *recordingWorkspacePeer) FinishWorkspaceTransfer(
+	context.Context,
+	connector.WorkspaceTransferControlRequest,
+) (protocol.FinishWorkspaceTransferResult, error) {
+	return protocol.FinishWorkspaceTransferResult{}, errors.New("not used")
+}
+
+func (p *recordingWorkspacePeer) CancelWorkspaceTransfer(
+	_ context.Context,
+	request connector.WorkspaceTransferControlRequest,
+) (protocol.CancelWorkspaceTransferResult, error) {
+	p.mu.Lock()
+	p.transferCancellations = append(p.transferCancellations, request)
+	cancelObserved := p.cancelObserved
+	p.mu.Unlock()
+	if cancelObserved != nil {
+		cancelObserved <- request
+	}
+	return protocol.CancelWorkspaceTransferResult{TransferID: request.Params.TransferID}, nil
+}
+
+func (p *recordingWorkspacePeer) CleanupWorkspaceTransfers(context.Context) error {
+	return nil
+}
+
+func TestWorkspaceRPCPrepareFailureCancelsExactProvisionalTarget(t *testing.T) {
+	tests := []struct {
+		name          string
+		prepareErr    error
+		cancelRequest bool
+	}{
+		{name: "target returns error", prepareErr: errors.New("target preparation failed")},
+		{name: "root request is canceled", cancelRequest: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+			gitURL := "ssh://git@example.invalid/repository.git"
+			sourceManager := &recordingWorkspacePeer{
+				deviceID: brokerTestDeviceID,
+				manifest: workspaceRPCManifest(gitURL, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+			}
+			cancelObserved := make(chan connector.WorkspaceTransferControlRequest, 1)
+			targetManager := &recordingWorkspacePeer{
+				deviceID: agentRPCTargetID, prepareErr: test.prepareErr,
+				cancelObserved: cancelObserved,
+			}
+			if test.cancelRequest {
+				targetManager.prepareStarted = make(chan struct{}, 1)
+				targetManager.prepareCanceled = make(chan struct{}, 1)
+			}
+			sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceManager)
+			startAgentRPCConnector(t, harness, agentRPCTargetID, targetManager)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var root protocol.EnsureRootTreeResult
+			if err := sourceClient.Call(
+				ctx, protocol.MethodEnsureRootTree, "", nil,
+				protocol.EnsureRootTreeParams{ExternalThreadID: agentRPCThreadID}, &root,
+			); err != nil {
+				t.Fatal(err)
+			}
+			source := root.Principal.Identity()
+			callContext, cancelCall := context.WithCancel(ctx)
+			defer cancelCall()
+			params := protocol.SyncWorkspaceParams{
+				SyncID: workspaceRPCFailedSyncID, TargetDeviceID: agentRPCTargetID,
+				GitURL: gitURL, SourcePath: filepath.Join(t.TempDir(), "trusted", "source"),
+			}
+			callDone := make(chan error, 1)
+			go func() {
+				var result protocol.SyncWorkspaceResult
+				callDone <- sourceClient.Call(
+					callContext, protocol.MethodSyncWorkspace, root.Tree.TreeID, &source, params, &result,
+				)
+			}()
+			if test.cancelRequest {
+				select {
+				case <-targetManager.prepareStarted:
+				case <-time.After(2 * time.Second):
+					t.Fatal("target workspace preparation did not start")
+				}
+				cancelCall()
+			}
+			select {
+			case err := <-callDone:
+				if err == nil {
+					t.Fatal("workspace sync unexpectedly succeeded")
+				}
+				if test.cancelRequest && !errors.Is(err, context.Canceled) {
+					t.Fatalf("canceled workspace sync = %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("failed workspace sync did not return")
+			}
+
+			var cleanup connector.WorkspaceTransferControlRequest
+			select {
+			case cleanup = <-cancelObserved:
+			case <-time.After(2 * time.Second):
+				t.Fatal("broker did not cancel the provisional target workspace")
+			}
+			wantCleanup := connector.WorkspaceTransferControlRequest{
+				TreeID: root.Tree.TreeID, Source: source,
+				Params: protocol.WorkspaceTransferControlParams{
+					WorkspaceID: params.SyncID, TransferID: params.SyncID,
+					SourceAgentID: source.AgentID, SourceDeviceID: source.DeviceID,
+				},
+			}
+			if !reflect.DeepEqual(cleanup, wantCleanup) {
+				t.Fatalf("provisional target cleanup = %#v, want %#v", cleanup, wantCleanup)
+			}
+			targetManager.mu.Lock()
+			cancellations := append(
+				[]connector.WorkspaceTransferControlRequest(nil),
+				targetManager.transferCancellations...,
+			)
+			targetManager.mu.Unlock()
+			if !reflect.DeepEqual(cancellations, []connector.WorkspaceTransferControlRequest{wantCleanup}) {
+				t.Fatalf("target cleanup calls = %#v, want exactly the provisional cleanup", cancellations)
+			}
+			waitForWorkspaceCleanupDrain(t, harness.server, brokerTestDeviceID, agentRPCTargetID)
+		})
+	}
 }
 
 func TestWorkspaceRPCCancellationStopsTargetPeerOperation(t *testing.T) {
@@ -88,8 +245,10 @@ func TestWorkspaceRPCCancellationStopsTargetPeerOperation(t *testing.T) {
 	}
 	prepareStarted := make(chan struct{}, 1)
 	prepareCanceled := make(chan struct{}, 1)
+	cancelObserved := make(chan connector.WorkspaceTransferControlRequest, 1)
 	targetManager := &recordingWorkspacePeer{
 		deviceID: agentRPCTargetID, prepareStarted: prepareStarted, prepareCanceled: prepareCanceled,
+		cancelObserved: cancelObserved,
 	}
 	sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceManager)
 	startAgentRPCConnector(t, harness, agentRPCTargetID, targetManager)
@@ -136,6 +295,41 @@ func TestWorkspaceRPCCancellationStopsTargetPeerOperation(t *testing.T) {
 	case <-prepareCanceled:
 	case <-time.After(2 * time.Second):
 		t.Fatal("target peer operation was not canceled")
+	}
+	select {
+	case <-cancelObserved:
+	case <-time.After(2 * time.Second):
+		t.Fatal("broker did not finish provisional target cleanup")
+	}
+	waitForWorkspaceCleanupDrain(t, harness.server, brokerTestDeviceID, agentRPCTargetID)
+}
+
+func waitForWorkspaceCleanupDrain(t *testing.T, server *Server, sourceDeviceID, targetDeviceID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sourceAsync := 0
+		if source := server.connection(sourceDeviceID); source != nil {
+			source.asyncMu.Lock()
+			sourceAsync = len(source.asyncCancels)
+			source.asyncMu.Unlock()
+		}
+		targetPending := 0
+		if target := server.connection(targetDeviceID); target != nil {
+			target.pendingMu.Lock()
+			targetPending = len(target.pending)
+			target.pendingMu.Unlock()
+		}
+		if sourceAsync == 0 && targetPending == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf(
+				"workspace cleanup did not drain: source async=%d, target pending=%d",
+				sourceAsync, targetPending,
+			)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -197,7 +391,7 @@ func TestWorkspaceRPCRoutesPinnedDirectWorkspaceAndSpawn(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if synchronized.Outcome != protocol.WorkspacePrepareDirect || synchronized.Workspace == nil ||
+	if synchronized.Outcome != protocol.WorkspacePrepareReady || synchronized.Workspace == nil ||
 		synchronized.Workspace.WorkspaceID != workspaceRPCSyncID {
 		t.Fatalf("workspace sync = %#v", synchronized)
 	}

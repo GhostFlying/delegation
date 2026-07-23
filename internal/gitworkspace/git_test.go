@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
 func TestValidateRemoteURL(t *testing.T) {
@@ -139,8 +141,16 @@ func TestInspectAndCloneDirectExactCleanHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repository.Root != source {
-		t.Fatalf("repository root = %q, want %q", repository.Root, source)
+	repositoryRootInfo, err := os.Stat(repository.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceInfo, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(repositoryRootInfo, sourceInfo) {
+		t.Fatalf("repository root = %q, want same directory as %q", repository.Root, source)
 	}
 	if repository.Manifest.GitURL != remote || repository.Manifest.HeadOID != head ||
 		repository.Manifest.ObjectFormat != "sha1" || repository.Manifest.WorkingDirectory != "nested" ||
@@ -215,11 +225,32 @@ func TestDirectCloneRequiresSourceWorkingDirectoryInCheckout(t *testing.T) {
 		t.Fatalf("empty cwd manifest = %#v", repository.Manifest)
 	}
 	destination := filepath.Join(t.TempDir(), "prepared")
-	if err := runner.CloneDirect(context.Background(), destination, repository.Manifest); !errors.Is(err, ErrBundleRequired) {
-		t.Fatalf("CloneDirect() = %v, want ErrBundleRequired", err)
+	if err := runner.CloneDirect(context.Background(), destination, repository.Manifest); err == nil ||
+		!strings.Contains(err.Error(), "working directory is absent") {
+		t.Fatalf("CloneDirect() = %v, want absent working directory error", err)
 	}
 	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("incomplete destination still exists: %v", err)
+	}
+}
+
+func TestPrepareBaseDiscardsRemoteWithDifferentObjectFormat(t *testing.T) {
+	runner := testRunner(t)
+	remote, _, _ := createRemoteRepository(t, runner.Binary)
+	manifest := protocol.WorkspaceManifest{
+		GitURL: remote, HeadOID: strings.Repeat("a", 64), ObjectFormat: "sha256",
+		Clean: true, SourceSnapshotHash: strings.Repeat("b", 64), Warnings: []string{},
+	}
+	destination := filepath.Join(t.TempDir(), "prepared")
+	prepared, err := runner.PrepareBase(context.Background(), destination, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prepared.BundleRequired || prepared.OverlayRequired || len(prepared.BasisOIDs) != 0 {
+		t.Fatalf("base preparation = %#v", prepared)
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mismatched clone destination still exists: %v", err)
 	}
 }
 

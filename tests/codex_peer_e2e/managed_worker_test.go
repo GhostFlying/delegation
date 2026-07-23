@@ -361,6 +361,7 @@ func openManagedTestHost(
 		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
 		PeerConfigPath: configPath, DelegationBinary: delegationBinary,
 		CodexBinary: codexLaunch.NativePath, CodexHome: cfg.Peer.CodexHome,
+		GitBinary:               cfg.Peer.GitBinary,
 		CodexEnvironment:        codexEnvironment,
 		CodexUnsetEnvironment:   codexLaunch.UnsetEnvironment,
 		ProviderEnvironmentFile: providerEnvironmentFile,

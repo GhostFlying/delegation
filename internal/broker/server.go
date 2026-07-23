@@ -41,8 +41,9 @@ const (
 	agentWaitRequestTimeout      = 30 * time.Second
 	agentSpawnRequestTimeout     = 125 * time.Second
 	agentOperationRequestTimeout = 125 * time.Second
-	workspaceSyncRequestTimeout  = 5 * time.Minute
+	workspaceSyncRequestTimeout  = 30 * time.Minute
 	maximumPendingPeerCalls      = 128
+	maximumActiveWorkspaceSyncs  = 128
 )
 
 type Registry interface {
@@ -111,6 +112,7 @@ type Server struct {
 	mailboxNotifier   *mailboxNotifier
 	lifecycleNotifier *treeNotifier
 	agentOperations   *agentOperationQueue
+	workspaceSyncs    *workspaceSyncFlights
 
 	retryMu              sync.Mutex
 	offlineRetries       map[string]uint64
@@ -239,6 +241,7 @@ func New(options Options) (*Server, error) {
 		mailboxNotifier:      newMailboxNotifier(),
 		lifecycleNotifier:    newTreeNotifier(),
 		agentOperations:      newAgentOperationQueue(),
+		workspaceSyncs:       newWorkspaceSyncFlights(maximumActiveWorkspaceSyncs),
 		offlineRetries:       map[string]uint64{},
 		offlineRetryWake:     make(chan struct{}, 1),
 		offlineRetryInterval: defaultOfflineRetry,
@@ -526,6 +529,7 @@ func (s *Server) acceptHello(
 		protocol.FeaturePeerRoot,
 		protocol.FeatureWorkerLifecycle,
 		protocol.FeatureWorkspaceSync,
+		protocol.FeatureWorkspaceTransfer,
 	} {
 		if !slices.Contains(hello.Features, feature) {
 			_ = s.writeError(ctx, connection, envelope, protocol.ErrorInvalidParams, "peer does not support required protocol features")
@@ -606,6 +610,7 @@ func (s *Server) acceptHello(
 			protocol.FeaturePeerRoot,
 			protocol.FeatureWorkerLifecycle,
 			protocol.FeatureWorkspaceSync,
+			protocol.FeatureWorkspaceTransfer,
 		},
 		HeartbeatIntervalMS:   s.heartbeatInterval.Milliseconds(),
 		Revision:              device.Revision,
@@ -1051,14 +1056,44 @@ func (s *session) callPeer(
 	case result := <-pending.result:
 		return result.payload, result.err
 	case <-ctx.Done():
-		if s.removePeerCall(requestID) {
-			if cancelErr := s.cancelPeerRequest(requestID); cancelErr != nil {
-				_ = s.connection.CloseNow()
+		if !drainsCanceledWorkspacePeerCalls(ctx) {
+			if s.removePeerCall(requestID) {
+				if cancelErr := s.cancelPeerRequest(requestID); cancelErr != nil {
+					_ = s.connection.CloseNow()
+				}
+				return nil, ctx.Err()
 			}
-			return nil, ctx.Err()
+			result := <-pending.result
+			return result.payload, result.err
 		}
-		result := <-pending.result
-		return result.payload, result.err
+		if !s.hasPeerCall(requestID) {
+			result := <-pending.result
+			return result.payload, result.err
+		}
+		if cancelErr := s.cancelPeerRequest(requestID); cancelErr != nil {
+			_ = s.connection.CloseNow()
+		}
+		return nil, s.drainCanceledPeerCall(ctx, requestID, pending)
+	}
+}
+
+func (s *session) drainCanceledPeerCall(
+	ctx context.Context,
+	requestID string,
+	pending peerPendingCall,
+) error {
+	timer := time.NewTimer(cleanupTimeout)
+	defer timer.Stop()
+	select {
+	case <-pending.result:
+		return ctx.Err()
+	case <-timer.C:
+		if s.removePeerCall(requestID) {
+			_ = s.connection.CloseNow()
+		} else {
+			<-pending.result
+		}
+		return ctx.Err()
 	}
 }
 
@@ -1109,6 +1144,13 @@ func (s *session) removePeerCall(requestID string) bool {
 	}
 	delete(s.pending, requestID)
 	return true
+}
+
+func (s *session) hasPeerCall(requestID string) bool {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	_, found := s.pending[requestID]
+	return found
 }
 
 func (s *session) completePeerCall(response protocol.Envelope) error {

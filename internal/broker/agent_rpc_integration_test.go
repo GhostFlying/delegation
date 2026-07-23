@@ -76,6 +76,50 @@ func (agentRPCWorkerController) PrepareWorkspace(
 	return protocol.PrepareWorkspaceResult{}, errors.New("not used")
 }
 
+func (agentRPCWorkerController) CreateWorkspaceTransfer(
+	context.Context,
+	connector.WorkspaceCreateTransferRequest,
+) (protocol.CreateWorkspaceTransferResult, error) {
+	return protocol.CreateWorkspaceTransferResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) ReadWorkspaceArtifact(
+	context.Context,
+	connector.WorkspaceReadArtifactRequest,
+) (protocol.ReadWorkspaceArtifactResult, error) {
+	return protocol.ReadWorkspaceArtifactResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) BeginWorkspaceTransfer(
+	context.Context,
+	connector.WorkspaceBeginTransferRequest,
+) (protocol.BeginWorkspaceTransferResult, error) {
+	return protocol.BeginWorkspaceTransferResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) WriteWorkspaceArtifact(
+	context.Context,
+	connector.WorkspaceWriteArtifactRequest,
+) (protocol.WriteWorkspaceArtifactResult, error) {
+	return protocol.WriteWorkspaceArtifactResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) FinishWorkspaceTransfer(
+	context.Context,
+	connector.WorkspaceTransferControlRequest,
+) (protocol.FinishWorkspaceTransferResult, error) {
+	return protocol.FinishWorkspaceTransferResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) CancelWorkspaceTransfer(
+	context.Context,
+	connector.WorkspaceTransferControlRequest,
+) (protocol.CancelWorkspaceTransferResult, error) {
+	return protocol.CancelWorkspaceTransferResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) CleanupWorkspaceTransfers(context.Context) error { return nil }
+
 func (agentRPCWorkerController) SendWorker(
 	_ context.Context,
 	request connector.WorkerSendRequest,

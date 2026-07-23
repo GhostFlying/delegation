@@ -59,6 +59,16 @@ func (s *session) handleSyncWorkspace(ctx context.Context, request protocol.Enve
 	if err != nil || params.Validate() != nil {
 		return s.writeError(ctx, request, protocol.ErrorInvalidParams, "invalid workspace sync payload")
 	}
+	key := store.WorkspaceSyncKey{
+		ControllerID: request.ControllerID, TreeID: request.TreeID,
+		SourceAgentID: request.Source.AgentID, SyncID: params.SyncID,
+	}
+	release, err := s.server.workspaceSyncs.acquire(ctx, key)
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx = withCanceledWorkspacePeerCallDrain(ctx)
 	receipt, err := s.server.registry.BeginWorkspaceSync(ctx, store.WorkspaceSyncIntent{
 		Source: *request.Source, SyncID: params.SyncID,
 		TargetDeviceID: params.TargetDeviceID, GitURL: params.GitURL,
@@ -70,7 +80,7 @@ func (s *session) handleSyncWorkspace(ctx context.Context, request protocol.Enve
 	if receipt.Status == store.WorkspaceSyncPrepared {
 		summary := receipt.Summary()
 		return s.writeResult(ctx, request, protocol.SyncWorkspaceResult{
-			Workspace: &summary, Outcome: protocol.WorkspacePrepareDirect,
+			Workspace: &summary, Outcome: protocol.WorkspacePrepareReady,
 			Warnings: append([]string(nil), summary.Warnings...),
 		})
 	}
@@ -81,6 +91,9 @@ func (s *session) handleSyncWorkspace(ctx context.Context, request protocol.Enve
 		},
 	)
 	if callErr != nil {
+		if isContextError(callErr) {
+			return callErr
+		}
 		return s.writeError(ctx, request, protocol.ErrorUnavailable, "source workspace inspection failed")
 	}
 	inspected, err := protocol.DecodePayload[protocol.InspectWorkspaceResult](sourcePayload)
@@ -88,10 +101,6 @@ func (s *session) handleSyncWorkspace(ctx context.Context, request protocol.Enve
 		inspected.Manifest.GitURL != params.GitURL {
 		_ = s.connection.CloseNow()
 		return s.writeError(ctx, request, protocol.ErrorUnavailable, "source returned an invalid workspace manifest")
-	}
-	key := store.WorkspaceSyncKey{
-		ControllerID: request.ControllerID, TreeID: request.TreeID,
-		SourceAgentID: request.Source.AgentID, SyncID: params.SyncID,
 	}
 	receipt, err = s.server.registry.PinWorkspaceSyncManifest(
 		ctx, key, inspected.Manifest, s.server.now(),
@@ -104,6 +113,26 @@ func (s *session) handleSyncWorkspace(ctx context.Context, request protocol.Enve
 	if target == nil {
 		return s.writeError(ctx, request, protocol.ErrorUnavailable, "workspace target is unavailable")
 	}
+	cleanupProvisional := true
+	defer func() {
+		if !cleanupProvisional {
+			return
+		}
+		cleanupContext, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx), workspaceTransferCleanupTimeout,
+		)
+		defer cancel()
+		_, cleanupErr := target.callPeer(
+			cleanupContext, protocol.MethodCancelWorkspaceTransfer, request.TreeID, *request.Source,
+			protocol.WorkspaceTransferControlParams{
+				WorkspaceID: params.SyncID, TransferID: params.SyncID,
+				SourceAgentID: request.Source.AgentID, SourceDeviceID: request.Source.DeviceID,
+			},
+		)
+		if cleanupErr != nil {
+			s.server.reportError(&internalError{operation: "clean provisional target workspace", err: cleanupErr})
+		}
+	}()
 	targetPayload, callErr := target.callPeer(
 		ctx, protocol.MethodPrepareWorkspace, request.TreeID, *request.Source,
 		protocol.PrepareWorkspaceParams{
@@ -112,6 +141,9 @@ func (s *session) handleSyncWorkspace(ctx context.Context, request protocol.Enve
 		},
 	)
 	if callErr != nil {
+		if isContextError(callErr) {
+			return callErr
+		}
 		return s.writeError(ctx, request, protocol.ErrorUnavailable, "target workspace preparation failed")
 	}
 	prepared, err := protocol.DecodePayload[protocol.PrepareWorkspaceResult](targetPayload)
@@ -119,16 +151,30 @@ func (s *session) handleSyncWorkspace(ctx context.Context, request protocol.Enve
 		_ = target.connection.CloseNow()
 		return s.writeError(ctx, request, protocol.ErrorUnavailable, "target returned an invalid workspace result")
 	}
-	if prepared.ManifestHash != "" && prepared.ManifestHash != receipt.ManifestHash ||
-		!slices.Equal(prepared.Warnings, manifest.Warnings) {
+	if prepared.Outcome == protocol.WorkspacePrepareTransferRequired {
+		prepared, err = s.relayWorkspaceTransfer(
+			ctx, target, request.TreeID, *request.Source, params, manifest, prepared,
+		)
+		if err != nil {
+			if isContextError(err) {
+				return err
+			}
+			writeErr := s.writeError(ctx, request, protocol.ErrorUnavailable, "workspace artifact transfer failed")
+			if errors.Is(err, errInvalidTargetWorkspaceTransfer) {
+				_ = target.connection.CloseNow()
+			}
+			if errors.Is(err, errInvalidSourceWorkspaceTransfer) {
+				_ = s.connection.CloseNow()
+			}
+			return writeErr
+		}
+	}
+	expectedWarnings, warningErr := protocol.WorkspaceWarningsForStrategy(manifest.Warnings, prepared.Strategy)
+	if prepared.Outcome != protocol.WorkspacePrepareReady || warningErr != nil ||
+		prepared.ManifestHash != receipt.ManifestHash ||
+		!slices.Equal(prepared.Warnings, expectedWarnings) {
 		_ = target.connection.CloseNow()
 		return s.writeError(ctx, request, protocol.ErrorUnavailable, "target returned mismatched workspace metadata")
-	}
-	if prepared.Outcome == protocol.WorkspacePrepareBundleRequired {
-		warnings := append([]string(nil), manifest.Warnings...)
-		return s.writeResult(ctx, request, protocol.SyncWorkspaceResult{
-			Outcome: protocol.WorkspacePrepareBundleRequired, Warnings: warnings,
-		})
 	}
 	summary := protocol.WorkspaceSummary{
 		WorkspaceID: params.SyncID, SourceDeviceID: request.Source.DeviceID,
@@ -146,9 +192,10 @@ func (s *session) handleSyncWorkspace(ctx context.Context, request protocol.Enve
 	if err != nil {
 		return s.handleWorkspaceStoreError(ctx, request, err)
 	}
+	cleanupProvisional = false
 	stored := receipt.Summary()
 	return s.writeResult(ctx, request, protocol.SyncWorkspaceResult{
-		Workspace: &stored, Outcome: protocol.WorkspacePrepareDirect,
+		Workspace: &stored, Outcome: protocol.WorkspacePrepareReady,
 		Warnings: append([]string(nil), stored.Warnings...),
 	})
 }

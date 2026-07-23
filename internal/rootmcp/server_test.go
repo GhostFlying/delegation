@@ -627,6 +627,10 @@ func TestRootMCPOutputIsBounded(t *testing.T) {
 			len(serverInstructions),
 		)
 	}
+	if !strings.Contains(serverInstructions, protocol.WorkspaceWarningFullHistoryFallback) ||
+		!strings.Contains(serverInstructions, "may contain deleted content") {
+		t.Fatal("root MCP instructions do not explain the full-history fallback warning")
+	}
 	features := make([]string, 64)
 	for index := range features {
 		features[index] = fmt.Sprintf("F%02d%s", index, strings.Repeat("x", 61))

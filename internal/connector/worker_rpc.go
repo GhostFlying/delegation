@@ -22,6 +22,18 @@ func (s *session) handleBrokerRequest(request protocol.Envelope) error {
 		return s.handleInspectWorkspaceRequest(request)
 	case protocol.MethodPrepareWorkspace:
 		return s.handlePrepareWorkspaceRequest(request)
+	case protocol.MethodCreateWorkspaceTransfer:
+		return s.handleCreateWorkspaceTransferRequest(request)
+	case protocol.MethodReadWorkspaceArtifact:
+		return s.handleReadWorkspaceArtifactRequest(request)
+	case protocol.MethodBeginWorkspaceTransfer:
+		return s.handleBeginWorkspaceTransferRequest(request)
+	case protocol.MethodWriteWorkspaceArtifact:
+		return s.handleWriteWorkspaceArtifactRequest(request)
+	case protocol.MethodFinishWorkspaceTransfer:
+		return s.handleFinishWorkspaceTransferRequest(request)
+	case protocol.MethodCancelWorkspaceTransfer:
+		return s.handleCancelWorkspaceTransferRequest(request)
 	default:
 		return s.writeError(request, protocol.ErrorMethodNotFound, "method not found")
 	}
@@ -36,7 +48,7 @@ func (s *session) handleInspectWorkspaceRequest(request protocol.Envelope) error
 		return s.writeError(request, protocol.ErrorInvalidParams, "invalid workspace inspection payload")
 	}
 	source := *request.Source
-	return s.startInbound(request, func(ctx context.Context) {
+	return s.startWorkspaceInbound(request, func(ctx context.Context) {
 		result, operationErr := s.client.workspaceManager.InspectWorkspace(ctx, WorkspaceInspectRequest{
 			TreeID: request.TreeID, Source: source, Params: params,
 		})
@@ -69,7 +81,7 @@ func (s *session) handlePrepareWorkspaceRequest(request protocol.Envelope) error
 		return s.writeError(request, protocol.ErrorInvalidParams, "invalid workspace prepare payload")
 	}
 	source := *request.Source
-	return s.startInbound(request, func(ctx context.Context) {
+	return s.startWorkspaceInbound(request, func(ctx context.Context) {
 		result, operationErr := s.client.workspaceManager.PrepareWorkspace(ctx, WorkspacePrepareRequest{
 			TreeID: request.TreeID, Source: source, Params: params,
 		})
@@ -222,12 +234,29 @@ func validateBrokerWorkerRequest(request protocol.Envelope) error {
 }
 
 func (s *session) startInbound(request protocol.Envelope, run func(context.Context)) error {
+	return s.startInboundOperation(request, false, run)
+}
+
+func (s *session) startWorkspaceInbound(request protocol.Envelope, run func(context.Context)) error {
+	return s.startInboundOperation(request, true, run)
+}
+
+func (s *session) startInboundOperation(
+	request protocol.Envelope,
+	workspace bool,
+	run func(context.Context),
+) error {
 	select {
 	case s.inboundSem <- struct{}{}:
 	default:
 		return s.writeError(request, protocol.ErrorUnavailable, "peer worker dispatch is busy")
 	}
 	s.inboundMu.Lock()
+	if s.context.Err() != nil || workspace && s.workspaceStopping {
+		s.inboundMu.Unlock()
+		<-s.inboundSem
+		return ErrUnavailable
+	}
 	if _, duplicate := s.inbound[request.RequestID]; duplicate {
 		s.inboundMu.Unlock()
 		<-s.inboundSem
@@ -235,6 +264,9 @@ func (s *session) startInbound(request protocol.Envelope, run func(context.Conte
 	}
 	operationContext, cancel := context.WithCancel(s.context)
 	s.inbound[request.RequestID] = cancel
+	if workspace {
+		s.workspaceInbound.Add(1)
+	}
 	s.inboundMu.Unlock()
 	go func() {
 		defer func() {
@@ -243,10 +275,20 @@ func (s *session) startInbound(request protocol.Envelope, run func(context.Conte
 			delete(s.inbound, request.RequestID)
 			s.inboundMu.Unlock()
 			<-s.inboundSem
+			if workspace {
+				s.workspaceInbound.Done()
+			}
 		}()
 		run(operationContext)
 	}()
 	return nil
+}
+
+func (s *session) stopWorkspaceInbound() {
+	s.inboundMu.Lock()
+	s.workspaceStopping = true
+	s.inboundMu.Unlock()
+	s.workspaceInbound.Wait()
 }
 
 func (s *session) finishWorkerOperationRequest(

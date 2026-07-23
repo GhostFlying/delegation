@@ -29,6 +29,7 @@ const (
 	defaultReconnectMinimum = 250 * time.Millisecond
 	defaultReconnectMaximum = 10 * time.Second
 	connectTimeout          = 30 * time.Second
+	workspaceCleanupTimeout = 30 * time.Second
 	writeTimeout            = 10 * time.Second
 	maximumPendingCalls     = 128
 	maximumHeartbeat        = time.Hour
@@ -94,9 +95,49 @@ type WorkspacePrepareRequest struct {
 	Params protocol.PrepareWorkspaceParams
 }
 
+type WorkspaceCreateTransferRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.CreateWorkspaceTransferParams
+}
+
+type WorkspaceReadArtifactRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.ReadWorkspaceArtifactParams
+}
+
+type WorkspaceBeginTransferRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.BeginWorkspaceTransferParams
+}
+
+type WorkspaceWriteArtifactRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.WriteWorkspaceArtifactParams
+}
+
+type WorkspaceTransferControlRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.WorkspaceTransferControlParams
+}
+
 type WorkspaceManager interface {
 	InspectWorkspace(context.Context, WorkspaceInspectRequest) (protocol.InspectWorkspaceResult, error)
 	PrepareWorkspace(context.Context, WorkspacePrepareRequest) (protocol.PrepareWorkspaceResult, error)
+}
+
+type WorkspaceTransferManager interface {
+	CreateWorkspaceTransfer(context.Context, WorkspaceCreateTransferRequest) (protocol.CreateWorkspaceTransferResult, error)
+	ReadWorkspaceArtifact(context.Context, WorkspaceReadArtifactRequest) (protocol.ReadWorkspaceArtifactResult, error)
+	BeginWorkspaceTransfer(context.Context, WorkspaceBeginTransferRequest) (protocol.BeginWorkspaceTransferResult, error)
+	WriteWorkspaceArtifact(context.Context, WorkspaceWriteArtifactRequest) (protocol.WriteWorkspaceArtifactResult, error)
+	FinishWorkspaceTransfer(context.Context, WorkspaceTransferControlRequest) (protocol.FinishWorkspaceTransferResult, error)
+	CancelWorkspaceTransfer(context.Context, WorkspaceTransferControlRequest) (protocol.CancelWorkspaceTransferResult, error)
+	CleanupWorkspaceTransfers(context.Context) error
 }
 
 type Options struct {
@@ -139,19 +180,20 @@ func (e *RPCError) Error() string {
 }
 
 type Client struct {
-	endpoint         string
-	hello            protocol.Hello
-	token            *tokenfile.Token
-	reconnectMin     time.Duration
-	reconnectMax     time.Duration
-	dial             DialFunc
-	httpClient       *http.Client
-	reportError      func(error)
-	workerSpawner    WorkerSpawner
-	workerController WorkerController
-	workerLifecycle  WorkerLifecycleSource
-	workspaceManager WorkspaceManager
-	running          atomic.Bool
+	endpoint          string
+	hello             protocol.Hello
+	token             *tokenfile.Token
+	reconnectMin      time.Duration
+	reconnectMax      time.Duration
+	dial              DialFunc
+	httpClient        *http.Client
+	reportError       func(error)
+	workerSpawner     WorkerSpawner
+	workerController  WorkerController
+	workerLifecycle   WorkerLifecycleSource
+	workspaceManager  WorkspaceManager
+	workspaceTransfer WorkspaceTransferManager
+	running           atomic.Bool
 
 	mu      sync.RWMutex
 	session *session
@@ -189,6 +231,10 @@ func New(options Options) (*Client, error) {
 	if options.WorkspaceManager == nil {
 		return nil, errors.New("connector workspace manager is required")
 	}
+	workspaceTransfer, ok := options.WorkspaceManager.(WorkspaceTransferManager)
+	if !ok {
+		return nil, errors.New("connector workspace transfer manager is required")
+	}
 	features := []string{
 		protocol.FeatureDeviceRegistry,
 		protocol.FeatureFullDuplexRPC,
@@ -197,6 +243,7 @@ func New(options Options) (*Client, error) {
 		protocol.FeaturePeerRoot,
 		protocol.FeatureWorkerLifecycle,
 		protocol.FeatureWorkspaceSync,
+		protocol.FeatureWorkspaceTransfer,
 	}
 	hello := protocol.Hello{
 		ControllerID:   options.ControllerID,
@@ -262,8 +309,8 @@ func New(options Options) (*Client, error) {
 		workerSpawner:    options.WorkerSpawner,
 		workerController: workerController,
 		workerLifecycle:  options.WorkerLifecycleSource,
-		workspaceManager: options.WorkspaceManager,
-		updates:          make(chan struct{}),
+		workspaceManager: options.WorkspaceManager, workspaceTransfer: workspaceTransfer,
+		updates: make(chan struct{}),
 	}, nil
 }
 
@@ -343,7 +390,7 @@ func (c *Client) WaitReady(ctx context.Context) error {
 	}
 }
 
-func (c *Client) runSession(ctx context.Context) (bool, error) {
+func (c *Client) runSession(ctx context.Context) (healthy bool, returnErr error) {
 	connectContext, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 	header := http.Header{}
@@ -363,6 +410,15 @@ func (c *Client) runSession(ctx context.Context) (bool, error) {
 	}
 	connection.SetReadLimit(protocol.MaxMessageSize)
 	current := newSession(c, connection)
+	defer func() {
+		current.stopWorkspaceInbound()
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), workspaceCleanupTimeout)
+		cleanupErr := c.workspaceTransfer.CleanupWorkspaceTransfers(cleanupContext)
+		cleanupCancel()
+		if cleanupErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("clean workspace transfers after broker session: %w", cleanupErr))
+		}
+	}()
 	hello := c.hello
 	hello.WorkerRevision = c.workerLifecycle.WorkerRevision()
 	if err := hello.Validate(); err != nil {
@@ -500,6 +556,7 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 		protocol.FeaturePeerRoot,
 		protocol.FeatureWorkerLifecycle,
 		protocol.FeatureWorkspaceSync,
+		protocol.FeatureWorkspaceTransfer,
 	}
 	for _, feature := range required {
 		if !slices.Contains(result.Features, feature) {

@@ -171,11 +171,12 @@ func (s *Store) FinishWorkspaceSync(
 			}
 			return nil
 		}
-		if receipt.Status != WorkspaceSyncInspected ||
+		expectedWarnings, warningErr := protocol.WorkspaceWarningsForStrategy(receipt.Warnings, summary.Strategy)
+		if warningErr != nil || receipt.Status != WorkspaceSyncInspected ||
 			receipt.ManifestHash != summary.ManifestHash ||
 			receipt.HeadOID != summary.HeadOID || receipt.ObjectFormat != summary.ObjectFormat ||
 			receipt.WorkingDirectory != summary.WorkingDirectory ||
-			!slices.Equal(receipt.Warnings, summary.Warnings) {
+			!slices.Equal(expectedWarnings, summary.Warnings) {
 			return fmt.Errorf("%w: workspace result differs from inspected source", ErrConflict)
 		}
 		if receipt.SourceDeviceID != summary.SourceDeviceID ||

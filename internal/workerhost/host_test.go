@@ -176,7 +176,7 @@ func TestHostDirectPreparationRecoversOrphanAndRevalidatesReadyWorkspace(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.Outcome != protocol.WorkspacePrepareDirect ||
+	if prepared.Outcome != protocol.WorkspacePrepareReady ||
 		prepared.Strategy != protocol.WorkspaceStrategyDirect {
 		t.Fatalf("prepared result = %#v", prepared)
 	}
@@ -2140,6 +2140,9 @@ func recordPreparedWorkspaceForTree(
 
 func runTestGit(t *testing.T, directory string, args ...string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		args = append([]string{"-c", "core.longpaths=true"}, args...)
+	}
 	command := exec.Command("git", args...)
 	command.Dir = directory
 	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
@@ -2150,6 +2153,9 @@ func runTestGit(t *testing.T, directory string, args ...string) {
 
 func outputTestGit(t *testing.T, directory string, args ...string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		args = append([]string{"-c", "core.longpaths=true"}, args...)
+	}
 	command := exec.Command("git", args...)
 	command.Dir = directory
 	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")

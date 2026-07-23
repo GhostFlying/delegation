@@ -170,6 +170,50 @@ func (integrationWorkerController) PrepareWorkspace(
 	return protocol.PrepareWorkspaceResult{}, errors.New("workspace preparation is outside this mailbox test")
 }
 
+func (integrationWorkerController) CreateWorkspaceTransfer(
+	context.Context,
+	connector.WorkspaceCreateTransferRequest,
+) (protocol.CreateWorkspaceTransferResult, error) {
+	return protocol.CreateWorkspaceTransferResult{}, errors.New("workspace transfer is outside this mailbox test")
+}
+
+func (integrationWorkerController) ReadWorkspaceArtifact(
+	context.Context,
+	connector.WorkspaceReadArtifactRequest,
+) (protocol.ReadWorkspaceArtifactResult, error) {
+	return protocol.ReadWorkspaceArtifactResult{}, errors.New("workspace transfer is outside this mailbox test")
+}
+
+func (integrationWorkerController) BeginWorkspaceTransfer(
+	context.Context,
+	connector.WorkspaceBeginTransferRequest,
+) (protocol.BeginWorkspaceTransferResult, error) {
+	return protocol.BeginWorkspaceTransferResult{}, errors.New("workspace transfer is outside this mailbox test")
+}
+
+func (integrationWorkerController) WriteWorkspaceArtifact(
+	context.Context,
+	connector.WorkspaceWriteArtifactRequest,
+) (protocol.WriteWorkspaceArtifactResult, error) {
+	return protocol.WriteWorkspaceArtifactResult{}, errors.New("workspace transfer is outside this mailbox test")
+}
+
+func (integrationWorkerController) FinishWorkspaceTransfer(
+	context.Context,
+	connector.WorkspaceTransferControlRequest,
+) (protocol.FinishWorkspaceTransferResult, error) {
+	return protocol.FinishWorkspaceTransferResult{}, errors.New("workspace transfer is outside this mailbox test")
+}
+
+func (integrationWorkerController) CancelWorkspaceTransfer(
+	context.Context,
+	connector.WorkspaceTransferControlRequest,
+) (protocol.CancelWorkspaceTransferResult, error) {
+	return protocol.CancelWorkspaceTransferResult{}, errors.New("workspace transfer is outside this mailbox test")
+}
+
+func (integrationWorkerController) CleanupWorkspaceTransfers(context.Context) error { return nil }
+
 func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 	controllerID := newIntegrationID(t)
 	deviceID := newIntegrationID(t)

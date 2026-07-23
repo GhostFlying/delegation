@@ -17,7 +17,7 @@ func TestRootMCPSyncWorkspaceUsesTrustedSandboxMetadata(t *testing.T) {
 	cwd := filepath.Join(t.TempDir(), "repository", "nested")
 	manifestHash := strings.Repeat("a", 64)
 	backend := &fakeRootBackend{workspaceResult: &protocol.SyncWorkspaceResult{
-		Outcome: protocol.WorkspacePrepareDirect,
+		Outcome: protocol.WorkspacePrepareReady,
 		Workspace: &protocol.WorkspaceSummary{
 			WorkspaceID: rootMCPWorkspaceID, SourceDeviceID: rootMCPDeviceID,
 			TargetDeviceID: rootMCPWorkerID,
@@ -56,7 +56,7 @@ func TestRootMCPSyncWorkspaceUsesTrustedSandboxMetadata(t *testing.T) {
 	var output SyncWorkspaceOutput
 	decodeStructured(t, result.StructuredContent, &output)
 	if output.WorkspaceID != rootMCPWorkspaceID || output.HeadOID != strings.Repeat("b", 40) ||
-		output.Outcome != protocol.WorkspacePrepareDirect {
+		output.Outcome != protocol.WorkspacePrepareReady {
 		t.Fatalf("sync output = %#v", output)
 	}
 	calls := backend.snapshot()

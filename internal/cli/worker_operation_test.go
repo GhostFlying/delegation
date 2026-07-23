@@ -101,6 +101,52 @@ func (h *fakeManagedWorkerHost) PrepareWorkspace(
 	return protocol.PrepareWorkspaceResult{}, errors.New("unexpected workspace preparation")
 }
 
+func (h *fakeManagedWorkerHost) CreateWorkspaceTransfer(
+	context.Context,
+	workerhost.WorkspaceCreateTransferRequest,
+) (protocol.CreateWorkspaceTransferResult, error) {
+	return protocol.CreateWorkspaceTransferResult{}, errors.New("unexpected workspace transfer creation")
+}
+
+func (h *fakeManagedWorkerHost) ReadWorkspaceArtifact(
+	context.Context,
+	workerhost.WorkspaceReadArtifactRequest,
+) (protocol.ReadWorkspaceArtifactResult, error) {
+	return protocol.ReadWorkspaceArtifactResult{}, errors.New("unexpected workspace artifact read")
+}
+
+func (h *fakeManagedWorkerHost) BeginWorkspaceTransfer(
+	context.Context,
+	workerhost.WorkspaceBeginTransferRequest,
+) (protocol.BeginWorkspaceTransferResult, error) {
+	return protocol.BeginWorkspaceTransferResult{}, errors.New("unexpected workspace transfer begin")
+}
+
+func (h *fakeManagedWorkerHost) WriteWorkspaceArtifact(
+	context.Context,
+	workerhost.WorkspaceWriteArtifactRequest,
+) (protocol.WriteWorkspaceArtifactResult, error) {
+	return protocol.WriteWorkspaceArtifactResult{}, errors.New("unexpected workspace artifact write")
+}
+
+func (h *fakeManagedWorkerHost) FinishWorkspaceTransfer(
+	context.Context,
+	workerhost.WorkspaceTransferControlRequest,
+) (protocol.FinishWorkspaceTransferResult, error) {
+	return protocol.FinishWorkspaceTransferResult{}, errors.New("unexpected workspace transfer finish")
+}
+
+func (h *fakeManagedWorkerHost) CancelWorkspaceTransfer(
+	context.Context,
+	workerhost.WorkspaceTransferControlRequest,
+) (protocol.CancelWorkspaceTransferResult, error) {
+	return protocol.CancelWorkspaceTransferResult{}, errors.New("unexpected workspace transfer cancel")
+}
+
+func (h *fakeManagedWorkerHost) CleanupWorkspaceTransfers(context.Context) error {
+	return nil
+}
+
 type staticManagedWorkerState struct {
 	worker store.WorkerReservation
 	err    error

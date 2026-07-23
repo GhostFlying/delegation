@@ -20,6 +20,7 @@ const (
 	MaximumWorkspaceRelativeBytes = 4 * 1024
 	MaximumWorkspaceWarnings      = 16
 	MaximumWorkspaceWarningBytes  = 64
+	MaximumWorkspaceBasisOIDs     = 128
 )
 
 var (
@@ -48,13 +49,13 @@ func (s WorkspaceStrategy) Validate() error {
 type WorkspacePrepareOutcome string
 
 const (
-	WorkspacePrepareDirect         WorkspacePrepareOutcome = "direct"
-	WorkspacePrepareBundleRequired WorkspacePrepareOutcome = "bundleRequired"
+	WorkspacePrepareReady            WorkspacePrepareOutcome = "ready"
+	WorkspacePrepareTransferRequired WorkspacePrepareOutcome = "transferRequired"
 )
 
 func (o WorkspacePrepareOutcome) Validate() error {
 	switch o {
-	case WorkspacePrepareDirect, WorkspacePrepareBundleRequired:
+	case WorkspacePrepareReady, WorkspacePrepareTransferRequired:
 		return nil
 	default:
 		return fmt.Errorf("unsupported workspace prepare outcome %q", o)
@@ -183,12 +184,14 @@ func (p PrepareWorkspaceParams) Validate() error {
 }
 
 type PrepareWorkspaceResult struct {
-	WorkspaceID  string                  `json:"workspaceId"`
-	Outcome      WorkspacePrepareOutcome `json:"outcome"`
-	Strategy     WorkspaceStrategy       `json:"strategy,omitempty"`
-	ManifestHash string                  `json:"manifestHash,omitempty"`
-	Warnings     []string                `json:"warnings"`
-	BasisOIDs    []string                `json:"basisOids,omitempty"`
+	WorkspaceID     string                  `json:"workspaceId"`
+	Outcome         WorkspacePrepareOutcome `json:"outcome"`
+	Strategy        WorkspaceStrategy       `json:"strategy,omitempty"`
+	ManifestHash    string                  `json:"manifestHash,omitempty"`
+	Warnings        []string                `json:"warnings"`
+	BasisOIDs       []string                `json:"basisOids,omitempty"`
+	BundleRequired  bool                    `json:"bundleRequired,omitempty"`
+	OverlayRequired bool                    `json:"overlayRequired,omitempty"`
 }
 
 func (r PrepareWorkspaceResult) Validate() error {
@@ -201,6 +204,9 @@ func (r PrepareWorkspaceResult) Validate() error {
 	if err := ValidateWorkspaceWarnings(r.Warnings); err != nil {
 		return err
 	}
+	if len(r.BasisOIDs) > MaximumWorkspaceBasisOIDs {
+		return fmt.Errorf("basisOids exceeds limit of %d", MaximumWorkspaceBasisOIDs)
+	}
 	for _, oid := range r.BasisOIDs {
 		if !gitObjectIDPattern.MatchString(oid) {
 			return errors.New("basisOids contains an invalid object ID")
@@ -209,14 +215,23 @@ func (r PrepareWorkspaceResult) Validate() error {
 	if !slices.IsSorted(r.BasisOIDs) || len(slices.Compact(slices.Clone(r.BasisOIDs))) != len(r.BasisOIDs) {
 		return errors.New("basisOids must be sorted and unique")
 	}
-	if r.Outcome == WorkspacePrepareBundleRequired {
-		if r.Strategy != "" || r.ManifestHash != "" {
-			return errors.New("bundle-required result must not claim a prepared workspace")
+	if r.Outcome == WorkspacePrepareTransferRequired {
+		if r.Strategy != "" || !sha256DigestPattern.MatchString(r.ManifestHash) {
+			return errors.New("transfer-required result must bind the source manifest without claiming a strategy")
+		}
+		if !r.BundleRequired && !r.OverlayRequired {
+			return errors.New("transfer-required result must request an artifact")
+		}
+		if !r.BundleRequired && len(r.BasisOIDs) != 0 {
+			return errors.New("basisOids require a bundle transfer")
 		}
 		return nil
 	}
-	if r.Strategy != WorkspaceStrategyDirect {
-		return errors.New("direct prepare result must use the direct strategy")
+	if err := r.Strategy.Validate(); err != nil {
+		return err
+	}
+	if r.BundleRequired || r.OverlayRequired || len(r.BasisOIDs) != 0 {
+		return errors.New("ready prepare result must not request transfer artifacts")
 	}
 	if !sha256DigestPattern.MatchString(r.ManifestHash) {
 		return errors.New("manifestHash must be a lowercase SHA-256 digest")
@@ -278,16 +293,19 @@ func (r SyncWorkspaceResult) Validate() error {
 	if err := ValidateWorkspaceWarnings(r.Warnings); err != nil {
 		return err
 	}
-	if r.Outcome == WorkspacePrepareBundleRequired {
-		if r.Workspace != nil {
-			return errors.New("bundle-required sync must not return a workspace")
-		}
-		return nil
+	if r.Outcome != WorkspacePrepareReady {
+		return errors.New("workspace sync must not expose an intermediate preparation state")
 	}
 	if r.Workspace == nil {
-		return errors.New("direct sync must return a workspace")
+		return errors.New("ready sync must return a workspace")
 	}
-	return r.Workspace.Validate()
+	if err := r.Workspace.Validate(); err != nil {
+		return err
+	}
+	if !slices.Equal(r.Warnings, r.Workspace.Warnings) {
+		return errors.New("workspace sync warnings do not match its workspace")
+	}
+	return nil
 }
 
 func ValidateWorkspaceWarnings(warnings []string) error {
