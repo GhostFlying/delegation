@@ -482,7 +482,7 @@ func TestHostCompletionFencePrecedesRecovery(t *testing.T) {
 	waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerRunning)
 }
 
-func TestHostSpawnReturnsOnCallerDeadlineWhileRecoveryContinues(t *testing.T) {
+func TestHostSpawnReturnsOnCallerCancellationWhileRecoveryContinues(t *testing.T) {
 	application := newFakeApplication()
 	transportErr := errors.New("injected app-server transport failure")
 	application.threadStartErr = transportErr
@@ -490,19 +490,29 @@ func TestHostSpawnReturnsOnCallerDeadlineWhileRecoveryContinues(t *testing.T) {
 	application.closeStarted = make(chan struct{})
 	host, _, _ := newTestHost(t, 1, application)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	_, err := host.Spawn(ctx, SpawnRequest{
-		TreeID: testTreeID, AgentID: "123e4567-e89b-42d3-a456-426614174425",
-		ParentAgentID: testParentID, TaskName: "caller-deadline", Prompt: "caller deadline prompt",
-	})
-	cancel()
-	if !errors.Is(err, transportErr) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Spawn() error = %v, want transport error and caller deadline", err)
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := host.Spawn(ctx, SpawnRequest{
+			TreeID: testTreeID, AgentID: "123e4567-e89b-42d3-a456-426614174425",
+			ParentAgentID: testParentID, TaskName: "caller-cancel", Prompt: "caller cancel prompt",
+		})
+		result <- err
+	}()
 	select {
 	case <-application.closeStarted:
 	case <-time.After(time.Second):
-		t.Fatal("app-server recovery did not continue after caller deadline")
+		t.Fatal("app-server recovery did not start")
+	}
+	cancel()
+	var err error
+	select {
+	case err = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("Spawn did not return after caller cancellation")
+	}
+	if !errors.Is(err, transportErr) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Spawn() error = %v, want transport error and caller cancellation", err)
 	}
 	close(application.closeGate)
 	waitForClientRetirement(t, host, application)
