@@ -129,6 +129,11 @@ func TestClientRoutesConcurrentResponsesAndNotifications(t *testing.T) {
 		lateResult <- client.Call(lateCtx, "test/late", nil, nil)
 	}()
 	waitNotification(t, client, "thread/status/changed")
+	var writeBarrier string
+	callWithTimeout(t, client, "test/fast-standalone", nil, &writeBarrier)
+	if writeBarrier != "fast-standalone" {
+		t.Fatalf("write barrier response = %q", writeBarrier)
+	}
 	lateCancel()
 	if err := <-lateResult; !errors.Is(err, context.Canceled) {
 		t.Fatalf("late call error = %v", err)
