@@ -74,6 +74,18 @@ func TestCaptureResultRejectsUnconfinedGitMetadata(t *testing.T) {
 				)
 			},
 		},
+		{
+			name:      "unknown_object_info_directory",
+			wantError: "object storage info must contain only real regular files",
+			mutate: func(t *testing.T, repositoryPath, _ string) {
+				t.Helper()
+				if err := os.Mkdir(
+					filepath.Join(repositoryPath, ".git", "objects", "info", "unexpected"), 0o700,
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -110,6 +122,33 @@ func TestCaptureResultRejectsManagedCheckoutConfigDrift(t *testing.T) {
 			gitRun(t, runner.Binary, source, "config", "--local", test.key, test.value)
 			assertCaptureResultRejectedAndCleaned(t, runner, source, base.Manifest, "config drifted at "+test.key)
 		})
+	}
+}
+
+func TestCaptureResultAllowsConfinedSplitCommitGraph(t *testing.T) {
+	runner := testRunner(t)
+	remote, source, _ := createManagedResultRepository(t, runner)
+	base, err := runner.Inspect(context.Background(), source, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, runner.Binary, source, "commit-graph", "write", "--reachable", "--split")
+	graphDirectory := filepath.Join(source, ".git", "objects", "info", "commit-graphs")
+	entries, err := os.ReadDir(graphDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) < 2 {
+		t.Fatalf("split commit-graph directory contains %d entries", len(entries))
+	}
+
+	artifacts := filepath.Join(t.TempDir(), "result")
+	capture, err := runner.CaptureResult(context.Background(), source, artifacts, base.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !capture.Unchanged || capture.Bundle != nil || capture.Overlay != nil {
+		t.Fatalf("capture = %#v", capture)
 	}
 }
 

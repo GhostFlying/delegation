@@ -149,45 +149,67 @@ func validateManagedGitObjectStorage(root *os.Root) error {
 			return fmt.Errorf("managed Git object directory contains invalid entry %s", entry.Name())
 		}
 		directory := filepath.Join("objects", entry.Name())
-		files, err := root.Open(directory)
-		if err != nil {
-			return fmt.Errorf("open managed Git object storage %s: %w", entry.Name(), err)
+		if err := validateManagedGitObjectStorageDirectory(
+			root, directory, entry.Name(), entry.Name() == "info", &total,
+		); err != nil {
+			return err
 		}
-		for {
-			batch, readErr := files.ReadDir(256)
-			for _, file := range batch {
-				total++
-				if total > maximumManagedGitObjectEntries {
-					_ = files.Close()
-					return fmt.Errorf(
-						"managed Git object storage exceeds %d entries", maximumManagedGitObjectEntries,
-					)
-				}
-				info, infoErr := file.Info()
-				if infoErr != nil {
-					_ = files.Close()
-					return fmt.Errorf(
-						"inspect managed Git object storage %s entry: %w", entry.Name(), infoErr,
-					)
-				}
-				if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-					_ = files.Close()
-					return fmt.Errorf(
-						"managed Git object storage %s must contain only real regular files", entry.Name(),
-					)
-				}
-			}
-			if errors.Is(readErr, io.EOF) {
-				break
-			}
-			if readErr != nil {
+	}
+	return nil
+}
+
+func validateManagedGitObjectStorageDirectory(
+	root *os.Root,
+	directory, label string,
+	allowSplitCommitGraphs bool,
+	total *int,
+) error {
+	files, err := root.Open(directory)
+	if err != nil {
+		return fmt.Errorf("open managed Git object storage %s: %w", label, err)
+	}
+	for {
+		batch, readErr := files.ReadDir(256)
+		for _, file := range batch {
+			*total = *total + 1
+			if *total > maximumManagedGitObjectEntries {
 				_ = files.Close()
-				return fmt.Errorf("inspect managed Git object storage %s: %w", entry.Name(), readErr)
+				return fmt.Errorf(
+					"managed Git object storage exceeds %d entries", maximumManagedGitObjectEntries,
+				)
+			}
+			info, infoErr := file.Info()
+			if infoErr != nil {
+				_ = files.Close()
+				return fmt.Errorf("inspect managed Git object storage %s entry: %w", label, infoErr)
+			}
+			if allowSplitCommitGraphs && file.Name() == "commit-graphs" &&
+				info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+				if err := validateManagedGitObjectStorageDirectory(
+					root, filepath.Join(directory, file.Name()), label+"/"+file.Name(), false, total,
+				); err != nil {
+					_ = files.Close()
+					return err
+				}
+				continue
+			}
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				_ = files.Close()
+				return fmt.Errorf(
+					"managed Git object storage %s must contain only real regular files", label,
+				)
 			}
 		}
-		if err := files.Close(); err != nil {
-			return fmt.Errorf("close managed Git object storage %s: %w", entry.Name(), err)
+		if errors.Is(readErr, io.EOF) {
+			break
 		}
+		if readErr != nil {
+			_ = files.Close()
+			return fmt.Errorf("inspect managed Git object storage %s: %w", label, readErr)
+		}
+	}
+	if err := files.Close(); err != nil {
+		return fmt.Errorf("close managed Git object storage %s: %w", label, err)
 	}
 	return nil
 }
