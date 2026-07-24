@@ -2116,6 +2116,22 @@ func initializeTestRepository(t *testing.T, repositoryPath string) string {
 		t.Fatal(err)
 	}
 	runTestGit(t, filepath.Dir(repositoryPath), "init", repositoryPath)
+	hooksPath := "/dev/null"
+	if runtime.GOOS == "windows" {
+		hooksPath = "NUL"
+	}
+	for _, setting := range [][2]string{
+		{"core.hooksPath", hooksPath},
+		{"core.autocrlf", "false"},
+		{"core.eol", "lf"},
+		{"core.excludesFile", ""},
+		{"core.attributesFile", ""},
+	} {
+		runTestGit(t, repositoryPath, "config", setting[0], setting[1])
+	}
+	if runtime.GOOS != "windows" {
+		runTestGit(t, repositoryPath, "config", "core.fileMode", "true")
+	}
 	runTestGit(t, repositoryPath, "add", "nested/source.txt")
 	runTestGit(
 		t, repositoryPath, "-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid",

@@ -77,7 +77,11 @@ func (r Runner) captureResult(
 	if err != nil {
 		return ResultCapture{}, fmt.Errorf("resolve managed workspace: %w", err)
 	}
-	if err := requireRepositoryRoot(ctx, r, resolvedRepository); err != nil {
+	r = r.forIsolatedTarget()
+	if err := r.validateManagedResultRepository(ctx, resolvedRepository); err != nil {
+		return ResultCapture{}, err
+	}
+	if err := r.ensureSafeSourceConfig(ctx, resolvedRepository); err != nil {
 		return ResultCapture{}, err
 	}
 	resolvedArtifactParent, err := filepath.EvalSymlinks(filepath.Dir(artifactDirectory))
@@ -98,10 +102,6 @@ func (r Runner) captureResult(
 		}
 	}()
 
-	r = r.forIsolatedTarget()
-	if err := r.ensureSafeSourceConfig(ctx, resolvedRepository); err != nil {
-		return ResultCapture{}, err
-	}
 	resultHead, err := r.resultHead(ctx, resolvedRepository, base)
 	if err != nil {
 		return ResultCapture{}, err
@@ -181,6 +181,12 @@ func (r Runner) captureResult(
 	if !slices.Equal(verifiedWarnings, resultWarnings) {
 		return ResultCapture{}, errors.New("worker result warnings changed while its artifacts were captured")
 	}
+	if err := r.validateManagedResultRepository(ctx, resolvedRepository); err != nil {
+		return ResultCapture{}, err
+	}
+	if err := r.ensureSafeSourceConfig(ctx, resolvedRepository); err != nil {
+		return ResultCapture{}, err
+	}
 	var artifactBytes int64
 	for _, artifact := range []*ResultArtifact{capture.Bundle, capture.Overlay} {
 		if artifact != nil {
@@ -227,7 +233,8 @@ func (r Runner) resultHead(
 		return head, nil
 	}
 	err = r.run(
-		ctx, repositoryPath, "--no-replace-objects", "merge-base", "--is-ancestor", base.HeadOID, head,
+		ctx, repositoryPath, "-c", "core.commitGraph=false", "--no-replace-objects",
+		"merge-base", "--is-ancestor", base.HeadOID, head,
 	)
 	if err == nil {
 		return head, nil
@@ -246,13 +253,15 @@ func (r Runner) createResultBundle(
 ) error {
 	if err := r.runDiscardingOutput(
 		ctx, repositoryPath,
-		"--no-replace-objects", "rev-list", "--objects", "--missing=error", "--no-object-names",
+		"-c", "core.commitGraph=false", "--no-replace-objects",
+		"rev-list", "--objects", "--missing=error", "--no-object-names",
 		resultHead, "^"+baseHead,
 	); err != nil {
 		return preserveContextError(err, errors.New("verify worker result objects"))
 	}
 	args := []string{
-		"--no-replace-objects", "bundle", "create", "--quiet", "-", "HEAD", "^" + baseHead,
+		"-c", "core.commitGraph=false", "--no-replace-objects",
+		"bundle", "create", "--quiet", "-", "HEAD", "^" + baseHead,
 	}
 	if err := r.createBundleFile(ctx, repositoryPath, destination, maximumBytes, args); err != nil {
 		if errors.Is(err, errWorkspaceArtifactTooLarge) {
@@ -314,29 +323,6 @@ func describeResultArtifact(
 		Kind: kind, Name: name, Path: path, Size: written,
 		SHA256: hex.EncodeToString(digest.Sum(nil)),
 	}, nil
-}
-
-func requireRepositoryRoot(ctx context.Context, r Runner, repositoryPath string) error {
-	rootOutput, err := r.output(ctx, repositoryPath, "rev-parse", "--show-toplevel")
-	if err != nil {
-		return preserveContextError(err, errors.New("managed workspace is not a readable Git worktree"))
-	}
-	root, err := filepath.EvalSymlinks(strings.TrimSpace(string(rootOutput)))
-	if err != nil {
-		return fmt.Errorf("resolve managed Git worktree root: %w", err)
-	}
-	wantInfo, err := os.Stat(repositoryPath)
-	if err != nil {
-		return fmt.Errorf("inspect managed workspace: %w", err)
-	}
-	rootInfo, err := os.Stat(root)
-	if err != nil {
-		return fmt.Errorf("inspect managed Git worktree root: %w", err)
-	}
-	if !os.SameFile(wantInfo, rootInfo) {
-		return errors.New("managed workspace path must be its Git worktree root")
-	}
-	return nil
 }
 
 func pathWithin(parent, candidate string) bool {

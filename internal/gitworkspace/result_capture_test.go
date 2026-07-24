@@ -23,7 +23,7 @@ func TestCaptureResultRepresentsUnchangedSnapshotsWithoutPayload(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			runner := testRunner(t)
-			remote, source, _ := createRemoteRepository(t, runner.Binary)
+			remote, source, _ := createManagedResultRepository(t, runner)
 			if dirty {
 				if err := os.WriteFile(
 					filepath.Join(source, "nested", "hello.txt"), []byte("base dirty\n"), 0o600,
@@ -59,7 +59,7 @@ func TestCaptureResultRepresentsUnchangedSnapshotsWithoutPayload(t *testing.T) {
 
 func TestCaptureResultRepresentsDirtyBaseBecomingCleanWithoutPayload(t *testing.T) {
 	runner := testRunner(t)
-	remote, source, _ := createRemoteRepository(t, runner.Binary)
+	remote, source, _ := createManagedResultRepository(t, runner)
 	if err := os.WriteFile(
 		filepath.Join(source, "nested", "hello.txt"), []byte("base dirty\n"), 0o600,
 	); err != nil {
@@ -98,7 +98,7 @@ func TestCaptureResultRepresentsDirtyBaseBecomingCleanWithoutPayload(t *testing.
 
 func TestCaptureResultCreatesOverlayRelativeToUnchangedHead(t *testing.T) {
 	runner := testRunner(t)
-	remote, source, _ := createRemoteRepository(t, runner.Binary)
+	remote, source, _ := createManagedResultRepository(t, runner)
 	base, err := runner.Inspect(context.Background(), source, remote)
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestCaptureResultCreatesExactThinBundleWithOptionalOverlay(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			runner := testRunner(t)
-			remote, source, _ := createRemoteRepository(t, runner.Binary)
+			remote, source, _ := createManagedResultRepository(t, runner)
 			base, err := runner.Inspect(context.Background(), source, remote)
 			if err != nil {
 				t.Fatal(err)
@@ -224,7 +224,7 @@ func TestCaptureResultCreatesExactThinBundleWithOptionalOverlay(t *testing.T) {
 
 func TestCaptureResultReportsWorkerIntroducedLFSAndSubmoduleContent(t *testing.T) {
 	runner := testRunner(t)
-	remote, source, _ := createRemoteRepository(t, runner.Binary)
+	remote, source, _ := createManagedResultRepository(t, runner)
 	base, err := runner.Inspect(context.Background(), source, remote)
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +272,7 @@ func TestCaptureResultReportsWorkerIntroducedLFSAndSubmoduleContent(t *testing.T
 
 func TestCaptureResultAfterSelfContainedBundleFallback(t *testing.T) {
 	runner := testRunner(t)
-	_, source, _ := createRemoteRepository(t, runner.Binary)
+	_, source, _ := createManagedResultRepository(t, runner)
 	const unavailableRemote = "https://127.0.0.1:1/unavailable.git"
 	if err := os.WriteFile(filepath.Join(source, "base-dirty.txt"), []byte("base dirty\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -331,7 +331,7 @@ func TestCaptureResultAfterSelfContainedBundleFallback(t *testing.T) {
 func TestCaptureResultRejectsNonDescendantHistory(t *testing.T) {
 	t.Run("unrelated_or_rebased", func(t *testing.T) {
 		runner := testRunner(t)
-		remote, source, _ := createRemoteRepository(t, runner.Binary)
+		remote, source, _ := createManagedResultRepository(t, runner)
 		base, err := runner.Inspect(context.Background(), source, remote)
 		if err != nil {
 			t.Fatal(err)
@@ -347,7 +347,7 @@ func TestCaptureResultRejectsNonDescendantHistory(t *testing.T) {
 
 	t.Run("ancestor_reversal", func(t *testing.T) {
 		runner := testRunner(t)
-		remote, source, ancestor := createRemoteRepository(t, runner.Binary)
+		remote, source, ancestor := createManagedResultRepository(t, runner)
 		if err := os.WriteFile(filepath.Join(source, "later.txt"), []byte("later\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -366,7 +366,7 @@ func TestCaptureResultEnforcesArtifactLimitAndCleansStaging(t *testing.T) {
 	for _, kind := range []string{"bundle", "overlay"} {
 		t.Run(kind, func(t *testing.T) {
 			runner := testRunner(t)
-			remote, source, _ := createRemoteRepository(t, runner.Binary)
+			remote, source, _ := createManagedResultRepository(t, runner)
 			base, err := runner.Inspect(context.Background(), source, remote)
 			if err != nil {
 				t.Fatal(err)
@@ -399,7 +399,7 @@ func TestCaptureResultEnforcesArtifactLimitAndCleansStaging(t *testing.T) {
 
 func TestCaptureResultRejectsExistingOrNestedArtifactDirectory(t *testing.T) {
 	runner := testRunner(t)
-	remote, source, _ := createRemoteRepository(t, runner.Binary)
+	remote, source, _ := createManagedResultRepository(t, runner)
 	base, err := runner.Inspect(context.Background(), source, remote)
 	if err != nil {
 		t.Fatal(err)
@@ -444,6 +444,15 @@ func assertCaptureResultRejectedAndCleaned(
 	if _, statErr := os.Lstat(artifacts); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("rejected capture staging still exists: %v", statErr)
 	}
+}
+
+func createManagedResultRepository(t *testing.T, runner Runner) (string, string, string) {
+	t.Helper()
+	remote, source, head := createRemoteRepository(t, runner.Binary)
+	if err := runner.configureTargetCheckout(context.Background(), source); err != nil {
+		t.Fatal(err)
+	}
+	return remote, source, head
 }
 
 func assertResultArtifact(

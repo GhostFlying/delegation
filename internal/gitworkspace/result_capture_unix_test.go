@@ -67,7 +67,7 @@ exec "$DELEGATION_TEST_REAL_GIT" "$@"
 
 func TestCaptureResultDiscardsLargeDescendantObjectList(t *testing.T) {
 	realRunner := testRunner(t)
-	remote, source, _ := createRemoteRepository(t, realRunner.Binary)
+	remote, source, _ := createManagedResultRepository(t, realRunner)
 	base, err := realRunner.Inspect(context.Background(), source, remote)
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +127,7 @@ exec "$DELEGATION_TEST_REAL_GIT" "$@"
 
 func TestCaptureResultRejectsSnapshotDriftAndRemovesArtifacts(t *testing.T) {
 	realRunner := testRunner(t)
-	remote, source, _ := createRemoteRepository(t, realRunner.Binary)
+	remote, source, _ := createManagedResultRepository(t, realRunner)
 	base, err := realRunner.Inspect(context.Background(), source, remote)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +167,7 @@ exit "$status"
 
 func TestCaptureResultUsesResolvedArtifactParent(t *testing.T) {
 	runner := testRunner(t)
-	remote, source, _ := createRemoteRepository(t, runner.Binary)
+	remote, source, _ := createManagedResultRepository(t, runner)
 	base, err := runner.Inspect(context.Background(), source, remote)
 	if err != nil {
 		t.Fatal(err)

@@ -331,22 +331,31 @@ func (r Runner) VerifyDirect(
 
 func (r Runner) configureTargetCheckout(ctx context.Context, repositoryPath string) error {
 	r = r.forIsolatedTarget()
-	settings := [][2]string{
-		{"core.hooksPath", disabledHooksPath()},
-		{"core.autocrlf", "false"},
-		{"core.eol", "lf"},
-		{"core.excludesFile", ""},
-		{"core.attributesFile", ""},
-	}
-	if runtime.GOOS != "windows" {
-		settings = append(settings, [2]string{"core.fileMode", "true"})
-	}
-	for _, setting := range settings {
-		if err := r.run(ctx, repositoryPath, "config", setting[0], setting[1]); err != nil {
+	for _, setting := range deterministicTargetGitSettings() {
+		if err := r.run(ctx, repositoryPath, "config", setting.key, setting.value); err != nil {
 			return preserveContextError(err, errors.New("configure deterministic target Git checkout"))
 		}
 	}
 	return nil
+}
+
+type gitConfigSetting struct {
+	key   string
+	value string
+}
+
+func deterministicTargetGitSettings() []gitConfigSetting {
+	settings := []gitConfigSetting{
+		{key: "core.hooksPath", value: disabledHooksPath()},
+		{key: "core.autocrlf", value: "false"},
+		{key: "core.eol", value: "lf"},
+		{key: "core.excludesFile", value: ""},
+		{key: "core.attributesFile", value: ""},
+	}
+	if runtime.GOOS != "windows" {
+		settings = append(settings, gitConfigSetting{key: "core.fileMode", value: "true"})
+	}
+	return settings
 }
 
 func ManifestHash(manifest protocol.WorkspaceManifest) (string, error) {
