@@ -641,6 +641,117 @@ func TestPublishedChangesArtifactRetentionReclaimsCaptureHeadroom(t *testing.T) 
 	}
 }
 
+func TestPendingChangesArtifactQuotaBackpressuresUntilPublication(t *testing.T) {
+	const maxSlots = 5
+	var (
+		pending       []store.ChangesArtifact
+		workspaceRoot string
+	)
+	host, state, _ := newTestHostWithStateSetup(t, maxSlots, "", func(state *store.PeerStore, root string) {
+		workspaceRoot = root
+		for index := range 4 {
+			workspaceID := newTestID()
+			workspacePath := filepath.Join(root, workspaceSyncName(testTreeID, workspaceID))
+			initializeTestRepository(t, workspacePath)
+			workspace := recordExactPreparedWorkspace(
+				t, state, testTreeID, workspaceID, workspacePath,
+			)
+			worker := makeRunningWorkspaceWorkerWithSlots(
+				t, state, workspace, newTestID(), maxSlots,
+			)
+			finalization, err := state.BeginWorkerFinalization(
+				context.Background(), worker.WorkerKey, worker.ActiveTurnID,
+				store.WorkerIdle, "", time.Unix(1_700_001_000+int64(index*10), 0),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := state.ReserveChangesArtifactPayload(
+				context.Background(), worker.WorkerKey, finalization.Artifact.ArtifactID,
+				store.MaximumChangesArtifactPayloadBytes,
+				time.Unix(1_700_001_001+int64(index*10), 0),
+			); err != nil {
+				t.Fatal(err)
+			}
+			artifact, err := state.CompleteChangesArtifactCapture(
+				context.Background(), worker.WorkerKey, finalization.Artifact.ArtifactID,
+				store.ChangesCaptureResult{
+					Status: store.ChangesAvailable, ResultHeadOID: workspace.HeadOID,
+					ResultSnapshotHash: workspace.SourceSnapshotHash, ResultClean: workspace.Clean,
+					Parts: []store.ChangesArtifactPart{
+						{Kind: store.ChangesArtifactBundle, Name: store.ChangesBundlePartName,
+							SizeBytes: protocol.MaximumWorkspaceArtifactBytes, SHA256: strings.Repeat("a", 64)},
+						{Kind: store.ChangesArtifactOverlay, Name: store.ChangesOverlayPartName,
+							SizeBytes: protocol.MaximumWorkspaceArtifactBytes, SHA256: strings.Repeat("b", 64)},
+					},
+				},
+				time.Unix(1_700_001_002+int64(index*10), 0),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pending = append(pending, artifact)
+		}
+	})
+
+	workspaceID := newTestID()
+	workspacePath := filepath.Join(workspaceRoot, workspaceSyncName(testTreeID, workspaceID))
+	initializeTestRepository(t, workspacePath)
+	workspace := recordExactPreparedWorkspace(t, state, testTreeID, workspaceID, workspacePath)
+	if err := os.WriteFile(
+		filepath.Join(workspacePath, "nested", "worker.txt"), []byte("worker change\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	worker := makeRunningWorkspaceWorkerWithSlots(t, state, workspace, newTestID(), maxSlots)
+	finalization, err := state.BeginWorkerFinalization(
+		context.Background(), worker.WorkerKey, worker.ActiveTurnID,
+		store.WorkerIdle, "", time.Unix(1_700_002_000, 0),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = host.captureChangesArtifact(context.Background(), finalization.Artifact)
+	var retentionError *artifactRetentionError
+	if !errors.As(err, &retentionError) || !errors.Is(err, store.ErrChangesArtifactQuota) {
+		t.Fatalf("full pending artifact quota capture = %v, want retryable retention error", err)
+	}
+	blocked, err := state.GetChangesArtifact(
+		context.Background(), worker.WorkerKey, finalization.Artifact.ArtifactID,
+	)
+	if err != nil || blocked.State != store.ChangesCapturePending || blocked.Status != "" ||
+		blocked.FailureCode != "" {
+		t.Fatalf("backpressured artifact = %#v, %v", blocked, err)
+	}
+	blockedWorker, err := state.GetWorker(context.Background(), worker.WorkerKey)
+	if err != nil || blockedWorker.Status != store.WorkerFinalizing ||
+		blockedWorker.FinalTarget != store.WorkerIdle || blockedWorker.FinalFailureCode != "" {
+		t.Fatalf("backpressured worker = %#v, %v", blockedWorker, err)
+	}
+	if _, err := state.AcknowledgeChangesArtifact(
+		context.Background(), pending[0].WorkerKey, pending[0].ArtifactID, 1,
+		time.Unix(1_700_002_001, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.captureChangesArtifact(context.Background(), finalization.Artifact); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := state.GetChangesArtifact(
+		context.Background(), worker.WorkerKey, finalization.Artifact.ArtifactID,
+	)
+	if err != nil || ready.State != store.ChangesPublishPending ||
+		ready.Status != store.ChangesAvailable || ready.FailureCode != "" || len(ready.Parts) != 1 ||
+		ready.Parts[0].Kind != store.ChangesArtifactOverlay {
+		t.Fatalf("recovered changes artifact = %#v, %v", ready, err)
+	}
+	if _, err := state.GetChangesArtifact(
+		context.Background(), pending[0].WorkerKey, pending[0].ArtifactID,
+	); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("reclaimed published artifact lookup = %v, want not found", err)
+	}
+}
+
 func TestChangesArtifactRootRejectsSymbolicLink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating an unprivileged directory symlink is not generally available")
@@ -739,6 +850,16 @@ func makeRunningWorkspaceWorker(
 	workspace store.PreparedWorkspace,
 	agentID string,
 ) store.WorkerReservation {
+	return makeRunningWorkspaceWorkerWithSlots(t, state, workspace, agentID, 1)
+}
+
+func makeRunningWorkspaceWorkerWithSlots(
+	t *testing.T,
+	state *store.PeerStore,
+	workspace store.PreparedWorkspace,
+	agentID string,
+	maxSlots int,
+) store.WorkerReservation {
 	t.Helper()
 	ctx := context.Background()
 	worker, err := state.ReserveWorkerStartWithWorkspace(ctx, store.WorkerReservation{
@@ -749,7 +870,7 @@ func makeRunningWorkspaceWorker(
 		PromptDigest: promptDigest("restart prompt"), WorkspaceID: workspace.WorkspaceID,
 		WorkspacePath: workspace.WorkspacePath, WorkingDirectory: workspace.WorkingDirectory,
 		ProfileVersion: workerProfileVersion,
-	}, 1, time.Unix(1_700_000_001, 0))
+	}, maxSlots, time.Unix(1_700_000_001, 0))
 	if err != nil {
 		t.Fatal(err)
 	}

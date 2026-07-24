@@ -19,7 +19,6 @@ const (
 	changesArtifactRootName      = ".artifacts"
 	changesArtifactPrefix        = "changes-"
 	changesCaptureFailureCode    = "git_capture_failed"
-	changesArtifactQuotaCode     = "artifact_quota_exceeded"
 	pendingChangesArtifactSuffix = ".pending"
 )
 
@@ -232,29 +231,37 @@ func (h *Host) prunePublishedChangesArtifacts(
 		if retention.Count <= retainCount && retention.ReservedBytes <= retainBytes {
 			return nil
 		}
-		artifacts, err := h.state.ListPublishedChangesArtifacts(
-			ctx, h.controllerID, h.deviceID, 1,
-		)
+		deleted, err := h.deleteOldestPublishedChangesArtifact(ctx)
 		if err != nil {
 			return err
 		}
-		if len(artifacts) != 1 {
+		if !deleted {
 			return errors.New("published changes artifact retention changed during pruning")
 		}
-		artifact := artifacts[0]
-		pendingName, finalName, err := changesArtifactDirectoryNames(artifact.ArtifactID)
-		if err != nil {
-			return err
-		}
-		if err := h.removeChangesArtifactDirectories(ctx, pendingName, finalName); err != nil {
-			return err
-		}
-		if err := h.state.DeletePublishedChangesArtifact(
-			ctx, artifact.WorkerKey, artifact.ArtifactID,
-		); err != nil {
-			return err
-		}
 	}
+}
+
+func (h *Host) deleteOldestPublishedChangesArtifact(ctx context.Context) (bool, error) {
+	artifacts, err := h.state.ListPublishedChangesArtifacts(
+		ctx, h.controllerID, h.deviceID, 1,
+	)
+	if err != nil || len(artifacts) == 0 {
+		return false, err
+	}
+	artifact := artifacts[0]
+	pendingName, finalName, err := changesArtifactDirectoryNames(artifact.ArtifactID)
+	if err != nil {
+		return false, err
+	}
+	if err := h.removeChangesArtifactDirectories(ctx, pendingName, finalName); err != nil {
+		return false, err
+	}
+	if err := h.state.DeletePublishedChangesArtifact(
+		ctx, artifact.WorkerKey, artifact.ArtifactID,
+	); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (h *Host) captureChangesArtifact(ctx context.Context, artifact store.ChangesArtifact) error {
@@ -270,25 +277,24 @@ func (h *Host) captureChangesArtifact(ctx context.Context, artifact store.Change
 		time.Now(),
 	)
 	if errors.Is(err, store.ErrChangesArtifactQuota) {
-		if pruneErr := h.pruneChangesArtifacts(
-			ctx,
-			store.MaximumRetainedChangesArtifacts,
-			store.MaximumRetainedChangesPayloadBytes-store.MaximumChangesArtifactPayloadBytes,
-		); pruneErr != nil {
-			return &artifactRetentionError{
-				err: fmt.Errorf("reclaim retained changes artifacts: %w", pruneErr),
+		for errors.Is(err, store.ErrChangesArtifactQuota) {
+			deleted, pruneErr := h.deleteOldestPublishedChangesArtifact(ctx)
+			if pruneErr != nil {
+				return &artifactRetentionError{
+					err: fmt.Errorf("reclaim retained changes artifacts: %w", pruneErr),
+				}
 			}
-		}
-		_, err = h.state.ReserveChangesArtifactPayload(
-			ctx,
-			artifact.WorkerKey,
-			artifact.ArtifactID,
-			store.MaximumChangesArtifactPayloadBytes,
-			time.Now(),
-		)
-		if errors.Is(err, store.ErrChangesArtifactQuota) {
-			return h.completeFailedChangesCapture(
-				ctx, artifact, changesArtifactQuotaCode, err,
+			if !deleted {
+				return &artifactRetentionError{
+					err: fmt.Errorf("wait for retained changes artifact publication: %w", err),
+				}
+			}
+			_, err = h.state.ReserveChangesArtifactPayload(
+				ctx,
+				artifact.WorkerKey,
+				artifact.ArtifactID,
+				store.MaximumChangesArtifactPayloadBytes,
+				time.Now(),
 			)
 		}
 	}
