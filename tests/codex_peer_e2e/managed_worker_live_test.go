@@ -79,6 +79,7 @@ func TestManagedWorkerLiveProviderSmoke(t *testing.T) {
 		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
 		PeerConfigPath: configPath, DelegationBinary: delegationBinary,
 		CodexBinary: codexLaunch.NativePath, CodexHome: cfg.Peer.CodexHome,
+		GitBinary:             cfg.Peer.GitBinary,
 		CodexEnvironment:      codexLaunch.Environment,
 		CodexUnsetEnvironment: codexLaunch.UnsetEnvironment,
 		WorkspaceRoot:         cfg.Peer.WorkspaceRoot, MaxWorkerSlots: cfg.Peer.MaxWorkerSlots,
