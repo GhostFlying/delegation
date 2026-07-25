@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -101,6 +102,95 @@ func TestRootMCPSyncWorkspaceBoundsInvalidBackendErrors(t *testing.T) {
 	if !result.IsError || text != "delegation service returned an invalid workspace" ||
 		strings.Contains(text, oversized[:64]) || len(text) > 256 {
 		t.Fatalf("invalid backend result was not sanitized: error=%t bytes=%d text=%q", result.IsError, len(text), text)
+	}
+}
+
+func TestRootMCPSyncWorkspaceExplainsSyncIDConflict(t *testing.T) {
+	backend := &fakeRootBackend{workspaceResult: &protocol.SyncWorkspaceResult{
+		Outcome: protocol.WorkspacePrepareReady,
+		Workspace: &protocol.WorkspaceSummary{
+			WorkspaceID: rootMCPWorkspaceID, SourceDeviceID: rootMCPDeviceID,
+			TargetDeviceID: rootMCPWorkerID,
+			HeadOID:        strings.Repeat("b", 40), ObjectFormat: "sha1",
+			WorkingDirectory: "nested", Strategy: protocol.WorkspaceStrategyDirect,
+			ManifestHash: strings.Repeat("a", 64), Warnings: []string{},
+		},
+		Warnings: []string{},
+	}}
+	ctx, client, closeSessions := connectRootMCP(t, backend)
+	defer closeSessions()
+	params := &mcp.CallToolParams{
+		Meta: mcp.Meta{
+			"threadId":                 rootMCPThreadID,
+			sandboxStateMetaCapability: map[string]any{"sandboxCwd": localFileURI(t.TempDir())},
+		},
+		Name: ToolSyncWorkspace,
+		Arguments: map[string]any{
+			"sync_id": rootMCPWorkspaceID, "target_device_id": rootMCPWorkerID,
+			"git_url": "ssh://git@example.invalid/repository.git",
+		},
+	}
+	initial, err := client.CallTool(ctx, params)
+	if err != nil || initial.IsError {
+		t.Fatalf("initialize workspace = %#v, %v", initial, err)
+	}
+	backend.mu.Lock()
+	backend.workspaceErr = &localbridge.RPCError{Code: protocol.ErrorConflict, Message: "untrusted backend conflict"}
+	backend.mu.Unlock()
+	result, err := client.CallTool(ctx, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := toolText(result)
+	if !result.IsError || !strings.Contains(text, "sync_id") || strings.Contains(text, "spawn_id") ||
+		strings.Contains(text, "untrusted backend conflict") || len(text) > 256 {
+		t.Fatalf("workspace conflict result = %#v, text %q", result, text)
+	}
+}
+
+func TestRootMCPSyncWorkspaceOmitsOversizedModelVisiblePath(t *testing.T) {
+	workingDirectory := strings.Repeat("<", protocol.MaximumWorkspaceRelativeBytes)
+	backend := &fakeRootBackend{workspaceResult: &protocol.SyncWorkspaceResult{
+		Outcome: protocol.WorkspacePrepareReady,
+		Workspace: &protocol.WorkspaceSummary{
+			WorkspaceID: rootMCPWorkspaceID, SourceDeviceID: rootMCPDeviceID,
+			TargetDeviceID: rootMCPWorkerID,
+			HeadOID:        strings.Repeat("b", 40), ObjectFormat: "sha1",
+			WorkingDirectory: workingDirectory, Strategy: protocol.WorkspaceStrategyDirect,
+			ManifestHash: strings.Repeat("a", 64), Warnings: []string{},
+		},
+		Warnings: []string{},
+	}}
+	if err := backend.workspaceResult.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, client, closeSessions := connectRootMCP(t, backend)
+	defer closeSessions()
+	result, err := client.CallTool(ctx, &mcp.CallToolParams{
+		Meta: mcp.Meta{
+			"threadId":                 rootMCPThreadID,
+			sandboxStateMetaCapability: map[string]any{"sandboxCwd": localFileURI(t.TempDir())},
+		},
+		Name: ToolSyncWorkspace,
+		Arguments: map[string]any{
+			"sync_id": rootMCPWorkspaceID, "target_device_id": rootMCPWorkerID,
+			"git_url": "ssh://git@example.invalid/repository.git",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("sync_workspace failed: %s", toolText(result))
+	}
+	var output SyncWorkspaceOutput
+	decodeStructured(t, result.StructuredContent, &output)
+	if output.WorkspaceID != rootMCPWorkspaceID || output.WorkingDirectory != "" ||
+		!output.WorkingDirectoryOmitted {
+		t.Fatalf("bounded sync output = %#v", output)
+	}
+	if err := enforceOutputLimit(output, maximumWorkspaceOutputBytes); err != nil {
+		t.Fatal(err)
 	}
 }
 

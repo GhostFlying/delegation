@@ -23,15 +23,16 @@ type SyncWorkspaceInput struct {
 }
 
 type SyncWorkspaceOutput struct {
-	WorkspaceID      string                           `json:"workspace_id,omitempty"`
-	SourceDeviceID   string                           `json:"source_device_id"`
-	TargetDeviceID   string                           `json:"target_device_id"`
-	HeadOID          string                           `json:"head_oid,omitempty"`
-	ObjectFormat     string                           `json:"object_format,omitempty"`
-	WorkingDirectory string                           `json:"working_directory,omitempty"`
-	Strategy         protocol.WorkspaceStrategy       `json:"strategy,omitempty"`
-	Outcome          protocol.WorkspacePrepareOutcome `json:"outcome"`
-	Warnings         []string                         `json:"warnings"`
+	WorkspaceID             string                           `json:"workspace_id,omitempty"`
+	SourceDeviceID          string                           `json:"source_device_id"`
+	TargetDeviceID          string                           `json:"target_device_id"`
+	HeadOID                 string                           `json:"head_oid,omitempty"`
+	ObjectFormat            string                           `json:"object_format,omitempty"`
+	WorkingDirectory        string                           `json:"working_directory,omitempty"`
+	WorkingDirectoryOmitted bool                             `json:"working_directory_omitted,omitempty"`
+	Strategy                protocol.WorkspaceStrategy       `json:"strategy,omitempty"`
+	Outcome                 protocol.WorkspacePrepareOutcome `json:"outcome"`
+	Warnings                []string                         `json:"warnings"`
 }
 
 func (r *Root) syncWorkspace(
@@ -61,7 +62,7 @@ func (r *Root) syncWorkspace(
 	if err := r.backend.Call(
 		callContext, protocol.MethodSyncWorkspace, tree.TreeID, &source, params, &result,
 	); err != nil {
-		return nil, SyncWorkspaceOutput{}, explainAgentError(err)
+		return nil, SyncWorkspaceOutput{}, explainWorkspaceError(err)
 	}
 	if err := result.Validate(); err != nil {
 		return nil, SyncWorkspaceOutput{}, errors.New("delegation service returned an invalid workspace")
@@ -82,6 +83,10 @@ func (r *Root) syncWorkspace(
 		output.WorkingDirectory = workspace.WorkingDirectory
 		output.Strategy = workspace.Strategy
 		output.Warnings = append([]string(nil), workspace.Warnings...)
+	}
+	if err := enforceOutputLimit(output, maximumWorkspaceOutputBytes); err != nil && output.WorkingDirectory != "" {
+		output.WorkingDirectory = ""
+		output.WorkingDirectoryOmitted = true
 	}
 	if err := enforceOutputLimit(output, maximumWorkspaceOutputBytes); err != nil {
 		return nil, SyncWorkspaceOutput{}, err

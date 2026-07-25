@@ -52,6 +52,7 @@ type fakeRootBackend struct {
 	operationResult *protocol.AgentOperationResult
 	waitResults     []protocol.WaitAgentResult
 	workspaceResult *protocol.SyncWorkspaceResult
+	workspaceErr    error
 }
 
 type cancelRootBackend struct {
@@ -94,6 +95,7 @@ func (b *fakeRootBackend) Call(
 	agentsResult := b.agentsResult
 	operationResult := b.operationResult
 	workspaceResult := b.workspaceResult
+	workspaceErr := b.workspaceErr
 	var waitResult *protocol.WaitAgentResult
 	if method == protocol.MethodWaitAgent && len(b.waitResults) != 0 {
 		copy := b.waitResults[0]
@@ -141,6 +143,9 @@ func (b *fakeRootBackend) Call(
 			Device:   testDevice(params.(protocol.DescribeDeviceParams).DeviceID, 24),
 		}
 	case protocol.MethodSyncWorkspace:
+		if workspaceErr != nil {
+			return workspaceErr
+		}
 		if workspaceResult == nil {
 			return errors.New("unexpected workspace sync")
 		}
