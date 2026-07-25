@@ -40,7 +40,7 @@ func TestSetupBroker(t *testing.T) {
 	}
 	wantState := filepath.Join(dir, "state", "broker.sqlite3")
 	if result.Role != delegationconfig.RoleBroker || result.ConfigPath != configPath || result.ControllerID == "" ||
-		result.StatePath != wantState || result.TokenFile == "" {
+		result.StatePath != wantState || result.TokenFile == "" || result.StatusListen != "127.0.0.1:8788" {
 		t.Fatalf("setup result = %#v", result)
 	}
 	cfg, err := delegationconfig.Read(configPath)
@@ -48,7 +48,8 @@ func TestSetupBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Role != delegationconfig.RoleBroker || cfg.ControllerID != result.ControllerID ||
-		cfg.Broker.StateFile != result.StatePath || cfg.Broker.Auth.TokenFile != result.TokenFile {
+		cfg.Broker.StateFile != result.StatePath || cfg.Broker.Auth.TokenFile != result.TokenFile ||
+		cfg.Broker.StatusListen != result.StatusListen {
 		t.Fatalf("config = %#v, setup result = %#v", cfg, result)
 	}
 	token, err := os.ReadFile(result.TokenFile)
@@ -61,6 +62,24 @@ func TestSetupBroker(t *testing.T) {
 	}
 	if bytes.Contains(configData, bytes.TrimSpace(token)) {
 		t.Fatal("config contains token material")
+	}
+}
+
+func TestSetupBrokerRejectsNonLoopbackStatusListener(t *testing.T) {
+	configPath := filepath.Join(privateTestDirectory(t), "config.json")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run([]string{
+		"setup", "broker", "--config", configPath,
+		"--status-listen", "0.0.0.0:8788",
+	}, &stdout, &stderr)
+
+	if code == 0 || !strings.Contains(stderr.String(), "status listener must use a loopback address") {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("setup wrote rejected broker config: %v", err)
 	}
 }
 

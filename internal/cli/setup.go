@@ -31,6 +31,7 @@ type setupResult struct {
 	GitBinary     string                `json:"gitBinary,omitempty"`
 	WorkspaceRoot string                `json:"workspaceRoot,omitempty"`
 	TokenFile     string                `json:"tokenFile,omitempty"`
+	StatusListen  string                `json:"statusListen,omitempty"`
 }
 
 func runSetup(args []string, stdout, stderr io.Writer) int {
@@ -60,6 +61,7 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	configPath := flags.String("config", defaultPath, "configuration file path")
 	controllerID := flags.String("controller-id", "", "stable Delegation network UUID; generated when omitted")
 	listen := flags.String("listen", "127.0.0.1:8787", "broker listen address")
+	statusListen := flags.String("status-listen", "127.0.0.1:8788", "loopback broker status listen address")
 	statePath := flags.String("state", "", "broker state database path; defaults beside the config")
 	authMode := flags.String("auth-mode", string(delegationconfig.AuthModeToken), "authentication mode: token or none")
 	tokenFile := flags.String("token-file", "", "token file path; generated when omitted in token mode")
@@ -95,6 +97,7 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 		ControllerID:  *controllerID,
 		Broker: delegationconfig.BrokerConfig{
 			Listen:                   *listen,
+			StatusListen:             *statusListen,
 			StateFile:                resolvedState,
 			Auth:                     auth,
 			AllowInsecureNonLoopback: *allowInsecure,
@@ -132,6 +135,7 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 		ControllerID: cfg.ControllerID,
 		StatePath:    cfg.Broker.StateFile,
 		TokenFile:    auth.TokenFile,
+		StatusListen: cfg.Broker.StatusListen,
 	}, *jsonOutput)
 }
 
@@ -449,6 +453,9 @@ func writeSetupResult(stdout, stderr io.Writer, result setupResult, jsonOutput b
 	}
 	if result.TokenFile != "" {
 		fmt.Fprintf(stdout, "tokenFile: %s\n", result.TokenFile)
+	}
+	if result.StatusListen != "" {
+		fmt.Fprintf(stdout, "status: http://%s/status\n", result.StatusListen)
 	}
 	return 0
 }
