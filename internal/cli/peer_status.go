@@ -14,14 +14,15 @@ import (
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/localbridge"
+	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
 const (
 	peerStatusReadTimeout        = 5 * time.Second
-	maximumPeerStatusOutput      = 16 * 1024
+	maximumStatusOutput          = 16 * 1024
 	peerStatusUnavailableError   = "delegation: peer status unavailable; ensure the peer service is running\n"
-	brokerStatusUnavailableError = "delegation: broker status is not integrated yet\n"
+	brokerStatusUnavailableError = "delegation: broker status unavailable; ensure the broker service and status listener are running\n"
 	statusOutputError            = "delegation: write status output failed\n"
 )
 
@@ -90,9 +91,12 @@ func (p peerLocalStatusProvider) LocalStatus(ctx context.Context) (localbridge.S
 }
 
 type statusReader func(context.Context, string) (localbridge.StatusSnapshot, error)
+type brokerStatusReader func(context.Context, string) (statuspage.Snapshot, error)
 
 func runStatus(args []string, stdout, stderr io.Writer) int {
-	return runStatusWithReader(args, stdout, stderr, localbridge.ReadStatus)
+	return runStatusWithReaders(
+		args, stdout, stderr, localbridge.ReadStatus, readBrokerStatus,
+	)
 }
 
 func runStatusWithReader(
@@ -100,6 +104,16 @@ func runStatusWithReader(
 	stdout io.Writer,
 	stderr io.Writer,
 	read statusReader,
+) int {
+	return runStatusWithReaders(args, stdout, stderr, read, nil)
+}
+
+func runStatusWithReaders(
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	readPeer statusReader,
+	readBroker brokerStatusReader,
 ) int {
 	flags := flag.NewFlagSet("delegation status", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -120,17 +134,26 @@ func runStatusWithReader(
 		return writeError(stderr, err)
 	}
 	if cfg.Role == delegationconfig.RoleBroker {
-		return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
+		if cfg.Broker.StatusListen == "" || readBroker == nil {
+			return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), peerStatusReadTimeout)
+		status, err := readBroker(ctx, cfg.Broker.StatusListen)
+		cancel()
+		if err != nil || status.Validate() != nil || status.ControllerID != cfg.ControllerID {
+			return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
+		}
+		return writeBrokerStatus(stdout, stderr, status, *jsonOutput)
 	}
 	if cfg.Role != delegationconfig.RolePeer {
 		return writeFixedStatusError(stderr, peerStatusUnavailableError, exitUnavailable)
 	}
 	endpoint, err := localbridge.Endpoint(cfg.ControllerID, cfg.DeviceID)
-	if err != nil || read == nil {
+	if err != nil || readPeer == nil {
 		return writeFixedStatusError(stderr, peerStatusUnavailableError, exitUnavailable)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), peerStatusReadTimeout)
-	status, err := read(ctx, endpoint)
+	status, err := readPeer(ctx, endpoint)
 	cancel()
 	if err != nil || status.Validate() != nil ||
 		status.ControllerID != cfg.ControllerID || status.DeviceID != cfg.DeviceID {
@@ -188,7 +211,7 @@ func writePeerStatus(
 		fmt.Fprintf(&rendered, "  retained bytes: %d\n", status.Artifacts.RetainedBytes)
 		output = rendered.Bytes()
 	}
-	if len(output) == 0 || len(output) > maximumPeerStatusOutput {
+	if len(output) == 0 || len(output) > maximumStatusOutput {
 		return writeFixedStatusError(stderr, statusOutputError, 1)
 	}
 	if _, err := io.Copy(stdout, bytes.NewReader(output)); err != nil {

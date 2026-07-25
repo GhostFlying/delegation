@@ -120,7 +120,7 @@ func (h *handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	snapshot, err := h.provider(request.Context())
-	if err != nil || snapshot.validate() != nil {
+	if err != nil || snapshot.Validate() != nil {
 		writeResponse(writer, request.Method, http.StatusServiceUnavailable, "text/plain; charset=utf-8", []byte(statusUnavailableBody))
 		return
 	}

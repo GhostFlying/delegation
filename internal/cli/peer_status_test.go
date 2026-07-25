@@ -207,7 +207,7 @@ artifacts:
 func TestStatusCommandReturnsBoundedRoleAndPeerErrors(t *testing.T) {
 	peerConfig, peerCfg := writeStatusTestConfig(t, delegationconfig.RolePeer)
 	brokerConfig, _ := writeStatusTestConfig(t, delegationconfig.RoleBroker)
-	hugeError := errors.New(strings.Repeat("private failure ", maximumPeerStatusOutput))
+	hugeError := errors.New(strings.Repeat("private failure ", maximumStatusOutput))
 
 	tests := []struct {
 		name     string
@@ -320,8 +320,9 @@ func writeStatusTestConfig(
 		cfg.DeviceID = ""
 		cfg.DeviceName = ""
 		cfg.Broker = delegationconfig.BrokerConfig{
-			Listen: "127.0.0.1:8787", StateFile: filepath.Join(directory, "state", "broker.sqlite3"),
-			Auth: delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
+			Listen: "127.0.0.1:8787", StatusListen: "127.0.0.1:8788",
+			StateFile: filepath.Join(directory, "state", "broker.sqlite3"),
+			Auth:      delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
 		}
 		cfg.Peer = delegationconfig.PeerConfig{}
 	}

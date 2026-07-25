@@ -72,8 +72,8 @@ func TestHTMLStatusIsAccessibleEscapedAndOmitsControllerID(t *testing.T) {
 		`<tr><th scope="row">Started</th><td>4</td></tr>`,
 		`<tr><th scope="row">Failed</th><td>3</td></tr>`,
 		`<tr><th scope="row">Lifetime started</th><td>200</td></tr>`,
-		`<tr><th scope="row">Running turns</th><td>2</td></tr>`,
-		`<tr><th scope="row">Occupied slots</th><td>1</td></tr>`,
+		`<tr><th scope="row">Running turns</th><td>1</td></tr>`,
+		`<tr><th scope="row">Occupied slots</th><td>2</td></tr>`,
 		`<tr><th scope="row">Lifetime turns</th><td>300</td></tr>`,
 		`<tr><th scope="row">Trees</th><td>10</td></tr>`,
 		`<tr><th scope="row">Available</th><td>11</td></tr>`,
@@ -229,6 +229,14 @@ func TestStatusProviderFailuresReturnBoundedError(t *testing.T) {
 				return Snapshot{Version: "version\nsecret"}, nil
 			},
 		},
+		{
+			name: "inconsistent device counts",
+			provider: func(context.Context) (Snapshot, error) {
+				snapshot := testSnapshot()
+				snapshot.Devices.SyncReady = snapshot.Devices.Connected + 1
+				return snapshot, nil
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -264,8 +272,8 @@ func testSnapshot() Snapshot {
 			Failed:          3,
 			LifetimeStarted: 200,
 		},
-		RunningTurns:  2,
-		OccupiedSlots: 1,
+		RunningTurns:  1,
+		OccupiedSlots: 2,
 		LifetimeTurns: 300,
 		Trees:         10,
 		Artifacts: ArtifactCounts{
