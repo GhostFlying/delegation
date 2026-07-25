@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	schemaVersion = 11
+	schemaVersion = 12
 	busyTimeoutMS = 5000
 	walRetryLimit = 8
 	sqliteBusy    = 5

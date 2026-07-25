@@ -262,12 +262,28 @@ func (s *Store) finishAgentSpawn(
 		if timestamp < receipt.CreatedAt {
 			return errors.New("observedAt precedes agent creation")
 		}
-		if _, err := connection.ExecContext(ctx, `
+		result, err := connection.ExecContext(ctx, `
 UPDATE agent_spawn_receipts
 SET status = ?, failure_code = ?, updated_at = ?
 WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND spawn_id = ?
-`, status, failureCode, timestamp, key.ControllerID, key.TreeID, key.SourceAgentID, key.SpawnID); err != nil {
+  AND status = ?
+`, status, failureCode, timestamp, key.ControllerID, key.TreeID, key.SourceAgentID, key.SpawnID,
+			receipt.Agent.Status)
+		if err != nil {
 			return fmt.Errorf("finish agent spawn: %w", err)
+		}
+		if err := requireAffectedRow(result, "finish agent spawn"); err != nil {
+			return err
+		}
+		if status == protocol.AgentSpawnStarted {
+			if err := incrementStatusLifetimeCounters(
+				ctx,
+				connection,
+				key.ControllerID,
+				statusLifetimeCounterIncrement{DispatchesStarted: 1, TurnsStarted: 1},
+			); err != nil {
+				return err
+			}
 		}
 		receipt.Agent.Status = status
 		receipt.Agent.FailureCode = failureCode

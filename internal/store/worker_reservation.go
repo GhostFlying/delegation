@@ -19,6 +19,7 @@ const (
 	maximumWorkerTaskName    = 128
 	maximumWorkerFailureCode = 64
 	maximumWorkspacePath     = 32 * 1024
+	occupiedWorkerStatesSQL  = "'reserved', 'starting', 'preflight', 'ready', 'running', 'finalizing'"
 )
 
 var (
@@ -571,7 +572,7 @@ func requireWorkerSlot(ctx context.Context, queryer rowQueryer, maxActive int) e
 	var active int
 	if err := queryer.QueryRowContext(ctx, `
 SELECT count(*) FROM worker_reservations
-WHERE status IN ('reserved', 'starting', 'preflight', 'ready', 'running', 'finalizing')
+WHERE status IN (`+occupiedWorkerStatesSQL+`)
 `).Scan(&active); err != nil {
 		return fmt.Errorf("count active worker reservations: %w", err)
 	}
