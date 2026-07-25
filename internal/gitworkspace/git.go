@@ -351,6 +351,8 @@ func deterministicTargetGitSettings() []gitConfigSetting {
 		{key: "core.eol", value: "lf"},
 		{key: "core.excludesFile", value: ""},
 		{key: "core.attributesFile", value: ""},
+		{key: "maintenance.auto", value: "false"},
+		{key: "gc.auto", value: "0"},
 	}
 	if runtime.GOOS != "windows" {
 		settings = append(settings, gitConfigSetting{key: "core.fileMode", value: "true"})

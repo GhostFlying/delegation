@@ -2126,6 +2126,8 @@ func initializeTestRepository(t *testing.T, repositoryPath string) string {
 		{"core.eol", "lf"},
 		{"core.excludesFile", ""},
 		{"core.attributesFile", ""},
+		{"maintenance.auto", "false"},
+		{"gc.auto", "0"},
 	} {
 		runTestGit(t, repositoryPath, "config", setting[0], setting[1])
 	}

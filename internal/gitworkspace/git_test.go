@@ -97,7 +97,10 @@ func TestInspectReportsSubmoduleAndLFSWarnings(t *testing.T) {
 		"-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid",
 		"commit", "-m", "add external content markers",
 	)
-	gitRun(t, runner.Binary, source, "push", "origin", "HEAD:refs/heads/main")
+	gitRun(
+		t, runner.Binary, source,
+		"-c", "core.hooksPath="+disabledHooksPath(), "push", "origin", "HEAD:refs/heads/main",
+	)
 	remotePath := gitOutput(t, runner.Binary, source, "remote", "get-url", "origin")
 	gitRun(t, runner.Binary, source, "--git-dir="+remotePath, "update-server-info")
 
@@ -402,7 +405,12 @@ func createRemoteRepositoryWithObjectFormat(
 		t.Fatal(err)
 	}
 	gitRun(t, gitBinary, source, "add", "nested/hello.txt")
-	gitRun(t, gitBinary, source, "-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid", "commit", "-m", "initial")
+	gitRun(
+		t, gitBinary, source,
+		"-c", "maintenance.auto=false", "-c", "gc.auto=0",
+		"-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid",
+		"commit", "-m", "initial",
+	)
 	gitRun(t, gitBinary, source, "remote", "add", "origin", remote)
 	gitRun(t, gitBinary, source, "push", "origin", "HEAD:refs/heads/main")
 	gitRun(t, gitBinary, root, "--git-dir="+remote, "update-server-info")

@@ -183,7 +183,11 @@ func TestCaptureResultUsesResolvedArtifactParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(realParent, "result")
+	resolvedParent, err := filepath.EvalSymlinks(realParent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(resolvedParent, "result")
 	if capture.ArtifactDirectory != want {
 		t.Fatalf("artifact directory = %q, want resolved path %q", capture.ArtifactDirectory, want)
 	}

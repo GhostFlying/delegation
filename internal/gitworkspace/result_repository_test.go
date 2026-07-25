@@ -111,6 +111,8 @@ func TestCaptureResultRejectsManagedCheckoutConfigDrift(t *testing.T) {
 		{key: "core.eol", value: "crlf"},
 		{key: "core.excludesFile", value: "worker-excludes"},
 		{key: "core.attributesFile", value: "worker-attributes"},
+		{key: "maintenance.auto", value: "true"},
+		{key: "gc.auto", value: "1"},
 	} {
 		t.Run(test.key, func(t *testing.T) {
 			runner := testRunner(t)

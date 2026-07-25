@@ -465,7 +465,11 @@ func assertResultArtifact(
 	if artifact == nil {
 		t.Fatalf("%s artifact is nil", kind)
 	}
-	wantPath := filepath.Join(directory, name)
+	resolvedDirectory, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := filepath.Join(resolvedDirectory, name)
 	if artifact.Kind != kind || artifact.Name != name || artifact.Path != wantPath || artifact.Size < 1 {
 		t.Fatalf("artifact = %#v", artifact)
 	}
