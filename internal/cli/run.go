@@ -29,6 +29,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runSetup(args[1:], stdout, stderr)
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr)
+	case "status":
+		return runStatus(args[1:], stdout, stderr)
 	case "credential":
 		return runCredential(args[1:], stdout, stderr)
 	case "service":
@@ -69,6 +71,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "  version [--json]  print runtime version")
 	fmt.Fprintln(w, "  setup <broker|peer>  configure a broker or peer")
 	fmt.Fprintln(w, "  doctor [--json]   validate the local configuration")
+	fmt.Fprintln(w, "  status --config PATH [--json]  report bounded runtime status")
 	fmt.Fprintln(w, "  credential <action>  issue or revoke a peer credential")
 	fmt.Fprintln(w, "  service <action>  prepare or run the user service")
 	fmt.Fprintln(w, "  mcp root          start the root MCP server")

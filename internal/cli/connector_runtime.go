@@ -191,7 +191,7 @@ func runConnectorServiceWithProviderEnvironment(
 	if err != nil {
 		return err
 	}
-	bridge, err := localbridge.ListenWithAuthorization(
+	bridge, err := localbridge.ListenWithStatus(
 		endpoint,
 		localbridge.ServiceIdentity{
 			ControllerID: cfg.ControllerID,
@@ -200,6 +200,11 @@ func runConnectorServiceWithProviderEnvironment(
 		client,
 		peerAuthorizer{
 			state: peerState, controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
+		},
+		peerLocalStatusProvider{
+			client: client, state: peerState,
+			controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
+			deviceName: cfg.DeviceName, maxWorkerSlots: cfg.Peer.MaxWorkerSlots,
 		},
 	)
 	if err != nil {
