@@ -776,13 +776,78 @@ func TestServerCloseReturnsListenerCleanupFailure(t *testing.T) {
 	}
 }
 
-func TestUnsupportedLocalBridgeRequestFailsClosed(t *testing.T) {
-	request := request{
-		Version: Version + 1, RequestID: "l_123e4567-e89b-42d3-a456-426614174399",
-		Method: protocol.MethodEnsureRootTree, Payload: json.RawMessage(`{}`),
+func TestServerRejectsLegacyLocalBridgeRequestBeforeBackend(t *testing.T) {
+	backend := &fakeBackend{result: json.RawMessage(`{}`)}
+	client, stop := startTestBridge(t, backend)
+	defer stop()
+	connection, err := dial(context.Background(), client.endpoint)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := request.validate(); err == nil || !strings.Contains(err.Error(), "unsupported local bridge version 2") {
-		t.Fatalf("unsupported local bridge validation error = %v", err)
+	defer connection.Close()
+	legacy := request{
+		Version: Version - 1, RequestID: "l_123e4567-e89b-42d3-a456-426614174399",
+		Method:  protocol.MethodEnsureRootTree,
+		Payload: json.RawMessage(`{"externalThreadId":"123e4567-e89b-42d3-a456-426614174302"}`),
+	}
+	if err := writeJSONFrame(connection, legacy); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := readJSONFrame[response](connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reply.validate(); err != nil || reply.Error == nil || reply.Error.Code != protocol.ErrorInvalidRequest {
+		t.Fatalf("legacy request response = %#v, validation error %v", reply, err)
+	}
+	if calls := backend.snapshot(); len(calls) != 0 {
+		t.Fatalf("legacy request reached backend: %#v", calls)
+	}
+}
+
+func TestClientRejectsLegacyLocalBridgeResponse(t *testing.T) {
+	endpoint := testEndpoint(t)
+	listener, err := listen(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	client, err := NewClient(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverDone := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer connection.Close()
+		call, err := readJSONFrame[request](connection)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		serverDone <- writeJSONFrame(connection, response{
+			Version: Version - 1, RequestID: "l_123e4567-e89b-42d3-a456-426614174398",
+			ReplyTo: call.RequestID, Payload: json.RawMessage(`{}`),
+		})
+	}()
+	err = client.Call(
+		context.Background(), protocol.MethodEnsureRootTree, "", nil,
+		protocol.EnsureRootTreeParams{ExternalThreadID: bridgeTestTreeID}, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "unsupported local bridge version 1") {
+		t.Fatalf("legacy response error = %v", err)
+	}
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("legacy response server did not finish")
 	}
 }
 
