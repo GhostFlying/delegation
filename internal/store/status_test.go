@@ -127,7 +127,9 @@ func TestStatusSnapshotCountsDurableStateAndLifetimeStarts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := registry.ReadStatusSnapshot(ctx, root.ControllerID)
+	got, err := registry.ReadStatusSnapshot(
+		ctx, root.ControllerID, []string{worker.DeviceID, worker.DeviceID},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,6 +143,36 @@ func TestStatusSnapshotCountsDurableStateAndLifetimeStarts(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("status snapshot = %#v, want %#v", got, want)
+	}
+}
+
+func TestStatusSnapshotExcludesWorkersOnUnsynchronizedDevices(t *testing.T) {
+	ctx := context.Background()
+	registry, root, worker, _, _ := prepareChangesArtifactStore(t, true, true)
+	session := lifecycleSession(t, registry, lifecycleConnectionOne)
+	claimLifecycleSession(t, registry, session, 1)
+	applyLifecyclePage(t, registry, session, 0, 1,
+		protocol.WorkerLifecycleSnapshot{
+			TreeID: root.TreeID, AgentID: worker.AgentID, Revision: 1,
+			Phase: protocol.WorkerLifecycleRunning,
+		},
+	)
+
+	withoutReadyPeer, err := registry.ReadStatusSnapshot(ctx, root.ControllerID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withReadyPeer, err := registry.ReadStatusSnapshot(
+		ctx, root.ControllerID, []string{worker.DeviceID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutReadyPeer.Workers != (StatusWorkerCounts{}) {
+		t.Fatalf("workers without a sync-ready peer = %#v", withoutReadyPeer.Workers)
+	}
+	if withReadyPeer.Workers != (StatusWorkerCounts{Running: 1, Occupied: 1}) {
+		t.Fatalf("workers with a sync-ready peer = %#v", withReadyPeer.Workers)
 	}
 }
 

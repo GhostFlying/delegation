@@ -20,6 +20,7 @@ import (
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/protocol"
+	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 	"github.com/coder/websocket"
@@ -58,6 +59,53 @@ func TestBrokerServiceRunsConfiguredAuthModes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBrokerServiceServesIndependentLoopbackStatus(t *testing.T) {
+	configPath, cfg := setupBrokerRuntimeTest(t, "none")
+	cfg.Broker.StatusListen = "127.0.0.1:8788"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	brokerReady := make(chan string, 1)
+	statusReady := make(chan string, 1)
+	options := testBrokerListen(brokerReady)
+	options.statusListen = func(ctx context.Context, network, address string) (net.Listener, error) {
+		if network != "tcp" || address != cfg.Broker.StatusListen {
+			return nil, fmt.Errorf("status listen network/address = %q/%q", network, address)
+		}
+		var listenConfig net.ListenConfig
+		listener, err := listenConfig.Listen(ctx, "tcp", "127.0.0.1:0")
+		if err == nil {
+			statusReady <- listener.Addr().String()
+		}
+		return listener, err
+	}
+	var stderr bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- runBrokerService(ctx, configPath, cfg, &stderr, options)
+	}()
+	brokerAddress := waitForBrokerAddress(t, brokerReady, done)
+	waitForBrokerHealth(t, brokerAddress)
+	statusAddress := waitForBrokerAddress(t, statusReady, done)
+	response, err := http.Get("http://" + statusAddress + statuspage.JSONPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var snapshot statuspage.Snapshot
+	if err := json.NewDecoder(response.Body).Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || snapshot.ControllerID != runtimeControllerID ||
+		snapshot.Devices != (statuspage.DeviceCounts{}) {
+		t.Fatalf("status response = %d, snapshot = %#v", response.StatusCode, snapshot)
+	}
+	if !strings.Contains(stderr.String(), "broker status on http://127.0.0.1:8788/status") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	cancel()
+	waitForBrokerStop(t, done)
 }
 
 func TestBrokerServiceUsesConfiguredMasterToken(t *testing.T) {
@@ -444,6 +492,9 @@ func setupBrokerRuntimeTest(t *testing.T, authMode string) (string, delegationco
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Most runtime tests exercise the primary listener only. Status listener
+	// lifecycle has a dedicated test with independent injected listeners.
+	cfg.Broker.StatusListen = ""
 	return configPath, cfg
 }
 

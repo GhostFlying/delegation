@@ -12,6 +12,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/broker"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/pathguard"
+	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
@@ -27,20 +28,24 @@ type brokerLeaseFunc func(string) (io.Closer, error)
 type brokerStoreOpenFunc func(context.Context, string) (*store.Store, error)
 
 type brokerRuntimeOptions struct {
-	listen      brokerListenFunc
-	lease       brokerLeaseFunc
-	openStore   brokerStoreOpenFunc
-	prepare     func(context.Context, *broker.Server) (store.PresenceTransition, error)
-	reportError func(error)
+	listen       brokerListenFunc
+	statusListen brokerListenFunc
+	lease        brokerLeaseFunc
+	openStore    brokerStoreOpenFunc
+	prepare      func(context.Context, *broker.Server) (store.PresenceTransition, error)
+	reportError  func(error)
 }
 
 type brokerRuntimeResources struct {
-	listener   net.Listener
-	httpServer *http.Server
-	broker     *broker.Server
-	registry   *store.Store
-	lease      io.Closer
-	serveDone  <-chan error
+	listener         net.Listener
+	statusListener   net.Listener
+	httpServer       *http.Server
+	statusHTTPServer *http.Server
+	broker           *broker.Server
+	registry         *store.Store
+	lease            io.Closer
+	serveDone        <-chan error
+	statusServeDone  <-chan error
 }
 
 func runBrokerService(
@@ -75,6 +80,22 @@ func runBrokerService(
 			return nil
 		}
 		return fmt.Errorf("listen for broker connections on %s: %w", cfg.Broker.Listen, err)
+	}
+	if cfg.Broker.StatusListen != "" {
+		statusListen := options.statusListen
+		if statusListen == nil {
+			var listenConfig net.ListenConfig
+			statusListen = listenConfig.Listen
+		}
+		resources.statusListener, err = statusListen(ctx, "tcp", cfg.Broker.StatusListen)
+		if err != nil {
+			if cleanContextCancellation(ctx, err) {
+				return nil
+			}
+			return fmt.Errorf(
+				"listen for broker status on %s: %w", cfg.Broker.StatusListen, err,
+			)
+		}
 	}
 	if ctx.Err() != nil {
 		return nil
@@ -111,6 +132,7 @@ func runBrokerService(
 		AuthMode:     cfg.Broker.Auth.Mode,
 		MasterToken:  masterToken,
 		Registry:     resources.registry,
+		StatusReader: resources.registry,
 		ReportError:  options.reportError,
 	})
 	if err != nil {
@@ -144,8 +166,26 @@ func runBrokerService(
 			return ctx
 		},
 	}
+	if resources.statusListener != nil {
+		resources.statusHTTPServer = &http.Server{
+			Handler:           statuspage.NewHandler(resources.broker.Status),
+			ReadHeaderTimeout: brokerReadHeaderTimeout,
+			IdleTimeout:       brokerIdleTimeout,
+			MaxHeaderBytes:    brokerMaxHeaderBytes,
+			BaseContext: func(net.Listener) context.Context {
+				return ctx
+			},
+		}
+	}
 	if _, err := fmt.Fprintf(stderr, "delegation: broker listening on %s\n", cfg.Broker.Listen); err != nil {
 		return fmt.Errorf("write broker readiness: %w", err)
+	}
+	if cfg.Broker.StatusListen != "" {
+		if _, err := fmt.Fprintf(
+			stderr, "delegation: broker status on http://%s/status\n", cfg.Broker.StatusListen,
+		); err != nil {
+			return fmt.Errorf("write broker status readiness: %w", err)
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil
@@ -155,6 +195,14 @@ func runBrokerService(
 	go func() {
 		serveDone <- resources.httpServer.Serve(resources.listener)
 	}()
+	var statusServeDone chan error
+	if resources.statusHTTPServer != nil {
+		statusServeDone = make(chan error, 1)
+		resources.statusServeDone = statusServeDone
+		go func() {
+			statusServeDone <- resources.statusHTTPServer.Serve(resources.statusListener)
+		}()
+	}
 	select {
 	case err := <-serveDone:
 		resources.serveDone = nil
@@ -162,6 +210,12 @@ func runBrokerService(
 			return nil
 		}
 		return fmt.Errorf("serve broker HTTP: %w", err)
+	case err := <-statusServeDone:
+		resources.statusServeDone = nil
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("serve broker status HTTP: %w", err)
 	case <-ctx.Done():
 		return nil
 	}
@@ -199,9 +253,19 @@ func (r *brokerRuntimeResources) close() error {
 			failures = append(failures, fmt.Errorf("close broker listener: %w", err))
 		}
 	}
+	if r.statusListener != nil {
+		if err := r.statusListener.Close(); !ignorableNetworkClose(err) {
+			failures = append(failures, fmt.Errorf("close broker status listener: %w", err))
+		}
+	}
 	if r.httpServer != nil {
 		if err := r.httpServer.Close(); !ignorableNetworkClose(err) {
 			failures = append(failures, fmt.Errorf("close broker HTTP server: %w", err))
+		}
+	}
+	if r.statusHTTPServer != nil {
+		if err := r.statusHTTPServer.Close(); !ignorableNetworkClose(err) {
+			failures = append(failures, fmt.Errorf("close broker status HTTP server: %w", err))
 		}
 	}
 	if r.broker != nil {
@@ -212,6 +276,11 @@ func (r *brokerRuntimeResources) close() error {
 	if r.serveDone != nil {
 		if err := <-r.serveDone; !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			failures = append(failures, fmt.Errorf("stop broker HTTP: %w", err))
+		}
+	}
+	if r.statusServeDone != nil {
+		if err := <-r.statusServeDone; !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+			failures = append(failures, fmt.Errorf("stop broker status HTTP: %w", err))
 		}
 	}
 	if r.registry != nil {

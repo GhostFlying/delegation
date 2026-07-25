@@ -67,8 +67,8 @@ const statusDocument = `<!doctype html>
 <tbody>
 <tr class="group"><th colspan="2" scope="rowgroup">Artifacts</th></tr>
 <tr><th scope="row">Available</th><td>{{.Artifacts.Available}}</td></tr>
-<tr><th scope="row">Evicted</th><td>{{.Artifacts.Evicted}}</td></tr>
-<tr><th scope="row">Lifetime published</th><td>{{.Artifacts.LifetimePublished}}</td></tr>
+<tr><th scope="row">Unchanged</th><td>{{.Artifacts.Unchanged}}</td></tr>
+<tr><th scope="row">Capture failed</th><td>{{.Artifacts.CaptureFailed}}</td></tr>
 </tbody>
 </table>
 </main>
