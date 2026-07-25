@@ -4,3 +4,11 @@
 *.test
 .DS_Store
 Thumbs.db
+
+# Local Delegation runtime state when setup is pointed at the checkout root.
+/broker.json
+/peer.json
+/secrets/
+/state/
+/codex/
+/workspaces/
