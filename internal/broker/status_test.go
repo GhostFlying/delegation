@@ -82,6 +82,38 @@ func TestStatusCombinesDurableStateWithLiveSynchronizedConnections(t *testing.T)
 	}
 }
 
+func TestStatusAllowsConnectedSessionAfterDurableCredentialRevocation(t *testing.T) {
+	const deviceID = "123e4567-e89b-42d3-a456-426614174101"
+	reader := &observedStatusReader{snapshot: store.StatusSnapshot{
+		Devices: store.StatusDeviceCounts{Total: 1, Online: 0},
+	}}
+	connected := &session{deviceID: deviceID}
+	connected.revision.Store(1)
+	connected.workerReady.Store(true)
+	server := &Server{
+		controllerID: brokerTestControllerID,
+		statusReader: reader,
+		connections:  map[string]*session{deviceID: connected},
+		latestRevisions: map[string]uint64{
+			deviceID: 1,
+		},
+		startedAt: time.Unix(100, 0),
+		now:       func() time.Time { return time.Unix(100, 0) },
+	}
+
+	snapshot, err := server.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.Validate(); err != nil {
+		t.Fatalf("status rejected transient connected/offline session: %v", err)
+	}
+	want := statuspage.DeviceCounts{Registered: 1, Online: 0, Connected: 1, SyncReady: 1}
+	if snapshot.Devices != want {
+		t.Fatalf("device status = %#v, want %#v", snapshot.Devices, want)
+	}
+}
+
 func TestStatusFailsClosedWithoutDurableSnapshot(t *testing.T) {
 	server := &Server{}
 	if _, err := server.Status(context.Background()); err == nil {

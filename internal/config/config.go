@@ -164,8 +164,8 @@ func (c Config) Validate() error {
 			if err := validateStatusListen(c.Broker.StatusListen); err != nil {
 				return err
 			}
-			if c.Broker.StatusListen == c.Broker.Listen {
-				return errors.New("broker status listener must differ from the broker listener")
+			if listenPortsConflict(c.Broker.Listen, c.Broker.StatusListen) {
+				return errors.New("broker status listener must not overlap the broker listener")
 			}
 		}
 	case RolePeer:
@@ -303,6 +303,17 @@ func validateStatusListen(address string) error {
 		return errors.New("broker status listener must use a loopback address")
 	}
 	return nil
+}
+
+func listenPortsConflict(primaryAddress, statusAddress string) bool {
+	_, primaryPort, primaryErr := net.SplitHostPort(primaryAddress)
+	_, statusPort, statusErr := net.SplitHostPort(statusAddress)
+	if primaryErr != nil || statusErr != nil {
+		return false
+	}
+	primaryPortNumber, primaryErr := strconv.Atoi(primaryPort)
+	statusPortNumber, statusErr := strconv.Atoi(statusPort)
+	return primaryErr == nil && statusErr == nil && primaryPortNumber == statusPortNumber
 }
 
 // UsesInsecureNonLoopbackTransport reports whether the configured network hop

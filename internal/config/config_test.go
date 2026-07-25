@@ -389,6 +389,32 @@ func TestBrokerStatusListenMustBeLoopbackAndDistinct(t *testing.T) {
 	}
 }
 
+func TestBrokerStatusListenRejectsSameNumericPort(t *testing.T) {
+	for _, primaryListen := range []string{
+		"0.0.0.0:8788",
+		"0.0.0.0:08788",
+		"[::]:8788",
+		"localhost:8788",
+		"127.0.0.2:8788",
+	} {
+		t.Run(primaryListen, func(t *testing.T) {
+			cfg := Config{
+				SchemaVersion: CurrentSchemaVersion,
+				Role:          RoleBroker,
+				ControllerID:  testID,
+				Broker: BrokerConfig{
+					Listen: primaryListen, StatusListen: "127.0.0.1:8788",
+					StateFile: testStateFile(t), Auth: AuthConfig{Mode: AuthModeNone},
+					AllowInsecureNonLoopback: true,
+				},
+			}
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate() accepted overlapping broker listeners")
+			}
+		})
+	}
+}
+
 func TestConfigRejectsUnsupportedSchemaVersions(t *testing.T) {
 	for _, version := range []int{0, CurrentSchemaVersion + 1} {
 		cfg := protectedTestConfig(t)

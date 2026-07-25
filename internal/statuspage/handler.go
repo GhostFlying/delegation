@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"html/template"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -18,6 +20,7 @@ const (
 
 	notFoundBody          = "not found\n"
 	methodNotAllowedBody  = "method not allowed\n"
+	misdirectedBody       = "misdirected request\n"
 	statusUnavailableBody = "status unavailable\n"
 
 	statusStyle = `:root{color-scheme:light dark;font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;letter-spacing:0}body{margin:0;padding:2rem;line-height:1.5}main{max-width:52rem;margin:0 auto;overflow-x:auto}h1{font-size:1.5rem;margin:0}.meta{margin:.25rem 0 1.5rem;color:#666}table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}caption{text-align:left;padding:.5rem 0;font-weight:600}th,td{padding:.55rem .5rem;border-bottom:1px solid #8886;text-align:left}td{text-align:right}.group th{padding-top:1.1rem;font-size:.85rem;text-transform:uppercase}@media(prefers-color-scheme:dark){.meta{color:#aaa}}`
@@ -101,6 +104,13 @@ func NewHandler(provider Provider) http.Handler {
 
 func (h *handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	setSecurityHeaders(writer.Header())
+	if !loopbackRequestHost(request.Host) {
+		writeResponse(
+			writer, request.Method, http.StatusMisdirectedRequest,
+			"text/plain; charset=utf-8", []byte(misdirectedBody),
+		)
+		return
+	}
 
 	switch request.URL.Path {
 	case HTMLPath, JSONPath:
@@ -141,6 +151,23 @@ func (h *handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeResponse(writer, request.Method, http.StatusOK, contentType, body)
+}
+
+func loopbackRequestHost(authority string) bool {
+	if authority == "" || strings.ContainsAny(authority, "/@?#") {
+		return false
+	}
+	host := authority
+	if parsedHost, _, err := net.SplitHostPort(authority); err == nil {
+		host = parsedHost
+	} else if strings.HasPrefix(authority, "[") && strings.HasSuffix(authority, "]") {
+		host = strings.TrimSuffix(strings.TrimPrefix(authority, "["), "]")
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func renderHTML(snapshot Snapshot) ([]byte, error) {

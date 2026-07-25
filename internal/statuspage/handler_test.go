@@ -204,6 +204,35 @@ func TestStatusRoutesMethodsAndHead(t *testing.T) {
 	}
 }
 
+func TestStatusRejectsNonLoopbackHostBeforeReadingProvider(t *testing.T) {
+	calls := 0
+	handler := NewHandler(func(context.Context) (Snapshot, error) {
+		calls++
+		return testSnapshot(), nil
+	})
+	request := httptest.NewRequest(http.MethodGet, JSONPath, nil)
+	request.Host = "attacker.example:8788"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assertStatusHeaders(t, response, "text/plain; charset=utf-8")
+	if response.Code != http.StatusMisdirectedRequest || response.Body.String() != misdirectedBody {
+		t.Fatalf("host rejection = %d %q", response.Code, response.Body.String())
+	}
+	if calls != 0 {
+		t.Fatalf("provider calls = %d, want 0", calls)
+	}
+
+	for _, host := range []string{"localhost:8788", "127.0.0.1:8788", "[::1]:8788"} {
+		request = httptest.NewRequest(http.MethodGet, JSONPath, nil)
+		request.Host = host
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Errorf("loopback host %q status = %d", host, response.Code)
+		}
+	}
+}
+
 func TestStatusProviderFailuresReturnBoundedError(t *testing.T) {
 	secret := strings.Repeat("sensitive provider failure ", 1000)
 	tests := []struct {
@@ -287,6 +316,7 @@ func testSnapshot() Snapshot {
 func requestStatus(t *testing.T, handler http.Handler, method, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, nil)
+	request.Host = "127.0.0.1:8788"
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
