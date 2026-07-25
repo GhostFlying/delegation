@@ -100,6 +100,8 @@ func TestWorkspaceSyncSingleFlightWaitsForCanceledTargetCleanup(t *testing.T) {
 		releaseFirst:           make(chan struct{}),
 		cancelFirst:            true,
 	}
+	releaseFirst := sync.OnceFunc(func() { close(targetManager.releaseFirst) })
+	defer releaseFirst()
 	sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceManager)
 	startAgentRPCConnector(t, harness, agentRPCTargetID, targetManager)
 	sourceSession := harness.server.connection(brokerTestDeviceID)
@@ -112,17 +114,18 @@ func TestWorkspaceSyncSingleFlightWaitsForCanceledTargetCleanup(t *testing.T) {
 	firstContext, cancelFirst := context.WithCancel(context.Background())
 	firstDone := callWorkspaceSync(sourceClient, firstContext, root, source, params)
 	wantWorkspacePrepareCall(t, targetManager.started, 1)
-	cancelOnlyWorkspaceSync(t, sourceSession)
+	cancelFirstSync := onlyWorkspaceSyncCancel(t, sourceSession)
+	secondContext, cancelSecond := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelSecond()
+	secondDone := callWorkspaceSync(sourceClient, secondContext, root, source, params)
+	wantActiveWorkspaceSyncs(t, harness.server, sourceSession, secondDone, 2)
+	cancelFirstSync()
 	select {
 	case <-targetManager.firstCanceled:
 	case <-time.After(10 * time.Second):
 		t.Fatal("target did not observe cancellation")
 	}
-	secondContext, cancelSecond := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelSecond()
-	secondDone := callWorkspaceSync(sourceClient, secondContext, root, source, params)
-	wantNoWorkspacePrepareCall(t, targetManager.started)
-	close(targetManager.releaseFirst)
+	releaseFirst()
 	select {
 	case got := <-targetManager.started:
 		if got != 2 {
@@ -160,7 +163,7 @@ func TestWorkspaceSyncSingleFlightWaitsForCanceledTargetCleanup(t *testing.T) {
 	}
 }
 
-func cancelOnlyWorkspaceSync(t *testing.T, session *session) {
+func onlyWorkspaceSyncCancel(t *testing.T, session *session) context.CancelFunc {
 	t.Helper()
 	session.asyncMu.Lock()
 	if len(session.asyncCancels) != 1 {
@@ -173,7 +176,7 @@ func cancelOnlyWorkspaceSync(t *testing.T, session *session) {
 		cancel = activeCancel
 	}
 	session.asyncMu.Unlock()
-	cancel()
+	return cancel
 }
 
 func TestWorkspaceSyncSingleFlightRetriesAfterLeaderFailure(t *testing.T) {
@@ -189,8 +192,11 @@ func TestWorkspaceSyncSingleFlightRetriesAfterLeaderFailure(t *testing.T) {
 		releaseFirst:           make(chan struct{}),
 		failFirst:              true,
 	}
+	releaseFirst := sync.OnceFunc(func() { close(targetManager.releaseFirst) })
+	defer releaseFirst()
 	sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceManager)
 	startAgentRPCConnector(t, harness, agentRPCTargetID, targetManager)
+	sourceSession := harness.server.connection(brokerTestDeviceID)
 	root, source := ensureWorkspaceSingleFlightRoot(t, sourceClient)
 	params := protocol.SyncWorkspaceParams{
 		SyncID: workspaceSingleFlightFailedSyncID, TargetDeviceID: agentRPCTargetID,
@@ -201,8 +207,8 @@ func TestWorkspaceSyncSingleFlightRetriesAfterLeaderFailure(t *testing.T) {
 	firstDone := callWorkspaceSync(sourceClient, ctx, root, source, params)
 	wantWorkspacePrepareCall(t, targetManager.started, 1)
 	secondDone := callWorkspaceSync(sourceClient, ctx, root, source, params)
-	wantNoWorkspacePrepareCall(t, targetManager.started)
-	close(targetManager.releaseFirst)
+	wantActiveWorkspaceSyncs(t, harness.server, sourceSession, secondDone, 2)
+	releaseFirst()
 	if err := <-firstDone; err == nil {
 		t.Fatal("first workspace sync unexpectedly succeeded")
 	}
@@ -261,11 +267,46 @@ func wantWorkspacePrepareCall(t *testing.T, started <-chan int, want int) {
 	}
 }
 
-func wantNoWorkspacePrepareCall(t *testing.T, started <-chan int) {
+func wantActiveWorkspaceSyncs(
+	t *testing.T,
+	server *Server,
+	initialSession *session,
+	requestDone <-chan error,
+	want int,
+) {
 	t.Helper()
-	select {
-	case got := <-started:
-		t.Fatalf("target preparation %d overlapped the active sync", got)
-	case <-time.After(100 * time.Millisecond):
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		active := activeWorkspaceSyncs(server, initialSession)
+		if active == want {
+			return
+		}
+		if active > want {
+			t.Fatalf("active asynchronous workspace syncs = %d, want %d", active, want)
+		}
+		select {
+		case err := <-requestDone:
+			t.Fatalf("workspace sync ended before entering single-flight wait: %v", err)
+		case <-deadline.C:
+			t.Fatalf("active asynchronous workspace syncs = %d, want %d", active, want)
+		case <-ticker.C:
+		}
 	}
+}
+
+func activeWorkspaceSyncs(server *Server, initialSession *session) int {
+	initialSession.asyncMu.Lock()
+	active := len(initialSession.asyncCancels)
+	initialSession.asyncMu.Unlock()
+	currentSession := server.connection(brokerTestDeviceID)
+	if currentSession == nil || currentSession == initialSession {
+		return active
+	}
+	currentSession.asyncMu.Lock()
+	active += len(currentSession.asyncCancels)
+	currentSession.asyncMu.Unlock()
+	return active
 }

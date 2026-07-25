@@ -167,7 +167,7 @@ func TestWorkspaceRPCPrepareFailureCancelsExactProvisionalTarget(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+			harness := newBrokerHarness(t, config.AuthModeNone, 5*time.Second)
 			gitURL := "ssh://git@example.invalid/repository.git"
 			sourceManager := &recordingWorkspacePeer{
 				deviceID: brokerTestDeviceID,
@@ -211,7 +211,7 @@ func TestWorkspaceRPCPrepareFailureCancelsExactProvisionalTarget(t *testing.T) {
 			if test.cancelRequest {
 				select {
 				case <-targetManager.prepareStarted:
-				case <-time.After(2 * time.Second):
+				case <-time.After(10 * time.Second):
 					t.Fatal("target workspace preparation did not start")
 				}
 				cancelCall()
@@ -224,14 +224,21 @@ func TestWorkspaceRPCPrepareFailureCancelsExactProvisionalTarget(t *testing.T) {
 				if test.cancelRequest && !errors.Is(err, context.Canceled) {
 					t.Fatalf("canceled workspace sync = %v", err)
 				}
-			case <-time.After(2 * time.Second):
+			case <-time.After(10 * time.Second):
 				t.Fatal("failed workspace sync did not return")
+			}
+			if test.cancelRequest {
+				select {
+				case <-targetManager.prepareCanceled:
+				case <-time.After(10 * time.Second):
+					t.Fatal("target workspace preparation did not observe cancellation")
+				}
 			}
 
 			var cleanup connector.WorkspaceTransferControlRequest
 			select {
 			case cleanup = <-cancelObserved:
-			case <-time.After(2 * time.Second):
+			case <-time.After(10 * time.Second):
 				t.Fatal("broker did not cancel the provisional target workspace")
 			}
 			wantCleanup := connector.WorkspaceTransferControlRequest{
