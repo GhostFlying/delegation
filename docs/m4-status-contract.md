@@ -25,12 +25,12 @@ latest-state table.
 ## Surfaces
 
 `delegation status [--json]` is role-aware. A broker reports the network snapshot. A peer reports
-its local connector and worker-slot snapshot together with broker-authoritative network counters
-when connected.
+its local connector, broker synchronization revision, worker-slot, and artifact backlog snapshot.
+Network-wide counters remain broker-authoritative and are not inferred by a peer.
 
 The broker serves the same bounded snapshot as server-rendered HTML and JSON. The status listener
-is loopback-only by default. A non-loopback status listener requires a separate read-only token and
-must not reuse a broker master token or peer token.
+is loopback-only and the current checkpoint rejects non-loopback addresses. Any future non-loopback
+mode requires a separate read-only token and must not reuse a broker master token or peer token.
 
 Status output never includes prompts, messages, Git URLs, local paths, rollout contents, tokens, or
 provider configuration. Recent-detail collections have hard limits and all HTTP responses disable

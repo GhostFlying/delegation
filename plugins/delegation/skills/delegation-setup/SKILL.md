@@ -47,8 +47,10 @@ and stop when the native service manager reports a foreign, drifted, or indeterm
 
 Run the launcher with `version --json` and confirm it exactly matches `VERSION`, then run the
 launcher with `doctor --config <path>` for each broker and peer config. Report the installed version,
-configured processes, configuration paths, and checks without printing credentials. For a broker
-foreground run, verify its `/healthz` endpoint without printing or transmitting the master token.
+configured processes, configuration paths, and checks without printing credentials. Run
+`status --config <path>` after each service starts. For a broker, verify both its `/healthz`
+endpoint and loopback-only `/status` page without printing or transmitting the master token. Keep
+the status listener on loopback; use an authenticated tunnel for remote inspection.
 
 After a plugin or runtime update, tell the user to start a new Codex task so the updated skills and
 MCP configuration are loaded. Do not attempt to reload a managed worker in place.

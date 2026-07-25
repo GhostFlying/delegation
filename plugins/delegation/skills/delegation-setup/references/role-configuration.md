@@ -7,7 +7,9 @@ separate.
 - `setup broker` creates or joins the authority for one Delegation network. The wire field
   `controllerId` is the stable network or trust-domain ID, not a controller device role. Token
   authentication is the default. Keep plaintext listeners on loopback unless the user explicitly
-  accepts `--allow-insecure-nonloopback` behind an encrypted private network or tunnel.
+  accepts `--allow-insecure-nonloopback` behind an encrypted private network or tunnel. The
+  separate status listener defaults to `127.0.0.1:8788` and must remain on loopback; use an
+  authenticated tunnel to reach `/status` from another device.
 - `setup peer` joins a physical device to that network. Every peer can host user-created root tasks
   and receive managed workers. Supply the broker URL, network `controllerId`, broker-bound
   `deviceId`, display name, and protected peer-token path. Setup generates a device ID only in
@@ -39,3 +41,8 @@ host's available standard Codex/OpenAI authentication variables from the current
 install a role-specific current-user service, use `service install
 --config <broker.json>` for a broker or `service install --config <peer.json> --environment-file
 <peer.env>` for a peer. Read the native-service reference before creating that protected file.
+
+After each service starts, run `status --config <broker.json>` or `status --config <peer.json>`.
+The broker command reads the aggregate loopback Web endpoint; the peer command reads the same-user
+local connector bridge. Add `--json` for machine-readable output. Do not copy raw state databases
+or tokens to diagnose status.

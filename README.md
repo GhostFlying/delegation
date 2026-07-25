@@ -75,6 +75,7 @@ the installation flags through the same launcher:
 plugins/delegation/scripts/delegation-mcp setup broker --help
 plugins/delegation/scripts/delegation-mcp setup peer --help
 plugins/delegation/scripts/delegation-mcp doctor --help
+plugins/delegation/scripts/delegation-mcp status --help
 ```
 
 On Windows, use `plugins\delegation\scripts\delegation-mcp.cmd` instead. The runtime writes a
@@ -150,6 +151,33 @@ requires that user to have a GUI login. The Windows task uses an interactive use
 requires a logged-in user. Runtime-path updates require explicit native service replacement.
 Windows restart-on-failure hardening is deferred to M4.
 Restart the peer service after rotating provider credentials or replacing the environment file.
+
+Inspect either process through its explicit role config:
+
+```bash
+plugins/delegation/scripts/delegation-mcp status --config <broker.json>
+plugins/delegation/scripts/delegation-mcp status --config <peer.json> --json
+```
+
+Peer status is read from the same-user local connector bridge and distinguishes local worker state
+from the revision acknowledged by the broker. Broker status combines durable network counters with
+the current synchronized connection set. It includes registered/online/connected/sync-ready device
+counts, current and lifetime dispatch/turn counts, occupied worker slots, and bounded artifact
+counts. Neither surface includes prompts, messages, Git URLs, workspaces, rollout contents,
+credentials, or provider configuration.
+
+`setup broker` configures the Web status listener as `127.0.0.1:8788` by default. It serves HTML at
+`/status` and the same snapshot as JSON at `/v1/status`. The listener is separate from the broker
+WebSocket listener and is restricted to loopback. To inspect it from another host, use an
+authenticated tunnel instead of exposing it directly, for example:
+
+```bash
+ssh -L 8788:127.0.0.1:8788 <broker-host>
+```
+
+Then open `http://127.0.0.1:8788/status` locally. Status responses disable caching and external
+content. An older pre-release broker config without `statusListen` must be recreated with the
+current `setup broker` command; pre-1.0 configuration migration is intentionally unsupported.
 
 Managed worker process cleanup is lifecycle ownership, not an OS security boundary. On Unix-like
 hosts, a deliberately detached same-UID process is outside the current threat model; on macOS, an
