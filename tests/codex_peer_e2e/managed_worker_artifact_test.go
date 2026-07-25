@@ -348,6 +348,8 @@ func TestManagedWorkerPublishesChangesArtifactCrossPlatform(t *testing.T) {
 	if artifact.TreeID != rootPrincipal.TreeID ||
 		artifact.SourceAgentID != artifactE2EAgentID ||
 		artifact.SourceDeviceID != artifactE2EDeviceID ||
+		artifact.WorkspaceSourceDeviceID != artifactE2EDeviceID ||
+		artifact.WorkspaceTargetDeviceID != artifactE2EDeviceID ||
 		artifact.WorkspaceID != artifactE2EWorkspaceID ||
 		artifact.Status != protocol.ChangesArtifactAvailable ||
 		artifact.BaseHeadOID != repository.Manifest.HeadOID ||
@@ -366,7 +368,9 @@ func TestManagedWorkerPublishesChangesArtifactCrossPlatform(t *testing.T) {
 		t.Fatal(err)
 	}
 	if storedArtifact.State != store.ChangesPublished ||
-		storedArtifact.BrokerSequence != artifact.Sequence {
+		storedArtifact.BrokerSequence != artifact.Sequence ||
+		storedArtifact.WorkspaceSourceDeviceID != artifactE2EDeviceID ||
+		storedArtifact.WorkspaceTargetDeviceID != artifactE2EDeviceID {
 		t.Fatalf("peer ACK state = %#v", storedArtifact)
 	}
 	if pending, err := host.ListPendingChangesPublications(context.Background()); err != nil || len(pending) != 0 {

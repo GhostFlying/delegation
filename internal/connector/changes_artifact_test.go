@@ -586,7 +586,9 @@ func testChangesArtifactPublication() ChangesArtifactPublication {
 		Params: protocol.PublishChangesArtifactParams{
 			ArtifactID: connectorTestArtifactID, TurnID: connectorTestTurnID,
 			WorkspaceID: connectorTestWorkspaceID, Status: protocol.ChangesArtifactAvailable,
-			BaseHeadOID: strings.Repeat("a", 40), BaseManifestHash: strings.Repeat("b", 64),
+			WorkspaceSourceDeviceID: connectorTestMessageID,
+			WorkspaceTargetDeviceID: connectorTestDeviceID,
+			BaseHeadOID:             strings.Repeat("a", 40), BaseManifestHash: strings.Repeat("b", 64),
 			BaseSnapshotHash: strings.Repeat("c", 64), ResultHeadOID: strings.Repeat("d", 40),
 			ResultSnapshotHash: strings.Repeat("e", 64), ResultClean: true,
 			Parts: []protocol.WorkspaceArtifactDescriptor{{

@@ -71,6 +71,8 @@ func (s *Store) PublishChangesArtifact(
 		if authority.ParentAgentID != principal.ParentAgentID ||
 			authority.TargetDeviceID != connectedDeviceID ||
 			authority.WorkspaceTargetDeviceID != connectedDeviceID ||
+			authority.WorkspaceSourceDeviceID != params.WorkspaceSourceDeviceID ||
+			authority.WorkspaceTargetDeviceID != params.WorkspaceTargetDeviceID ||
 			authority.WorkspaceID != params.WorkspaceID ||
 			authority.WorkspaceStatus != WorkspaceSyncPrepared ||
 			authority.SpawnStatus != protocol.AgentSpawnStarted ||
@@ -87,7 +89,9 @@ func (s *Store) PublishChangesArtifact(
 			TreeID: source.TreeID, ArtifactID: params.ArtifactID, TurnID: params.TurnID,
 			WorkspaceID: params.WorkspaceID, Status: params.Status,
 			SourceAgentID: source.AgentID, SourceDeviceID: connectedDeviceID,
-			ObjectFormat: authority.ObjectFormat, BaseHeadOID: params.BaseHeadOID,
+			WorkspaceSourceDeviceID: authority.WorkspaceSourceDeviceID,
+			WorkspaceTargetDeviceID: authority.WorkspaceTargetDeviceID,
+			ObjectFormat:            authority.ObjectFormat, BaseHeadOID: params.BaseHeadOID,
 			BaseManifestHash: params.BaseManifestHash, BaseSnapshotHash: params.BaseSnapshotHash,
 			BaseClean: authority.SourceClean, ResultHeadOID: params.ResultHeadOID,
 			ResultSnapshotHash: params.ResultSnapshotHash, ResultClean: params.ResultClean,
@@ -141,14 +145,16 @@ func (s *Store) PublishChangesArtifact(
 		}
 		if _, err := connection.ExecContext(ctx, `
 INSERT INTO changes_artifacts(
-    controller_id, tree_id, artifact_id, turn_id, workspace_id, status,
-    source_agent_id, source_device_id, object_format, base_head_oid,
-    base_manifest_hash, base_snapshot_hash, base_clean, result_head_oid,
-    result_snapshot_hash, result_clean, parts_json, base_warnings_json,
-    result_warnings_json, failure_code, artifact_sequence, observed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	controller_id, tree_id, artifact_id, turn_id, workspace_id, status,
+	source_agent_id, source_device_id, workspace_source_device_id,
+	workspace_target_device_id, object_format, base_head_oid,
+	base_manifest_hash, base_snapshot_hash, base_clean, result_head_oid,
+	result_snapshot_hash, result_clean, parts_json, base_warnings_json,
+	result_warnings_json, failure_code, artifact_sequence, observed_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, source.ControllerID, source.TreeID, metadata.ArtifactID, metadata.TurnID,
 			metadata.WorkspaceID, metadata.Status, metadata.SourceAgentID, metadata.SourceDeviceID,
+			metadata.WorkspaceSourceDeviceID, metadata.WorkspaceTargetDeviceID,
 			metadata.ObjectFormat, metadata.BaseHeadOID, metadata.BaseManifestHash,
 			metadata.BaseSnapshotHash, metadata.BaseClean, metadata.ResultHeadOID,
 			metadata.ResultSnapshotHash, metadata.ResultClean, string(partsJSON),
@@ -250,6 +256,7 @@ type changesArtifactAuthority struct {
 	WorkspaceID             string
 	SpawnStatus             protocol.AgentSpawnStatus
 	WorkspaceTargetDeviceID string
+	WorkspaceSourceDeviceID string
 	WorkspaceStatus         WorkspaceSyncStatus
 	ConsumedSpawnID         string
 	HeadOID                 string
@@ -269,7 +276,7 @@ func queryChangesArtifactAuthority(
 	var warningsJSON string
 	err := queryer.QueryRowContext(ctx, `
 SELECT r.source_agent_id, r.spawn_id, r.target_device_id, r.workspace_id, r.status,
-       w.target_device_id, w.status, w.consumed_spawn_id, w.head_oid,
+	   w.target_device_id, w.source_device_id, w.status, w.consumed_spawn_id, w.head_oid,
 	   w.object_format, w.source_clean, w.source_snapshot_hash, w.manifest_hash,
 	   w.warnings_json
 FROM agent_spawn_receipts AS r
@@ -280,7 +287,8 @@ WHERE r.controller_id = ? AND r.tree_id = ? AND r.agent_id = ?
 `, source.ControllerID, source.TreeID, source.AgentID).Scan(
 		&authority.ParentAgentID, &authority.SpawnID, &authority.TargetDeviceID,
 		&authority.WorkspaceID, &authority.SpawnStatus,
-		&authority.WorkspaceTargetDeviceID, &authority.WorkspaceStatus,
+		&authority.WorkspaceTargetDeviceID, &authority.WorkspaceSourceDeviceID,
+		&authority.WorkspaceStatus,
 		&authority.ConsumedSpawnID, &authority.HeadOID, &authority.ObjectFormat,
 		&authority.SourceClean, &authority.SourceSnapshotHash, &authority.ManifestHash,
 		&warningsJSON,
@@ -317,7 +325,9 @@ func replayChangesArtifact(
 func changesArtifactParams(metadata protocol.ChangesArtifactMetadata) protocol.PublishChangesArtifactParams {
 	return protocol.PublishChangesArtifactParams{
 		ArtifactID: metadata.ArtifactID, TurnID: metadata.TurnID, WorkspaceID: metadata.WorkspaceID,
-		Status: metadata.Status, BaseHeadOID: metadata.BaseHeadOID,
+		WorkspaceSourceDeviceID: metadata.WorkspaceSourceDeviceID,
+		WorkspaceTargetDeviceID: metadata.WorkspaceTargetDeviceID,
+		Status:                  metadata.Status, BaseHeadOID: metadata.BaseHeadOID,
 		BaseManifestHash: metadata.BaseManifestHash, BaseSnapshotHash: metadata.BaseSnapshotHash,
 		ResultHeadOID: metadata.ResultHeadOID, ResultSnapshotHash: metadata.ResultSnapshotHash,
 		ResultClean: metadata.ResultClean, Parts: metadata.Parts,
@@ -352,6 +362,7 @@ func scanChangesArtifact(scanner rowScanner) (protocol.ChangesArtifactMetadata, 
 	err := scanner.Scan(
 		&metadata.TreeID, &metadata.ArtifactID, &metadata.TurnID, &metadata.WorkspaceID,
 		&metadata.Status, &metadata.SourceAgentID, &metadata.SourceDeviceID,
+		&metadata.WorkspaceSourceDeviceID, &metadata.WorkspaceTargetDeviceID,
 		&metadata.ObjectFormat, &metadata.BaseHeadOID, &metadata.BaseManifestHash,
 		&metadata.BaseSnapshotHash, &metadata.BaseClean, &metadata.ResultHeadOID,
 		&metadata.ResultSnapshotHash, &metadata.ResultClean, &partsJSON, &baseWarningsJSON,
@@ -417,7 +428,8 @@ WHERE controller_id = ? AND tree_id = ? AND last_artifact_sequence = ?
 
 const changesArtifactSelect = `
 SELECT tree_id, artifact_id, turn_id, workspace_id, status, source_agent_id,
-       source_device_id, object_format, base_head_oid, base_manifest_hash,
+	source_device_id, workspace_source_device_id, workspace_target_device_id,
+	object_format, base_head_oid, base_manifest_hash,
        base_snapshot_hash, base_clean, result_head_oid, result_snapshot_hash,
        result_clean, parts_json, base_warnings_json, result_warnings_json,
        failure_code, artifact_sequence, observed_at

@@ -362,7 +362,9 @@ func beginWorkerFinalization(
 	artifact := ChangesArtifact{
 		WorkerKey: worker.WorkerKey, ArtifactID: artifactID, TurnID: worker.ActiveTurnID,
 		WorkspaceID: worker.WorkspaceID, CompletionTarget: target,
-		CompletionFailureCode: failureCode, State: ChangesCapturePending,
+		WorkspaceSourceDeviceID: workspace.SourceDeviceID,
+		WorkspaceTargetDeviceID: workspace.TargetDeviceID,
+		CompletionFailureCode:   failureCode, State: ChangesCapturePending,
 		ObjectFormat: workspace.ObjectFormat, BaseHeadOID: workspace.HeadOID,
 		BaseClean:        workspace.Clean,
 		BaseManifestHash: workspace.ManifestHash, BaseSnapshotHash: workspace.SourceSnapshotHash,
@@ -388,12 +390,15 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND active_turn_id = ?
 	if _, err := connection.ExecContext(ctx, `
 INSERT INTO peer_changes_artifacts(
 	controller_id, tree_id, agent_id, turn_id, artifact_id, workspace_id,
+	workspace_source_device_id, workspace_target_device_id,
 	completion_target_status, completion_failure_code, state, object_format,
 	base_head_oid, base_clean, base_manifest_hash, base_snapshot_hash, base_warnings_json,
 	created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, artifact.ControllerID, artifact.TreeID, artifact.AgentID, artifact.TurnID,
-		artifact.ArtifactID, artifact.WorkspaceID, artifact.CompletionTarget,
+		artifact.ArtifactID, artifact.WorkspaceID,
+		artifact.WorkspaceSourceDeviceID, artifact.WorkspaceTargetDeviceID,
+		artifact.CompletionTarget,
 		artifact.CompletionFailureCode, artifact.State, artifact.ObjectFormat,
 		artifact.BaseHeadOID, artifact.BaseClean, artifact.BaseManifestHash, artifact.BaseSnapshotHash,
 		string(baseWarningsJSON),

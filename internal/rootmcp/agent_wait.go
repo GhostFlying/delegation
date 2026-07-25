@@ -56,26 +56,28 @@ type AgentArtifactPartOutput struct {
 }
 
 type AgentArtifactOutput struct {
-	ArtifactID         string                         `json:"artifact_id"`
-	TurnID             string                         `json:"turn_id"`
-	WorkspaceID        string                         `json:"workspace_id"`
-	Status             protocol.ChangesArtifactStatus `json:"status"`
-	SourceAgentID      string                         `json:"source_agent_id"`
-	SourceDeviceID     string                         `json:"source_device_id"`
-	ObjectFormat       string                         `json:"object_format"`
-	BaseHeadOID        string                         `json:"base_head_oid"`
-	BaseManifestHash   string                         `json:"base_manifest_hash"`
-	BaseSnapshotHash   string                         `json:"base_snapshot_hash"`
-	BaseClean          bool                           `json:"base_clean"`
-	ResultHeadOID      string                         `json:"result_head_oid,omitempty"`
-	ResultSnapshotHash string                         `json:"result_snapshot_hash,omitempty"`
-	ResultClean        bool                           `json:"result_clean"`
-	Parts              []AgentArtifactPartOutput      `json:"parts"`
-	BaseWarnings       []string                       `json:"base_warnings"`
-	ResultWarnings     []string                       `json:"result_warnings"`
-	FailureCode        string                         `json:"failure_code,omitempty"`
-	Sequence           uint64                         `json:"sequence"`
-	ObservedAt         int64                          `json:"observed_at"`
+	ArtifactID              string                         `json:"artifact_id"`
+	TurnID                  string                         `json:"turn_id"`
+	WorkspaceID             string                         `json:"workspace_id"`
+	Status                  protocol.ChangesArtifactStatus `json:"status"`
+	SourceAgentID           string                         `json:"source_agent_id"`
+	SourceDeviceID          string                         `json:"source_device_id"`
+	WorkspaceSourceDeviceID string                         `json:"workspace_source_device_id"`
+	WorkspaceTargetDeviceID string                         `json:"workspace_target_device_id"`
+	ObjectFormat            string                         `json:"object_format"`
+	BaseHeadOID             string                         `json:"base_head_oid"`
+	BaseManifestHash        string                         `json:"base_manifest_hash"`
+	BaseSnapshotHash        string                         `json:"base_snapshot_hash"`
+	BaseClean               bool                           `json:"base_clean"`
+	ResultHeadOID           string                         `json:"result_head_oid,omitempty"`
+	ResultSnapshotHash      string                         `json:"result_snapshot_hash,omitempty"`
+	ResultClean             bool                           `json:"result_clean"`
+	Parts                   []AgentArtifactPartOutput      `json:"parts"`
+	BaseWarnings            []string                       `json:"base_warnings"`
+	ResultWarnings          []string                       `json:"result_warnings"`
+	FailureCode             string                         `json:"failure_code,omitempty"`
+	Sequence                uint64                         `json:"sequence"`
+	ObservedAt              int64                          `json:"observed_at"`
 }
 
 type WaitAgentOutput struct {
@@ -245,7 +247,7 @@ func validateWaitAgentResult(
 	mailboxCursor := params.MailboxCursor
 	for _, message := range result.Messages {
 		if err := message.Validate(); err != nil {
-			return fmt.Errorf("delegation service returned an invalid agent message: %w", err)
+			return errors.New("delegation service returned an invalid agent message")
 		}
 		if message.Sequence <= mailboxCursor || message.Source.ControllerID != root.ControllerID ||
 			message.Source.TreeID != root.TreeID || message.Source.ParentAgentID != root.AgentID {
@@ -259,7 +261,7 @@ func validateWaitAgentResult(
 	lifecycleCursor := params.LifecycleCursor
 	for _, activity := range result.Activities {
 		if err := activity.Validate(); err != nil {
-			return fmt.Errorf("delegation service returned invalid agent lifecycle activity: %w", err)
+			return errors.New("delegation service returned invalid agent lifecycle activity")
 		}
 		if activity.Sequence <= lifecycleCursor {
 			return errors.New("delegation service returned unordered agent lifecycle activity")
@@ -272,10 +274,11 @@ func validateWaitAgentResult(
 	artifactCursor := params.ArtifactCursor
 	for _, artifact := range result.Artifacts {
 		if err := artifact.Validate(); err != nil {
-			return fmt.Errorf("delegation service returned invalid changes artifact: %w", err)
+			return errors.New("delegation service returned an invalid changes artifact")
 		}
 		if artifact.Sequence <= artifactCursor || artifact.TreeID != root.TreeID ||
-			artifact.SourceAgentID == root.AgentID {
+			artifact.SourceAgentID == root.AgentID ||
+			artifact.WorkspaceSourceDeviceID != root.DeviceID {
 			return errors.New("delegation service returned a mismatched or unordered changes artifact")
 		}
 		artifactCursor = artifact.Sequence
@@ -319,7 +322,9 @@ func waitAgentOutput(result protocol.WaitAgentResult) WaitAgentOutput {
 			ArtifactID: artifact.ArtifactID, TurnID: artifact.TurnID,
 			WorkspaceID: artifact.WorkspaceID, Status: artifact.Status,
 			SourceAgentID: artifact.SourceAgentID, SourceDeviceID: artifact.SourceDeviceID,
-			ObjectFormat: artifact.ObjectFormat, BaseHeadOID: artifact.BaseHeadOID,
+			WorkspaceSourceDeviceID: artifact.WorkspaceSourceDeviceID,
+			WorkspaceTargetDeviceID: artifact.WorkspaceTargetDeviceID,
+			ObjectFormat:            artifact.ObjectFormat, BaseHeadOID: artifact.BaseHeadOID,
 			BaseManifestHash: artifact.BaseManifestHash,
 			BaseSnapshotHash: artifact.BaseSnapshotHash, BaseClean: artifact.BaseClean,
 			ResultHeadOID:      artifact.ResultHeadOID,

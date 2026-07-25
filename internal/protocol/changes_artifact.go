@@ -18,20 +18,22 @@ const (
 )
 
 type PublishChangesArtifactParams struct {
-	ArtifactID         string                        `json:"artifactId"`
-	TurnID             string                        `json:"turnId"`
-	WorkspaceID        string                        `json:"workspaceId"`
-	Status             ChangesArtifactStatus         `json:"status"`
-	BaseHeadOID        string                        `json:"baseHeadOid"`
-	BaseManifestHash   string                        `json:"baseManifestHash"`
-	BaseSnapshotHash   string                        `json:"baseSnapshotHash"`
-	ResultHeadOID      string                        `json:"resultHeadOid"`
-	ResultSnapshotHash string                        `json:"resultSnapshotHash"`
-	ResultClean        bool                          `json:"resultClean"`
-	Parts              []WorkspaceArtifactDescriptor `json:"parts"`
-	BaseWarnings       []string                      `json:"baseWarnings"`
-	ResultWarnings     []string                      `json:"resultWarnings"`
-	FailureCode        string                        `json:"failureCode"`
+	ArtifactID              string                        `json:"artifactId"`
+	TurnID                  string                        `json:"turnId"`
+	WorkspaceID             string                        `json:"workspaceId"`
+	WorkspaceSourceDeviceID string                        `json:"workspaceSourceDeviceId"`
+	WorkspaceTargetDeviceID string                        `json:"workspaceTargetDeviceId"`
+	Status                  ChangesArtifactStatus         `json:"status"`
+	BaseHeadOID             string                        `json:"baseHeadOid"`
+	BaseManifestHash        string                        `json:"baseManifestHash"`
+	BaseSnapshotHash        string                        `json:"baseSnapshotHash"`
+	ResultHeadOID           string                        `json:"resultHeadOid"`
+	ResultSnapshotHash      string                        `json:"resultSnapshotHash"`
+	ResultClean             bool                          `json:"resultClean"`
+	Parts                   []WorkspaceArtifactDescriptor `json:"parts"`
+	BaseWarnings            []string                      `json:"baseWarnings"`
+	ResultWarnings          []string                      `json:"resultWarnings"`
+	FailureCode             string                        `json:"failureCode"`
 }
 
 func (p PublishChangesArtifactParams) Validate() error {
@@ -39,6 +41,8 @@ func (p PublishChangesArtifactParams) Validate() error {
 		{name: "artifactId", value: p.ArtifactID},
 		{name: "turnId", value: p.TurnID},
 		{name: "workspaceId", value: p.WorkspaceID},
+		{name: "workspaceSourceDeviceId", value: p.WorkspaceSourceDeviceID},
+		{name: "workspaceTargetDeviceId", value: p.WorkspaceTargetDeviceID},
 	} {
 		if err := identity.ValidateID(field.value); err != nil {
 			return fmt.Errorf("%s %w", field.name, err)
@@ -160,27 +164,29 @@ func (r PublishChangesArtifactResult) Validate() error {
 }
 
 type ChangesArtifactMetadata struct {
-	TreeID             string                        `json:"treeId"`
-	ArtifactID         string                        `json:"artifactId"`
-	TurnID             string                        `json:"turnId"`
-	WorkspaceID        string                        `json:"workspaceId"`
-	Status             ChangesArtifactStatus         `json:"status"`
-	SourceAgentID      string                        `json:"sourceAgentId"`
-	SourceDeviceID     string                        `json:"sourceDeviceId"`
-	ObjectFormat       string                        `json:"objectFormat"`
-	BaseHeadOID        string                        `json:"baseHeadOid"`
-	BaseManifestHash   string                        `json:"baseManifestHash"`
-	BaseSnapshotHash   string                        `json:"baseSnapshotHash"`
-	BaseClean          bool                          `json:"baseClean"`
-	ResultHeadOID      string                        `json:"resultHeadOid"`
-	ResultSnapshotHash string                        `json:"resultSnapshotHash"`
-	ResultClean        bool                          `json:"resultClean"`
-	Parts              []WorkspaceArtifactDescriptor `json:"parts"`
-	BaseWarnings       []string                      `json:"baseWarnings"`
-	ResultWarnings     []string                      `json:"resultWarnings"`
-	FailureCode        string                        `json:"failureCode"`
-	Sequence           uint64                        `json:"sequence"`
-	ObservedAt         int64                         `json:"observedAt"`
+	TreeID                  string                        `json:"treeId"`
+	ArtifactID              string                        `json:"artifactId"`
+	TurnID                  string                        `json:"turnId"`
+	WorkspaceID             string                        `json:"workspaceId"`
+	Status                  ChangesArtifactStatus         `json:"status"`
+	SourceAgentID           string                        `json:"sourceAgentId"`
+	SourceDeviceID          string                        `json:"sourceDeviceId"`
+	WorkspaceSourceDeviceID string                        `json:"workspaceSourceDeviceId"`
+	WorkspaceTargetDeviceID string                        `json:"workspaceTargetDeviceId"`
+	ObjectFormat            string                        `json:"objectFormat"`
+	BaseHeadOID             string                        `json:"baseHeadOid"`
+	BaseManifestHash        string                        `json:"baseManifestHash"`
+	BaseSnapshotHash        string                        `json:"baseSnapshotHash"`
+	BaseClean               bool                          `json:"baseClean"`
+	ResultHeadOID           string                        `json:"resultHeadOid"`
+	ResultSnapshotHash      string                        `json:"resultSnapshotHash"`
+	ResultClean             bool                          `json:"resultClean"`
+	Parts                   []WorkspaceArtifactDescriptor `json:"parts"`
+	BaseWarnings            []string                      `json:"baseWarnings"`
+	ResultWarnings          []string                      `json:"resultWarnings"`
+	FailureCode             string                        `json:"failureCode"`
+	Sequence                uint64                        `json:"sequence"`
+	ObservedAt              int64                         `json:"observedAt"`
 }
 
 func (m ChangesArtifactMetadata) Validate() error {
@@ -188,6 +194,8 @@ func (m ChangesArtifactMetadata) Validate() error {
 		{name: "treeId", value: m.TreeID},
 		{name: "sourceAgentId", value: m.SourceAgentID},
 		{name: "sourceDeviceId", value: m.SourceDeviceID},
+		{name: "workspaceSourceDeviceId", value: m.WorkspaceSourceDeviceID},
+		{name: "workspaceTargetDeviceId", value: m.WorkspaceTargetDeviceID},
 	} {
 		if err := identity.ValidateID(field.value); err != nil {
 			return fmt.Errorf("%s %w", field.name, err)
@@ -195,7 +203,9 @@ func (m ChangesArtifactMetadata) Validate() error {
 	}
 	p := PublishChangesArtifactParams{
 		ArtifactID: m.ArtifactID, TurnID: m.TurnID, WorkspaceID: m.WorkspaceID,
-		Status: m.Status, BaseHeadOID: m.BaseHeadOID,
+		WorkspaceSourceDeviceID: m.WorkspaceSourceDeviceID,
+		WorkspaceTargetDeviceID: m.WorkspaceTargetDeviceID,
+		Status:                  m.Status, BaseHeadOID: m.BaseHeadOID,
 		BaseManifestHash: m.BaseManifestHash, BaseSnapshotHash: m.BaseSnapshotHash,
 		ResultHeadOID: m.ResultHeadOID, ResultSnapshotHash: m.ResultSnapshotHash,
 		ResultClean: m.ResultClean, Parts: m.Parts, BaseWarnings: m.BaseWarnings,
@@ -203,6 +213,9 @@ func (m ChangesArtifactMetadata) Validate() error {
 	}
 	if err := p.Validate(); err != nil {
 		return err
+	}
+	if m.SourceDeviceID != m.WorkspaceTargetDeviceID {
+		return errors.New("changes artifact publisher must match the workspace target device")
 	}
 	if (m.ObjectFormat == "sha1" && len(m.BaseHeadOID) != 40) ||
 		(m.ObjectFormat == "sha256" && len(m.BaseHeadOID) != 64) ||
@@ -227,7 +240,9 @@ func (m ChangesArtifactMetadata) Validate() error {
 
 func SameChangesArtifactParams(left, right PublishChangesArtifactParams) bool {
 	return left.ArtifactID == right.ArtifactID && left.TurnID == right.TurnID &&
-		left.WorkspaceID == right.WorkspaceID && left.Status == right.Status &&
+		left.WorkspaceID == right.WorkspaceID &&
+		left.WorkspaceSourceDeviceID == right.WorkspaceSourceDeviceID &&
+		left.WorkspaceTargetDeviceID == right.WorkspaceTargetDeviceID && left.Status == right.Status &&
 		left.BaseHeadOID == right.BaseHeadOID && left.BaseManifestHash == right.BaseManifestHash &&
 		left.BaseSnapshotHash == right.BaseSnapshotHash && left.ResultHeadOID == right.ResultHeadOID &&
 		left.ResultSnapshotHash == right.ResultSnapshotHash && left.ResultClean == right.ResultClean &&

@@ -96,6 +96,9 @@ func TestChangesArtifactRejectsInconsistentResultsAndParts(t *testing.T) {
 			value.Status = ChangesArtifactCaptureFailed
 			value.FailureCode = "capture_failed"
 		}},
+		{name: "missing workspace source device", mutate: func(value *PublishChangesArtifactParams) {
+			value.WorkspaceSourceDeviceID = ""
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -133,9 +136,18 @@ func TestChangesArtifactMetadataBindsDerivedBaseState(t *testing.T) {
 	}
 }
 
+func TestChangesArtifactMetadataBindsPublisherToWorkspaceTarget(t *testing.T) {
+	metadata := changesArtifactMetadata(validChangesArtifactParams())
+	metadata.WorkspaceTargetDeviceID = testControllerID
+	if err := metadata.Validate(); err == nil {
+		t.Fatal("changes artifact accepted a publisher outside the workspace target device")
+	}
+}
+
 func validChangesArtifactParams() PublishChangesArtifactParams {
 	return PublishChangesArtifactParams{
 		ArtifactID: testArtifactID, TurnID: testTurnID, WorkspaceID: testChangesWorkspaceID,
+		WorkspaceSourceDeviceID: testControllerID, WorkspaceTargetDeviceID: testDeviceID,
 		Status: ChangesArtifactAvailable, BaseHeadOID: strings.Repeat("a", 40),
 		BaseManifestHash: strings.Repeat("b", 64), BaseSnapshotHash: strings.Repeat("c", 64),
 		ResultHeadOID: strings.Repeat("d", 40), ResultSnapshotHash: strings.Repeat("e", 64),
@@ -151,7 +163,10 @@ func changesArtifactMetadata(params PublishChangesArtifactParams) ChangesArtifac
 	return ChangesArtifactMetadata{
 		TreeID: testTreeID, ArtifactID: params.ArtifactID, TurnID: params.TurnID,
 		WorkspaceID: params.WorkspaceID, Status: params.Status, SourceAgentID: testAgentID,
-		SourceDeviceID: testDeviceID, ObjectFormat: "sha1", BaseHeadOID: params.BaseHeadOID,
+		SourceDeviceID:          testDeviceID,
+		WorkspaceSourceDeviceID: params.WorkspaceSourceDeviceID,
+		WorkspaceTargetDeviceID: params.WorkspaceTargetDeviceID,
+		ObjectFormat:            "sha1", BaseHeadOID: params.BaseHeadOID,
 		BaseManifestHash: params.BaseManifestHash, BaseSnapshotHash: params.BaseSnapshotHash,
 		BaseClean: true, ResultHeadOID: params.ResultHeadOID,
 		ResultSnapshotHash: params.ResultSnapshotHash, ResultClean: params.ResultClean,

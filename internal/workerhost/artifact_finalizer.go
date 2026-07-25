@@ -388,7 +388,10 @@ func (h *Host) loadChangesWorkspace(
 		worker.WorkspaceID != artifact.WorkspaceID || worker.WorkspacePath != workspace.WorkspacePath ||
 		worker.DeviceID != h.deviceID || workspace.Status != store.PreparedWorkspaceClaimed ||
 		workspace.ClaimedAgentID != worker.AgentID || workspace.SourceAgentID != worker.ParentAgentID ||
-		workspace.TargetDeviceID != h.deviceID || artifact.BaseHeadOID != workspace.HeadOID ||
+		workspace.TargetDeviceID != h.deviceID ||
+		artifact.WorkspaceSourceDeviceID != workspace.SourceDeviceID ||
+		artifact.WorkspaceTargetDeviceID != workspace.TargetDeviceID ||
+		artifact.BaseHeadOID != workspace.HeadOID ||
 		artifact.ObjectFormat != workspace.ObjectFormat || artifact.BaseClean != workspace.Clean ||
 		artifact.BaseManifestHash != manifestHash || artifact.BaseManifestHash != workspace.ManifestHash ||
 		artifact.BaseSnapshotHash != workspace.SourceSnapshotHash ||

@@ -231,6 +231,8 @@ CREATE TABLE changes_artifacts (
 	status TEXT NOT NULL CHECK (status IN ('available', 'unchanged', 'captureFailed')),
 	source_agent_id TEXT NOT NULL CHECK (length(source_agent_id) = 36),
 	source_device_id TEXT NOT NULL CHECK (length(source_device_id) = 36),
+	workspace_source_device_id TEXT NOT NULL CHECK (length(workspace_source_device_id) = 36),
+	workspace_target_device_id TEXT NOT NULL CHECK (length(workspace_target_device_id) = 36),
 	object_format TEXT NOT NULL CHECK (object_format IN ('sha1', 'sha256')),
 	base_head_oid TEXT NOT NULL CHECK (length(base_head_oid) IN (40, 64)),
 	base_manifest_hash TEXT NOT NULL CHECK (length(base_manifest_hash) = 64),
@@ -267,8 +269,13 @@ CREATE TABLE changes_artifacts (
 		REFERENCES workspace_sync_receipts(controller_id, tree_id, sync_id),
 	FOREIGN KEY (controller_id, source_device_id)
 		REFERENCES devices(controller_id, device_id),
+	FOREIGN KEY (controller_id, workspace_source_device_id)
+		REFERENCES devices(controller_id, device_id),
+	FOREIGN KEY (controller_id, workspace_target_device_id)
+		REFERENCES devices(controller_id, device_id),
 	FOREIGN KEY (controller_id, tree_id)
-		REFERENCES trees(controller_id, tree_id) ON DELETE CASCADE
+		REFERENCES trees(controller_id, tree_id) ON DELETE CASCADE,
+	CHECK (source_device_id = workspace_target_device_id)
 ) STRICT;
 
 CREATE INDEX changes_artifacts_by_tree_sequence

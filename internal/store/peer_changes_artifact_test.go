@@ -35,6 +35,8 @@ func TestChangesArtifactFinalizationPersistsThroughBrokerAcknowledgement(t *test
 		finalization.Worker.ActiveTurnID != turnID ||
 		finalization.Worker.FinalTarget != WorkerIdle ||
 		finalization.Artifact.State != ChangesCapturePending ||
+		finalization.Artifact.WorkspaceSourceDeviceID != workspace.SourceDeviceID ||
+		finalization.Artifact.WorkspaceTargetDeviceID != workspace.TargetDeviceID ||
 		finalization.Artifact.BaseHeadOID != workspace.HeadOID ||
 		finalization.Artifact.BaseClean != workspace.Clean ||
 		!slices.Equal(finalization.Artifact.BaseWarnings, workspace.Warnings) ||
@@ -577,6 +579,8 @@ func TestRecoverWorkersRestoresFinalizingWorkspaceCapture(t *testing.T) {
 		t.Fatalf("recovered captures = %#v, %v", captures, err)
 	}
 	if !slices.Equal(captures[0].BaseWarnings, workspace.Warnings) ||
+		captures[0].WorkspaceSourceDeviceID != workspace.SourceDeviceID ||
+		captures[0].WorkspaceTargetDeviceID != workspace.TargetDeviceID ||
 		len(captures[0].ResultWarnings) != 0 {
 		t.Fatalf("capture-pending warnings = %#v, want base %v", captures[0], workspace.Warnings)
 	}
@@ -596,9 +600,57 @@ func TestRecoverWorkersRestoresFinalizingWorkspaceCapture(t *testing.T) {
 	defer state.Close()
 	captures, err = state.ListPendingChangesCaptures(ctx, worker.ControllerID, worker.DeviceID, 10)
 	if err != nil || len(captures) != 1 || captures[0].ArtifactID != artifactID ||
+		captures[0].WorkspaceSourceDeviceID != workspace.SourceDeviceID ||
+		captures[0].WorkspaceTargetDeviceID != workspace.TargetDeviceID ||
 		!slices.Equal(captures[0].BaseWarnings, workspace.Warnings) ||
 		len(captures[0].ResultWarnings) != 0 {
 		t.Fatalf("reopened captures = %#v, %v", captures, err)
+	}
+}
+
+func TestChangesArtifactWorkspaceDevicesSurvivePendingPublicationRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state", "peer.sqlite3")
+	state, err := OpenPeer(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Unix(8_500, 0)
+	worker, workspace, turnID := prepareRunningChangesWorker(t, state, 650, true, start)
+	finalization, err := state.BeginWorkerFinalization(
+		ctx, worker.WorkerKey, turnID, WorkerIdle, "", start.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.CompleteChangesArtifactCapture(
+		ctx, worker.WorkerKey, finalization.Artifact.ArtifactID,
+		ChangesCaptureResult{
+			Status: ChangesUnchanged, ResultHeadOID: workspace.HeadOID,
+			ResultSnapshotHash: workspace.SourceSnapshotHash, ResultClean: true,
+		},
+		start.Add(2*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state, err = OpenPeer(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	publications, err := state.ListPendingChangesPublications(
+		ctx, worker.ControllerID, worker.DeviceID, 1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(publications) != 1 ||
+		publications[0].WorkspaceSourceDeviceID != workspace.SourceDeviceID ||
+		publications[0].WorkspaceTargetDeviceID != workspace.TargetDeviceID {
+		t.Fatalf("reopened pending publication = %#v", publications)
 	}
 }
 

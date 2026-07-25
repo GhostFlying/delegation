@@ -51,6 +51,7 @@ func TestChangesArtifactPublishIsMetadataOnlyAndExactlyIdempotent(t *testing.T) 
 		TreeID: worker.TreeID, ArtifactID: params.ArtifactID, TurnID: params.TurnID,
 		WorkspaceID: params.WorkspaceID, Status: params.Status,
 		SourceAgentID: worker.AgentID, SourceDeviceID: worker.DeviceID,
+		WorkspaceSourceDeviceID: root.DeviceID, WorkspaceTargetDeviceID: worker.DeviceID,
 		ObjectFormat: manifest.ObjectFormat, BaseHeadOID: params.BaseHeadOID,
 		BaseManifestHash: params.BaseManifestHash, BaseSnapshotHash: params.BaseSnapshotHash,
 		BaseClean: manifest.Clean, ResultHeadOID: params.ResultHeadOID,
@@ -148,6 +149,12 @@ func TestChangesArtifactPublishEnforcesConnectionPrincipalSpawnAndWorkspaceAutho
 		{name: "unstarted spawn", mutate: func(_ *string, _ *control.PrincipalIdentity, _ *protocol.PublishChangesArtifactParams) {}, wantError: ErrAuthorizationDenied},
 		{name: "wrong workspace", started: true, mutate: func(_ *string, _ *control.PrincipalIdentity, params *protocol.PublishChangesArtifactParams) {
 			params.WorkspaceID = workspaceSyncID
+		}, wantError: ErrAuthorizationDenied},
+		{name: "wrong workspace source device", started: true, mutate: func(_ *string, _ *control.PrincipalIdentity, params *protocol.PublishChangesArtifactParams) {
+			params.WorkspaceSourceDeviceID = deviceSecondID
+		}, wantError: ErrAuthorizationDenied},
+		{name: "wrong workspace target device", started: true, mutate: func(_ *string, _ *control.PrincipalIdentity, params *protocol.PublishChangesArtifactParams) {
+			params.WorkspaceTargetDeviceID = testDeviceID
 		}, wantError: ErrAuthorizationDenied},
 		{name: "changed base head", started: true, mutate: func(_ *string, _ *control.PrincipalIdentity, params *protocol.PublishChangesArtifactParams) {
 			params.BaseHeadOID = strings.Repeat("9", 40)
@@ -370,6 +377,7 @@ func testChangesArtifactParams(
 ) protocol.PublishChangesArtifactParams {
 	return protocol.PublishChangesArtifactParams{
 		ArtifactID: changesArtifactID, TurnID: changesTurnID, WorkspaceID: changesWorkspaceID,
+		WorkspaceSourceDeviceID: testDeviceID, WorkspaceTargetDeviceID: agentSpawnTargetID,
 		Status: protocol.ChangesArtifactAvailable, BaseHeadOID: manifest.HeadOID,
 		BaseManifestHash: manifestHash, BaseSnapshotHash: manifest.SourceSnapshotHash,
 		ResultHeadOID:      strings.Repeat("d", len(manifest.HeadOID)),

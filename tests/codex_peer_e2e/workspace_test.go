@@ -405,6 +405,8 @@ func waitForWorkspaceArtifact(
 	if artifact.Sequence != result.NextArtifactCursor || artifact.TreeID != agent.Principal.TreeID ||
 		artifact.SourceAgentID != agent.Principal.AgentID ||
 		artifact.SourceDeviceID != agent.Principal.DeviceID ||
+		artifact.WorkspaceSourceDeviceID != rootSource.DeviceID ||
+		artifact.WorkspaceTargetDeviceID != agent.Principal.DeviceID ||
 		artifact.WorkspaceID != scenario.syncID || artifact.Status != protocol.ChangesArtifactAvailable ||
 		artifact.ObjectFormat != "sha1" || artifact.BaseHeadOID != scenario.head || artifact.BaseClean ||
 		artifact.BaseManifestHash != manifestHash || artifact.BaseSnapshotHash != sourceSnapshotHash ||
@@ -434,6 +436,7 @@ func assertPeerChangesArtifact(
 	t.Helper()
 	var (
 		state, status, baseHead, baseManifest, baseSnapshot   string
+		workspaceSourceDeviceID, workspaceTargetDeviceID      string
 		resultHead, resultSnapshot, bundleName, bundleSHA     string
 		overlayName, overlaySHA, baseWarningsJSON             string
 		resultWarningsJSON                                    string
@@ -441,7 +444,8 @@ func assertPeerChangesArtifact(
 		bundleSize, overlaySize, payloadBytes, brokerSequence int64
 	)
 	if err := database.QueryRow(`
-SELECT state, capture_status, base_head_oid, base_manifest_hash, base_snapshot_hash,
+SELECT state, capture_status, workspace_source_device_id, workspace_target_device_id,
+       base_head_oid, base_manifest_hash, base_snapshot_hash,
        base_clean, result_head_oid, result_snapshot_hash, result_clean,
        bundle_part_name, bundle_size_bytes, bundle_sha256,
        overlay_part_name, overlay_size_bytes, overlay_sha256,
@@ -449,7 +453,8 @@ SELECT state, capture_status, base_head_oid, base_manifest_hash, base_snapshot_h
 FROM peer_changes_artifacts
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND artifact_id = ?
 `, networkID, artifact.TreeID, artifact.SourceAgentID, artifact.ArtifactID).Scan(
-		&state, &status, &baseHead, &baseManifest, &baseSnapshot, &baseClean,
+		&state, &status, &workspaceSourceDeviceID, &workspaceTargetDeviceID,
+		&baseHead, &baseManifest, &baseSnapshot, &baseClean,
 		&resultHead, &resultSnapshot, &resultClean,
 		&bundleName, &bundleSize, &bundleSHA, &overlayName, &overlaySize, &overlaySHA,
 		&baseWarningsJSON, &resultWarningsJSON, &payloadBytes, &brokerSequence,
@@ -464,6 +469,8 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND artifact_id = ?
 		t.Fatal(err)
 	}
 	if state != "published" || status != string(artifact.Status) ||
+		workspaceSourceDeviceID != artifact.WorkspaceSourceDeviceID ||
+		workspaceTargetDeviceID != artifact.WorkspaceTargetDeviceID ||
 		baseHead != artifact.BaseHeadOID || baseManifest != artifact.BaseManifestHash ||
 		baseSnapshot != artifact.BaseSnapshotHash || baseClean != artifact.BaseClean ||
 		resultHead != artifact.ResultHeadOID || resultSnapshot != artifact.ResultSnapshotHash ||
@@ -488,6 +495,7 @@ func assertBrokerChangesArtifact(
 	t.Helper()
 	var (
 		status, workspaceID, sourceAgentID, sourceDeviceID, baseHead string
+		workspaceSourceDeviceID, workspaceTargetDeviceID             string
 		baseManifest, baseSnapshot, resultHead, resultSnapshot       string
 		partsJSON, baseWarningsJSON, resultWarningsJSON              string
 		failureCode                                                  string
@@ -495,14 +503,16 @@ func assertBrokerChangesArtifact(
 		sequence                                                     uint64
 	)
 	if err := database.QueryRow(`
-SELECT status, workspace_id, source_agent_id, source_device_id, base_head_oid,
+SELECT status, workspace_id, source_agent_id, source_device_id,
+       workspace_source_device_id, workspace_target_device_id, base_head_oid,
        base_manifest_hash, base_snapshot_hash, base_clean, result_head_oid,
        result_snapshot_hash, result_clean, parts_json, base_warnings_json,
        result_warnings_json, failure_code, artifact_sequence
 FROM changes_artifacts
 WHERE controller_id = ? AND tree_id = ? AND artifact_id = ?
 `, networkID, artifact.TreeID, artifact.ArtifactID).Scan(
-		&status, &workspaceID, &sourceAgentID, &sourceDeviceID, &baseHead,
+		&status, &workspaceID, &sourceAgentID, &sourceDeviceID,
+		&workspaceSourceDeviceID, &workspaceTargetDeviceID, &baseHead,
 		&baseManifest, &baseSnapshot, &baseClean, &resultHead, &resultSnapshot,
 		&resultClean, &partsJSON, &baseWarningsJSON, &resultWarningsJSON,
 		&failureCode, &sequence,
@@ -522,6 +532,8 @@ WHERE controller_id = ? AND tree_id = ? AND artifact_id = ?
 	}
 	if status != string(artifact.Status) || workspaceID != artifact.WorkspaceID ||
 		sourceAgentID != artifact.SourceAgentID || sourceDeviceID != artifact.SourceDeviceID ||
+		workspaceSourceDeviceID != artifact.WorkspaceSourceDeviceID ||
+		workspaceTargetDeviceID != artifact.WorkspaceTargetDeviceID ||
 		baseHead != artifact.BaseHeadOID || baseManifest != artifact.BaseManifestHash ||
 		baseSnapshot != artifact.BaseSnapshotHash || baseClean != artifact.BaseClean ||
 		resultHead != artifact.ResultHeadOID || resultSnapshot != artifact.ResultSnapshotHash ||

@@ -93,7 +93,9 @@ func TestManagedChangesArtifactSourceMapsAndAcknowledgesDurableOutbox(t *testing
 		Params: protocol.PublishChangesArtifactParams{
 			ArtifactID: artifact.ArtifactID, TurnID: artifact.TurnID,
 			WorkspaceID: artifact.WorkspaceID, Status: protocol.ChangesArtifactAvailable,
-			BaseHeadOID: artifact.BaseHeadOID, BaseManifestHash: artifact.BaseManifestHash,
+			WorkspaceSourceDeviceID: artifact.WorkspaceSourceDeviceID,
+			WorkspaceTargetDeviceID: artifact.WorkspaceTargetDeviceID,
+			BaseHeadOID:             artifact.BaseHeadOID, BaseManifestHash: artifact.BaseManifestHash,
 			BaseSnapshotHash: artifact.BaseSnapshotHash, ResultHeadOID: artifact.ResultHeadOID,
 			ResultSnapshotHash: artifact.ResultSnapshotHash, ResultClean: artifact.ResultClean,
 			Parts: []protocol.WorkspaceArtifactDescriptor{
@@ -146,7 +148,9 @@ func validCLIChangesArtifactState() (store.WorkerReservation, store.ChangesArtif
 	artifact := store.ChangesArtifact{
 		WorkerKey: key, ArtifactID: cliChangesArtifactID, TurnID: cliChangesTurnID,
 		WorkspaceID: cliChangesWorkspace, CompletionTarget: store.WorkerIdle,
-		State: store.ChangesPublishPending, Status: store.ChangesAvailable,
+		WorkspaceSourceDeviceID: cliChangesParentID,
+		WorkspaceTargetDeviceID: runtimeDeviceID,
+		State:                   store.ChangesPublishPending, Status: store.ChangesAvailable,
 		ObjectFormat: "sha1", BaseHeadOID: strings.Repeat("a", 40), BaseClean: true,
 		BaseManifestHash: strings.Repeat("b", 64), BaseSnapshotHash: strings.Repeat("c", 64),
 		ResultHeadOID: strings.Repeat("d", 40), ResultSnapshotHash: strings.Repeat("4", 64),

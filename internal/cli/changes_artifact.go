@@ -73,6 +73,7 @@ func (s managedChangesArtifactSource) ListPendingChangesPublications(
 		}
 		if artifact.ControllerID != s.controllerID || worker.ControllerID != s.controllerID ||
 			worker.DeviceID != s.deviceID || worker.ParentAgentID == "" ||
+			artifact.WorkspaceTargetDeviceID != worker.DeviceID ||
 			artifact.State != store.ChangesPublishPending ||
 			worker.Status != store.WorkerFinalizing || worker.ActiveTurnID != artifact.TurnID ||
 			worker.WorkspaceID != artifact.WorkspaceID {
@@ -180,7 +181,9 @@ func protocolChangesArtifactParams(
 	params := protocol.PublishChangesArtifactParams{
 		ArtifactID: artifact.ArtifactID, TurnID: artifact.TurnID,
 		WorkspaceID: artifact.WorkspaceID, Status: status,
-		BaseHeadOID: artifact.BaseHeadOID, BaseManifestHash: artifact.BaseManifestHash,
+		WorkspaceSourceDeviceID: artifact.WorkspaceSourceDeviceID,
+		WorkspaceTargetDeviceID: artifact.WorkspaceTargetDeviceID,
+		BaseHeadOID:             artifact.BaseHeadOID, BaseManifestHash: artifact.BaseManifestHash,
 		BaseSnapshotHash: artifact.BaseSnapshotHash, ResultHeadOID: artifact.ResultHeadOID,
 		ResultSnapshotHash: artifact.ResultSnapshotHash, ResultClean: artifact.ResultClean,
 		Parts: parts, BaseWarnings: slices.Clone(artifact.BaseWarnings),

@@ -4,7 +4,7 @@ import "fmt"
 
 const (
 	peerStoreApplicationID = 0x444c4750 // "DLGP"
-	peerSchemaVersion      = 10
+	peerSchemaVersion      = 11
 )
 
 var peerSchemaCurrent = fmt.Sprintf(`
@@ -130,6 +130,8 @@ CREATE TABLE peer_changes_artifacts (
 	turn_id TEXT NOT NULL,
 	artifact_id TEXT NOT NULL UNIQUE,
 	workspace_id TEXT NOT NULL,
+	workspace_source_device_id TEXT NOT NULL CHECK (length(workspace_source_device_id) = 36),
+	workspace_target_device_id TEXT NOT NULL CHECK (length(workspace_target_device_id) = 36),
 	completion_target_status TEXT NOT NULL CHECK (
 		completion_target_status IN ('idle', 'interrupted', 'failed')
 	),

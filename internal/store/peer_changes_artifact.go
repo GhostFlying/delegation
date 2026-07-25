@@ -71,31 +71,33 @@ type ChangesArtifactPart struct {
 // intentionally not representable here or in the database.
 type ChangesArtifact struct {
 	WorkerKey
-	ArtifactID            string
-	TurnID                string
-	WorkspaceID           string
-	CompletionTarget      WorkerStatus
-	CompletionFailureCode string
-	State                 ChangesArtifactState
-	Status                ChangesCaptureStatus
-	ObjectFormat          string
-	BaseHeadOID           string
-	BaseClean             bool
-	BaseManifestHash      string
-	BaseSnapshotHash      string
-	BaseWarnings          []string
-	ResultHeadOID         string
-	ResultSnapshotHash    string
-	ResultClean           bool
-	Parts                 []ChangesArtifactPart
-	ResultWarnings        []string
-	FailureCode           string
-	RetentionReserved     bool
-	ReservedBytes         int64
-	PayloadBytes          int64
-	BrokerSequence        uint64
-	CreatedAt             int64
-	UpdatedAt             int64
+	ArtifactID              string
+	TurnID                  string
+	WorkspaceID             string
+	WorkspaceSourceDeviceID string
+	WorkspaceTargetDeviceID string
+	CompletionTarget        WorkerStatus
+	CompletionFailureCode   string
+	State                   ChangesArtifactState
+	Status                  ChangesCaptureStatus
+	ObjectFormat            string
+	BaseHeadOID             string
+	BaseClean               bool
+	BaseManifestHash        string
+	BaseSnapshotHash        string
+	BaseWarnings            []string
+	ResultHeadOID           string
+	ResultSnapshotHash      string
+	ResultClean             bool
+	Parts                   []ChangesArtifactPart
+	ResultWarnings          []string
+	FailureCode             string
+	RetentionReserved       bool
+	ReservedBytes           int64
+	PayloadBytes            int64
+	BrokerSequence          uint64
+	CreatedAt               int64
+	UpdatedAt               int64
 }
 
 type ChangesArtifactRetention struct {
@@ -125,6 +127,7 @@ func scanPeerChangesArtifact(scanner rowScanner) (ChangesArtifact, error) {
 	if err := scanner.Scan(
 		&artifact.ControllerID, &artifact.TreeID, &artifact.AgentID,
 		&artifact.TurnID, &artifact.ArtifactID, &artifact.WorkspaceID,
+		&artifact.WorkspaceSourceDeviceID, &artifact.WorkspaceTargetDeviceID,
 		&artifact.CompletionTarget, &artifact.CompletionFailureCode,
 		&artifact.State, &artifact.Status, &artifact.ObjectFormat,
 		&artifact.BaseHeadOID, &artifact.BaseClean, &artifact.BaseManifestHash, &artifact.BaseSnapshotHash,
@@ -169,6 +172,12 @@ func (a ChangesArtifact) Validate() error {
 	}
 	if err := identity.ValidateID(a.WorkspaceID); err != nil {
 		return fmt.Errorf("workspaceId %w", err)
+	}
+	if err := identity.ValidateID(a.WorkspaceSourceDeviceID); err != nil {
+		return fmt.Errorf("workspaceSourceDeviceId %w", err)
+	}
+	if err := identity.ValidateID(a.WorkspaceTargetDeviceID); err != nil {
+		return fmt.Errorf("workspaceTargetDeviceId %w", err)
 	}
 	if err := validateFinalTarget(a.CompletionTarget, a.CompletionFailureCode); err != nil {
 		return err

@@ -215,6 +215,7 @@ WHERE artifact.controller_id = ? AND artifact.tree_id = ? AND artifact.agent_id 
 const peerChangesArtifactSelect = `
 SELECT artifact.controller_id, artifact.tree_id, artifact.agent_id,
 	artifact.turn_id, artifact.artifact_id, artifact.workspace_id,
+	artifact.workspace_source_device_id, artifact.workspace_target_device_id,
 	artifact.completion_target_status, artifact.completion_failure_code,
 	artifact.state, artifact.capture_status, artifact.object_format,
 	artifact.base_head_oid, artifact.base_clean, artifact.base_manifest_hash, artifact.base_snapshot_hash,

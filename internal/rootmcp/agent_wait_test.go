@@ -268,6 +268,9 @@ func TestWaitAgentRejectsMismatchedArtifactIdentity(t *testing.T) {
 		{name: "invalid source device", mutate: func(artifact *protocol.ChangesArtifactMetadata) {
 			artifact.SourceDeviceID = "not-an-id"
 		}},
+		{name: "wrong workspace source device", mutate: func(artifact *protocol.ChangesArtifactMetadata) {
+			artifact.WorkspaceSourceDeviceID = rootMCPOtherTreeID
+		}},
 		{name: "root as source", mutate: func(artifact *protocol.ChangesArtifactMetadata) {
 			artifact.SourceAgentID = rootMCPAgentID
 		}},
@@ -286,6 +289,25 @@ func TestWaitAgentRejectsMismatchedArtifactIdentity(t *testing.T) {
 				t.Fatalf("mismatched artifact was accepted: %#v", artifact)
 			}
 		})
+	}
+}
+
+func TestWaitAgentBoundsInvalidArtifactValidationErrors(t *testing.T) {
+	marker := strings.Repeat("untrusted-artifact-status", 8*1024)
+	artifact := rootMCPChangesArtifact(protocol.ChangesArtifactAvailable)
+	artifact.Status = protocol.ChangesArtifactStatus(marker)
+	result := protocol.WaitAgentResult{
+		Messages: []protocol.MailboxMessage{}, Activities: []protocol.AgentLifecycleActivity{},
+		Artifacts: []protocol.ChangesArtifactMetadata{artifact}, NextArtifactCursor: 1,
+	}
+	err := validateWaitAgentResult(result, protocol.WaitAgentParams{
+		MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1,
+	}, rootResult(rootMCPThreadID).Principal)
+	if err == nil || err.Error() != "delegation service returned an invalid changes artifact" {
+		t.Fatalf("invalid artifact error = %v", err)
+	}
+	if strings.Contains(err.Error(), "untrusted-artifact-status") || len(err.Error()) > 128 {
+		t.Fatalf("invalid artifact error reflected backend input: %q", err)
 	}
 }
 
@@ -453,7 +475,9 @@ func rootMCPChangesArtifact(status protocol.ChangesArtifactStatus) protocol.Chan
 		TreeID: rootMCPTreeID, ArtifactID: rootMCPArtifactID, TurnID: rootMCPTurnID,
 		WorkspaceID: rootMCPArtifactWorkspaceID, Status: status,
 		SourceAgentID: rootMCPWorkerID, SourceDeviceID: rootMCPDeviceID,
-		ObjectFormat: "sha1", BaseHeadOID: strings.Repeat("a", 40),
+		WorkspaceSourceDeviceID: rootMCPDeviceID,
+		WorkspaceTargetDeviceID: rootMCPDeviceID,
+		ObjectFormat:            "sha1", BaseHeadOID: strings.Repeat("a", 40),
 		BaseManifestHash: strings.Repeat("b", 64), BaseSnapshotHash: strings.Repeat("c", 64),
 		BaseClean: true, Sequence: 1, ObservedAt: 11,
 		BaseWarnings: []string{}, ResultWarnings: []string{},
@@ -495,7 +519,9 @@ func agentArtifactOutput(artifact protocol.ChangesArtifactMetadata) AgentArtifac
 		ArtifactID: artifact.ArtifactID, TurnID: artifact.TurnID,
 		WorkspaceID: artifact.WorkspaceID, Status: artifact.Status,
 		SourceAgentID: artifact.SourceAgentID, SourceDeviceID: artifact.SourceDeviceID,
-		ObjectFormat: artifact.ObjectFormat, BaseHeadOID: artifact.BaseHeadOID,
+		WorkspaceSourceDeviceID: artifact.WorkspaceSourceDeviceID,
+		WorkspaceTargetDeviceID: artifact.WorkspaceTargetDeviceID,
+		ObjectFormat:            artifact.ObjectFormat, BaseHeadOID: artifact.BaseHeadOID,
 		BaseManifestHash: artifact.BaseManifestHash, BaseSnapshotHash: artifact.BaseSnapshotHash,
 		BaseClean: artifact.BaseClean, ResultHeadOID: artifact.ResultHeadOID,
 		ResultSnapshotHash: artifact.ResultSnapshotHash, ResultClean: artifact.ResultClean,

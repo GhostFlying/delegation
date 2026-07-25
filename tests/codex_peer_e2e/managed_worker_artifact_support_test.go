@@ -224,7 +224,9 @@ func artifactE2EPublicationParams(
 	params := protocol.PublishChangesArtifactParams{
 		ArtifactID: artifact.ArtifactID, TurnID: artifact.TurnID,
 		WorkspaceID: artifact.WorkspaceID, Status: protocol.ChangesArtifactAvailable,
-		BaseHeadOID: artifact.BaseHeadOID, BaseManifestHash: artifact.BaseManifestHash,
+		WorkspaceSourceDeviceID: artifact.WorkspaceSourceDeviceID,
+		WorkspaceTargetDeviceID: artifact.WorkspaceTargetDeviceID,
+		BaseHeadOID:             artifact.BaseHeadOID, BaseManifestHash: artifact.BaseManifestHash,
 		BaseSnapshotHash: artifact.BaseSnapshotHash, ResultHeadOID: artifact.ResultHeadOID,
 		ResultSnapshotHash: artifact.ResultSnapshotHash, ResultClean: artifact.ResultClean,
 		Parts: parts, BaseWarnings: slices.Clone(artifact.BaseWarnings),

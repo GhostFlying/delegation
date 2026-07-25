@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
 type mockResponses struct {
@@ -722,8 +724,8 @@ func validateRoster(roster map[string]any, currentLabel string) error {
 		if current != (deviceID == deviceIDs[currentLabel]) {
 			return fmt.Errorf("peer %s current-device marker is wrong: %s", currentLabel, data)
 		}
-		if protocolVersion, _ := device["protocolVersion"].(float64); protocolVersion != 1 {
-			return fmt.Errorf("peer protocol version is not 1: %s", data)
+		if protocolVersion, _ := device["protocolVersion"].(float64); protocolVersion != protocol.Version {
+			return fmt.Errorf("peer protocol version is not %d: %s", protocol.Version, data)
 		}
 		if online, _ := device["online"].(bool); !online {
 			return fmt.Errorf("peer is not online: %s", data)
