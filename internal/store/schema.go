@@ -25,6 +25,16 @@ CREATE TABLE controller_registries (
     revision INTEGER NOT NULL CHECK (revision >= 0)
 ) STRICT;
 
+CREATE TABLE controller_lifetime_counters (
+	controller_id TEXT PRIMARY KEY,
+	dispatches_started INTEGER NOT NULL DEFAULT 0
+		CHECK (dispatches_started BETWEEN 0 AND 9223372036854775807),
+	turns_started INTEGER NOT NULL DEFAULT 0
+		CHECK (turns_started BETWEEN 0 AND 9223372036854775807),
+	FOREIGN KEY (controller_id)
+		REFERENCES controller_registries(controller_id) ON DELETE CASCADE
+) STRICT;
+
 CREATE TABLE devices (
     controller_id TEXT NOT NULL,
     device_id TEXT NOT NULL,

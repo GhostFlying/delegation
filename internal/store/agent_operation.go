@@ -284,6 +284,17 @@ WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND operation_id
 			"%w: agent operation changed while finishing", ErrConflict,
 		)
 	}
+	if receipt.Action == protocol.AgentOperationFollowup &&
+		outcome == protocol.AgentOperationOutcomeStarted {
+		if err := incrementStatusLifetimeCounters(
+			ctx,
+			connection,
+			receipt.Key.ControllerID,
+			statusLifetimeCounterIncrement{TurnsStarted: 1},
+		); err != nil {
+			return AgentOperationReceipt{}, err
+		}
+	}
 	receipt.Outcome = outcome
 	receipt.FailureCode = failureCode
 	receipt.UpdatedAt = timestamp
