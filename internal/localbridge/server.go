@@ -34,11 +34,16 @@ type Authorizer interface {
 	AuthorizeWorker(context.Context, control.PrincipalIdentity) error
 }
 
+type StatusProvider interface {
+	LocalStatus(context.Context) (StatusSnapshot, error)
+}
+
 type Server struct {
 	listener      net.Listener
 	identity      ServiceIdentity
 	backend       Backend
 	authorizer    Authorizer
+	status        StatusProvider
 	connectionSem chan struct{}
 	waitSem       chan struct{}
 	controlSem    chan struct{}
@@ -62,6 +67,16 @@ func ListenWithAuthorization(
 	backend Backend,
 	authorizer Authorizer,
 ) (*Server, error) {
+	return ListenWithStatus(endpoint, identity, backend, authorizer, nil)
+}
+
+func ListenWithStatus(
+	endpoint string,
+	identity ServiceIdentity,
+	backend Backend,
+	authorizer Authorizer,
+	status StatusProvider,
+) (*Server, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
@@ -73,7 +88,7 @@ func ListenWithAuthorization(
 		return nil, fmt.Errorf("listen on local delegation endpoint: %w", err)
 	}
 	return &Server{
-		listener: listener, identity: identity, backend: backend, authorizer: authorizer,
+		listener: listener, identity: identity, backend: backend, authorizer: authorizer, status: status,
 		connectionSem: make(chan struct{}, maximumConcurrentCalls),
 		waitSem:       make(chan struct{}, maximumConcurrentWaitCalls),
 		controlSem:    make(chan struct{}, maximumConcurrentControlCalls),
@@ -240,6 +255,30 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		result, err := json.Marshal(s.identity)
 		if err != nil {
 			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode bridge identity"}
+		}
+		return result, nil
+	}
+	if request.Method == methodStatus {
+		if request.TreeID != "" || request.Source != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid bridge status request"}
+		}
+		var params struct{}
+		if err := decodeResult(request.Payload, &params); err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid bridge status request"}
+		}
+		if s.status == nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "local status unavailable"}
+		}
+		status, err := s.status.LocalStatus(ctx)
+		if err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "local status unavailable"}
+		}
+		if err := status.Validate(); err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "local status invalid"}
+		}
+		result, err := json.Marshal(status)
+		if err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode local status"}
 		}
 		return result, nil
 	}
