@@ -169,12 +169,7 @@ func (s *session) handleAgentStoreError(
 func (s *Server) connection(deviceID string) *session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current := s.connections[deviceID]
-	if current == nil || current.revision.Load() < s.latestRevisions[deviceID] ||
-		!current.workerReady.Load() {
-		return nil
-	}
-	return current
+	return s.workerReadyConnectionLocked(deviceID)
 }
 
 func validateTargetWorkerResult(result protocol.SpawnWorkerResult, agent protocol.AgentSummary) error {

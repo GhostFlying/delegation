@@ -21,13 +21,35 @@ func (s *Server) Status(ctx context.Context) (statuspage.Snapshot, error) {
 	if s.statusReader == nil {
 		return statuspage.Snapshot{}, errors.New("broker status reader is unavailable")
 	}
-	connected, syncReadyDeviceIDs := s.connectionStatus()
-	durable, err := s.statusReader.ReadStatusSnapshot(
-		ctx, s.controllerID, syncReadyDeviceIDs,
-	)
-	if err != nil {
-		return statuspage.Snapshot{}, err
+	const maximumSnapshotAttempts = 3
+	for range maximumSnapshotAttempts {
+		connections := s.captureConnectionStatus()
+		durable, err := s.statusReader.ReadStatusSnapshot(
+			ctx, s.controllerID, connections.syncReadyDeviceIDs,
+		)
+		if err != nil {
+			return statuspage.Snapshot{}, err
+		}
+		if s.connectionStatusGenerationMatches(connections.generation) {
+			return s.buildStatusSnapshot(durable, connections), nil
+		}
+		if err := ctx.Err(); err != nil {
+			return statuspage.Snapshot{}, err
+		}
 	}
+	return statuspage.Snapshot{}, errors.New("broker connections changed during status snapshot")
+}
+
+type connectionStatusSnapshot struct {
+	generation         uint64
+	connected          int
+	syncReadyDeviceIDs []string
+}
+
+func (s *Server) buildStatusSnapshot(
+	durable store.StatusSnapshot,
+	connections connectionStatusSnapshot,
+) statuspage.Snapshot {
 	uptime := s.now().Sub(s.startedAt)
 	if uptime < 0 {
 		uptime = 0
@@ -39,8 +61,8 @@ func (s *Server) Status(ctx context.Context) (statuspage.Snapshot, error) {
 		Devices: statuspage.DeviceCounts{
 			Registered: uint64(durable.Devices.Total),
 			Online:     uint64(durable.Devices.Online),
-			Connected:  uint64(connected),
-			SyncReady:  uint64(len(syncReadyDeviceIDs)),
+			Connected:  uint64(connections.connected),
+			SyncReady:  uint64(len(connections.syncReadyDeviceIDs)),
 		},
 		Dispatch: statuspage.DispatchCounts{
 			Pending:         uint64(durable.Dispatches.Pending),
@@ -57,19 +79,30 @@ func (s *Server) Status(ctx context.Context) (statuspage.Snapshot, error) {
 			Unchanged:     uint64(durable.Artifacts.Unchanged),
 			CaptureFailed: uint64(durable.Artifacts.CaptureFailed),
 		},
-	}, nil
+	}
 }
 
-func (s *Server) connectionStatus() (int, []string) {
+func (s *Server) captureConnectionStatus() connectionStatusSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	connected := len(s.connections)
-	syncReadyDeviceIDs := make([]string, 0, connected)
-	for deviceID, current := range s.connections {
-		if current.revision.Load() < s.latestRevisions[deviceID] || !current.workerReady.Load() {
+	snapshot := connectionStatusSnapshot{
+		generation:         s.statusGeneration,
+		syncReadyDeviceIDs: make([]string, 0, len(s.connections)),
+	}
+	for deviceID := range s.connections {
+		if s.currentConnectionLocked(deviceID) == nil {
 			continue
 		}
-		syncReadyDeviceIDs = append(syncReadyDeviceIDs, deviceID)
+		snapshot.connected++
+		if s.workerReadyConnectionLocked(deviceID) != nil {
+			snapshot.syncReadyDeviceIDs = append(snapshot.syncReadyDeviceIDs, deviceID)
+		}
 	}
-	return connected, syncReadyDeviceIDs
+	return snapshot
+}
+
+func (s *Server) connectionStatusGenerationMatches(generation uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.statusGeneration == generation
 }
