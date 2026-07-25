@@ -165,7 +165,7 @@ func TestSetupPeerWithoutAuthentication(t *testing.T) {
 	workspaceRoot := filepath.Join(t.TempDir(), "worker-workspaces")
 	statePath := filepath.Join(filepath.Dir(configPath), "state", "peer.sqlite3")
 	codexBinary := testCodexBinary(t)
-	gitBinary, err := resolveExecutable("git")
+	gitBinary, err := resolveGitExecutable("git")
 	if err != nil {
 		t.Fatal(err)
 	}

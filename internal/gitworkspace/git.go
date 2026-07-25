@@ -233,7 +233,7 @@ func (r Runner) PrepareBase(
 		"-c", "protocol.allow=never",
 		"-c", "protocol.https.allow=always",
 		"-c", "protocol.ssh.allow=always",
-		"clone", "--no-checkout", "--no-recurse-submodules", "--template=", "--", manifest.GitURL, destination,
+		"clone", "--origin=origin", "--no-checkout", "--no-recurse-submodules", "--template=", "--", manifest.GitURL, destination,
 	}
 	if err := r.runWithTimeout(ctx, cloneCommandTimeout, parent, args...); err != nil {
 		if isContextError(err) {
@@ -246,6 +246,19 @@ func (r Runner) PrepareBase(
 	targetRunner := r.forIsolatedTarget()
 	if err := targetRunner.configureTargetCheckout(ctx, destination); err != nil {
 		return BasePreparation{}, err
+	}
+	shallow, err := targetRunner.output(ctx, destination, "rev-parse", "--is-shallow-repository")
+	if err != nil {
+		return BasePreparation{}, preserveContextError(err, errors.New("inspect target Git repository depth"))
+	}
+	switch strings.TrimSpace(string(shallow)) {
+	case "true":
+		return BasePreparation{
+			BundleRequired: true, OverlayRequired: !manifest.Clean,
+		}, nil
+	case "false":
+	default:
+		return BasePreparation{}, errors.New("target Git returned an invalid shallow repository state")
 	}
 	actualFormat, err := targetRunner.output(ctx, destination, "rev-parse", "--show-object-format")
 	if err != nil {
@@ -366,14 +379,33 @@ func ManifestHash(manifest protocol.WorkspaceManifest) (string, error) {
 
 func (r Runner) hasSubmodules(ctx context.Context, root string) (bool, error) {
 	output, err := r.outputWithLimit(
-		ctx, root, maximumGitPathOutput, "ls-files", "--format=%(objectmode)",
+		ctx, root, maximumGitPathOutput, "ls-files", "--stage", "-z", "--",
 	)
 	if err != nil {
 		return false, preserveContextError(err, errors.New("inspect source Git index modes"))
 	}
-	return slices.ContainsFunc(bytes.Fields(output), func(mode []byte) bool {
-		return bytes.Equal(mode, []byte("160000"))
-	}), nil
+	return indexContainsMode(output, "160000")
+}
+
+func indexContainsMode(output []byte, wanted string) (bool, error) {
+	records, err := splitNULRecords(output)
+	if err != nil {
+		return false, fmt.Errorf("inspect source Git index modes: %w", err)
+	}
+	for _, record := range records {
+		tab := bytes.IndexByte(record, '\t')
+		if tab < 0 || tab == len(record)-1 {
+			return false, errors.New("inspect source Git index modes: Git returned invalid index metadata")
+		}
+		fields := bytes.Fields(record[:tab])
+		if len(fields) != 3 {
+			return false, errors.New("inspect source Git index modes: Git returned invalid index metadata")
+		}
+		if string(fields[0]) == wanted {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r Runner) hasLFS(ctx context.Context, root string) (bool, error) {

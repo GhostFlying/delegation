@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/GhostFlying/delegation/internal/codexcommand"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/gitworkspace"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/store"
@@ -171,11 +174,11 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
-	resolvedCodexBinary, err := resolveExecutable(*codexBinary)
+	resolvedCodexBinary, err := resolveCodexExecutable(*codexBinary)
 	if err != nil {
 		return writeError(stderr, fmt.Errorf("resolve Codex executable: %w", err))
 	}
-	resolvedGitBinary, err := resolveExecutable(*gitBinary)
+	resolvedGitBinary, err := resolveGitExecutable(*gitBinary)
 	if err != nil {
 		return writeError(stderr, fmt.Errorf("resolve Git executable: %w", err))
 	}
@@ -450,12 +453,31 @@ func writeSetupResult(stdout, stderr io.Writer, result setupResult, jsonOutput b
 	return 0
 }
 
-func resolveExecutable(name string) (string, error) {
+func resolveCodexExecutable(name string) (string, error) {
 	resolved, err := codexcommand.Resolve(name)
 	if err != nil {
 		return "", err
 	}
 	return resolved.CommandPath, nil
+}
+
+func resolveGitExecutable(name string) (string, error) {
+	if strings.TrimSpace(name) == "" {
+		return "", errors.New("Git executable is required")
+	}
+	resolved, err := exec.LookPath(name)
+	if err != nil {
+		return "", err
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve Git executable path: %w", err)
+	}
+	runner, err := gitworkspace.NewRunner(resolved)
+	if err != nil {
+		return "", err
+	}
+	return runner.Binary, nil
 }
 
 func prepareManagedDirectory(path, description string) (bool, error) {

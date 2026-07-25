@@ -36,8 +36,8 @@ func TestContentWarningsHandlesLargeGitPathLists(t *testing.T) {
 	wrapper := filepath.Join(wrapperDirectory, "git-wrapper")
 	if err := os.WriteFile(wrapper, []byte(`#!/bin/sh
 case " $* " in
-  *" ls-files --format=%(objectmode) "*)
-    printf '100644\n'
+  *" ls-files --stage -z -- "*)
+    printf '100644 0000000000000000000000000000000000000000 0\ttracked\0'
     exit 0
     ;;
   *" ls-files -z "*)

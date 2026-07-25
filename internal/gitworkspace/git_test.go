@@ -6,10 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -114,6 +116,32 @@ func TestInspectReportsSubmoduleAndLFSWarnings(t *testing.T) {
 	}
 	if !reflect.DeepEqual(repository.Manifest.Warnings, want) {
 		t.Fatalf("workspace warnings = %#v, want %#v", repository.Manifest.Warnings, want)
+	}
+}
+
+func TestIndexContainsModeParsesPortableStageOutput(t *testing.T) {
+	oid := strings.Repeat("0", 40)
+	tests := []struct {
+		name      string
+		output    string
+		want      bool
+		wantError bool
+	}{
+		{name: "empty"},
+		{name: "regular", output: "100644 " + oid + " 0\ttracked\x00"},
+		{name: "submodule", output: "100644 " + oid + " 0\ttracked\x00" +
+			"160000 " + oid + " 0\tvendor/module\x00", want: true},
+		{name: "not terminated", output: "100644 " + oid + " 0\ttracked", wantError: true},
+		{name: "missing path", output: "100644 " + oid + " 0\t\x00", wantError: true},
+		{name: "missing metadata", output: "100644 " + oid + "\ttracked\x00", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := indexContainsMode([]byte(test.output), "160000")
+			if (err != nil) != test.wantError || got != test.want {
+				t.Fatalf("indexContainsMode() = %v, %v", got, err)
+			}
+		})
 	}
 }
 
@@ -301,6 +329,115 @@ func TestPrepareBaseDiscardsRemoteWithDifferentObjectFormat(t *testing.T) {
 	}
 }
 
+func TestPrepareBaseReplacesShallowRemoteWithSelfContainedBundle(t *testing.T) {
+	runner := testRunner(t)
+	_, source, _ := createRemoteRepository(t, runner.Binary)
+	if err := os.WriteFile(filepath.Join(source, "second.txt"), []byte("second\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, runner.Binary, source, "add", "second.txt")
+	gitRun(
+		t, runner.Binary, source,
+		"-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid",
+		"commit", "-m", "second",
+	)
+	gitRun(t, runner.Binary, source, "push", "origin", "HEAD:refs/heads/main")
+	remotePath := gitOutput(t, runner.Binary, source, "remote", "get-url", "origin")
+
+	root := t.TempDir()
+	shallowRemote := filepath.Join(root, "shallow.git")
+	gitRun(
+		t, runner.Binary, root, "clone", "--bare", "--depth=1", "--branch=main",
+		localFileURL(remotePath), shallowRemote,
+	)
+	gitRun(t, runner.Binary, root, "--git-dir="+shallowRemote, "update-server-info")
+	server := httptest.NewTLSServer(http.FileServer(http.Dir(root)))
+	t.Cleanup(server.Close)
+	shallowURL := server.URL + "/" + filepath.Base(shallowRemote)
+	repository, err := runner.Inspect(context.Background(), source, shallowURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	destination := filepath.Join(t.TempDir(), "prepared")
+	prepared, err := runner.PrepareBase(context.Background(), destination, repository.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prepared.BundleRequired || prepared.OverlayRequired || len(prepared.BasisOIDs) != 0 {
+		t.Fatalf("shallow base preparation = %#v", prepared)
+	}
+	if _, err := os.Lstat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("shallow clone destination still exists: %v", err)
+	}
+	bundle := filepath.Join(t.TempDir(), "workspace.bundle")
+	strategy, err := runner.CreateBundle(
+		context.Background(), repository.Root, bundle, repository.Manifest, prepared.BasisOIDs,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strategy != protocol.WorkspaceStrategyFull {
+		t.Fatalf("shallow remote fallback strategy = %q", strategy)
+	}
+	if err := runner.ApplyBundle(context.Background(), destination, bundle, repository.Manifest); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitOutput(t, runner.Binary, destination, "rev-parse", "--is-shallow-repository"); got != "false" {
+		t.Fatalf("prepared repository shallow state = %q", got)
+	}
+	capture, err := runner.CaptureResult(
+		context.Background(), destination, filepath.Join(t.TempDir(), "result"), repository.Manifest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !capture.Unchanged {
+		t.Fatalf("unchanged shallow fallback capture = %#v", capture)
+	}
+}
+
+func TestPrepareBasePinsOriginDespiteAmbientDefaultRemoteName(t *testing.T) {
+	runner := testRunner(t)
+	remote, source, remoteHead := createRemoteRepository(t, runner.Binary)
+	gitConfig := filepath.Join(os.Getenv("HOME"), ".gitconfig")
+	config, err := os.OpenFile(gitConfig, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.WriteString("[clone]\n\tdefaultRemoteName = upstream\n"); err != nil {
+		config.Close()
+		t.Fatal(err)
+	}
+	if err := config.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "local.txt"), []byte("local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, runner.Binary, source, "add", "local.txt")
+	gitRun(
+		t, runner.Binary, source,
+		"-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid",
+		"commit", "-m", "local only",
+	)
+	repository, err := runner.Inspect(context.Background(), source, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "prepared")
+	prepared, err := runner.PrepareBase(context.Background(), destination, repository.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prepared.BundleRequired || !reflect.DeepEqual(prepared.BasisOIDs, []string{remoteHead}) {
+		t.Fatalf("base preparation = %#v, want origin basis %s", prepared, remoteHead)
+	}
+	if got := gitOutput(t, runner.Binary, destination, "remote"); got != "origin" {
+		t.Fatalf("target remotes = %q, want origin", got)
+	}
+}
+
 func TestHardenedEnvironmentReplacesGitOverrides(t *testing.T) {
 	input := []string{
 		"PATH=/bin", "GIT_DIR=/attacker", "git_work_tree=/attacker", "GCM_INTERACTIVE=Always",
@@ -430,6 +567,14 @@ func createRemoteRepositoryWithObjectFormat(
 	t.Setenv("no_proxy", "*")
 	remoteURL := server.URL + "/" + filepath.Base(remote)
 	return remoteURL, source, gitOutput(t, gitBinary, source, "rev-parse", "HEAD^{commit}")
+}
+
+func localFileURL(path string) string {
+	filePath := filepath.ToSlash(path)
+	if runtime.GOOS == "windows" && !strings.HasPrefix(filePath, "/") {
+		filePath = "/" + filePath
+	}
+	return (&url.URL{Scheme: "file", Path: filePath}).String()
 }
 
 func gitInitWithObjectFormat(
