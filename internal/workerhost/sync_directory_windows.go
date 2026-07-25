@@ -9,3 +9,7 @@ import "os"
 func syncDirectory(_ *os.Root) error {
 	return nil
 }
+
+func syncDirectoryHandle(_ *os.File) error {
+	return nil
+}

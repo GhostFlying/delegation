@@ -2124,6 +2124,7 @@ func initializeTestRepository(t *testing.T, repositoryPath string) string {
 		{"core.hooksPath", hooksPath},
 		{"core.autocrlf", "false"},
 		{"core.eol", "lf"},
+		{"core.symlinks", "true"},
 		{"core.excludesFile", ""},
 		{"core.attributesFile", ""},
 		{"maintenance.auto", "false"},

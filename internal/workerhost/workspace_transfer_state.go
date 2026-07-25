@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"time"
@@ -152,10 +153,10 @@ func (h *Host) publishPreparedWorkspace(
 			_ = h.workspaceRoot.RemoveAll(temporaryName)
 		}
 	}()
-	if err := h.workspaceRoot.Rename(temporaryName, finalName); err != nil {
-		return protocol.PrepareWorkspaceResult{}, fmt.Errorf("publish prepared workspace: %w", err)
+	published, err = publishPreparedWorkspaceDirectory(h.workspaceRoot, temporaryName, finalName)
+	if err != nil {
+		return protocol.PrepareWorkspaceResult{}, err
 	}
-	published = true
 	if err := h.syncWorkspaceDirectory(); err != nil {
 		return protocol.PrepareWorkspaceResult{}, err
 	}
@@ -179,6 +180,40 @@ func (h *Host) publishPreparedWorkspace(
 	}
 	committed = true
 	return preparedWorkspaceResult(stored), nil
+}
+
+func publishPreparedWorkspaceDirectory(
+	workspaceRoot *os.Root,
+	temporaryName, finalName string,
+) (published bool, returnErr error) {
+	pendingEntry, err := workspaceRoot.Lstat(temporaryName)
+	if err != nil || pendingEntry.Mode()&os.ModeSymlink != 0 || !pendingEntry.IsDir() {
+		return false, errors.Join(errors.New("prepared workspace pending path is not a real directory"), err)
+	}
+	pendingRoot, err := workspaceRoot.OpenRoot(temporaryName)
+	if err != nil {
+		return false, fmt.Errorf("open prepared workspace before publication: %w", err)
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, pendingRoot.Close())
+	}()
+	openedEntry, err := pendingRoot.Lstat(".")
+	if err != nil || !openedEntry.IsDir() || !os.SameFile(pendingEntry, openedEntry) {
+		return false, errors.Join(errors.New("prepared workspace pending directory changed while it was opened"), err)
+	}
+	if err := syncWorkspaceTree(pendingRoot); err != nil {
+		return false, fmt.Errorf("sync prepared workspace before publication: %w", err)
+	}
+	if err := workspaceRoot.Rename(temporaryName, finalName); err != nil {
+		return false, fmt.Errorf("publish prepared workspace: %w", err)
+	}
+	published = true
+	finalEntry, err := workspaceRoot.Lstat(finalName)
+	if err != nil || finalEntry.Mode()&os.ModeSymlink != 0 || !finalEntry.IsDir() ||
+		!os.SameFile(openedEntry, finalEntry) {
+		return true, errors.Join(errors.New("published workspace directory identity changed"), err)
+	}
+	return true, nil
 }
 
 func validateWorkspaceTransferControl(
