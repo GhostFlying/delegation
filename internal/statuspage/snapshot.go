@@ -51,12 +51,21 @@ type ArtifactCounts struct {
 	CaptureFailed uint64 `json:"captureFailed"`
 }
 
-func (s Snapshot) validate() error {
+// Validate checks that a snapshot is safe for bounded status presentation.
+func (s Snapshot) Validate() error {
 	if !validOptionalText(s.Version) {
 		return errors.New("version is not bounded display text")
 	}
 	if !validOptionalText(s.ControllerID) {
 		return errors.New("controller ID is not bounded display text")
+	}
+	if s.Devices.Online > s.Devices.Registered ||
+		s.Devices.Connected > s.Devices.Online ||
+		s.Devices.SyncReady > s.Devices.Connected {
+		return errors.New("device counts are inconsistent")
+	}
+	if s.RunningTurns > s.OccupiedSlots {
+		return errors.New("worker counts are inconsistent")
 	}
 	return nil
 }
