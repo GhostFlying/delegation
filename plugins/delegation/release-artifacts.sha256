@@ -1,2 +1,6 @@
-# Populated for published versions by the reviewed release preparation process.
-# Format: <sha256><two spaces><artifact filename>
+070c44a0f1f19d8efba699e9279ee7231fdeea67e3f4d890a4cfd34bfaff4665  delegation_0.1.0-alpha.1_darwin_amd64.tar.gz
+a632d233d370a46e59759b9a8da78e6c09feff9db8c81d08c4071a90f67abe6b  delegation_0.1.0-alpha.1_darwin_arm64.tar.gz
+92e022cd9175df039aa4e154e2527067d649ed7650974a553b38d0192bff67d4  delegation_0.1.0-alpha.1_linux_amd64.tar.gz
+16924cd68078b3b6e60aa77430a4fddb44500cbc46dfbc78b2fb7386c82afcae  delegation_0.1.0-alpha.1_linux_arm64.tar.gz
+9b85fad2e1d85fdfecfa7df1e9b3d32968c3b3df2b2e1cedf162f15ea68d6140  delegation_0.1.0-alpha.1_windows_amd64.zip
+54b4878216fe1ef60ef54bba123150b4d91ee94862490102a470fc751961dd14  delegation_0.1.0-alpha.1_windows_arm64.zip
