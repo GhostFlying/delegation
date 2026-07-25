@@ -13,9 +13,11 @@ import (
 )
 
 type observedStatusReader struct {
-	snapshot store.StatusSnapshot
-	devices  []string
-	err      error
+	snapshot  store.StatusSnapshot
+	devices   []string
+	err       error
+	calls     int
+	afterRead func(int)
 }
 
 func (r *observedStatusReader) ReadStatusSnapshot(
@@ -23,14 +25,18 @@ func (r *observedStatusReader) ReadStatusSnapshot(
 	_ string,
 	deviceIDs []string,
 ) (store.StatusSnapshot, error) {
+	r.calls++
 	r.devices = append([]string(nil), deviceIDs...)
+	if r.afterRead != nil {
+		r.afterRead(r.calls)
+	}
 	return r.snapshot, r.err
 }
 
 func TestStatusCombinesDurableStateWithLiveSynchronizedConnections(t *testing.T) {
 	const (
-		readyDevice = "123e4567-e89b-42d3-a456-426614174101"
-		staleDevice = "123e4567-e89b-42d3-a456-426614174102"
+		readyDevice   = "123e4567-e89b-42d3-a456-426614174101"
+		syncingDevice = "123e4567-e89b-42d3-a456-426614174102"
 	)
 	reader := &observedStatusReader{snapshot: store.StatusSnapshot{
 		Devices:    store.StatusDeviceCounts{Total: 3, Online: 2},
@@ -43,16 +49,15 @@ func TestStatusCombinesDurableStateWithLiveSynchronizedConnections(t *testing.T)
 	ready := &session{deviceID: readyDevice}
 	ready.revision.Store(2)
 	ready.workerReady.Store(true)
-	stale := &session{deviceID: staleDevice}
-	stale.revision.Store(1)
-	stale.workerReady.Store(true)
+	syncing := &session{deviceID: syncingDevice}
+	syncing.revision.Store(2)
 	server := &Server{
 		controllerID: brokerTestControllerID,
 		statusReader: reader,
-		connections:  map[string]*session{readyDevice: ready, staleDevice: stale},
+		connections:  map[string]*session{readyDevice: ready, syncingDevice: syncing},
 		latestRevisions: map[string]uint64{
-			readyDevice: 2,
-			staleDevice: 2,
+			readyDevice:   2,
+			syncingDevice: 2,
 		},
 		startedAt: time.Unix(100, 0),
 		now:       func() time.Time { return time.Unix(223, 0) },
@@ -88,5 +93,44 @@ func TestStatusFailsClosedWithoutDurableSnapshot(t *testing.T) {
 	server.latestRevisions = map[string]uint64{}
 	if _, err := server.Status(context.Background()); !errors.Is(err, injected) {
 		t.Fatalf("Status() error = %v, want %v", err, injected)
+	}
+}
+
+func TestStatusRetriesConnectionChurnAndStopsAtBound(t *testing.T) {
+	reader := &observedStatusReader{}
+	server := &Server{
+		controllerID:    brokerTestControllerID,
+		statusReader:    reader,
+		connections:     map[string]*session{},
+		latestRevisions: map[string]uint64{},
+		startedAt:       time.Unix(100, 0),
+		now:             func() time.Time { return time.Unix(100, 0) },
+	}
+	reader.afterRead = func(call int) {
+		if call != 1 {
+			return
+		}
+		server.mu.Lock()
+		server.statusGeneration++
+		server.mu.Unlock()
+	}
+	if _, err := server.Status(context.Background()); err != nil {
+		t.Fatalf("Status() did not recover from one connection change: %v", err)
+	}
+	if reader.calls != 2 {
+		t.Fatalf("status read calls = %d, want 2", reader.calls)
+	}
+
+	reader.calls = 0
+	reader.afterRead = func(int) {
+		server.mu.Lock()
+		server.statusGeneration++
+		server.mu.Unlock()
+	}
+	if _, err := server.Status(context.Background()); err == nil {
+		t.Fatal("Status() succeeded during continuous connection churn")
+	}
+	if reader.calls != 3 {
+		t.Fatalf("bounded status read calls = %d, want 3", reader.calls)
 	}
 }

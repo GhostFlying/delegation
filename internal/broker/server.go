@@ -105,6 +105,7 @@ type Server struct {
 	mu                sync.Mutex
 	connections       map[string]*session
 	latestRevisions   map[string]uint64
+	statusGeneration  uint64
 	peers             map[*websocket.Conn]struct{}
 	pendingHellos     int
 	deviceHellos      map[string]int
@@ -659,6 +660,7 @@ func (s *Server) activate(current *session) (*session, bool) {
 		return previous, false
 	}
 	s.connections[current.deviceID] = current
+	s.statusGeneration++
 	return previous, true
 }
 
@@ -671,6 +673,7 @@ func (s *Server) recordDeviceLease(deviceID string, revision uint64) {
 	current := s.connections[deviceID]
 	if current != nil && current.revision.Load() < s.latestRevisions[deviceID] {
 		delete(s.connections, deviceID)
+		s.statusGeneration++
 		replaced = current
 	}
 	s.mu.Unlock()
@@ -686,8 +689,36 @@ func (s *Server) deactivate(current *session) {
 		return
 	}
 	delete(s.connections, current.deviceID)
+	s.statusGeneration++
 	s.mu.Unlock()
 	s.releaseLease(current)
+}
+
+func (s *Server) markWorkerReady(current *session) {
+	s.mu.Lock()
+	if !current.workerReady.Load() {
+		current.workerReady.Store(true)
+		if s.currentConnectionLocked(current.deviceID) == current {
+			s.statusGeneration++
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) currentConnectionLocked(deviceID string) *session {
+	current := s.connections[deviceID]
+	if current == nil || current.revision.Load() < s.latestRevisions[deviceID] {
+		return nil
+	}
+	return current
+}
+
+func (s *Server) workerReadyConnectionLocked(deviceID string) *session {
+	current := s.currentConnectionLocked(deviceID)
+	if current == nil || !current.workerReady.Load() {
+		return nil
+	}
+	return current
 }
 
 func (s *Server) releaseLease(current *session) {
