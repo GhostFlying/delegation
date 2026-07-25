@@ -346,6 +346,49 @@ func TestListenPortMustBeUsable(t *testing.T) {
 	}
 }
 
+func TestBrokerStatusListenMustBeLoopbackAndDistinct(t *testing.T) {
+	for _, statusListen := range []string{
+		"0.0.0.0:8788",
+		"broker.example.test:8788",
+		"127.0.0.1:0",
+		"127.0.0.1:not-a-port",
+		"127.0.0.1:8787",
+	} {
+		t.Run(statusListen, func(t *testing.T) {
+			cfg := Config{
+				SchemaVersion: CurrentSchemaVersion,
+				Role:          RoleBroker,
+				ControllerID:  testID,
+				Broker: BrokerConfig{
+					Listen:       "127.0.0.1:8787",
+					StatusListen: statusListen,
+					StateFile:    testStateFile(t),
+					Auth:         AuthConfig{Mode: AuthModeNone},
+				},
+			}
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate() accepted unsafe broker status listener")
+			}
+		})
+	}
+
+	cfg := Config{
+		SchemaVersion: CurrentSchemaVersion,
+		Role:          RoleBroker,
+		ControllerID:  testID,
+		Broker: BrokerConfig{
+			Listen:                   "0.0.0.0:8787",
+			StatusListen:             "[::1]:8788",
+			StateFile:                testStateFile(t),
+			Auth:                     AuthConfig{Mode: AuthModeNone},
+			AllowInsecureNonLoopback: true,
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() rejected loopback status listener: %v", err)
+	}
+}
+
 func TestConfigRejectsUnsupportedSchemaVersions(t *testing.T) {
 	for _, version := range []int{0, CurrentSchemaVersion + 1} {
 		cfg := protectedTestConfig(t)

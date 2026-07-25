@@ -51,6 +51,7 @@ type Config struct {
 type BrokerConfig struct {
 	URL                      string     `json:"url,omitempty"`
 	Listen                   string     `json:"listen,omitempty"`
+	StatusListen             string     `json:"statusListen,omitempty"`
 	StateFile                string     `json:"stateFile,omitempty"`
 	Auth                     AuthConfig `json:"auth"`
 	AllowInsecureNonLoopback bool       `json:"allowInsecureNonLoopback,omitempty"`
@@ -159,6 +160,14 @@ func (c Config) Validate() error {
 		if err := validateListen(c.Broker.Listen, c.Broker.AllowInsecureNonLoopback); err != nil {
 			return err
 		}
+		if c.Broker.StatusListen != "" {
+			if err := validateStatusListen(c.Broker.StatusListen); err != nil {
+				return err
+			}
+			if c.Broker.StatusListen == c.Broker.Listen {
+				return errors.New("broker status listener must differ from the broker listener")
+			}
+		}
 	case RolePeer:
 		if identity.ValidateID(c.DeviceID) != nil {
 			return errors.New("deviceId must be a UUID")
@@ -166,7 +175,7 @@ func (c Config) Validate() error {
 		if err := control.ValidateDeviceName(c.DeviceName); err != nil {
 			return fmt.Errorf("deviceName: %w", err)
 		}
-		if c.Broker.Listen != "" || c.Broker.StateFile != "" {
+		if c.Broker.Listen != "" || c.Broker.StatusListen != "" || c.Broker.StateFile != "" {
 			return errors.New("peer config must not contain broker listener or state fields")
 		}
 		if _, err := NormalizeBrokerURL(c.Broker.URL, c.Broker.AllowInsecureNonLoopback); err != nil {
@@ -277,6 +286,21 @@ func validateListen(address string, allowInsecureNonLoopback bool) error {
 	}
 	if !allowInsecureNonLoopback {
 		return errors.New("plaintext non-loopback listener requires explicit acknowledgement")
+	}
+	return nil
+}
+
+func validateStatusListen(address string) error {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("broker status listen address must be host:port: %w", err)
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return errors.New("broker status listen port must be an integer from 1 through 65535")
+	}
+	if !loopbackHost(host) {
+		return errors.New("broker status listener must use a loopback address")
 	}
 	return nil
 }
