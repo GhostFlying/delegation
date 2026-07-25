@@ -46,9 +46,9 @@ type DispatchCounts struct {
 
 // ArtifactCounts summarizes retained artifact availability and publication.
 type ArtifactCounts struct {
-	Available         uint64 `json:"available"`
-	Evicted           uint64 `json:"evicted"`
-	LifetimePublished uint64 `json:"lifetimePublished"`
+	Available     uint64 `json:"available"`
+	Unchanged     uint64 `json:"unchanged"`
+	CaptureFailed uint64 `json:"captureFailed"`
 }
 
 func (s Snapshot) validate() error {

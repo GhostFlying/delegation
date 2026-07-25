@@ -82,6 +82,7 @@ type Options struct {
 	AuthMode          config.AuthMode
 	MasterToken       *tokenfile.Token
 	Registry          Registry
+	StatusReader      StatusReader
 	HeartbeatInterval time.Duration
 	Now               func() time.Time
 	NewID             func() (string, error)
@@ -93,6 +94,7 @@ type Server struct {
 	authMode          config.AuthMode
 	masterToken       tokenfile.Token
 	registry          Registry
+	statusReader      StatusReader
 	heartbeatInterval time.Duration
 	newID             func() (string, error)
 	now               func() time.Time
@@ -125,6 +127,7 @@ type Server struct {
 	shutdownOnce sync.Once
 	shutdownDone chan struct{}
 	shutdownErr  error
+	startedAt    time.Time
 }
 
 type peerAuthority struct {
@@ -231,6 +234,7 @@ func New(options Options) (*Server, error) {
 		controllerID:         options.ControllerID,
 		authMode:             options.AuthMode,
 		registry:             options.Registry,
+		statusReader:         options.StatusReader,
 		heartbeatInterval:    heartbeatInterval,
 		newID:                newID,
 		now:                  now,
@@ -250,6 +254,7 @@ func New(options Options) (*Server, error) {
 		offlineRetryWake:     make(chan struct{}, 1),
 		offlineRetryInterval: defaultOfflineRetry,
 		shutdownDone:         make(chan struct{}),
+		startedAt:            now(),
 	}
 	server.context, server.cancel = context.WithCancel(context.Background())
 	server.background.Add(1)

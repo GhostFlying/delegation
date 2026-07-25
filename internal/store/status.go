@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/GhostFlying/delegation/internal/identity"
 )
@@ -99,9 +100,18 @@ ON CONFLICT(controller_id) DO UPDATE SET
 }
 
 // ReadStatusSnapshot returns fixed-size aggregates from one read transaction.
-func (s *Store) ReadStatusSnapshot(ctx context.Context, controllerID string) (StatusSnapshot, error) {
+func (s *Store) ReadStatusSnapshot(
+	ctx context.Context,
+	controllerID string,
+	syncReadyDeviceIDs []string,
+) (StatusSnapshot, error) {
 	if err := identity.ValidateID(controllerID); err != nil {
 		return StatusSnapshot{}, fmt.Errorf("controllerId %w", err)
+	}
+	for _, deviceID := range syncReadyDeviceIDs {
+		if err := identity.ValidateID(deviceID); err != nil {
+			return StatusSnapshot{}, fmt.Errorf("sync-ready deviceId %w", err)
+		}
 	}
 	transaction, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -136,15 +146,13 @@ WHERE controller_id = ?
 	); err != nil {
 		return StatusSnapshot{}, fmt.Errorf("read status dispatch counts: %w", err)
 	}
-	if err := transaction.QueryRowContext(ctx, `
-SELECT
-	COALESCE(sum(CASE WHEN phase = 'running' THEN 1 ELSE 0 END), 0),
-	COALESCE(sum(CASE WHEN phase IN (`+occupiedWorkerStatesSQL+`) THEN 1 ELSE 0 END), 0)
-FROM agent_lifecycle_states
-WHERE controller_id = ?
-`, controllerID).Scan(&snapshot.Workers.Running, &snapshot.Workers.Occupied); err != nil {
-		return StatusSnapshot{}, fmt.Errorf("read status worker counts: %w", err)
+	workerCounts, err := readSyncReadyWorkerCounts(
+		ctx, transaction, controllerID, syncReadyDeviceIDs,
+	)
+	if err != nil {
+		return StatusSnapshot{}, err
 	}
+	snapshot.Workers = workerCounts
 	if err := transaction.QueryRowContext(ctx, `
 SELECT
 	COALESCE(sum(CASE WHEN status = 'available' THEN 1 ELSE 0 END), 0),
@@ -175,6 +183,49 @@ WHERE controller_id = ?
 		return StatusSnapshot{}, fmt.Errorf("commit broker status snapshot: %w", err)
 	}
 	return snapshot, nil
+}
+
+func readSyncReadyWorkerCounts(
+	ctx context.Context,
+	transaction *sql.Tx,
+	controllerID string,
+	deviceIDs []string,
+) (StatusWorkerCounts, error) {
+	const maximumBindingsPerQuery = 128
+	uniqueDeviceIDs := make([]string, 0, len(deviceIDs))
+	seen := make(map[string]struct{}, len(deviceIDs))
+	for _, deviceID := range deviceIDs {
+		if _, exists := seen[deviceID]; exists {
+			continue
+		}
+		seen[deviceID] = struct{}{}
+		uniqueDeviceIDs = append(uniqueDeviceIDs, deviceID)
+	}
+
+	var result StatusWorkerCounts
+	for start := 0; start < len(uniqueDeviceIDs); start += maximumBindingsPerQuery {
+		end := min(start+maximumBindingsPerQuery, len(uniqueDeviceIDs))
+		chunk := uniqueDeviceIDs[start:end]
+		arguments := make([]any, 0, len(chunk)+1)
+		arguments = append(arguments, controllerID)
+		for _, deviceID := range chunk {
+			arguments = append(arguments, deviceID)
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		var counts StatusWorkerCounts
+		if err := transaction.QueryRowContext(ctx, `
+SELECT
+	COALESCE(sum(CASE WHEN phase = 'running' THEN 1 ELSE 0 END), 0),
+	COALESCE(sum(CASE WHEN phase IN (`+occupiedWorkerStatesSQL+`) THEN 1 ELSE 0 END), 0)
+FROM agent_lifecycle_states
+WHERE controller_id = ? AND target_device_id IN (`+placeholders+`)
+`, arguments...).Scan(&counts.Running, &counts.Occupied); err != nil {
+			return StatusWorkerCounts{}, fmt.Errorf("read status worker counts: %w", err)
+		}
+		result.Running += counts.Running
+		result.Occupied += counts.Occupied
+	}
+	return result, nil
 }
 
 // ReadPeerStatusSnapshot returns fixed-size peer aggregates from one read transaction.

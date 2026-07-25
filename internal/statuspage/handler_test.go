@@ -77,8 +77,8 @@ func TestHTMLStatusIsAccessibleEscapedAndOmitsControllerID(t *testing.T) {
 		`<tr><th scope="row">Lifetime turns</th><td>300</td></tr>`,
 		`<tr><th scope="row">Trees</th><td>10</td></tr>`,
 		`<tr><th scope="row">Available</th><td>11</td></tr>`,
-		`<tr><th scope="row">Evicted</th><td>12</td></tr>`,
-		`<tr><th scope="row">Lifetime published</th><td>400</td></tr>`,
+		`<tr><th scope="row">Unchanged</th><td>12</td></tr>`,
+		`<tr><th scope="row">Capture failed</th><td>13</td></tr>`,
 	} {
 		if !strings.Contains(body, required) {
 			t.Errorf("body missing %q", required)
@@ -269,9 +269,9 @@ func testSnapshot() Snapshot {
 		LifetimeTurns: 300,
 		Trees:         10,
 		Artifacts: ArtifactCounts{
-			Available:         11,
-			Evicted:           12,
-			LifetimePublished: 400,
+			Available:     11,
+			Unchanged:     12,
+			CaptureFailed: 13,
 		},
 	}
 }
