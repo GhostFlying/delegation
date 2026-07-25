@@ -1484,6 +1484,14 @@ func TestManagedProfileUsesPlatformPermissionBoundary(t *testing.T) {
 		t.Fatalf("managed profile grants the co-located peer config: %#v", filesystem)
 	}
 	assertCodexRuntimeFilesystemPermission(t, filesystem, host.codexBinary)
+	if filesystem[host.workerGitBinary] != "read" {
+		t.Fatalf("managed profile does not grant the exact Git executable: %#v", filesystem)
+	}
+	if host.workerGitBinary != host.git.Binary {
+		if _, found := filesystem[host.git.Binary]; found {
+			t.Fatalf("managed profile grants the configured host Git executable: %#v", filesystem)
+		}
+	}
 }
 
 type testHostPaths struct {
@@ -1679,6 +1687,13 @@ func assertManagedProfile(
 		t.Fatal(err)
 	}
 	addCodexRuntimeFilesystemPermission(filesystem, resolvedCodexBinary)
+	workerGitBinary, err := resolveWorkerGitBinary(context.Background(), paths.gitBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		filesystem[workerGitBinary] = "read"
+	}
 	if runtime.GOOS == "windows" {
 		if config["default_permissions"] != windowsWorkerProfile {
 			t.Fatalf("default permissions = %#v", config["default_permissions"])
@@ -1697,12 +1712,28 @@ func assertManagedProfile(
 			t.Fatalf("worker permissions = %#v, want %#v", config["permissions."+workerPermissionProfile], wantPermissions)
 		}
 	}
+	wantShellSet := map[string]string{
+		"GIT_ATTR_NOSYSTEM":   "1",
+		"GIT_CONFIG_GLOBAL":   os.DevNull,
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_TERMINAL_PROMPT": "0",
+		"GCM_INTERACTIVE":     "Never",
+	}
+	if runtime.GOOS != "windows" {
+		wantShellSet["PATH"] = prependExecutableDirectory(
+			os.Getenv("PATH"), filepath.Dir(workerGitBinary),
+		)
+	}
+	if runtime.GOOS == "darwin" {
+		wantShellSet["TMPDIR"] = "/tmp"
+	}
 	wantShellEnvironment := map[string]any{
 		"inherit": "core", "ignore_default_excludes": false,
 		"exclude": []string{
 			"CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "DELEGATION_CODEX_CONFIG_JSON",
 			"OPENAI_API_KEY", "TEST_PROVIDER_VALUE",
 		},
+		"set": wantShellSet,
 	}
 	if !reflect.DeepEqual(config["shell_environment_policy"], wantShellEnvironment) {
 		t.Fatalf("shell environment policy = %#v, want %#v", config["shell_environment_policy"], wantShellEnvironment)

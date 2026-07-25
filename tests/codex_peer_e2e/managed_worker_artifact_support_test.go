@@ -68,7 +68,8 @@ func (m *artifactWorkerMock) ServeHTTP(writer http.ResponseWriter, request *http
 	case 1:
 		output := functionCallOutput(body["input"], callID)
 		if !strings.Contains(output, artifactEESuccessMarker) {
-			m.record(fmt.Errorf("workspace mutation failed: %s", output))
+			m.fail(writer, fmt.Errorf("workspace mutation failed: %s", output))
+			return
 		}
 		writeManagedSSE(writer,
 			map[string]any{"type": "response.created", "response": map[string]any{"id": "resp-artifact-final"}},
@@ -88,14 +89,16 @@ func artifactE2EWorkerCommand() string {
 		return `$ErrorActionPreference = 'Stop'
 if ((Get-Content -Raw tracked.txt).Trim() -ne 'tracked-base') { throw 'unexpected tracked base' }
 if ((Get-Content -Raw rename-source.txt).Trim() -ne 'rename-base') { throw 'unexpected rename base' }
-Set-Content -NoNewline tracked.txt 'tracked-worker'
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[System.IO.File]::WriteAllText((Join-Path (Get-Location) 'tracked.txt'), 'tracked-worker', $utf8)
+if ((Get-Content -Raw tracked.txt).Trim() -ne 'tracked-worker') { throw 'tracked write failed' }
 git mv -- rename-source.txt renamed-worker.txt
 if ($LASTEXITCODE -ne 0) { throw 'git mv failed' }
 git add -- tracked.txt renamed-worker.txt
 if ($LASTEXITCODE -ne 0) { throw 'git add failed' }
 git -c "user.name=Delegation Worker Test" -c "user.email=worker@example.invalid" commit -m "worker artifact commit"
 if ($LASTEXITCODE -ne 0) { throw 'git commit failed' }
-Set-Content -NoNewline dirty-worker.txt 'dirty-worker'
+[System.IO.File]::WriteAllText((Join-Path (Get-Location) 'dirty-worker.txt'), 'dirty-worker', $utf8)
 Write-Output '` + artifactEESuccessMarker + `'`
 	}
 	return `set -eu

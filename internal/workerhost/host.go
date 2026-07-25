@@ -129,6 +129,7 @@ type Host struct {
 	delegationBinary         string
 	codexBinary              string
 	git                      gitworkspace.Runner
+	workerGitBinary          string
 	codexEnvironment         map[string]string
 	codexUnsetEnvironment    []string
 	shellExcludedEnvironment []string
@@ -226,10 +227,15 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
+	workerGitBinary, err := resolveWorkerGitBinary(ctx, gitRunner.Binary)
+	if err != nil {
+		return nil, err
+	}
 	for name, executable := range map[string]string{
 		"delegation binary": options.DelegationBinary,
 		"Codex binary":      codexBinary,
 		"Git binary":        gitRunner.Binary,
+		"worker Git binary": workerGitBinary,
 	} {
 		if err := pathguard.ValidateManagedExecutable(
 			name, executable, options.CodexHome, options.WorkspaceRoot,
@@ -304,7 +310,8 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	host := &Host{
 		controllerID: options.ControllerID, deviceID: options.DeviceID,
 		peerConfigPath: options.PeerConfigPath, delegationBinary: options.DelegationBinary,
-		codexBinary: codexBinary, git: gitRunner, codexHome: options.CodexHome,
+		codexBinary: codexBinary, git: gitRunner, workerGitBinary: workerGitBinary,
+		codexHome:                options.CodexHome,
 		codexEnvironment:         codexEnvironment,
 		codexUnsetEnvironment:    uniqueEnvironmentNames(appServerUnsetEnvironment),
 		shellExcludedEnvironment: uniqueEnvironmentNames(shellExcludedEnvironment),

@@ -3,6 +3,8 @@ package workerhost
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 
@@ -11,7 +13,7 @@ import (
 )
 
 const (
-	workerProfileVersion    = 3
+	workerProfileVersion    = 5
 	workerPermissionProfile = "delegation-worker"
 	windowsWorkerProfile    = ":danger-full-access"
 	rootPluginEnabledConfig = "plugins.delegation@delegation.enabled"
@@ -39,6 +41,9 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 		},
 	}
 	addCodexRuntimeFilesystemPermission(filesystem, h.codexBinary)
+	if runtime.GOOS != "windows" {
+		filesystem[h.workerGitBinary] = "read"
+	}
 	if h.providerEnvironmentFile != "" {
 		filesystem[h.providerEnvironmentFile] = "deny"
 	}
@@ -59,10 +64,28 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 	config["projects"] = map[string]any{
 		worker.WorkspacePath: map[string]any{"trust_level": "untrusted"},
 	}
+	shellEnvironment := map[string]string{
+		"GIT_ATTR_NOSYSTEM":   "1",
+		"GIT_CONFIG_GLOBAL":   os.DevNull,
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_TERMINAL_PROMPT": "0",
+		"GCM_INTERACTIVE":     "Never",
+	}
+	if runtime.GOOS != "windows" {
+		shellEnvironment["PATH"] = prependExecutableDirectory(
+			os.Getenv("PATH"), filepath.Dir(h.workerGitBinary),
+		)
+	}
+	if runtime.GOOS == "darwin" {
+		// The Apple Git shim writes its xcrun cache beneath TMPDIR. The managed
+		// profile already grants /tmp, while the per-user macOS TMPDIR is hidden.
+		shellEnvironment["TMPDIR"] = "/tmp"
+	}
 	config["shell_environment_policy"] = map[string]any{
 		"inherit":                 "core",
 		"ignore_default_excludes": false,
 		"exclude":                 append([]string(nil), h.shellExcludedEnvironment...),
+		"set":                     shellEnvironment,
 	}
 	config["mcp_servers."+workerServerName] = map[string]any{
 		"command": h.delegationBinary,
@@ -77,6 +100,13 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 		"startup_timeout_sec": workerMCPTimeout,
 	}
 	return config
+}
+
+func prependExecutableDirectory(path, directory string) string {
+	if path == "" {
+		return directory
+	}
+	return directory + string(os.PathListSeparator) + path
 }
 
 func (h *Host) verifyWorkerMCP(
