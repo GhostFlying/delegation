@@ -60,7 +60,7 @@ func (s Snapshot) Validate() error {
 		return errors.New("controller ID is not bounded display text")
 	}
 	if s.Devices.Online > s.Devices.Registered ||
-		s.Devices.Connected > s.Devices.Online ||
+		s.Devices.Connected > s.Devices.Registered ||
 		s.Devices.SyncReady > s.Devices.Connected {
 		return errors.New("device counts are inconsistent")
 	}
