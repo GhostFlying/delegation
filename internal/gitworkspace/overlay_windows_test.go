@@ -90,3 +90,44 @@ func TestApplyOverlayRejectsExecutableUntrackedFileBeforeChangingWorktree(t *tes
 		t.Fatalf("rejected executable path exists: %v", err)
 	}
 }
+
+func TestCloneDirectNeverReportsTrackedSymlinkAsRegularFile(t *testing.T) {
+	runner := testRunner(t)
+	remote, source, _ := createRemoteRepository(t, runner.Binary)
+	linkPath := filepath.Join(source, "tracked-link")
+	if err := os.WriteFile(linkPath, []byte("nested/hello.txt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, runner.Binary, source, "config", "core.symlinks", "false")
+	oid := gitOutput(t, runner.Binary, source, "hash-object", "-w", "tracked-link")
+	gitRun(t, runner.Binary, source, "update-index", "--add", "--cacheinfo", "120000,"+oid+",tracked-link")
+	gitRun(
+		t, runner.Binary, source,
+		"-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid",
+		"commit", "-m", "add tracked symlink",
+	)
+	gitRun(t, runner.Binary, source, "push", "origin", "HEAD:refs/heads/main")
+	remotePath := gitOutput(t, runner.Binary, source, "remote", "get-url", "origin")
+	gitRun(t, runner.Binary, source, "--git-dir="+remotePath, "update-server-info")
+	repository, err := runner.Inspect(context.Background(), source, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repository.Manifest.Clean {
+		t.Fatalf("tracked symlink repository is dirty: %#v", repository.Manifest)
+	}
+	destination := filepath.Join(t.TempDir(), "prepared")
+	if err := runner.CloneDirect(context.Background(), destination, repository.Manifest); err != nil {
+		if _, statErr := os.Lstat(destination); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("failed symlink checkout left destination behind: %v", statErr)
+		}
+		return
+	}
+	info, err := os.Lstat(filepath.Join(destination, "tracked-link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("tracked symlink was materialized as %s", info.Mode().Type())
+	}
+}

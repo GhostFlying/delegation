@@ -109,6 +109,7 @@ func TestCaptureResultRejectsManagedCheckoutConfigDrift(t *testing.T) {
 		{key: "core.hooksPath", value: "worker-hooks"},
 		{key: "core.autocrlf", value: "true"},
 		{key: "core.eol", value: "crlf"},
+		{key: "core.symlinks", value: "false"},
 		{key: "core.excludesFile", value: "worker-excludes"},
 		{key: "core.attributesFile", value: "worker-attributes"},
 		{key: "maintenance.auto", value: "true"},

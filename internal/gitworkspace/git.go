@@ -362,6 +362,7 @@ func deterministicTargetGitSettings() []gitConfigSetting {
 		{key: "core.hooksPath", value: disabledHooksPath()},
 		{key: "core.autocrlf", value: "false"},
 		{key: "core.eol", value: "lf"},
+		{key: "core.symlinks", value: "true"},
 		{key: "core.excludesFile", value: ""},
 		{key: "core.attributesFile", value: ""},
 		{key: "maintenance.auto", value: "false"},

@@ -56,6 +56,66 @@ func TestCloneDirectBlocksInsteadOfCustomTransport(t *testing.T) {
 	}
 }
 
+func TestCloneDirectOverridesSymlinkFallbackBeforeCheckout(t *testing.T) {
+	baseRunner := testRunner(t)
+	remote, source, _ := createRemoteRepository(t, baseRunner.Binary)
+	if err := os.Symlink("nested/hello.txt", filepath.Join(source, "tracked-link")); err != nil {
+		t.Skipf("creating a symlink is unavailable: %v", err)
+	}
+	gitRun(t, baseRunner.Binary, source, "add", "tracked-link")
+	gitRun(
+		t, baseRunner.Binary, source,
+		"-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid",
+		"commit", "-m", "add tracked symlink",
+	)
+	gitRun(t, baseRunner.Binary, source, "push", "origin", "HEAD:refs/heads/main")
+	remotePath := gitOutput(t, baseRunner.Binary, source, "remote", "get-url", "origin")
+	gitRun(t, baseRunner.Binary, source, "--git-dir="+remotePath, "update-server-info")
+	repository, err := baseRunner.Inspect(context.Background(), source, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wrapper := filepath.Join(t.TempDir(), "git")
+	if err := os.WriteFile(wrapper, []byte(`#!/bin/sh
+is_clone=
+destination=
+for argument in "$@"; do
+	if [ "$argument" = clone ]; then
+		is_clone=1
+	fi
+	destination=$argument
+done
+"$DELEGATION_TEST_REAL_GIT" "$@"
+status=$?
+if [ "$status" -eq 0 ] && [ "$is_clone" = 1 ]; then
+	"$DELEGATION_TEST_REAL_GIT" -C "$destination" config core.symlinks false || exit $?
+fi
+exit "$status"
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DELEGATION_TEST_REAL_GIT", baseRunner.Binary)
+	runner, err := NewRunner(wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "prepared")
+	if err := runner.CloneDirect(context.Background(), destination, repository.Manifest); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(destination, "tracked-link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("tracked symlink was materialized as %s", info.Mode().Type())
+	}
+	if got := gitOutput(t, baseRunner.Binary, destination, "config", "--bool", "core.symlinks"); got != "true" {
+		t.Fatalf("target core.symlinks = %q", got)
+	}
+}
+
 func TestInspectDisablesRepositoryFSMonitor(t *testing.T) {
 	runner := testRunner(t)
 	remote, source, _ := createRemoteRepository(t, runner.Binary)
