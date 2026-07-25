@@ -20,9 +20,16 @@ func TestReadStatusReturnsValidatedLocalSnapshot(t *testing.T) {
 	want := StatusSnapshot{
 		Version: "0.1.0-test", ControllerID: identity.ControllerID, DeviceID: identity.DeviceID,
 		DeviceName: "test-peer", Connected: true, RegistryRevision: 7, WorkerRevision: 5,
-		MaxWorkerSlots: 4,
-		Workers:        WorkerCounts{Total: 6, Running: 1, Idle: 3, Failed: 2, Occupied: 1},
-		Artifacts:      ArtifactCounts{Available: 2, RetainedBytes: 4096},
+		BrokerWorkerRevision: 5, WorkerSyncReady: true,
+		MaxWorkerSlots: 8,
+		Workers: WorkerCounts{
+			Total: 10, Reserved: 1, Pending: 1, Starting: 1, Preflight: 1,
+			Ready: 1, Running: 1, Finalizing: 1, Idle: 1, Interrupted: 1,
+			Failed: 1, Occupied: 6,
+		},
+		Artifacts: ArtifactCounts{
+			CapturePending: 1, PublishPending: 2, Retained: 3, RetainedBytes: 4096,
+		},
 	}
 	endpoint := testEndpoint(t)
 	server, err := ListenWithStatus(
@@ -46,6 +53,59 @@ func TestReadStatusReturnsValidatedLocalSnapshot(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ReadStatus() = %#v, want %#v", got, want)
+	}
+}
+
+func TestStatusSnapshotRejectsInconsistentCountsAndSynchronization(t *testing.T) {
+	valid := StatusSnapshot{
+		Version: "0.1.0-test", ControllerID: bridgeTestControllerID, DeviceID: bridgeTestDeviceID,
+		DeviceName: "test-peer", Connected: true, WorkerRevision: 8,
+		BrokerWorkerRevision: 8, WorkerSyncReady: true, MaxWorkerSlots: 4,
+		Workers: WorkerCounts{Total: 2, Ready: 1, Idle: 1, Occupied: 1},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*StatusSnapshot)
+	}{
+		{
+			name: "phase total",
+			mutate: func(status *StatusSnapshot) {
+				status.Workers.Total++
+			},
+		},
+		{
+			name: "occupied phases",
+			mutate: func(status *StatusSnapshot) {
+				status.Workers.Occupied = 0
+			},
+		},
+		{
+			name: "disconnected sync ready",
+			mutate: func(status *StatusSnapshot) {
+				status.Connected = false
+			},
+		},
+		{
+			name: "mismatched revision sync ready",
+			mutate: func(status *StatusSnapshot) {
+				status.BrokerWorkerRevision--
+			},
+		},
+		{
+			name: "non-printing version",
+			mutate: func(status *StatusSnapshot) {
+				status.Version = "version\nsecret"
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status := valid
+			test.mutate(&status)
+			if err := status.Validate(); err == nil {
+				t.Fatal("Validate() accepted inconsistent status")
+			}
+		})
 	}
 }
 

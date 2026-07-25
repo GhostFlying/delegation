@@ -196,6 +196,18 @@ func TestPeerServicesRegisterDevicesAndServeRootBridge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	statusContext, cancelStatus := context.WithTimeout(context.Background(), time.Second)
+	localStatus, err := localbridge.ReadStatus(statusContext, endpoint)
+	cancelStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !localStatus.Connected || !localStatus.WorkerSyncReady ||
+		localStatus.ControllerID != runtimeControllerID ||
+		localStatus.DeviceID != runtimeDeviceID || localStatus.DeviceName != "peer-a" ||
+		localStatus.MaxWorkerSlots != firstConfig.Peer.MaxWorkerSlots {
+		t.Fatalf("connector local status = %#v", localStatus)
+	}
 	bridgeClient, err := localbridge.NewClient(endpoint)
 	if err != nil {
 		t.Fatal(err)
