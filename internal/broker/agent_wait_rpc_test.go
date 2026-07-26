@@ -198,18 +198,18 @@ func TestAgentWaitPaginatesDeliveredResultsWithIndependentCursor(t *testing.T) {
 	}
 
 	workers := []struct {
-		spawnID, agentID, threadID, turnID, packageID string
-		revision                                      uint64
+		spawnID, agentID, threadID, turnID, packageID, taskName string
+		revision                                                uint64
 	}{
 		{
 			spawnID: agentWaitResultSpawnID1, agentID: agentWaitResultAgentID1,
 			threadID: agentWaitResultThreadID1, turnID: agentWaitResultTurnID1,
-			packageID: agentWaitResultPackageID1, revision: 1,
+			packageID: agentWaitResultPackageID1, taskName: "result_wait_worker_1", revision: 1,
 		},
 		{
 			spawnID: agentWaitResultSpawnID2, agentID: agentWaitResultAgentID2,
 			threadID: agentWaitResultThreadID2, turnID: agentWaitResultTurnID2,
-			packageID: agentWaitResultPackageID2, revision: 2,
+			packageID: agentWaitResultPackageID2, taskName: "result_wait_worker_2", revision: 2,
 		},
 	}
 	receipts := make([]store.AgentSpawnReceipt, 0, len(workers))
@@ -219,7 +219,7 @@ func TestAgentWaitPaginatesDeliveredResultsWithIndependentCursor(t *testing.T) {
 			context.Background(),
 			store.AgentSpawnIntent{
 				Source: root.Identity(), SpawnID: worker.spawnID, AgentID: worker.agentID,
-				TargetDeviceID: brokerTestSecondDeviceID, TaskName: "result_wait_worker",
+				TargetDeviceID: brokerTestSecondDeviceID, TaskName: worker.taskName,
 				PromptDigest: sha256.Sum256([]byte(worker.agentID)),
 			},
 			time.Unix(10+int64(worker.revision), 0),

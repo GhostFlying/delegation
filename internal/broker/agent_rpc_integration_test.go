@@ -53,6 +53,7 @@ type agentRPCWorkerController struct{}
 type agentRPCLifecycleSource struct{}
 
 var agentRPCArtifactChanges = make(chan struct{})
+var agentRPCResultPackageChanges = make(chan struct{})
 
 func (agentRPCLifecycleSource) WorkerRevision() uint64 { return 0 }
 
@@ -80,6 +81,23 @@ func (agentRPCLifecycleSource) AcknowledgeChangesArtifact(
 	uint64,
 ) error {
 	return errors.New("changes artifact acknowledgement is outside this agent RPC test")
+}
+
+func (agentRPCLifecycleSource) ResultPackageChanges() <-chan struct{} {
+	return agentRPCResultPackageChanges
+}
+
+func (agentRPCLifecycleSource) ListPendingResultPackagePublications(
+	context.Context,
+) ([]connector.ResultPackagePublication, error) {
+	return []connector.ResultPackagePublication{}, nil
+}
+
+func (agentRPCLifecycleSource) AcknowledgeResultPackageMetadata(
+	context.Context,
+	connector.ResultPackagePublication,
+) error {
+	return errors.New("result package acknowledgement is outside this agent RPC test")
 }
 
 func (agentRPCWorkerController) InspectWorkspace(
@@ -139,6 +157,48 @@ func (agentRPCWorkerController) CancelWorkspaceTransfer(
 }
 
 func (agentRPCWorkerController) CleanupWorkspaceTransfers(context.Context) error { return nil }
+
+func (agentRPCWorkerController) ReadResultPackagePart(
+	context.Context,
+	connector.ResultPackageReadRequest,
+) (protocol.ReadResultPackagePartResult, error) {
+	return protocol.ReadResultPackagePartResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) BeginResultPackage(
+	context.Context,
+	connector.ResultPackageBeginRequest,
+) (protocol.BeginResultPackageResult, error) {
+	return protocol.BeginResultPackageResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) WriteResultPackagePart(
+	context.Context,
+	connector.ResultPackageWriteRequest,
+) (protocol.WriteResultPackagePartResult, error) {
+	return protocol.WriteResultPackagePartResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) FinishResultPackage(
+	context.Context,
+	connector.ResultPackageFinishRequest,
+) (protocol.FinishResultPackageResult, error) {
+	return protocol.FinishResultPackageResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) CancelResultPackage(
+	context.Context,
+	connector.ResultPackageCancelRequest,
+) (protocol.CancelResultPackageResult, error) {
+	return protocol.CancelResultPackageResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) AcknowledgeResultPackage(
+	context.Context,
+	connector.ResultPackageAcknowledgeRequest,
+) (protocol.AcknowledgeResultPackageResult, error) {
+	return protocol.AcknowledgeResultPackageResult{}, errors.New("not used")
+}
 
 func (agentRPCWorkerController) SendWorker(
 	_ context.Context,
@@ -273,7 +333,9 @@ func TestAgentRPCSelfDispatchIsDurableIdempotentAndNonBlocking(t *testing.T) {
 		WorkerController:      agentRPCWorkerController{},
 		WorkerLifecycleSource: agentRPCLifecycleSource{},
 		ChangesArtifactSource: agentRPCLifecycleSource{},
+		ResultPackageSource:   agentRPCLifecycleSource{},
 		WorkspaceManager:      agentRPCWorkerController{},
+		ResultPackageManager:  agentRPCWorkerController{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -800,7 +862,9 @@ func startAgentRPCConnectorWithAuth(
 		WorkerController:      agentRPCWorkerController{},
 		WorkerLifecycleSource: agentRPCLifecycleSource{},
 		ChangesArtifactSource: agentRPCLifecycleSource{},
+		ResultPackageSource:   agentRPCLifecycleSource{},
 		WorkspaceManager:      workspaceManager,
+		ResultPackageManager:  agentRPCWorkerController{},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -143,7 +143,8 @@ func validCLIChangesArtifactState() (store.WorkerReservation, store.ChangesArtif
 		WorkspaceID: cliChangesWorkspace, WorkspacePath: workspacePath,
 		CodexThreadID: runtimeManagedThreadID, ProfileVersion: 1,
 		Status: store.WorkerFinalizing, ActiveTurnID: cliChangesTurnID,
-		FinalTarget: store.WorkerIdle, Revision: 7, CreatedAt: 1, UpdatedAt: 2,
+		LastBoundTurnID: cliChangesTurnID,
+		FinalTarget:     store.WorkerIdle, Revision: 7, CreatedAt: 1, UpdatedAt: 2,
 	}
 	artifact := store.ChangesArtifact{
 		WorkerKey: key, ArtifactID: cliChangesArtifactID, TurnID: cliChangesTurnID,
