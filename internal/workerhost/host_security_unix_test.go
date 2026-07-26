@@ -99,3 +99,43 @@ func TestHostCanonicalizesSymlinkedCodexBinaryWithoutGrantingEitherDirectory(t *
 	}
 	assertCodexRuntimeFilesystemPermission(t, filesystem, resolvedTarget)
 }
+
+func TestHostCanonicalizesCodexHomeThroughSymlinkedParent(t *testing.T) {
+	fixtureHost, state, paths := newTestHost(t, 1)
+	aliasParent := filepath.Join(t.TempDir(), "runtime-link")
+	if err := os.Symlink(filepath.Dir(paths.codexHome), aliasParent); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+	aliasCodexHome := filepath.Join(aliasParent, filepath.Base(paths.codexHome))
+	resolvedCodexHome, err := filepath.EvalSymlinks(aliasCodexHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	host, err := New(context.Background(), Options{
+		ControllerID:     testControllerID,
+		DeviceID:         testDeviceID,
+		PeerConfigPath:   paths.configPath,
+		DelegationBinary: paths.delegationBinary,
+		CodexBinary:      paths.codexBinary,
+		GitBinary:        paths.gitBinary,
+		CodexHome:        aliasCodexHome,
+		WorkspaceRoot:    filepath.Join(filepath.Dir(paths.configPath), "workspaces"),
+		MaxWorkerSlots:   1,
+		Store:            state,
+		ResultPackages:   fixtureHost.resultPackages,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := host.Close(ctx); err != nil {
+			t.Errorf("close Codex home alias host: %v", err)
+		}
+	})
+	if host.codexHome != resolvedCodexHome {
+		t.Fatalf("canonical Codex home = %q, want %q", host.codexHome, resolvedCodexHome)
+	}
+}

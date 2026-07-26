@@ -289,6 +289,10 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	if err := codexconfig.ValidateManagedHome(options.CodexHome); err != nil {
 		return nil, err
 	}
+	codexHome, err := filepath.EvalSymlinks(options.CodexHome)
+	if err != nil {
+		return nil, fmt.Errorf("resolve managed CODEX_HOME: %w", err)
+	}
 	if err := config.ValidatePrivateDirectory(options.WorkspaceRoot); err != nil {
 		return nil, fmt.Errorf("validate managed workspace root: %w", err)
 	}
@@ -342,7 +346,7 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		controllerID: options.ControllerID, deviceID: options.DeviceID,
 		peerConfigPath: options.PeerConfigPath, delegationBinary: options.DelegationBinary,
 		codexBinary: codexBinary, git: gitRunner, workerGitBinary: workerGitBinary,
-		codexHome:                options.CodexHome,
+		codexHome:                codexHome,
 		codexEnvironment:         codexEnvironment,
 		codexUnsetEnvironment:    uniqueEnvironmentNames(appServerUnsetEnvironment),
 		shellExcludedEnvironment: uniqueEnvironmentNames(shellExcludedEnvironment),
