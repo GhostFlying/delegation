@@ -14,12 +14,14 @@ import (
 )
 
 const (
-	resultPackageRelayRequestTimeout  = 30 * time.Minute
-	resultPackageReceivingLease       = 2 * time.Minute
+	resultPackageBeginTimeout         = 30 * time.Second
+	resultPackageChunkTimeout         = 30 * time.Second
+	resultPackageFinishTimeout        = 2 * time.Minute
+	resultPackageAcknowledgeTimeout   = 30 * time.Second
 	resultPackageCancelTimeout        = 5 * time.Second
 	resultPackageReconnectScanTimeout = 30 * time.Second
 	maximumPendingResultPackageRelays = 128
-	maximumResultPackageRelayAttempts = 8
+	maximumConcurrentResultRelays     = 128
 	initialResultPackageRelayBackoff  = time.Second
 	maximumResultPackageRelayBackoff  = 30 * time.Second
 )
@@ -70,17 +72,17 @@ type resultPackageRelayScanFunc func(
 ) (resultPackageRelayScanPage, error)
 
 type resultPackageRelayFlight struct {
-	wake chan struct{}
-	done chan struct{}
+	wake             chan struct{}
+	firstAttemptDone chan struct{}
 }
 
 type resultPackageRelayPeerScan struct {
-	wake chan struct{}
+	wake    chan struct{}
+	restart bool
 }
 
 type resultPackageRelayCoordinator struct {
 	context context.Context
-	timeout time.Duration
 	relay   resultPackageRelayFunc
 	scan    resultPackageRelayScanFunc
 	report  func(error)
@@ -88,13 +90,13 @@ type resultPackageRelayCoordinator struct {
 	mu         sync.Mutex
 	active     map[resultPackageRelayKey]*resultPackageRelayFlight
 	activeScan map[string]*resultPackageRelayPeerScan
+	attempts   chan struct{}
 	stopped    bool
 	wait       sync.WaitGroup
 }
 
 func newResultPackageRelayCoordinator(
 	ctx context.Context,
-	timeout time.Duration,
 	relay resultPackageRelayFunc,
 	scan resultPackageRelayScanFunc,
 	report func(error),
@@ -104,12 +106,12 @@ func newResultPackageRelayCoordinator(
 	}
 	return &resultPackageRelayCoordinator{
 		context:    ctx,
-		timeout:    timeout,
 		relay:      relay,
 		scan:       scan,
 		report:     report,
 		active:     make(map[resultPackageRelayKey]*resultPackageRelayFlight),
 		activeScan: make(map[string]*resultPackageRelayPeerScan),
+		attempts:   make(chan struct{}, maximumConcurrentResultRelays),
 	}
 }
 
@@ -123,6 +125,7 @@ func (c *resultPackageRelayCoordinator) schedulePeerReconnect(deviceID string) b
 		return false
 	}
 	if current := c.activeScan[deviceID]; current != nil {
+		current.restart = true
 		select {
 		case current.wake <- struct{}{}:
 		default:
@@ -144,16 +147,38 @@ func (c *resultPackageRelayCoordinator) schedulePeerReconnect(deviceID string) b
 			c.mu.Unlock()
 		}()
 		var after *store.ResultPackageRelayCursor
+		scanAttempt := 0
 		for {
 			ctx, cancel := context.WithTimeout(c.context, resultPackageReconnectScanTimeout)
 			page, err := c.scan(ctx, deviceID, after)
 			cancel()
 			if err != nil {
-				if !errors.Is(err, context.Canceled) {
-					c.report(fmt.Errorf("scan pending result packages for peer %s: %w", deviceID, err))
+				if errors.Is(err, context.DeadlineExceeded) && c.context.Err() == nil {
+					err = fmt.Errorf(
+						"%w: pending result package scan timed out",
+						errResultPackageRelayDeferred,
+					)
 				}
-				return
+				delay, retry := resultPackageRelayRetryDelay(err, scanAttempt)
+				if !retry {
+					if !errors.Is(err, context.Canceled) {
+						c.report(fmt.Errorf("scan pending result packages for peer %s: %w", deviceID, err))
+					}
+					return
+				}
+				scanAttempt++
+				timer := time.NewTimer(delay)
+				select {
+				case <-timer.C:
+				case <-scan.wake:
+					timer.Stop()
+				case <-c.context.Done():
+					timer.Stop()
+					return
+				}
+				continue
 			}
+			scanAttempt = 0
 			flights := make([]*resultPackageRelayFlight, 0, len(page.requests))
 			for _, request := range page.requests {
 				flight, _ := c.scheduleFlight(request)
@@ -161,7 +186,21 @@ func (c *resultPackageRelayCoordinator) schedulePeerReconnect(deviceID string) b
 					flights = append(flights, flight)
 				}
 			}
-			if !c.waitForResultPackageRelayFlights(scan, flights) || page.nextAfter == nil {
+			if !c.waitForResultPackageRelayAttempts(scan, flights) {
+				return
+			}
+			if page.nextAfter == nil {
+				c.mu.Lock()
+				if scan.restart {
+					scan.restart = false
+					c.mu.Unlock()
+					after = nil
+					continue
+				}
+				if c.activeScan[deviceID] == scan {
+					delete(c.activeScan, deviceID)
+				}
+				c.mu.Unlock()
 				return
 			}
 			after = page.nextAfter
@@ -170,18 +209,18 @@ func (c *resultPackageRelayCoordinator) schedulePeerReconnect(deviceID string) b
 	return true
 }
 
-func (c *resultPackageRelayCoordinator) waitForResultPackageRelayFlights(
+func (c *resultPackageRelayCoordinator) waitForResultPackageRelayAttempts(
 	scan *resultPackageRelayPeerScan,
 	flights []*resultPackageRelayFlight,
 ) bool {
 flights:
-	for index, flight := range flights {
+	for _, flight := range flights {
 		for {
 			select {
-			case <-flight.done:
+			case <-flight.firstAttemptDone:
 				continue flights
 			case <-scan.wake:
-				for _, pending := range flights[index:] {
+				for _, pending := range flights {
 					select {
 					case pending.wake <- struct{}{}:
 					default:
@@ -227,8 +266,8 @@ func (c *resultPackageRelayCoordinator) scheduleFlight(
 		return current, false
 	}
 	flight := &resultPackageRelayFlight{
-		wake: make(chan struct{}, 1),
-		done: make(chan struct{}),
+		wake:             make(chan struct{}, 1),
+		firstAttemptDone: make(chan struct{}),
 	}
 	c.active[key] = flight
 	c.wait.Add(1)
@@ -239,33 +278,43 @@ func (c *resultPackageRelayCoordinator) scheduleFlight(
 		defer func() {
 			c.mu.Lock()
 			delete(c.active, key)
-			close(flight.done)
 			c.mu.Unlock()
 		}()
-		ctx, cancel := context.WithTimeout(c.context, c.timeout)
-		defer cancel()
-		var err error
-		for attempt := 0; attempt < maximumResultPackageRelayAttempts; attempt++ {
-			err = c.relay(ctx, request)
+		firstAttempt := true
+		for attempt := 0; ; attempt++ {
+			select {
+			case c.attempts <- struct{}{}:
+			case <-c.context.Done():
+				if firstAttempt {
+					close(flight.firstAttemptDone)
+				}
+				return
+			}
+			err := c.relay(c.context, request)
+			<-c.attempts
+			if firstAttempt {
+				close(flight.firstAttemptDone)
+				firstAttempt = false
+			}
 			if err == nil {
 				return
 			}
 			delay, retry := resultPackageRelayRetryDelay(err, attempt)
-			if !retry || attempt+1 == maximumResultPackageRelayAttempts {
-				break
+			if !retry {
+				if !errors.Is(err, context.Canceled) {
+					c.report(fmt.Errorf("relay result package %s: %w", request.packageID, err))
+				}
+				return
 			}
 			timer := time.NewTimer(delay)
 			select {
 			case <-timer.C:
 			case <-flight.wake:
 				timer.Stop()
-			case <-ctx.Done():
+			case <-c.context.Done():
 				timer.Stop()
 				return
 			}
-		}
-		if !errors.Is(err, context.Canceled) {
-			c.report(fmt.Errorf("relay result package %s: %w", request.packageID, err))
 		}
 	}()
 	return flight, true
@@ -322,6 +371,24 @@ type resultPackageSourceAcknowledger interface {
 	) (store.ResultPackageRecord, error)
 }
 
+func callResultPackagePeer(
+	ctx context.Context,
+	timeout time.Duration,
+	peer resultPackagePeer,
+	method string,
+	treeID string,
+	source control.PrincipalIdentity,
+	params any,
+) (json.RawMessage, error) {
+	callContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return peer.callPeer(callContext, method, treeID, source, params)
+}
+
+func resultPackageReceivingLeaseExpiresAt(now time.Time) int64 {
+	return now.Add(store.MaximumResultInboxLease).Unix()
+}
+
 func (s *Server) relayResultPackage(
 	ctx context.Context,
 	request resultPackageRelayRequest,
@@ -330,10 +397,13 @@ func (s *Server) relayResultPackage(
 		ctx, request.source.DeviceID, request.source, request.packageID,
 	)
 	if err != nil {
-		return fmt.Errorf("load relay metadata: %w", err)
+		return resultPackageStoreRelayError("load relay metadata", err)
 	}
 	if record.SourcePrincipal != request.source {
 		return errors.New("stored result package source differs from its relay request")
+	}
+	if record.State == store.ResultPackageDelivered {
+		s.notifyResultPackageDelivered(record)
 	}
 	if record.SourceAcknowledgedAt != 0 {
 		return nil
@@ -363,20 +433,20 @@ func (s *Server) relayResultPackage(
 		record.RootPrincipal,
 		record,
 		attemptID,
-		s.now().Add(resultPackageReceivingLease).Unix(),
+		resultPackageReceivingLeaseExpiresAt(s.now()),
 	)
 	if err != nil {
 		if began {
 			if !s.cancelResultPackageTransfer(root, record.RootPrincipal, record, attemptID) &&
 				errors.Is(err, errResultPackageRelayDeferred) {
-				return retryResultPackageRelayAfter(err, resultPackageReceivingLease)
+				return retryResultPackageRelayAfter(err, store.MaximumResultInboxLease)
 			}
 		}
 		return err
 	}
 	delivered, err := s.markResultPackageDelivered(ctx, record.RootPrincipal, request.packageID)
 	if err != nil {
-		return fmt.Errorf("record durable result package delivery: %w", err)
+		return err
 	}
 	return acknowledgeAndMarkResultPackage(
 		ctx, source, s.registry, record.SourcePrincipal, delivered, s.now(),
@@ -392,13 +462,20 @@ func (s *Server) markResultPackageDelivered(
 		ctx, root.DeviceID, root, packageID, s.now(),
 	)
 	if err != nil {
-		return store.ResultPackageRecord{}, err
+		return store.ResultPackageRecord{}, resultPackageStoreRelayError(
+			"record durable result package delivery",
+			err,
+		)
 	}
-	s.artifactNotifier.notify(treeKey{
-		controllerID: delivered.Manifest.ControllerID,
-		treeID:       delivered.Manifest.TreeID,
-	})
+	s.notifyResultPackageDelivered(delivered)
 	return delivered, nil
+}
+
+func (s *Server) notifyResultPackageDelivered(record store.ResultPackageRecord) {
+	s.resultNotifier.notify(treeKey{
+		controllerID: record.Manifest.ControllerID,
+		treeID:       record.Manifest.TreeID,
+	})
 }
 
 func (s *Server) pendingResultPackageRelays(
@@ -416,7 +493,10 @@ func (s *Server) pendingResultPackageRelays(
 		},
 	)
 	if err != nil {
-		return resultPackageRelayScanPage{}, err
+		return resultPackageRelayScanPage{}, resultPackageStoreRelayError(
+			"list pending result package relays",
+			err,
+		)
 	}
 	requests := make([]resultPackageRelayRequest, 0, len(page.Packages))
 	for _, record := range page.Packages {
@@ -459,8 +539,10 @@ func transferResultPackage(
 		LeaseExpiresAt: leaseExpiresAt,
 		Metadata:       record.Metadata,
 	}
-	payload, err := root.callPeer(
+	payload, err := callResultPackagePeer(
 		ctx,
+		resultPackageBeginTimeout,
+		root,
 		protocol.MethodBeginResultPackage,
 		record.Manifest.TreeID,
 		rootPrincipal,
@@ -473,7 +555,7 @@ func transferResultPackage(
 				"%w: root still owns another receiving attempt",
 				errResultPackageRelayDeferred,
 			)
-			return false, retryResultPackageRelayAfter(deferred, resultPackageReceivingLease)
+			return false, retryResultPackageRelayAfter(deferred, store.MaximumResultInboxLease)
 		}
 		return false, deferResultPackagePeerError("begin root result package", err)
 	}
@@ -508,8 +590,10 @@ func transferResultPackage(
 		AttemptID: attemptID,
 		PackageID: record.Manifest.PackageID,
 	}
-	payload, err = root.callPeer(
+	payload, err = callResultPackagePeer(
 		ctx,
+		resultPackageFinishTimeout,
+		root,
 		protocol.MethodFinishResultPackage,
 		record.Manifest.TreeID,
 		rootPrincipal,
@@ -562,8 +646,10 @@ func relayResultPackagePart(
 			Offset:    offset,
 			Limit:     int(limit),
 		}
-		payload, err := source.callPeer(
+		payload, err := callResultPackagePeer(
 			ctx,
+			resultPackageChunkTimeout,
+			source,
 			protocol.MethodReadResultPackagePart,
 			manifest.TreeID,
 			workerPrincipal,
@@ -585,8 +671,10 @@ func relayResultPackagePart(
 			Offset:    offset,
 			Data:      read.Data,
 		}
-		payload, err = root.callPeer(
+		payload, err = callResultPackagePeer(
 			ctx,
+			resultPackageChunkTimeout,
+			root,
 			protocol.MethodWriteResultPackagePart,
 			manifest.TreeID,
 			rootPrincipal,
@@ -616,8 +704,10 @@ func acknowledgeResultPackage(
 		PackageID: record.Manifest.PackageID,
 		Sequence:  record.Sequence,
 	}
-	payload, err := source.callPeer(
+	payload, err := callResultPackagePeer(
 		ctx,
+		resultPackageAcknowledgeTimeout,
+		source,
 		protocol.MethodAcknowledgeResultPackage,
 		record.Manifest.TreeID,
 		workerPrincipal,
@@ -652,13 +742,26 @@ func acknowledgeAndMarkResultPackage(
 		record.Manifest.PackageID,
 		acknowledgedAt,
 	); err != nil {
-		return fmt.Errorf(
-			"%w: record source result package acknowledgement: %v",
-			errResultPackageRelayDeferred,
+		return resultPackageStoreRelayError(
+			"record source result package acknowledgement",
 			err,
 		)
 	}
 	return nil
+}
+
+func resultPackageStoreRelayError(operation string, err error) error {
+	if isContextError(err) {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	if errors.Is(err, store.ErrAuthorizationDenied) ||
+		errors.Is(err, store.ErrNotFound) ||
+		errors.Is(err, store.ErrConflict) ||
+		errors.Is(err, store.ErrResultPackageCorrupt) ||
+		errors.Is(err, store.ErrResultPackageSequenceExhausted) {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	return fmt.Errorf("%w: %s: %v", errResultPackageRelayDeferred, operation, err)
 }
 
 func (s *Server) cancelResultPackageTransfer(
@@ -692,6 +795,9 @@ func (s *Server) cancelResultPackageTransfer(
 }
 
 func deferResultPackagePeerError(operation string, err error) error {
+	if registrationDenied(err) {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
 	var rpcError *peerRPCError
 	if errors.As(err, &rpcError) && rpcError.code != protocol.ErrorUnavailable {
 		return fmt.Errorf("%s: %w", operation, err)

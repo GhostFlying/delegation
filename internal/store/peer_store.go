@@ -6,7 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 )
+
+// MaximumResultInboxLease is the longest receiving-attempt inactivity window
+// accepted by the peer result inbox. Broker attempts use the same duration so
+// a live transfer cannot be fenced before the peer's durable lease expires.
+const MaximumResultInboxLease = 10 * time.Minute
 
 // PeerStore persists connector-owned managed worker reservations separately
 // from the broker registry.
