@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -122,6 +123,7 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 			protocol.FeatureMailbox,
 			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
+			protocol.FeatureResultPackage,
 			protocol.FeatureWorkerLifecycle,
 			protocol.FeatureWorkspaceSync,
 			protocol.FeatureWorkspaceTransfer,
@@ -441,9 +443,46 @@ func TestNoneAuthPeerConnectorRegisters(t *testing.T) {
 	waitForDevice(t, fixture.registry, connectorTestDeviceID, func(device control.Device) bool {
 		return device.Online
 	})
+	record, err := fixture.registry.DescribeDevice(
+		context.Background(), connectorTestControllerID, connectorTestDeviceID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(record.Device.Features, protocol.FeatureResultPackage) {
+		t.Fatalf("registered connector features = %v", record.Device.Features)
+	}
 	cancel()
 	if err := waitClient(done); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResultPackageFeatureNegotiationFailsClosed(t *testing.T) {
+	hello := protocol.Hello{
+		ControllerID:   connectorTestControllerID,
+		DeviceID:       connectorTestDeviceID,
+		DeviceName:     "builder",
+		OS:             "linux",
+		Arch:           "amd64",
+		RuntimeVersion: "0.1.0-alpha.0.m4",
+		Features:       connectorProtocolFeatures(),
+	}
+	if !slices.Contains(hello.Features, protocol.FeatureResultPackage) {
+		t.Fatalf("connector protocol features = %v", hello.Features)
+	}
+	legacyBrokerFeatures := slices.DeleteFunc(
+		slices.Clone(hello.Features),
+		func(feature string) bool { return feature == protocol.FeatureResultPackage },
+	)
+	err := validateHelloResult(protocol.HelloResult{
+		ConnectionID:        connectorTestConnectionID,
+		Features:            legacyBrokerFeatures,
+		HeartbeatIntervalMS: time.Second.Milliseconds(),
+		Revision:            1,
+	}, hello)
+	if err == nil || !strings.Contains(err.Error(), protocol.FeatureResultPackage) {
+		t.Fatalf("legacy broker feature validation error = %v", err)
 	}
 }
 
@@ -455,6 +494,7 @@ func TestConnectorRequiresEveryBrokerFeatureBeforePublishingReadiness(t *testing
 		protocol.FeatureMailbox,
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
+		protocol.FeatureResultPackage,
 		protocol.FeatureWorkerLifecycle,
 		protocol.FeatureWorkspaceSync,
 		protocol.FeatureWorkspaceTransfer,
@@ -1352,6 +1392,7 @@ func newFakeBroker(t *testing.T, afterHello func(*websocket.Conn)) *httptest.Ser
 		protocol.FeatureMailbox,
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
+		protocol.FeatureResultPackage,
 		protocol.FeatureWorkerLifecycle,
 		protocol.FeatureWorkspaceSync,
 		protocol.FeatureWorkspaceTransfer,

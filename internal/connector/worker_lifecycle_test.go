@@ -356,6 +356,7 @@ func writeLifecycleHello(
 			protocol.FeatureMailbox,
 			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
+			protocol.FeatureResultPackage,
 			protocol.FeatureWorkerLifecycle,
 			protocol.FeatureWorkspaceSync,
 			protocol.FeatureWorkspaceTransfer,

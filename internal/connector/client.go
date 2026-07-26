@@ -306,17 +306,7 @@ func New(options Options) (*Client, error) {
 	if !ok {
 		return nil, errors.New("connector workspace transfer manager is required")
 	}
-	features := []string{
-		protocol.FeatureChangesArtifact,
-		protocol.FeatureDeviceRegistry,
-		protocol.FeatureFullDuplexRPC,
-		protocol.FeatureMailbox,
-		protocol.FeatureWorkerDispatch,
-		protocol.FeaturePeerRoot,
-		protocol.FeatureWorkerLifecycle,
-		protocol.FeatureWorkspaceSync,
-		protocol.FeatureWorkspaceTransfer,
-	}
+	features := connectorProtocolFeatures()
 	hello := protocol.Hello{
 		ControllerID:   options.ControllerID,
 		DeviceID:       options.DeviceID,
@@ -657,18 +647,7 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 	if err := descriptor.Validate(); err != nil {
 		return fmt.Errorf("broker features: %w", err)
 	}
-	required := []string{
-		protocol.FeatureChangesArtifact,
-		protocol.FeatureDeviceRegistry,
-		protocol.FeatureFullDuplexRPC,
-		protocol.FeatureMailbox,
-		protocol.FeatureWorkerDispatch,
-		protocol.FeaturePeerRoot,
-		protocol.FeatureWorkerLifecycle,
-		protocol.FeatureWorkspaceSync,
-		protocol.FeatureWorkspaceTransfer,
-	}
-	for _, feature := range required {
+	for _, feature := range connectorProtocolFeatures() {
 		if !slices.Contains(result.Features, feature) {
 			return fmt.Errorf("broker does not support required feature %q", feature)
 		}
@@ -677,4 +656,19 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 		return errors.New("broker worker lifecycle cursor is ahead of the peer")
 	}
 	return nil
+}
+
+func connectorProtocolFeatures() []string {
+	return []string{
+		protocol.FeatureChangesArtifact,
+		protocol.FeatureDeviceRegistry,
+		protocol.FeatureFullDuplexRPC,
+		protocol.FeatureMailbox,
+		protocol.FeatureWorkerDispatch,
+		protocol.FeaturePeerRoot,
+		protocol.FeatureResultPackage,
+		protocol.FeatureWorkerLifecycle,
+		protocol.FeatureWorkspaceSync,
+		protocol.FeatureWorkspaceTransfer,
+	}
 }

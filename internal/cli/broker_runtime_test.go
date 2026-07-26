@@ -575,6 +575,7 @@ func sendRuntimeHello(t *testing.T, connection *websocket.Conn, deviceID string)
 			protocol.FeatureMailbox,
 			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
+			protocol.FeatureResultPackage,
 			protocol.FeatureWorkerLifecycle,
 			protocol.FeatureWorkspaceSync,
 			protocol.FeatureWorkspaceTransfer,
