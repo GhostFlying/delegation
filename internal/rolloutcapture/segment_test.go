@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -113,6 +114,56 @@ func TestCaptureSegmentHonorsOffsetAndContext(t *testing.T) {
 	if _, err := CaptureSegment(canceled, strings.NewReader(input), int64(len(prefix)), testThreadID, &output); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled error = %v", err)
 	}
+}
+
+func TestCaptureSegmentRawLimitExcludesPreStartRecords(t *testing.T) {
+	prefix := rolloutLine("event_msg", "thread_settings_applied", "")
+	for _, test := range []struct {
+		name      string
+		rawBytes  int64
+		wantError error
+	}{
+		{name: "exact limit", rawBytes: MaximumRawBytes},
+		{name: "over limit", rawBytes: MaximumRawBytes + 1, wantError: ErrTooLarge},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			segment := rolloutSegmentWithSize(t, test.rawBytes)
+			var output bytes.Buffer
+			got, err := CaptureSegment(
+				context.Background(), strings.NewReader(prefix+segment), 0, testThreadID, &output,
+			)
+			if !errors.Is(err, test.wantError) {
+				t.Fatalf("error = %v, want %v", err, test.wantError)
+			}
+			if test.wantError == nil && (got.RawBytes != MaximumRawBytes || output.String() != segment) {
+				t.Fatalf("segment metadata = %#v, output bytes = %d", got, output.Len())
+			}
+		})
+	}
+}
+
+func TestCaptureSegmentBoundsPreStartScan(t *testing.T) {
+	prefix := "{\"type\":\"response_item\",\"payload\":{\"padding\":\"" +
+		strings.Repeat("x", int(maximumPreStartBytes)) + "\"}}\n"
+	input := prefix + rolloutLine("event_msg", "task_started", testThreadID)
+	if _, err := CaptureSegment(
+		context.Background(), strings.NewReader(input), 0, testThreadID, io.Discard,
+	); !errors.Is(err, errStartScan) {
+		t.Fatalf("error = %v, want %v", err, errStartScan)
+	}
+}
+
+func rolloutSegmentWithSize(t *testing.T, size int64) string {
+	t.Helper()
+	start := rolloutLine("event_msg", "task_started", testThreadID)
+	terminal := rolloutLine("event_msg", "task_complete", testThreadID)
+	prefix := "{\"type\":\"response_item\",\"payload\":{\"padding\":\""
+	suffix := "\"}}\n"
+	padding := size - int64(len(start)+len(terminal)+len(prefix)+len(suffix))
+	if padding < 0 || padding > int64(int(padding)) {
+		t.Fatalf("invalid test rollout size %d", size)
+	}
+	return start + prefix + strings.Repeat("x", int(padding)) + suffix + terminal
 }
 
 func rolloutLine(outerType, eventType, turnID string) string {

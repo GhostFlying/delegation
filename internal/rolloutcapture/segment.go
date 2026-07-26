@@ -13,12 +13,16 @@ import (
 	"github.com/GhostFlying/delegation/internal/identity"
 )
 
-const MaximumRawBytes = int64(64 * 1024 * 1024)
+const (
+	MaximumRawBytes      = int64(64 * 1024 * 1024)
+	maximumPreStartBytes = int64(1024 * 1024)
+)
 
 var (
 	ErrIncomplete = errors.New("managed rollout turn segment is incomplete")
 	ErrConflict   = errors.New("managed rollout turn segment conflicts with the expected turn")
 	ErrTooLarge   = errors.New("managed rollout turn segment exceeds its byte limit")
+	errStartScan  = errors.New("managed rollout pre-start scan exceeds its byte limit")
 )
 
 type Outcome string
@@ -60,10 +64,11 @@ func CaptureSegment(
 		return Segment{}, errors.New("managed rollout seek returned a mismatched offset")
 	}
 
-	limited := &io.LimitedReader{R: source, N: MaximumRawBytes + 1}
+	limited := &io.LimitedReader{R: source, N: maximumPreStartBytes + MaximumRawBytes + 1}
 	reader := bufio.NewReaderSize(limited, 64*1024)
 	digest := sha256.New()
 	written := int64(0)
+	preStartBytes := int64(0)
 	started := false
 	for {
 		if err := ctx.Err(); err != nil {
@@ -88,6 +93,10 @@ func CaptureSegment(
 		}
 		if !started {
 			if event.kind != "task_started" {
+				preStartBytes += int64(len(line))
+				if preStartBytes > maximumPreStartBytes {
+					return Segment{}, errStartScan
+				}
 				continue
 			}
 			if event.turnID != turnID {
