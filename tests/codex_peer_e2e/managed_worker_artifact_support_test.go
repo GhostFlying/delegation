@@ -23,9 +23,11 @@ import (
 )
 
 type artifactWorkerMock struct {
-	mu     sync.Mutex
-	calls  int
-	errors []string
+	mu         sync.Mutex
+	calls      int
+	errors     []string
+	testCase   string
+	leaveDirty bool
 }
 
 func (m *artifactWorkerMock) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -39,7 +41,7 @@ func (m *artifactWorkerMock) ServeHTTP(writer http.ResponseWriter, request *http
 		return
 	}
 	encoded, _ := json.Marshal(body)
-	if !bytes.Contains(encoded, []byte("managed-worker-case="+artifactEETestCase)) {
+	if !bytes.Contains(encoded, []byte("managed-worker-case="+m.testCase)) {
 		m.fail(writer, errors.New("managed model request has no artifact test case"))
 		return
 	}
@@ -47,7 +49,7 @@ func (m *artifactWorkerMock) ServeHTTP(writer http.ResponseWriter, request *http
 	call := m.calls
 	m.calls++
 	m.mu.Unlock()
-	command := artifactE2EWorkerCommand()
+	command := artifactE2EWorkerCommand(m.leaveDirty)
 	shellTool, shellArguments := managedShellTool(command)
 	callID := "call-artifact-cross-platform"
 	switch call {
@@ -79,16 +81,31 @@ func (m *artifactWorkerMock) ServeHTTP(writer http.ResponseWriter, request *http
 			}},
 			managedCompletedEvent("resp-artifact-final"),
 		)
+	case 2:
+		writeManagedSSE(writer,
+			map[string]any{"type": "response.created", "response": map[string]any{"id": "resp-artifact-followup"}},
+			map[string]any{"type": "response.output_item.done", "item": map[string]any{
+				"type": "message", "role": "assistant", "id": "msg-artifact-followup",
+				"content": []map[string]any{{"type": "output_text", "text": "result-ready"}},
+			}},
+			managedCompletedEvent("resp-artifact-followup"),
+		)
 	default:
 		m.fail(writer, fmt.Errorf("artifact model received unexpected call %d", call+1))
 	}
 }
 
-func artifactE2EWorkerCommand() string {
+func artifactE2EWorkerCommand(leaveDirty bool) string {
+	dirtyWindows := ""
+	dirtyPOSIX := ""
+	if leaveDirty {
+		dirtyWindows = "[System.IO.File]::WriteAllText((Join-Path (Get-Location) 'dirty-worker.txt'), 'dirty-worker', $utf8)\n"
+		dirtyPOSIX = "printf '%s\\n' dirty-worker > dirty-worker.txt\n"
+	}
 	if runtime.GOOS == "windows" {
 		return `$ErrorActionPreference = 'Stop'
-if ((Get-Content -Raw tracked.txt).Trim() -ne 'tracked-base') { throw 'unexpected tracked base' }
-if ((Get-Content -Raw rename-source.txt).Trim() -ne 'rename-base') { throw 'unexpected rename base' }
+	if ((Get-Content -Raw tracked.txt).Trim() -ne 'tracked-base') { throw 'unexpected tracked base' }
+	if ((Get-Content -Raw rename-source.txt).Trim() -ne 'rename-base') { throw 'unexpected rename base' }
 $utf8 = [System.Text.UTF8Encoding]::new($false)
 [System.IO.File]::WriteAllText((Join-Path (Get-Location) 'tracked.txt'), 'tracked-worker', $utf8)
 if ((Get-Content -Raw tracked.txt).Trim() -ne 'tracked-worker') { throw 'tracked write failed' }
@@ -96,20 +113,18 @@ git mv -- rename-source.txt renamed-worker.txt
 if ($LASTEXITCODE -ne 0) { throw 'git mv failed' }
 git add -- tracked.txt renamed-worker.txt
 if ($LASTEXITCODE -ne 0) { throw 'git add failed' }
-git -c "user.name=Delegation Worker Test" -c "user.email=worker@example.invalid" commit -m "worker artifact commit"
-if ($LASTEXITCODE -ne 0) { throw 'git commit failed' }
-[System.IO.File]::WriteAllText((Join-Path (Get-Location) 'dirty-worker.txt'), 'dirty-worker', $utf8)
-Write-Output '` + artifactEESuccessMarker + `'`
+	git -c "user.name=Delegation Worker Test" -c "user.email=worker@example.invalid" commit -m "worker artifact commit"
+	if ($LASTEXITCODE -ne 0) { throw 'git commit failed' }
+	` + dirtyWindows + `Write-Output '` + artifactEESuccessMarker + `'`
 	}
 	return `set -eu
 test "$(cat tracked.txt)" = tracked-base
 test "$(cat rename-source.txt)" = rename-base
 printf '%s\n' tracked-worker > tracked.txt
-git mv -- rename-source.txt renamed-worker.txt
-git add -- tracked.txt renamed-worker.txt
-git -c user.name='Delegation Worker Test' -c user.email=worker@example.invalid commit -m 'worker artifact commit'
-printf '%s\n' dirty-worker > dirty-worker.txt
-printf '%s\n' ` + artifactEESuccessMarker
+	git mv -- rename-source.txt renamed-worker.txt
+	git add -- tracked.txt renamed-worker.txt
+	git -c user.name='Delegation Worker Test' -c user.email=worker@example.invalid commit -m 'worker artifact commit'
+	` + dirtyPOSIX + `printf '%s\n' ` + artifactEESuccessMarker
 }
 
 func (m *artifactWorkerMock) fail(writer http.ResponseWriter, err error) {
@@ -127,7 +142,7 @@ func (m *artifactWorkerMock) verify(t *testing.T) {
 	t.Helper()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.calls != 2 || len(m.errors) != 0 {
+	if m.calls != 3 || len(m.errors) != 0 {
 		t.Fatalf("artifact model calls = %d, errors = %v", m.calls, m.errors)
 	}
 }
