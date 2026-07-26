@@ -9,53 +9,353 @@ permissions:
 env:
   GOTOOLCHAIN: local
 
+concurrency:
+  group: release-candidate-${{ github.sha }}
+  cancel-in-progress: false
+
 jobs:
-  package:
-    name: Package candidate
+  gate:
+    name: Validate candidate source
     runs-on: ubuntu-latest
+    outputs:
+      source_commit: ${{ steps.source.outputs.source_commit }}
+      version: ${{ steps.source.outputs.version }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+      - name: Require an exact default-branch source commit
+        id: source
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          source_commit=$(git rev-parse --verify HEAD^{commit})
+          test "$source_commit" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          version=$(tr -d '\r\n' < plugins/delegation/VERSION)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux ${{ matrix.arch }} candidate
+    needs: gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.gate.outputs.source_commit }}
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: 1.26.5
           check-latest: false
           cache: true
-      - name: Build candidate twice
-        run: |
-          go run ./cmd/releasepack -out dist
-          go run ./cmd/releasepack -out dist-rebuild
-          diff -r dist dist-rebuild
-      - name: Verify exact release target matrix
+      - name: Build and package unsigned Linux runtime
         shell: bash
+        env:
+          TARGET: linux-${{ matrix.arch }}
         run: |
           set -euo pipefail
-          version=$(tr -d '\r\n' < plugins/delegation/VERSION)
-          expected="$RUNNER_TEMP/expected-release-assets.txt"
-          actual="$RUNNER_TEMP/actual-release-assets.txt"
-          manifest="$RUNNER_TEMP/manifest-release-assets.txt"
-          printf '%s\n' \
-            "delegation_${version}_darwin_amd64.tar.gz" \
-            "delegation_${version}_darwin_arm64.tar.gz" \
-            "delegation_${version}_linux_amd64.tar.gz" \
-            "delegation_${version}_linux_arm64.tar.gz" \
-            "delegation_${version}_windows_amd64.zip" \
-            "delegation_${version}_windows_arm64.zip" \
-            | LC_ALL=C sort > "$expected"
-          LC_ALL=C find dist -mindepth 1 -maxdepth 1 -type f \
-            -name 'delegation_*' -printf '%f\n' | LC_ALL=C sort > "$actual"
-          sed -nE 's/^[0-9a-f]{64}  (delegation_[A-Za-z0-9._+-]+)$/\1/p' \
-            dist/release-artifacts.sha256 | LC_ALL=C sort > "$manifest"
-          test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 7
-          test "$(find dist -mindepth 1 -maxdepth 1 ! -type f | wc -l)" -eq 0
-          diff -u "$expected" "$actual"
-          diff -u "$expected" "$manifest"
-          (cd dist && sha256sum --strict -c release-artifacts.sha256)
-      - name: Upload candidate for review
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+          go run ./cmd/releasepack build-target \
+            --target "$TARGET" --out "$RUNNER_TEMP/delegation"
+          go run ./cmd/releasepack package-target \
+            --target "$TARGET" --binary "$RUNNER_TEMP/delegation" --out part
+          go run ./cmd/releasepack write-evidence \
+            --target "$TARGET" --out part
+      - name: Upload immutable Linux candidate part
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: delegation-release-candidate-${{ github.sha }}
+          name: delegation-part-linux-${{ matrix.arch }}-${{ github.run_id }}
+          path: part/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+
+  macos:
+    name: macOS ${{ matrix.arch }} signed candidate
+    needs: gate
+    runs-on: macos-15
+    environment: release-signing
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.gate.outputs.source_commit }}
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: true
+      - name: Build native macOS runtime
+        shell: bash
+        env:
+          TARGET: darwin-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          go run ./cmd/releasepack build-target \
+            --target "$TARGET" --out "$RUNNER_TEMP/delegation"
+      - name: Sign, notarize, verify, and package macOS runtime
+        shell: bash
+        env:
+          TARGET: darwin-${{ matrix.arch }}
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          binary="$RUNNER_TEMP/delegation"
+          p12="$RUNNER_TEMP/delegation-signing.p12"
+          keychain="$RUNNER_TEMP/delegation-signing.keychain-db"
+          notary_zip="$RUNNER_TEMP/delegation-notary.zip"
+          notary_json="$RUNNER_TEMP/delegation-notary.json"
+          keychain_password=$(openssl rand -hex 24)
+          cleanup() {
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -f "$p12" "$notary_zip" "$notary_json"
+          }
+          trap cleanup EXIT
+
+          [[ "$MACOS_SIGNING_IDENTITY" == "Developer ID Application:"* ]]
+          printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 -D > "$p12"
+          chmod 600 "$p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$keychain_password" "$keychain"
+
+          codesign --force --options runtime --timestamp \
+            --keychain "$keychain" --sign "$MACOS_SIGNING_IDENTITY" "$binary"
+          codesign --verify --strict --verbose=2 "$binary"
+          codesign_details=$(codesign --display --verbose=4 "$binary" 2>&1)
+          grep -F "Authority=$MACOS_SIGNING_IDENTITY" <<< "$codesign_details"
+          grep -F 'Runtime Version=' <<< "$codesign_details"
+          grep -F 'Timestamp=' <<< "$codesign_details"
+
+          ditto -c -k --keepParent "$binary" "$notary_zip"
+          xcrun notarytool submit "$notary_zip" --wait --output-format json \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" > "$notary_json"
+          notary_id=$(python3 - "$notary_json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              result = json.load(stream)
+          if result.get("status") != "Accepted" or not result.get("id"):
+              raise SystemExit("Apple notarization was not accepted")
+          print(result["id"])
+          PY
+          )
+
+          go run ./cmd/releasepack write-evidence \
+            --target "$TARGET" --out part --notarization-request-id "$notary_id"
+          go run ./cmd/releasepack package-target \
+            --target "$TARGET" --binary "$binary" --out part
+      - name: Upload immutable macOS candidate part
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: delegation-part-darwin-${{ matrix.arch }}-${{ github.run_id }}
+          path: part/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+
+  windows:
+    name: Windows ${{ matrix.arch }} signed candidate
+    needs: gate
+    runs-on: windows-latest
+    environment: release-signing
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.gate.outputs.source_commit }}
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: true
+      - name: Build native Windows runtime
+        shell: pwsh
+        env:
+          TARGET: windows-${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          go run ./cmd/releasepack build-target `
+            --target $env:TARGET --out (Join-Path $env:RUNNER_TEMP 'delegation.exe')
+      - name: Sign, timestamp, verify, and package Windows runtime
+        shell: pwsh
+        env:
+          TARGET: windows-${{ matrix.arch }}
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $binary = Join-Path $env:RUNNER_TEMP 'delegation.exe'
+          $pfx = Join-Path $env:RUNNER_TEMP 'delegation-signing.pfx'
+          $imported = @()
+          try {
+            $timestamp = [Uri]$env:WINDOWS_TIMESTAMP_URL
+            if ($timestamp.Scheme -ne 'https') {
+              throw 'WINDOWS_TIMESTAMP_URL must use HTTPS'
+            }
+            [IO.File]::WriteAllBytes(
+              $pfx,
+              [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64)
+            )
+            $password = ConvertTo-SecureString `
+              $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $imported = @(
+              Import-PfxCertificate -FilePath $pfx `
+                -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            )
+            $signingCertificate = $imported | Where-Object HasPrivateKey | Select-Object -First 1
+            if ($null -eq $signingCertificate) {
+              throw 'PFX did not contain a signing certificate with a private key'
+            }
+            $signtool = Get-ChildItem `
+              "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1 -ExpandProperty FullName
+            if (-not $signtool) {
+              throw 'signtool.exe was not found'
+            }
+            & $signtool sign /sha1 $signingCertificate.Thumbprint `
+              /fd SHA256 /tr $env:WINDOWS_TIMESTAMP_URL /td SHA256 $binary
+            & $signtool verify /pa /all /v $binary
+            $signature = Get-AuthenticodeSignature -FilePath $binary
+            if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+              throw "Authenticode verification failed: $($signature.Status)"
+            }
+            go run ./cmd/releasepack write-evidence `
+              --target $env:TARGET --out part
+            go run ./cmd/releasepack package-target `
+              --target $env:TARGET --binary $binary --out part
+          }
+          finally {
+            foreach ($certificate in $imported) {
+              Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" `
+                -Force -ErrorAction SilentlyContinue
+            }
+            Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+          }
+      - name: Upload immutable Windows candidate part
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: delegation-part-windows-${{ matrix.arch }}-${{ github.run_id }}
+          path: part/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+
+  assemble:
+    name: Assemble and attest immutable candidate
+    needs: [gate, linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.gate.outputs.source_commit }}
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: 1.26.5
+          check-latest: false
+          cache: true
+      - name: Download immutable native candidate parts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: delegation-part-*-${{ github.run_id }}
+          path: candidate-input
+          merge-multiple: true
+      - name: Assemble canonical candidate descriptor
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ needs.gate.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          go run ./cmd/releasepack assemble \
+            --input candidate-input \
+            --out dist \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$SOURCE_COMMIT" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --candidate-name "delegation-release-candidate-$GITHUB_RUN_ID"
+      - name: Attest candidate archives at source commit
+        id: provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: dist/release-artifacts.sha256
+      - name: Seal and verify candidate contents
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ needs.gate.outputs.source_commit }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$PROVENANCE_BUNDLE" dist/candidate-provenance.sigstore.json
+          go run ./cmd/releasepack verify-candidate \
+            --candidate dist \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$SOURCE_COMMIT" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --candidate-name "delegation-release-candidate-$GITHUB_RUN_ID"
+      - name: Upload immutable signed release candidate
+        id: candidate
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: delegation-release-candidate-${{ github.run_id }}
           path: dist/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
+          compression-level: 0
+          overwrite: true
+      - name: Record candidate identity
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.candidate.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.candidate.outputs.artifact-digest }}
+          SOURCE_COMMIT: ${{ needs.gate.outputs.source_commit }}
+        run: |
+          {
+            printf '### Delegation release candidate\n\n'
+            printf -- '- Source commit: `%s`\n' "$SOURCE_COMMIT"
+            printf -- '- Workflow run: `%s`\n' "$GITHUB_RUN_ID"
+            printf -- '- Artifact ID: `%s`\n' "$ARTIFACT_ID"
+            printf -- '- GitHub artifact SHA-256: `%s`\n' "$ARTIFACT_DIGEST"
+          } >> "$GITHUB_STEP_SUMMARY"

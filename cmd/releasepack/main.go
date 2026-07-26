@@ -55,6 +55,13 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return runCommand(args[0], args[1:], stdout, stderr)
+	}
+	return runPackageRelease(args, stdout, stderr)
+}
+
+func runPackageRelease(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("releasepack", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	repoRoot := flags.String("repo", ".", "repository root")

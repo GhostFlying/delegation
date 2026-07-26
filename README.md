@@ -47,23 +47,36 @@ not runtime dependencies of Delegation.
 
 ## Prepare A Release
 
-Freeze the version and all build-affecting source, then run the `Release candidate` workflow from
-that source commit. It builds all six runtime archives twice, requires byte-identical output, and
-uploads a candidate containing the generated `release-artifacts.sha256`. Review that candidate,
-then replace the comments in the plugin's checksum file with the reviewed manifest in a normal
-commit. If the version or any build-affecting source changes afterward, discard that manifest and
-generate a new candidate.
+Delegation promotes a signed candidate because Apple notarization and RFC 3161 timestamps make a
+second build byte-different. Freeze the version and every build-affecting source file in a commit
+`S` on `main`, then dispatch `Release candidate` from `main`. Native Linux, macOS, and Windows jobs
+build the six targets. The protected macOS and Windows jobs sign and verify each executable before
+packaging it; the final job creates a canonical descriptor, checksum manifest, signing evidence,
+and candidate SLSA provenance, then uploads one immutable candidate artifact. Its summary records
+the workflow run ID, artifact ID, GitHub artifact digest, and source commit.
 
-Before enabling releases, configure the `github-release` environment to accept deployments only
-from `main` and require approval. Also add a tag ruleset that prevents updates and deletion for
-`v*`, and enable immutable releases. The ruleset closes the force-move window while a release is
-being published; immutability protects its tag and assets after publication.
+Review the candidate and replace `plugins/delegation/release-artifacts.sha256` with its manifest in
+one normal commit `M`. That must be the only `S -> M` change, and `S` must be the single parent of
+`M`. Any source, version, dependency, build flag, signing input, or packaging change requires a new
+candidate. After the manifest commit passes CI, create `v<VERSION>` at `M`. Dispatch `Release` while
+selecting that tag as the workflow ref, and provide the candidate workflow run ID and artifact ID.
+Promotion verifies the GitHub run and artifact identities, the exact `S -> M` relationship, every
+archive and evidence digest, and the candidate provenance. It publishes the original candidate
+bytes without rebuilding or repackaging them, and adds a tag-bound promotion attestation.
 
-After the checksum commit passes CI, create `v<VERSION>` at that exact commit. Dispatch the
-`Release` workflow from `main` with that tag. Separate jobs validate the tag against `main`, build
-the six archives at the tagged commit, and verify them against the reviewed checksum manifest
-before the write-scoped job publishes them. Candidate preparation never creates a tag or release.
-Release signing and provenance hardening are deferred to M4.
+Before enabling signing, configure a required-reviewer `release-signing` environment that accepts
+deployments only from `main`. Define `MACOS_SIGNING_IDENTITY` and `WINDOWS_TIMESTAMP_URL` as
+environment variables, and add these environment secrets:
+
+- `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, and
+  `APPLE_APP_SPECIFIC_PASSWORD`;
+- `WINDOWS_CERTIFICATE_PFX_BASE64` and `WINDOWS_CERTIFICATE_PASSWORD`.
+
+Configure a separate required-reviewer `github-release` environment that accepts only `v*` tags;
+it needs no platform signing credential. Add a tag ruleset that prevents updates and deletion for
+`v*`, and enable immutable releases. Pull requests, ordinary CI, and promotion never receive the
+platform signing secrets. See [the M4 release trust contract](docs/m4-release-trust-contract.md) for
+the descriptor, provenance, verification, and credential-rotation rules.
 
 ## Configure The Network
 
