@@ -398,6 +398,10 @@ func (c *Client) ThreadResume(ctx context.Context, params, result any) error {
 	return c.Call(ctx, MethodThreadResume, params, result)
 }
 
+func (c *Client) ThreadRead(ctx context.Context, params, result any) error {
+	return c.Call(ctx, MethodThreadRead, params, result)
+}
+
 func (c *Client) MCPServerStatusList(ctx context.Context, params, result any) error {
 	return c.Call(ctx, MethodMCPServerStatusList, params, result)
 }

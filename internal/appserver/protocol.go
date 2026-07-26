@@ -12,6 +12,7 @@ import (
 const (
 	MethodThreadStart         = "thread/start"
 	MethodThreadResume        = "thread/resume"
+	MethodThreadRead          = "thread/read"
 	MethodMCPServerStatusList = "mcpServerStatus/list"
 	MethodTurnStart           = "turn/start"
 	MethodTurnSteer           = "turn/steer"
