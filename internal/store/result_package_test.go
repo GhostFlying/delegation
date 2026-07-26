@@ -64,6 +64,7 @@ func TestResultPackagePublishIsMetadataOnlyUnsequencedAndReplayable(t *testing.T
 	}
 	if record.State != ResultPackageDeliveryPending || record.Sequence != 0 ||
 		record.RootDeviceID != fixture.Root.DeviceID || record.PublishedAt != 40 ||
+		record.SourceAcknowledgedAt != 0 ||
 		record.SourcePrincipal != fixture.Worker || record.RootPrincipal != fixture.Root.Identity() ||
 		!protocol.SameResultPackageMetadata(record.Metadata, fixture.Metadata) ||
 		!reflect.DeepEqual(record.Manifest, fixture.Manifest) {
@@ -166,6 +167,71 @@ func TestPendingResultPackageRelaysAreBoundedAndPeerScoped(t *testing.T) {
 	)
 	if err != nil || len(page.Packages) != 0 {
 		t.Fatalf("delivered root relays = %#v, error %v", page, err)
+	}
+}
+
+func TestResultPackageSourceAcknowledgementIsAuthorizedDurableAndIdempotent(t *testing.T) {
+	fixture := prepareResultPackageFixture(t, false, true)
+	ctx := context.Background()
+	publishResultManifest(t, fixture, fixture.Manifest, 40)
+	if _, err := fixture.Registry.MarkResultPackageSourceAcknowledged(
+		ctx,
+		fixture.Worker.DeviceID,
+		fixture.Worker,
+		resultPackageOne,
+		time.Unix(50, 0),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("pending source acknowledgement error = %v, want ErrConflict", err)
+	}
+	if _, err := fixture.Registry.MarkResultPackageDelivered(
+		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageOne, time.Unix(50, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.Registry.MarkResultPackageSourceAcknowledged(
+		ctx,
+		fixture.Root.DeviceID,
+		fixture.Root.Identity(),
+		resultPackageOne,
+		time.Unix(60, 0),
+	); !errors.Is(err, ErrAuthorizationDenied) {
+		t.Fatalf("root source acknowledgement error = %v, want authorization denied", err)
+	}
+	acknowledged, err := fixture.Registry.MarkResultPackageSourceAcknowledged(
+		ctx,
+		fixture.Worker.DeviceID,
+		fixture.Worker,
+		resultPackageOne,
+		time.Unix(45, 0),
+	)
+	if err != nil || acknowledged.SourceAcknowledgedAt != 50 {
+		t.Fatalf("source acknowledgement = %#v, error %v", acknowledged, err)
+	}
+	replayed, err := fixture.Registry.MarkResultPackageSourceAcknowledged(
+		ctx,
+		fixture.Worker.DeviceID,
+		fixture.Worker,
+		resultPackageOne,
+		time.Unix(70, 0),
+	)
+	if err != nil || replayed.SourceAcknowledgedAt != 50 {
+		t.Fatalf("source acknowledgement replay = %#v, error %v", replayed, err)
+	}
+	page, err := fixture.Registry.ListPendingResultPackageRelaysForPeer(
+		ctx,
+		fixture.Worker.ControllerID,
+		fixture.Worker.DeviceID,
+		ResultPackageRelayPageRequest{Limit: 1},
+	)
+	if err != nil || len(page.Packages) != 0 || page.NextAfter != nil {
+		t.Fatalf("acknowledged source reconnect page = %#v, error %v", page, err)
+	}
+	rootPage, err := fixture.Registry.ListDeliveredResultPackages(
+		ctx, fixture.Root.Identity(), ResultPackagePageRequest{Limit: 1},
+	)
+	if err != nil || len(rootPage.Packages) != 1 ||
+		rootPage.Packages[0].SourceAcknowledgedAt != 50 {
+		t.Fatalf("root delivered package after source acknowledgement = %#v, error %v", rootPage, err)
 	}
 }
 
