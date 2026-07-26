@@ -78,10 +78,20 @@ func TestCapabilityAccessorsReturnCopies(t *testing.T) {
 	}
 }
 
-func TestRootDoesNotReceiveDeferredArtifactApply(t *testing.T) {
+func TestRootReceivesArtifactApplyWithoutExpandingWorkerCapabilities(t *testing.T) {
 	root := NewRootPrincipal(testControllerID, testTreeID, testAgentID, testDeviceID)
-	if root.Has(CapabilityArtifactApply) {
-		t.Fatal("M1 root received deferred artifact.apply capability")
+	if !root.Has(CapabilityArtifactApply) {
+		t.Fatal("root did not receive artifact.apply capability")
+	}
+	worker := NewWorkerPrincipal(
+		testControllerID,
+		testTreeID,
+		"123e4567-e89b-42d3-a456-426614174004",
+		testAgentID,
+		testDeviceID,
+	)
+	if worker.Has(CapabilityArtifactApply) {
+		t.Fatal("worker received artifact.apply capability")
 	}
 }
 

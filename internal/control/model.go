@@ -30,6 +30,7 @@ const (
 var rootCapabilities = []Capability{
 	CapabilityAgentManageDescendants,
 	CapabilityAgentSpawn,
+	CapabilityArtifactApply,
 	CapabilityDeviceRead,
 	CapabilityMessageTree,
 	CapabilityWorkspaceSync,
