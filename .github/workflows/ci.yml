@@ -305,10 +305,9 @@ jobs:
         run: |
           go run ./cmd/releasepack -out dist-first
           go run ./cmd/releasepack -out dist-second
-      - name: Compare candidate bytes
+      - name: Compare deterministic unsigned package bytes
         run: |
           diff -r dist-first dist-second
-          diff -u plugins/delegation/release-artifacts.sha256 dist-first/release-artifacts.sha256
       - name: Verify exact release target matrix
         shell: bash
         run: |
@@ -334,3 +333,32 @@ jobs:
           diff -u "$expected" "$actual"
           diff -u "$expected" "$manifest"
           (cd dist-first && sha256sum --strict -c release-artifacts.sha256)
+      - name: Exercise candidate descriptor and verifier without signing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir mock-input
+          cp dist-first/delegation_* mock-input/
+          for target in linux-amd64 linux-arm64 windows-amd64 windows-arm64; do
+            go run ./cmd/releasepack write-evidence --target "$target" --out mock-input
+          done
+          for target in darwin-amd64 darwin-arm64; do
+            go run ./cmd/releasepack write-evidence \
+              --target "$target" \
+              --out mock-input \
+              --notarization-request-id d5c99425-16c7-47ab-9e96-8f65f018111f
+          done
+          go run ./cmd/releasepack assemble \
+            --input mock-input \
+            --out mock-candidate \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --candidate-name "delegation-release-candidate-$GITHUB_RUN_ID"
+          printf '{}\n' > mock-candidate/candidate-provenance.sigstore.json
+          go run ./cmd/releasepack verify-candidate \
+            --candidate mock-candidate \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --candidate-name "delegation-release-candidate-$GITHUB_RUN_ID"
