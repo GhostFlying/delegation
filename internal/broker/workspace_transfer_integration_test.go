@@ -959,14 +959,20 @@ func TestWorkspaceRPCTransferFailureCleansCreatedState(t *testing.T) {
 
 func waitForWorkspaceSessionReplacement(t *testing.T, server *Server, deviceID string, initial *session) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(writeTimeout)
 	for {
 		current := server.connection(deviceID)
-		if current != nil && current != initial {
+		server.mu.Lock()
+		_, initialTracked := server.peers[initial.connection]
+		server.mu.Unlock()
+		if current != nil && current != initial && !initialTracked {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("workspace connector did not replace session %p: current=%p", initial, current)
+			t.Fatalf(
+				"workspace connector did not drain and replace session %p: current=%p tracked=%t",
+				initial, current, initialTracked,
+			)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
