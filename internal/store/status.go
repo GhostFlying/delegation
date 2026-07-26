@@ -3,10 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
 // StatusSnapshot is a bounded, controller-scoped view of durable broker state.
@@ -16,6 +18,7 @@ type StatusSnapshot struct {
 	Dispatches StatusDispatchCounts
 	Workers    StatusWorkerCounts
 	Artifacts  StatusArtifactCounts
+	Results    StatusResultCounts
 	Lifetime   StatusLifetimeCounters
 }
 
@@ -41,6 +44,12 @@ type StatusArtifactCounts struct {
 	CaptureFailed int
 }
 
+type StatusResultCounts struct {
+	DeliveryPending    int
+	Delivered          int
+	SourceAcknowledged int
+}
+
 type StatusLifetimeCounters struct {
 	DispatchesStarted uint64
 	TurnsStarted      uint64
@@ -51,6 +60,7 @@ type PeerStatusSnapshot struct {
 	WorkerRevision uint64
 	Workers        PeerStatusWorkerCounts
 	Artifacts      PeerStatusArtifactCounts
+	Results        PeerStatusResultCounts
 }
 
 type PeerStatusWorkerCounts struct {
@@ -73,6 +83,20 @@ type PeerStatusArtifactCounts struct {
 	PublishBacklog int
 	Retained       int
 	RetainedBytes  int64
+}
+
+type PeerStatusResultCounts struct {
+	OutboxCapturePending   int
+	OutboxPublishPending   int
+	OutboxDeliveryPending  int
+	OutboxDelivered        int
+	OutboxRetainedBytes    int64
+	InboxReceiving         int
+	InboxAvailable         int
+	InboxEvictionPending   int
+	InboxRetainedBytes     int64
+	RolloutCaptureFailed   int
+	WorkspaceCaptureFailed int
 }
 
 type statusLifetimeCounterIncrement struct {
@@ -166,6 +190,20 @@ WHERE controller_id = ?
 		&snapshot.Artifacts.CaptureFailed,
 	); err != nil {
 		return StatusSnapshot{}, fmt.Errorf("read status artifact counts: %w", err)
+	}
+	if err := transaction.QueryRowContext(ctx, `
+SELECT
+	COALESCE(sum(CASE WHEN state = 'deliveryPending' THEN 1 ELSE 0 END), 0),
+	COALESCE(sum(CASE WHEN state = 'delivered' THEN 1 ELSE 0 END), 0),
+	COALESCE(sum(CASE WHEN source_acknowledged_at > 0 THEN 1 ELSE 0 END), 0)
+FROM result_packages
+WHERE controller_id = ?
+`, controllerID).Scan(
+		&snapshot.Results.DeliveryPending,
+		&snapshot.Results.Delivered,
+		&snapshot.Results.SourceAcknowledged,
+	); err != nil {
+		return StatusSnapshot{}, fmt.Errorf("read status result package counts: %w", err)
 	}
 	if err := transaction.QueryRowContext(ctx, `
 SELECT
@@ -300,6 +338,81 @@ WHERE artifact.controller_id = ? AND worker.device_id = ?
 		&snapshot.Artifacts.RetainedBytes,
 	); err != nil {
 		return PeerStatusSnapshot{}, fmt.Errorf("read peer status artifact counts: %w", err)
+	}
+	if err := transaction.QueryRowContext(ctx, `
+SELECT
+	COALESCE(sum(CASE WHEN state = 'capturePending' THEN 1 ELSE 0 END), 0),
+	COALESCE(sum(CASE WHEN state = 'publishPending' THEN 1 ELSE 0 END), 0),
+	COALESCE(sum(CASE WHEN state = 'deliveryPending' THEN 1 ELSE 0 END), 0),
+	COALESCE(sum(CASE WHEN state = 'delivered' THEN 1 ELSE 0 END), 0),
+	COALESCE(sum(reserved_bytes), 0)
+FROM peer_result_outbox
+WHERE controller_id = ? AND source_device_id = ?
+`, controllerID, deviceID).Scan(
+		&snapshot.Results.OutboxCapturePending,
+		&snapshot.Results.OutboxPublishPending,
+		&snapshot.Results.OutboxDeliveryPending,
+		&snapshot.Results.OutboxDelivered,
+		&snapshot.Results.OutboxRetainedBytes,
+	); err != nil {
+		return PeerStatusSnapshot{}, fmt.Errorf("read peer status result outbox counts: %w", err)
+	}
+	if err := transaction.QueryRowContext(ctx, `
+SELECT
+	COALESCE(sum(CASE WHEN state = 'receiving' THEN 1 ELSE 0 END), 0),
+	COALESCE(sum(CASE WHEN state = 'available' THEN 1 ELSE 0 END), 0),
+	COALESCE(sum(CASE WHEN state = 'evictionTombstone' THEN 1 ELSE 0 END), 0),
+	COALESCE(sum(package_bytes), 0)
+FROM peer_result_inbox
+WHERE controller_id = ? AND root_device_id = ?
+`, controllerID, deviceID).Scan(
+		&snapshot.Results.InboxReceiving,
+		&snapshot.Results.InboxAvailable,
+		&snapshot.Results.InboxEvictionPending,
+		&snapshot.Results.InboxRetainedBytes,
+	); err != nil {
+		return PeerStatusSnapshot{}, fmt.Errorf("read peer status result inbox counts: %w", err)
+	}
+	rows, err := transaction.QueryContext(ctx, `
+SELECT manifest_bytes
+FROM peer_result_outbox
+WHERE controller_id = ? AND source_device_id = ? AND state <> 'capturePending'
+ORDER BY created_at, package_id
+LIMIT ?
+`, controllerID, deviceID, MaximumPeerResultPackages+1)
+	if err != nil {
+		return PeerStatusSnapshot{}, fmt.Errorf("read peer status result manifests: %w", err)
+	}
+	manifestCount := 0
+	for rows.Next() {
+		manifestCount++
+		if manifestCount > MaximumPeerResultPackages {
+			_ = rows.Close()
+			return PeerStatusSnapshot{}, errors.New("peer result outbox exceeds its package quota")
+		}
+		var manifestBytes []byte
+		if err := rows.Scan(&manifestBytes); err != nil {
+			_ = rows.Close()
+			return PeerStatusSnapshot{}, fmt.Errorf("scan peer status result manifest: %w", err)
+		}
+		manifest, err := protocol.DecodeResultManifest(manifestBytes)
+		if err != nil {
+			_ = rows.Close()
+			return PeerStatusSnapshot{}, fmt.Errorf("decode peer status result manifest: %w", err)
+		}
+		if manifest.Rollout.Status == protocol.ResultRolloutCaptureFailed {
+			snapshot.Results.RolloutCaptureFailed++
+		}
+		if manifest.Workspace.Status == protocol.ResultWorkspaceCaptureFailed {
+			snapshot.Results.WorkspaceCaptureFailed++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return PeerStatusSnapshot{}, fmt.Errorf("read peer status result manifests: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return PeerStatusSnapshot{}, fmt.Errorf("close peer status result manifests: %w", err)
 	}
 	if err := transaction.Commit(); err != nil {
 		return PeerStatusSnapshot{}, fmt.Errorf("commit peer status snapshot: %w", err)

@@ -30,6 +30,14 @@ func TestReadStatusReturnsValidatedLocalSnapshot(t *testing.T) {
 		Artifacts: ArtifactCounts{
 			CapturePending: 1, PublishPending: 2, Retained: 3, RetainedBytes: 4096,
 		},
+		Results: ResultCounts{
+			OutboxCapturePending: 1, OutboxPublishPending: 2,
+			OutboxDeliveryPending: 3, OutboxDelivered: 4,
+			OutboxRetainedBytes: 8192,
+			InboxReceiving:      1, InboxAvailable: 2, InboxEvictionPending: 3,
+			InboxRetainedBytes:   16384,
+			RolloutCaptureFailed: 2, WorkspaceCaptureFailed: 1,
+		},
 	}
 	endpoint := testEndpoint(t)
 	server, err := ListenWithStatus(
@@ -95,6 +103,30 @@ func TestStatusSnapshotRejectsInconsistentCountsAndSynchronization(t *testing.T)
 			name: "non-printing version",
 			mutate: func(status *StatusSnapshot) {
 				status.Version = "version\nsecret"
+			},
+		},
+		{
+			name: "negative result count",
+			mutate: func(status *StatusSnapshot) {
+				status.Results.InboxAvailable = -1
+			},
+		},
+		{
+			name: "outbox bytes without packages",
+			mutate: func(status *StatusSnapshot) {
+				status.Results.OutboxRetainedBytes = 1
+			},
+		},
+		{
+			name: "capture failures without captured outbox",
+			mutate: func(status *StatusSnapshot) {
+				status.Results.RolloutCaptureFailed = 1
+			},
+		},
+		{
+			name: "inbox package without bytes",
+			mutate: func(status *StatusSnapshot) {
+				status.Results.InboxReceiving = 1
 			},
 		},
 	}

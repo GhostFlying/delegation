@@ -79,6 +79,14 @@ func TestPeerLocalStatusProviderCombinesLiveAndDurableState(t *testing.T) {
 		Artifacts: store.PeerStatusArtifactCounts{
 			CaptureBacklog: 2, PublishBacklog: 3, Retained: 4, RetainedBytes: 8192,
 		},
+		Results: store.PeerStatusResultCounts{
+			OutboxCapturePending: 1, OutboxPublishPending: 2,
+			OutboxDeliveryPending: 3, OutboxDelivered: 4,
+			OutboxRetainedBytes: 16384,
+			InboxReceiving:      5, InboxAvailable: 6, InboxEvictionPending: 7,
+			InboxRetainedBytes:   32768,
+			RolloutCaptureFailed: 2, WorkspaceCaptureFailed: 1,
+		},
 	}
 	provider := peerLocalStatusProvider{
 		client: staticConnectorStatus{status: connector.Status{
@@ -113,6 +121,14 @@ func TestPeerLocalStatusProviderCombinesLiveAndDurableState(t *testing.T) {
 		},
 		Artifacts: localbridge.ArtifactCounts{
 			CapturePending: 2, PublishPending: 3, Retained: 4, RetainedBytes: 8192,
+		},
+		Results: localbridge.ResultCounts{
+			OutboxCapturePending: 1, OutboxPublishPending: 2,
+			OutboxDeliveryPending: 3, OutboxDelivered: 4,
+			OutboxRetainedBytes: 16384,
+			InboxReceiving:      5, InboxAvailable: 6, InboxEvictionPending: 7,
+			InboxRetainedBytes:   32768,
+			RolloutCaptureFailed: 2, WorkspaceCaptureFailed: 1,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -179,12 +195,24 @@ artifacts:
   publish pending: 3
   retained: 4
   retained bytes: 8192
+results:
+  outbox capture pending: 1
+  outbox publish pending: 2
+  outbox delivery pending: 3
+  outbox delivered: 4
+  outbox retained bytes: 16384
+  inbox receiving: 5
+  inbox available: 6
+  inbox eviction pending: 7
+  inbox retained bytes: 32768
+  rollout capture failed: 2
+  workspace capture failed: 1
 `,
 		},
 		{
 			name: "JSON",
 			args: []string{"status", "--config", configPath, "--json"},
-			want: `{"version":"0.2.0-test","controllerId":"123e4567-e89b-42d3-a456-426614174800","deviceId":"123e4567-e89b-42d3-a456-426614174801","deviceName":"status-peer","connected":true,"registryRevision":42,"workerRevision":77,"brokerWorkerRevision":77,"workerSyncReady":true,"maxWorkerSlots":8,"workers":{"total":10,"reserved":1,"pending":1,"starting":1,"preflight":1,"ready":1,"running":1,"finalizing":1,"idle":1,"interrupted":1,"failed":1,"occupied":6},"artifacts":{"capturePending":2,"publishPending":3,"retained":4,"retainedBytes":8192}}` + "\n",
+			want: `{"version":"0.2.0-test","controllerId":"123e4567-e89b-42d3-a456-426614174800","deviceId":"123e4567-e89b-42d3-a456-426614174801","deviceName":"status-peer","connected":true,"registryRevision":42,"workerRevision":77,"brokerWorkerRevision":77,"workerSyncReady":true,"maxWorkerSlots":8,"workers":{"total":10,"reserved":1,"pending":1,"starting":1,"preflight":1,"ready":1,"running":1,"finalizing":1,"idle":1,"interrupted":1,"failed":1,"occupied":6},"artifacts":{"capturePending":2,"publishPending":3,"retained":4,"retainedBytes":8192},"results":{"outboxCapturePending":1,"outboxPublishPending":2,"outboxDeliveryPending":3,"outboxDelivered":4,"outboxRetainedBytes":16384,"inboxReceiving":5,"inboxAvailable":6,"inboxEvictionPending":7,"inboxRetainedBytes":32768,"rolloutCaptureFailed":2,"workspaceCaptureFailed":1}}` + "\n",
 		},
 	}
 	for _, test := range tests {
@@ -351,6 +379,14 @@ func statusTestSnapshot(cfg delegationconfig.Config) localbridge.StatusSnapshot 
 		},
 		Artifacts: localbridge.ArtifactCounts{
 			CapturePending: 2, PublishPending: 3, Retained: 4, RetainedBytes: 8192,
+		},
+		Results: localbridge.ResultCounts{
+			OutboxCapturePending: 1, OutboxPublishPending: 2,
+			OutboxDeliveryPending: 3, OutboxDelivered: 4,
+			OutboxRetainedBytes: 16384,
+			InboxReceiving:      5, InboxAvailable: 6, InboxEvictionPending: 7,
+			InboxRetainedBytes:   32768,
+			RolloutCaptureFailed: 2, WorkspaceCaptureFailed: 1,
 		},
 	}
 }

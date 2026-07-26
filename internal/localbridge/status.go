@@ -38,6 +38,20 @@ type ArtifactCounts struct {
 	RetainedBytes  int64 `json:"retainedBytes"`
 }
 
+type ResultCounts struct {
+	OutboxCapturePending   int64 `json:"outboxCapturePending"`
+	OutboxPublishPending   int64 `json:"outboxPublishPending"`
+	OutboxDeliveryPending  int64 `json:"outboxDeliveryPending"`
+	OutboxDelivered        int64 `json:"outboxDelivered"`
+	OutboxRetainedBytes    int64 `json:"outboxRetainedBytes"`
+	InboxReceiving         int64 `json:"inboxReceiving"`
+	InboxAvailable         int64 `json:"inboxAvailable"`
+	InboxEvictionPending   int64 `json:"inboxEvictionPending"`
+	InboxRetainedBytes     int64 `json:"inboxRetainedBytes"`
+	RolloutCaptureFailed   int64 `json:"rolloutCaptureFailed"`
+	WorkspaceCaptureFailed int64 `json:"workspaceCaptureFailed"`
+}
+
 type StatusSnapshot struct {
 	Version              string         `json:"version"`
 	ControllerID         string         `json:"controllerId"`
@@ -51,6 +65,7 @@ type StatusSnapshot struct {
 	MaxWorkerSlots       int            `json:"maxWorkerSlots"`
 	Workers              WorkerCounts   `json:"workers"`
 	Artifacts            ArtifactCounts `json:"artifacts"`
+	Results              ResultCounts   `json:"results"`
 }
 
 func (s StatusSnapshot) Validate() error {
@@ -80,7 +95,12 @@ func (s StatusSnapshot) Validate() error {
 		s.Workers.Preflight, s.Workers.Ready, s.Workers.Running, s.Workers.Finalizing,
 		s.Workers.Idle, s.Workers.Interrupted, s.Workers.Failed, s.Workers.Occupied,
 		s.Artifacts.CapturePending, s.Artifacts.PublishPending, s.Artifacts.Retained,
-		s.Artifacts.RetainedBytes,
+		s.Artifacts.RetainedBytes, s.Results.OutboxCapturePending,
+		s.Results.OutboxPublishPending, s.Results.OutboxDeliveryPending,
+		s.Results.OutboxDelivered, s.Results.OutboxRetainedBytes,
+		s.Results.InboxReceiving, s.Results.InboxAvailable,
+		s.Results.InboxEvictionPending, s.Results.InboxRetainedBytes,
+		s.Results.RolloutCaptureFailed, s.Results.WorkspaceCaptureFailed,
 	}
 	for _, count := range counts {
 		if count < 0 {
@@ -105,6 +125,28 @@ func (s StatusSnapshot) Validate() error {
 	if s.WorkerSyncReady &&
 		(!s.Connected || s.BrokerWorkerRevision != s.WorkerRevision) {
 		return errors.New("worker synchronization state is inconsistent")
+	}
+	outboxCount, ok := sumCounts(
+		s.Results.OutboxCapturePending, s.Results.OutboxPublishPending,
+		s.Results.OutboxDeliveryPending, s.Results.OutboxDelivered,
+	)
+	if !ok || (outboxCount == 0) != (s.Results.OutboxRetainedBytes == 0) {
+		return errors.New("result outbox counts are inconsistent")
+	}
+	capturedOutboxCount, ok := sumCounts(
+		s.Results.OutboxPublishPending, s.Results.OutboxDeliveryPending,
+		s.Results.OutboxDelivered,
+	)
+	if !ok || s.Results.RolloutCaptureFailed > capturedOutboxCount ||
+		s.Results.WorkspaceCaptureFailed > capturedOutboxCount {
+		return errors.New("result capture counts are inconsistent")
+	}
+	inboxCount, ok := sumCounts(
+		s.Results.InboxReceiving, s.Results.InboxAvailable,
+		s.Results.InboxEvictionPending,
+	)
+	if !ok || (inboxCount == 0) != (s.Results.InboxRetainedBytes == 0) {
+		return errors.New("result inbox counts are inconsistent")
 	}
 	return nil
 }

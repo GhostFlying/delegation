@@ -79,6 +79,11 @@ func (s *Server) buildStatusSnapshot(
 			Unchanged:     uint64(durable.Artifacts.Unchanged),
 			CaptureFailed: uint64(durable.Artifacts.CaptureFailed),
 		},
+		Results: statuspage.ResultCounts{
+			DeliveryPending:    uint64(durable.Results.DeliveryPending),
+			Delivered:          uint64(durable.Results.Delivered),
+			SourceAcknowledged: uint64(durable.Results.SourceAcknowledged),
+		},
 	}
 }
 
