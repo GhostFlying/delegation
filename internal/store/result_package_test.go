@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	resultPackageOne = "123e4567-e89b-42d3-a456-426614175130"
-	resultPackageTwo = "123e4567-e89b-42d3-a456-426614175131"
-	resultTurnTwo    = "123e4567-e89b-42d3-a456-426614175132"
-	resultThreadTwo  = "123e4567-e89b-42d3-a456-426614175133"
+	resultPackageOne  = "123e4567-e89b-42d3-a456-426614175130"
+	resultPackageTwo  = "123e4567-e89b-42d3-a456-426614175131"
+	resultTurnTwo     = "123e4567-e89b-42d3-a456-426614175132"
+	resultThreadTwo   = "123e4567-e89b-42d3-a456-426614175133"
+	resultRelayParent = "123e4567-e89b-42d3-a456-426614175134"
 )
 
 type resultPackageFixture struct {
@@ -63,6 +64,7 @@ func TestResultPackagePublishIsMetadataOnlyUnsequencedAndReplayable(t *testing.T
 	}
 	if record.State != ResultPackageDeliveryPending || record.Sequence != 0 ||
 		record.RootDeviceID != fixture.Root.DeviceID || record.PublishedAt != 40 ||
+		record.SourcePrincipal != fixture.Worker || record.RootPrincipal != fixture.Root.Identity() ||
 		!protocol.SameResultPackageMetadata(record.Metadata, fixture.Metadata) ||
 		!reflect.DeepEqual(record.Manifest, fixture.Manifest) {
 		t.Fatalf("stored result package = %#v", record)
@@ -84,6 +86,124 @@ func TestResultPackagePublishIsMetadataOnlyUnsequencedAndReplayable(t *testing.T
 		t.Fatalf("published metadata count=%d, result sequence=%d", count, sequence)
 	}
 	assertResultPackageTableHasNoPayloadColumns(t, fixture.Registry)
+}
+
+func TestPendingResultPackageRelaysAreBoundedAndPeerScoped(t *testing.T) {
+	fixture := prepareResultPackageFixture(t, false, true)
+	ctx := context.Background()
+	publishResultManifest(t, fixture, fixture.Manifest, 40)
+	for name, deviceID := range map[string]string{
+		"source": fixture.Worker.DeviceID,
+		"root":   fixture.Root.DeviceID,
+	} {
+		t.Run(name, func(t *testing.T) {
+			page, err := fixture.Registry.ListPendingResultPackageRelaysForPeer(
+				ctx, fixture.Worker.ControllerID, deviceID, ResultPackageRelayPageRequest{Limit: 1},
+			)
+			if err != nil || len(page.Packages) != 1 {
+				t.Fatalf("pending relays = %#v, error %v", page, err)
+			}
+			if page.Packages[0].SourcePrincipal != fixture.Worker ||
+				page.Packages[0].RootPrincipal != fixture.Root.Identity() ||
+				page.Packages[0].Manifest.PackageID != resultPackageOne {
+				t.Fatalf("pending relay authority = %#v", page.Packages[0])
+			}
+		})
+	}
+	firstPage, err := fixture.Registry.ListPendingResultPackageRelaysForPeer(
+		ctx,
+		fixture.Worker.ControllerID,
+		fixture.Worker.DeviceID,
+		ResultPackageRelayPageRequest{Limit: 1},
+	)
+	if err != nil || firstPage.NextAfter == nil {
+		t.Fatalf("exact-full pending relay page = %#v, error %v", firstPage, err)
+	}
+	tailPage, err := fixture.Registry.ListPendingResultPackageRelaysForPeer(
+		ctx,
+		fixture.Worker.ControllerID,
+		fixture.Worker.DeviceID,
+		ResultPackageRelayPageRequest{After: firstPage.NextAfter, Limit: 1},
+	)
+	if err != nil || len(tailPage.Packages) != 0 || tailPage.NextAfter != nil {
+		t.Fatalf("pending relay page after exact limit = %#v, error %v", tailPage, err)
+	}
+	otherDeviceID := "123e4567-e89b-42d3-a456-426614175134"
+	page, err := fixture.Registry.ListPendingResultPackageRelaysForPeer(
+		ctx, fixture.Worker.ControllerID, otherDeviceID, ResultPackageRelayPageRequest{Limit: 1},
+	)
+	if err != nil || len(page.Packages) != 0 {
+		t.Fatalf("unrelated peer relays = %#v, error %v", page, err)
+	}
+	if _, err := fixture.Registry.ListPendingResultPackageRelaysForPeer(
+		ctx,
+		fixture.Worker.ControllerID,
+		fixture.Worker.DeviceID,
+		ResultPackageRelayPageRequest{Limit: maximumPendingResultRelays + 1},
+	); err == nil {
+		t.Fatal("pending relay lookup accepted an unbounded limit")
+	}
+
+	if _, err := fixture.Registry.MarkResultPackageDelivered(
+		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageOne, time.Unix(50, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	page, err = fixture.Registry.ListPendingResultPackageRelaysForPeer(
+		ctx,
+		fixture.Worker.ControllerID,
+		fixture.Worker.DeviceID,
+		ResultPackageRelayPageRequest{Limit: 1},
+	)
+	if err != nil || len(page.Packages) != 1 || page.Packages[0].State != ResultPackageDelivered {
+		t.Fatalf("delivered source acknowledgement = %#v, error %v", page, err)
+	}
+	page, err = fixture.Registry.ListPendingResultPackageRelaysForPeer(
+		ctx,
+		fixture.Worker.ControllerID,
+		fixture.Root.DeviceID,
+		ResultPackageRelayPageRequest{Limit: 1},
+	)
+	if err != nil || len(page.Packages) != 0 {
+		t.Fatalf("delivered root relays = %#v, error %v", page, err)
+	}
+}
+
+func TestPendingResultPackageRelayDerivesTreeRootInsteadOfSourceParent(t *testing.T) {
+	fixture := prepareResultPackageFixture(t, false, true)
+	ctx := context.Background()
+	publishResultManifest(t, fixture, fixture.Manifest, 40)
+	if _, err := fixture.Registry.CreateWorkerPrincipal(
+		ctx,
+		fixture.Worker.ControllerID,
+		fixture.Worker.TreeID,
+		resultRelayParent,
+		fixture.Root.AgentID,
+		fixture.Worker.DeviceID,
+		time.Unix(41, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.Registry.db.ExecContext(ctx, `
+UPDATE principals
+SET parent_agent_id = ?
+WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
+`, resultRelayParent, fixture.Worker.ControllerID, fixture.Worker.TreeID, fixture.Worker.AgentID); err != nil {
+		t.Fatal(err)
+	}
+	page, err := fixture.Registry.ListPendingResultPackageRelaysForPeer(
+		ctx,
+		fixture.Worker.ControllerID,
+		fixture.Worker.DeviceID,
+		ResultPackageRelayPageRequest{Limit: 1},
+	)
+	if err != nil || len(page.Packages) != 1 {
+		t.Fatalf("pending relays = %#v, error %v", page, err)
+	}
+	if page.Packages[0].SourcePrincipal.ParentAgentID != resultRelayParent ||
+		page.Packages[0].RootPrincipal != fixture.Root.Identity() {
+		t.Fatalf("derived relay principals = %#v", page.Packages[0])
+	}
 }
 
 func TestResultPackagePublishConflictsAreAtomicByPackageAndSourceTurn(t *testing.T) {
