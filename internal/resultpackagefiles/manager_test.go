@@ -806,13 +806,27 @@ func (f *managerFixture) publishOutbox(
 		worker, err = f.state.MarkWorkerReady(ctx, worker.WorkerKey, start.Add(3*time.Second))
 	}
 	if err == nil {
-		worker, err = f.state.MarkWorkerRunning(ctx, worker.WorkerKey, testTurnID, start.Add(4*time.Second))
+		_, _, err = f.state.PrepareWorkerTurnStartIntent(ctx, store.PrepareWorkerTurnStartIntentRequest{
+			WorkerKey: worker.WorkerKey, IntentID: testID(98), DeviceID: testDeviceID,
+			ManagedThreadID: testThreadID, PackageID: packageID,
+			Rollout: store.WorkerRolloutLocator{
+				Status: store.WorkerRolloutUnavailable, FailureCode: "rollout_unavailable",
+			},
+			ReservationLimitBytes: protocol.MaximumResultPackageBytes,
+		}, start.Add(4*time.Second))
+	}
+	if err == nil {
+		var resolution store.WorkerTurnStartResolution
+		resolution, err = f.state.BindWorkerTurnStartIntent(
+			ctx, worker.WorkerKey, testID(98), testTurnID, start.Add(5*time.Second),
+		)
+		worker = resolution.Worker
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
 	finalization, err := f.state.BeginWorkerFinalization(
-		ctx, worker.WorkerKey, testTurnID, store.WorkerIdle, "", start.Add(5*time.Second),
+		ctx, worker.WorkerKey, testTurnID, store.WorkerIdle, "", start.Add(6*time.Second),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -829,7 +843,7 @@ func (f *managerFixture) publishOutbox(
 		ManagedThreadID: testThreadID, TurnID: testTurnID,
 		LifecycleRevision: worker.Revision,
 		Terminal:          protocol.ResultTerminal{Outcome: protocol.ResultTerminalCompleted},
-		CapturedAt:        start.Add(5 * time.Second).Unix(),
+		CapturedAt:        start.Add(6 * time.Second).Unix(),
 		Rollout: protocol.ResultRolloutComponent{
 			Status: protocol.ResultRolloutCaptureFailed, FailureCode: "rollout_unavailable",
 		},
@@ -848,15 +862,12 @@ func (f *managerFixture) publishOutbox(
 	key := store.ResultOutboxKey{
 		WorkerKey: worker.WorkerKey, SourceDeviceID: testDeviceID, PackageID: packageID,
 	}
-	if _, err := f.state.ReserveResultOutbox(ctx, key, protocol.MaximumResultPackageBytes, start); err != nil {
-		t.Fatal(err)
-	}
 	if err := writePackageDirectory(f.manager.outbox, packageID, metadata, map[string][]byte{
 		protocol.ResultChangesBundleFileName: bundle,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.state.CommitResultOutboxCapture(ctx, key, metadata, start.Add(time.Second)); err != nil {
+	if _, err := f.state.CommitResultOutboxCapture(ctx, key, metadata, start.Add(7*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	return metadata, worker
