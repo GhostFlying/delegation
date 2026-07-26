@@ -74,3 +74,24 @@ func TestLocateRejectsSymbolicLink(t *testing.T) {
 		t.Fatal("Locate accepted a symbolic-link component")
 	}
 }
+
+func TestLocateDoesNotTreatBackslashAsUnixSeparator(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("backslash is a path separator on Windows")
+	}
+	home := t.TempDir()
+	path := filepath.Join(
+		home,
+		"sessions\\sibling",
+		"rollout-2026-07-26T00-00-00-"+testThreadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Locate(home, testThreadID, path); err == nil {
+		t.Fatal("Locate accepted a Unix directory whose name only begins with sessions")
+	}
+}

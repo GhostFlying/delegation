@@ -96,7 +96,5 @@ func sameComponent(left, right string) bool {
 }
 
 func splitPath(path string) []string {
-	return strings.FieldsFunc(path, func(char rune) bool {
-		return char == '/' || char == '\\'
-	})
+	return strings.Split(path, string(filepath.Separator))
 }
