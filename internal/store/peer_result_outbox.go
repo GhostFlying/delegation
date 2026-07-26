@@ -210,23 +210,82 @@ func (s *PeerStore) AcknowledgeResultOutboxMetadata(
 	key ResultOutboxKey,
 	metadata protocol.ResultPackageMetadata,
 	observedAt time.Time,
-) (ResultOutbox, error) {
+) (WorkerResultFinalization, error) {
+	if err := key.Validate(); err != nil {
+		return WorkerResultFinalization{}, err
+	}
 	manifest, err := metadata.DecodeManifest()
 	if err != nil {
-		return ResultOutbox{}, err
+		return WorkerResultFinalization{}, err
 	}
 	if err := validateStoredResultMetadata(key, metadata, manifest); err != nil {
-		return ResultOutbox{}, err
+		return WorkerResultFinalization{}, err
 	}
-	return s.transitionResultOutbox(
-		ctx,
-		key,
-		observedAt,
-		ResultOutboxPublishPending,
-		ResultOutboxDeliveryPending,
-		0,
-		&metadata,
-	)
+	timestamp, err := resultObservedAt(observedAt)
+	if err != nil {
+		return WorkerResultFinalization{}, err
+	}
+	var finalization WorkerResultFinalization
+	err = withImmediateTransaction(ctx, s.db, "peer", func(connection *sql.Conn) error {
+		outbox, queryErr := queryResultOutbox(ctx, connection, key)
+		if queryErr != nil {
+			return queryErr
+		}
+		if !protocol.SameResultPackageMetadata(outbox.Metadata, metadata) {
+			return ErrResultPackageConflict
+		}
+		worker, queryErr := queryWorker(ctx, connection, key.WorkerKey)
+		if queryErr != nil {
+			return queryErr
+		}
+		if outbox.State == ResultOutboxDeliveryPending || outbox.State == ResultOutboxDelivered {
+			if worker.DeviceID != outbox.SourceDeviceID ||
+				worker.CodexThreadID != manifest.ManagedThreadID {
+				return ErrResultPackageAuthority
+			}
+			intent, intentErr := queryWorkerTurnStartIntentByPackage(
+				ctx, connection, key.PackageID,
+			)
+			if intentErr != nil && !errors.Is(intentErr, ErrNotFound) {
+				return intentErr
+			}
+			finalization = WorkerResultFinalization{Intent: intent, Worker: worker, Outbox: outbox}
+			return nil
+		}
+		if outbox.State != ResultOutboxPublishPending {
+			return ErrResultPackageTransition
+		}
+		intent, queryErr := queryWorkerTurnStartIntentByPackage(ctx, connection, key.PackageID)
+		if queryErr != nil {
+			return queryErr
+		}
+		if err := validateResultOutboxTurnIntentAuthority(ctx, connection, outbox, manifest); err != nil {
+			return err
+		}
+		worker, queryErr = completeWorkerResultFinalization(
+			ctx, connection, worker, manifest, timestamp,
+		)
+		if queryErr != nil {
+			return queryErr
+		}
+		outbox.State = ResultOutboxDeliveryPending
+		outbox.UpdatedAt = max(timestamp, outbox.UpdatedAt, worker.UpdatedAt)
+		result, execErr := connection.ExecContext(ctx, `
+UPDATE peer_result_outbox
+SET state = 'deliveryPending', delivery_sequence = 0, updated_at = ?
+WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND package_id = ?
+	AND state = 'publishPending'
+`, outbox.UpdatedAt, key.ControllerID, key.TreeID, key.AgentID, key.PackageID)
+		if execErr != nil {
+			return fmt.Errorf("acknowledge result outbox metadata: %w", execErr)
+		}
+		if err := requireWorkerTurnStartUpdate(result); err != nil {
+			return err
+		}
+		finalization = WorkerResultFinalization{Intent: intent, Worker: worker, Outbox: outbox}
+		return nil
+	})
+	return finalization, err
 }
 
 func (s *PeerStore) AcknowledgeResultOutboxDelivery(
@@ -318,6 +377,14 @@ func (s *PeerStore) ListPendingResultPublications(
 	limit int,
 ) ([]ResultOutbox, error) {
 	return s.listResultOutboxes(ctx, controllerID, deviceID, ResultOutboxPublishPending, limit)
+}
+
+func (s *PeerStore) ListPendingResultCaptures(
+	ctx context.Context,
+	controllerID, deviceID string,
+	limit int,
+) ([]ResultOutbox, error) {
+	return s.listResultOutboxes(ctx, controllerID, deviceID, ResultOutboxCapturePending, limit)
 }
 
 func (s *PeerStore) ListPendingResultDeliveries(
@@ -447,8 +514,8 @@ func (s *PeerStore) listResultOutboxes(
 		return nil, err
 	}
 	switch state {
-	case ResultOutboxPublishPending, ResultOutboxDeliveryPending, ResultOutboxDelivered,
-		ResultOutboxReleasePending:
+	case ResultOutboxCapturePending, ResultOutboxPublishPending, ResultOutboxDeliveryPending,
+		ResultOutboxDelivered, ResultOutboxReleasePending:
 	default:
 		return nil, fmt.Errorf("unsupported result outbox list state %q", state)
 	}

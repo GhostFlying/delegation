@@ -74,18 +74,39 @@ type ReleaseRequest struct {
 }
 
 type Manager struct {
-	controllerID  string
-	deviceID      string
-	state         *store.PeerStore
-	workspace     *os.Root
-	outbox        *os.Root
-	inbox         *os.Root
-	locks         [packageLockCount]sync.Mutex
-	evictionMu    sync.Mutex
-	outboxChanges chan struct{}
-	now           func() time.Time
-	syncRoot      func(*os.Root) error
-	removePackage func(*os.Root, string) error
+	controllerID    string
+	deviceID        string
+	state           *store.PeerStore
+	workspace       *os.Root
+	outbox          *os.Root
+	inbox           *os.Root
+	locks           [packageLockCount]sync.Mutex
+	evictionMu      sync.Mutex
+	outboxChanges   chan struct{}
+	observerMu      sync.RWMutex
+	workerFinalized func(store.WorkerResultFinalization) error
+	now             func() time.Time
+	syncRoot        func(*os.Root) error
+	commitOutbox    func(context.Context, store.ResultOutboxKey, protocol.ResultPackageMetadata, time.Time) (store.ResultOutbox, error)
+	removePackage   func(*os.Root, string) error
+}
+
+func (m *Manager) SetWorkerFinalizationObserver(
+	observer func(store.WorkerResultFinalization) error,
+) {
+	m.observerMu.Lock()
+	m.workerFinalized = observer
+	m.observerMu.Unlock()
+}
+
+func (m *Manager) notifyWorkerFinalized(finalization store.WorkerResultFinalization) error {
+	m.observerMu.RLock()
+	observer := m.workerFinalized
+	m.observerMu.RUnlock()
+	if observer == nil {
+		return nil
+	}
+	return observer(finalization)
 }
 
 func New(ctx context.Context, options Options) (*Manager, error) {
@@ -132,6 +153,7 @@ func New(ctx context.Context, options Options) (*Manager, error) {
 		outboxChanges: make(chan struct{}, 1),
 		now:           time.Now,
 		syncRoot:      syncDirectory,
+		commitOutbox:  options.Store.CommitResultOutboxCapture,
 		removePackage: removePackageDirectory,
 	}
 	if err := manager.recover(ctx); err != nil {

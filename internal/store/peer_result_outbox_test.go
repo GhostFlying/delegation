@@ -32,7 +32,7 @@ func TestResultOutboxLifecycleIsIdempotentAndReleasesUnusedReservation(t *testin
 	if err != nil || !reflect.DeepEqual(replayedReservation, reserved) {
 		t.Fatalf("reservation replay = %#v, %v; want %#v", replayedReservation, err, reserved)
 	}
-	metadata := resultMetadata(t, key, threadID, turnID, 21)
+	metadata := resultMetadataForRevision(t, key, threadID, turnID, worker.Revision, 21)
 	packageBytes, err := resultPackageBytes(metadata)
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func TestResultOutboxLifecycleIsIdempotentAndReleasesUnusedReservation(t *testin
 	if err != nil || !reflect.DeepEqual(publishedReplay, published) {
 		t.Fatalf("capture replay = %#v, %v; want %#v", publishedReplay, err, published)
 	}
-	conflict := resultMetadata(t, key, threadID, turnID, 22)
+	conflict := resultMetadataForRevision(t, key, threadID, turnID, worker.Revision, 22)
 	if _, err := state.CommitResultOutboxCapture(ctx, key, conflict, now.Add(3*time.Second)); !errors.Is(
 		err, ErrResultPackageConflict,
 	) {
@@ -69,7 +69,8 @@ func TestResultOutboxLifecycleIsIdempotentAndReleasesUnusedReservation(t *testin
 		t.Fatalf("pending publications = %#v, %v", publications, err)
 	}
 	delivery, err := state.AcknowledgeResultOutboxMetadata(ctx, key, metadata, now.Add(4*time.Second))
-	if err != nil || delivery.State != ResultOutboxDeliveryPending {
+	if err != nil || delivery.Outbox.State != ResultOutboxDeliveryPending ||
+		delivery.Worker.Status != WorkerIdle || delivery.Worker.ActiveTurnID != "" {
 		t.Fatalf("metadata acknowledgement = %#v, %v", delivery, err)
 	}
 	if _, err := state.AcknowledgeResultOutboxMetadata(ctx, key, metadata, now.Add(5*time.Second)); err != nil {
@@ -89,6 +90,10 @@ func TestResultOutboxLifecycleIsIdempotentAndReleasesUnusedReservation(t *testin
 		err, ErrResultPackageConflict,
 	) {
 		t.Fatalf("different delivery sequence error = %v, want ErrResultPackageConflict", err)
+	}
+	afterDelivery, err := state.GetWorker(ctx, worker.WorkerKey)
+	if err != nil || !reflect.DeepEqual(afterDelivery, delivery.Worker) {
+		t.Fatalf("delivery acknowledgement changed worker = %#v, %v; want %#v", afterDelivery, err, delivery.Worker)
 	}
 	eligible, err := state.ListDeliveredResultOutboxes(ctx, key.ControllerID, key.SourceDeviceID, 10)
 	if err != nil || len(eligible) != 1 || eligible[0].PackageID != key.PackageID {
@@ -131,7 +136,7 @@ func TestResultOutboxEnforcesWorkerAuthorityAndIdentity(t *testing.T) {
 	if _, err := state.ReserveResultOutbox(ctx, key, protocol.MaximumResultPackageBytes, now); err != nil {
 		t.Fatal(err)
 	}
-	metadata := resultMetadata(t, key, threadID, turnID, 21)
+	metadata := resultMetadataForRevision(t, key, threadID, turnID, worker.Revision, 21)
 	wrongPackage := key
 	wrongPackage.PackageID = changesTestID(5014)
 	if _, err := state.ReserveResultOutbox(
@@ -140,11 +145,11 @@ func TestResultOutboxEnforcesWorkerAuthorityAndIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := state.CommitResultOutboxCapture(
-		ctx, wrongPackage, resultMetadata(t, wrongPackage, threadID, turnID, 21), now,
+		ctx, wrongPackage, resultMetadataForRevision(t, wrongPackage, threadID, turnID, worker.Revision, 21), now,
 	); !errors.Is(err, ErrResultPackageAuthority) {
 		t.Fatalf("unbound package capture error = %v, want ErrResultPackageAuthority", err)
 	}
-	wrongThread := resultMetadata(t, key, changesTestID(5012), turnID, 21)
+	wrongThread := resultMetadataForRevision(t, key, changesTestID(5012), turnID, worker.Revision, 21)
 	if _, err := state.CommitResultOutboxCapture(ctx, key, wrongThread, now); !errors.Is(
 		err, ErrResultPackageAuthority,
 	) {
@@ -219,7 +224,7 @@ func TestResultOutboxAdmissionEnforcesCountAndByteBudgets(t *testing.T) {
 		state, worker, _, _ := newFinalizingResultWorker(t, "")
 		defer state.Close()
 		now := time.Unix(1_700_003_000, 0)
-		for index := 0; index < 3; index++ {
+		for index := 0; index < 4; index++ {
 			key := ResultOutboxKey{
 				WorkerKey: worker.WorkerKey, SourceDeviceID: worker.DeviceID,
 				PackageID: changesTestID(5300 + index),
@@ -232,12 +237,32 @@ func TestResultOutboxAdmissionEnforcesCountAndByteBudgets(t *testing.T) {
 		}
 		overflow := ResultOutboxKey{
 			WorkerKey: worker.WorkerKey, SourceDeviceID: worker.DeviceID,
-			PackageID: changesTestID(5310),
+			PackageID: changesTestID(5311),
 		}
 		if _, err := state.ReserveResultOutbox(
 			ctx, overflow, protocol.MaximumResultPackageBytes, now,
 		); !errors.Is(err, ErrResultPackageQuota) {
 			t.Fatalf("byte overflow error = %v, want ErrResultPackageQuota", err)
+		}
+	})
+
+	t.Run("no-workspace packages can exceed default worker concurrency", func(t *testing.T) {
+		ctx := context.Background()
+		state, worker, _, _ := newFinalizingResultWorker(t, "")
+		defer state.Close()
+		reservation := int64(
+			protocol.MaximumResultManifestBytes + protocol.MaximumResultRolloutBytes,
+		)
+		for index := range 5 {
+			key := ResultOutboxKey{
+				WorkerKey: worker.WorkerKey, SourceDeviceID: worker.DeviceID,
+				PackageID: changesTestID(5320 + index),
+			}
+			if _, err := state.ReserveResultOutbox(
+				ctx, key, reservation, time.Unix(1_700_003_100, 0),
+			); err != nil {
+				t.Fatalf("reserve no-workspace package %d: %v", index, err)
+			}
 		}
 	})
 }
@@ -292,22 +317,15 @@ func newFinalizingResultWorker(
 		}
 		worker = resolution.Worker
 	}
-	if _, err := state.db.ExecContext(ctx, `
-UPDATE worker_reservations SET
-	status = 'finalizing', final_target_status = 'idle', final_failure_code = '', revision = 7, updated_at = ?
-WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND status = 'running'
-`, now.Add(4*time.Second).Unix(), worker.ControllerID, worker.TreeID, worker.AgentID); err != nil {
-		state.Close()
-		t.Fatal(err)
-	}
-	if _, err := state.db.ExecContext(ctx, `UPDATE peer_metadata SET worker_revision = 7`); err != nil {
-		state.Close()
-		t.Fatal(err)
-	}
-	worker, err = state.GetWorker(ctx, worker.WorkerKey)
-	if err != nil {
-		state.Close()
-		t.Fatal(err)
+	if packageID != "" {
+		finalization, err := state.BeginWorkerResultFinalization(
+			ctx, worker.WorkerKey, turnID, WorkerIdle, "", now.Add(5*time.Second),
+		)
+		if err != nil {
+			state.Close()
+			t.Fatal(err)
+		}
+		worker = finalization.Worker
 	}
 	return state, worker, threadID, turnID
 }
@@ -319,11 +337,22 @@ func resultMetadata(
 	rolloutSize int64,
 ) protocol.ResultPackageMetadata {
 	t.Helper()
+	return resultMetadataForRevision(t, key, threadID, turnID, 7, rolloutSize)
+}
+
+func resultMetadataForRevision(
+	t *testing.T,
+	key ResultOutboxKey,
+	threadID, turnID string,
+	lifecycleRevision uint64,
+	rolloutSize int64,
+) protocol.ResultPackageMetadata {
+	t.Helper()
 	manifest := protocol.ResultManifest{
 		Version: protocol.ResultManifestVersion, PackageID: key.PackageID,
 		ControllerID: key.ControllerID, TreeID: key.TreeID,
 		SourceAgentID: key.AgentID, SourceDeviceID: key.SourceDeviceID,
-		ManagedThreadID: threadID, TurnID: turnID, LifecycleRevision: 7,
+		ManagedThreadID: threadID, TurnID: turnID, LifecycleRevision: lifecycleRevision,
 		Terminal:   protocol.ResultTerminal{Outcome: protocol.ResultTerminalCompleted},
 		CapturedAt: 1_700_000_000,
 		Workspace: protocol.ResultWorkspaceComponent{

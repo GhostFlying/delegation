@@ -158,7 +158,11 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	codexHome := flags.String("codex-home", "", "managed worker CODEX_HOME; defaults beside the peer config")
 	workspaceRoot := flags.String("workspace-root", "", "managed worker workspace root; defaults beside the peer config")
 	statePath := flags.String("state", "", "peer reservation database path; defaults beside the peer config")
-	maxWorkerSlots := flags.Int("max-worker-slots", 4, "maximum concurrent managed workers")
+	maxWorkerSlots := flags.Int(
+		"max-worker-slots",
+		4,
+		"maximum concurrent managed workers; result storage admission is separate",
+	)
 	allowInsecure := flags.Bool("allow-insecure-nonloopback", false, "acknowledge plaintext non-loopback transport")
 	jsonOutput := flags.Bool("json", false, "print setup result as JSON")
 	if code := parseFlags(flags, args); code >= 0 {

@@ -20,6 +20,11 @@ func TestResultPackagePublicationRequiresExactMetadataBeforeAdvancing(t *testing
 	key := store.ResultOutboxKey{
 		WorkerKey: worker.WorkerKey, SourceDeviceID: testDeviceID, PackageID: packageID,
 	}
+	select {
+	case <-fixture.manager.ResultPackageChanges():
+	default:
+		t.Fatal("published metadata did not signal a publication change")
+	}
 
 	publications, err := fixture.manager.ListPendingResultPublications(context.Background())
 	if err != nil {
@@ -61,8 +66,8 @@ func TestResultPackagePublicationRequiresExactMetadataBeforeAdvancing(t *testing
 	acknowledged, err := fixture.manager.AcknowledgeResultPackageMetadata(
 		context.Background(), key, metadata,
 	)
-	if err != nil || acknowledged.State != store.ResultOutboxDeliveryPending ||
-		!protocol.SameResultPackageMetadata(acknowledged.Metadata, metadata) {
+	if err != nil || acknowledged.Outbox.State != store.ResultOutboxDeliveryPending ||
+		!protocol.SameResultPackageMetadata(acknowledged.Outbox.Metadata, metadata) {
 		t.Fatalf("metadata acknowledgement = %#v, %v", acknowledged, err)
 	}
 	select {
@@ -74,7 +79,7 @@ func TestResultPackagePublicationRequiresExactMetadataBeforeAdvancing(t *testing
 	replayed, err := fixture.manager.AcknowledgeResultPackageMetadata(
 		context.Background(), key, metadata,
 	)
-	if err != nil || replayed.State != store.ResultOutboxDeliveryPending {
+	if err != nil || replayed.Outbox.State != store.ResultOutboxDeliveryPending {
 		t.Fatalf("metadata acknowledgement replay = %#v, %v", replayed, err)
 	}
 }

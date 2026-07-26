@@ -198,23 +198,25 @@ func TestAgentWaitPaginatesDeliveredResultsWithIndependentCursor(t *testing.T) {
 	}
 
 	workers := []struct {
-		spawnID, agentID, threadID, turnID, packageID, taskName string
+		spawnID, agentID, taskName, threadID, turnID, packageID string
 		revision                                                uint64
 	}{
 		{
 			spawnID: agentWaitResultSpawnID1, agentID: agentWaitResultAgentID1,
+			taskName: "result_wait_worker_1",
 			threadID: agentWaitResultThreadID1, turnID: agentWaitResultTurnID1,
-			packageID: agentWaitResultPackageID1, taskName: "result_wait_worker_1", revision: 1,
+			packageID: agentWaitResultPackageID1, revision: 1,
 		},
 		{
 			spawnID: agentWaitResultSpawnID2, agentID: agentWaitResultAgentID2,
+			taskName: "result_wait_worker_2",
 			threadID: agentWaitResultThreadID2, turnID: agentWaitResultTurnID2,
-			packageID: agentWaitResultPackageID2, taskName: "result_wait_worker_2", revision: 2,
+			packageID: agentWaitResultPackageID2, revision: 2,
 		},
 	}
 	receipts := make([]store.AgentSpawnReceipt, 0, len(workers))
 	snapshots := make([]protocol.WorkerLifecycleSnapshot, 0, len(workers))
-	for _, worker := range workers {
+	for index, worker := range workers {
 		receipt, err := harness.registry.BeginAgentSpawn(
 			context.Background(),
 			store.AgentSpawnIntent{
@@ -225,7 +227,7 @@ func TestAgentWaitPaginatesDeliveredResultsWithIndependentCursor(t *testing.T) {
 			time.Unix(10+int64(worker.revision), 0),
 		)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("begin worker %d (%s): %v", index, worker.taskName, err)
 		}
 		if _, err := harness.registry.MarkAgentSpawnStarted(
 			context.Background(),

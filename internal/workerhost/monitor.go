@@ -168,49 +168,50 @@ func (h *Host) completeTurn(completed turnCompletedNotification) error {
 	if err != nil {
 		return fmt.Errorf("reload completed worker: %w", err)
 	}
+	if worker.Status == store.WorkerReady {
+		intent, intentErr := h.state.GetPreparedWorkerTurnStartIntent(ctx, worker.WorkerKey)
+		if intentErr != nil {
+			return fmt.Errorf("load completed worker turn intent: %w", intentErr)
+		}
+		resolution, bindErr := h.state.BindWorkerTurnStartIntent(
+			ctx, worker.WorkerKey, intent.IntentID, completed.Turn.ID, time.Now(),
+		)
+		worker, bindErr = h.recordWorkerChange(resolution.Worker, bindErr)
+		if bindErr != nil {
+			return fmt.Errorf("bind completed worker turn intent: %w", bindErr)
+		}
+	}
 	if (worker.Status != store.WorkerRunning && worker.Status != store.WorkerInterrupted) ||
 		worker.ActiveTurnID != completed.Turn.ID {
 		return nil
 	}
-	if worker.WorkspaceID != "" {
-		target := store.WorkerFailed
-		failureCode := "unsupported_turn_status"
-		switch completed.Turn.Status {
-		case "completed", "interrupted":
-			target = store.WorkerIdle
-			failureCode = ""
-		case "failed":
-			failureCode = "turn_failed"
-		}
-		finalization, err := h.state.BeginWorkerFinalization(
-			ctx, worker.WorkerKey, completed.Turn.ID, target, failureCode, time.Now(),
-		)
-		if _, err := h.recordWorkerChange(finalization.Worker, err); err != nil {
-			return fmt.Errorf("begin completed worker finalization: %w", err)
-		}
-		h.signalArtifactWork()
-		return nil
-	}
-	switch completed.Turn.Status {
-	case "completed", "interrupted":
-		if _, err := h.recordWorkerChange(
-			h.state.MarkWorkerIdle(ctx, worker.WorkerKey, time.Now()),
-		); err != nil {
-			return fmt.Errorf("record completed worker: %w", err)
-		}
+	return h.beginTerminalResultFinalization(ctx, worker, completed.Turn)
+}
+
+func (h *Host) beginTerminalResultFinalization(
+	ctx context.Context,
+	worker store.WorkerReservation,
+	completed turn,
+) error {
+	target := store.WorkerFailed
+	failureCode := "unsupported_turn_status"
+	switch completed.Status {
+	case "completed":
+		target = store.WorkerIdle
+		failureCode = ""
+	case "interrupted":
+		target = store.WorkerInterrupted
+		failureCode = "turn_interrupted"
 	case "failed":
-		if _, err := h.recordWorkerChange(
-			h.state.FailWorker(ctx, worker.WorkerKey, "turn_failed", time.Now()),
-		); err != nil {
-			return fmt.Errorf("record failed worker: %w", err)
-		}
-	default:
-		if _, err := h.recordWorkerChange(
-			h.state.FailWorker(ctx, worker.WorkerKey, "unsupported_turn_status", time.Now()),
-		); err != nil {
-			return fmt.Errorf("record unsupported turn status %q: %w", completed.Turn.Status, err)
-		}
+		failureCode = "turn_failed"
 	}
+	finalization, err := h.state.BeginWorkerResultFinalization(
+		ctx, worker.WorkerKey, completed.ID, target, failureCode, time.Now(),
+	)
+	if _, err := h.recordWorkerChange(finalization.Worker, err); err != nil {
+		return fmt.Errorf("begin completed worker result finalization: %w", err)
+	}
+	h.signalArtifactWork()
 	return nil
 }
 
@@ -222,7 +223,7 @@ func (h *Host) retireClient(client application, cause error) <-chan struct{} {
 		return recovering
 	}
 	h.client = nil
-	h.loaded = make(map[store.WorkerKey]string)
+	h.loaded = make(map[store.WorkerKey]loadedThread)
 	if h.recovering == nil {
 		h.recovering = make(chan struct{})
 	}
@@ -265,6 +266,19 @@ func (h *Host) closeAndRecover(client application, cause error, recovering chan 
 	recovered, recoveryErr := h.recordWorkerRecovery(h.state.RecoverWorkers(
 		recoveryContext, h.controllerID, h.deviceID, time.Now(),
 	))
+	var preparedIntents bool
+	if recoveryErr == nil {
+		preparedIntents, recoveryErr = h.finalizeBoundTurnsAfterClientExit(recoveryContext)
+	}
+	if recoveryErr == nil && preparedIntents {
+		recoveryErr = h.reconcilePreparedTurnIntentsAfterClientExit(
+			recoveryContext,
+			recovering,
+		)
+		if errors.Is(recoveryErr, ErrClosed) {
+			recoveryErr = nil
+		}
+	}
 	cancel()
 	h.operations.Unlock()
 	if recoveryErr != nil {
@@ -283,6 +297,61 @@ func (h *Host) closeAndRecover(client application, cause error, recovering chan 
 		return
 	}
 	h.finishRecovery(recovering, nil)
+}
+
+func (h *Host) finalizeBoundTurnsAfterClientExit(ctx context.Context) (bool, error) {
+	intents, err := h.state.ListUnresolvedWorkerTurnStartIntents(
+		ctx, h.controllerID, h.deviceID, store.MaximumWorkerTurnStartIntentReceipts,
+	)
+	if err != nil {
+		return false, err
+	}
+	prepared := false
+	boundIntents := make([]store.WorkerTurnStartIntent, 0, len(intents))
+	boundWorkers := make([]store.WorkerReservation, 0, len(intents))
+	for _, intent := range intents {
+		if intent.State == store.WorkerTurnStartPrepared {
+			prepared = true
+			continue
+		}
+		if intent.State != store.WorkerTurnStartBound {
+			continue
+		}
+		worker, err := h.state.GetWorker(ctx, intent.WorkerKey)
+		if err != nil {
+			return false, err
+		}
+		if worker.Status == store.WorkerFinalizing {
+			h.signalArtifactWork()
+			continue
+		}
+		if worker.Status != store.WorkerRunning || worker.ActiveTurnID != intent.TurnID {
+			return false, store.ErrWorkerTurnStartIntentConflict
+		}
+		boundIntents = append(boundIntents, intent)
+		boundWorkers = append(boundWorkers, worker)
+	}
+	targets, err := h.resolveResultTargetsAfterClientExit(ctx, boundIntents)
+	if err != nil {
+		return false, err
+	}
+	for index, intent := range boundIntents {
+		worker := boundWorkers[index]
+		target := targets[index]
+		finalization, err := h.state.BeginWorkerResultFinalization(
+			ctx,
+			worker.WorkerKey,
+			intent.TurnID,
+			target.status,
+			target.failureCode,
+			time.Now(),
+		)
+		if _, err := h.recordWorkerChange(finalization.Worker, err); err != nil {
+			return false, err
+		}
+		h.signalArtifactWork()
+	}
+	return prepared, nil
 }
 
 func (h *Host) finishRecovery(recovering chan struct{}, fatalErr error) {

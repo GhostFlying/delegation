@@ -224,6 +224,40 @@ func TestWorkerTurnStartIntentPrepareBindAndRecoveryAreIdempotent(t *testing.T) 
 	}
 }
 
+func TestFourWorstCaseWorkspaceTurnIntentsFitPeerResultBudget(t *testing.T) {
+	ctx := context.Background()
+	state, err := OpenPeer(ctx, filepath.Join(t.TempDir(), "state", "peer.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	now := time.Unix(2_000, 0)
+	for index := range 5 {
+		worker := readyInitialTurnWorker(
+			t,
+			state,
+			turnIntentTestID(0x1800+index),
+			turnIntentTestID(0x1810+index),
+			now.Add(time.Duration(index)*10*time.Second),
+		)
+		request := unavailableTurnIntentRequest(
+			worker,
+			turnIntentTestID(0x1820+index),
+			turnIntentTestID(0x1830+index),
+			"",
+		)
+		_, _, err := state.PrepareWorkerTurnStartIntent(
+			ctx, request, now.Add(time.Duration(index)*10*time.Second+3*time.Second),
+		)
+		if index < 4 && err != nil {
+			t.Fatalf("prepare default workspace turn %d: %v", index, err)
+		}
+		if index == 4 && !errors.Is(err, ErrResultPackageQuota) {
+			t.Fatalf("fifth worst-case workspace turn error = %v, want ErrResultPackageQuota", err)
+		}
+	}
+}
+
 func TestWorkerTurnStartIntentFollowupBindCompletesReceiptAtomically(t *testing.T) {
 	ctx := context.Background()
 	state, err := OpenPeer(ctx, filepath.Join(t.TempDir(), "state", "peer.sqlite3"))

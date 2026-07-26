@@ -134,6 +134,18 @@ func runConnectorServiceWithProviderEnvironment(
 		_, err := fmt.Fprintf(stderr, format, args...)
 		return err
 	}
+	resultPackages, err := resultpackagefiles.New(ctx, resultpackagefiles.Options{
+		ControllerID:  cfg.ControllerID,
+		DeviceID:      cfg.DeviceID,
+		WorkspaceRoot: cfg.Peer.WorkspaceRoot,
+		Store:         peerState,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, resultPackages.Close())
+	}()
 	workers, err := workerhost.New(ctx, workerhost.Options{
 		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
 		PeerConfigPath: configPath, DelegationBinary: runtimeBinary,
@@ -144,6 +156,7 @@ func runConnectorServiceWithProviderEnvironment(
 		ProviderEnvironmentFile: environmentFile,
 		WorkspaceRoot:           cfg.Peer.WorkspaceRoot, MaxWorkerSlots: cfg.Peer.MaxWorkerSlots,
 		CodexConfig: providerEnvironment.Config, Store: peerState,
+		ResultPackages: resultPackages,
 		ReportError: func(err error) {
 			_ = writeStderr("delegation: managed worker host: %v\n", err)
 		},
@@ -166,18 +179,6 @@ func runConnectorServiceWithProviderEnvironment(
 		host: workers, state: peerState,
 		controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 	}
-	resultPackages, err := resultpackagefiles.New(ctx, resultpackagefiles.Options{
-		ControllerID:  cfg.ControllerID,
-		DeviceID:      cfg.DeviceID,
-		WorkspaceRoot: cfg.Peer.WorkspaceRoot,
-		Store:         peerState,
-	})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		resultErr = errors.Join(resultErr, resultPackages.Close())
-	}()
 	workerManager.resultPackages = resultPackages
 	resultSource := managedResultPackageSource{
 		packages: resultPackages, state: peerState,

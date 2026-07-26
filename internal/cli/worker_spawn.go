@@ -83,7 +83,7 @@ func (s managedWorkerSpawner) SpawnWorker(
 		result.Outcome = protocol.AgentSpawnOutcomeStarted
 		return result, nil
 	}
-	if errors.Is(err, store.ErrWorkerBusy) {
+	if errors.Is(err, store.ErrWorkerBusy) || errors.Is(err, store.ErrResultPackageQuota) {
 		result.Outcome = protocol.AgentSpawnOutcomeBusy
 		return result, nil
 	}

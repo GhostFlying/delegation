@@ -159,6 +159,7 @@ func TestManagedWorkerAdapterMapsSpawnAttemptOutcomes(t *testing.T) {
 		outcome protocol.AgentSpawnOutcome
 	}{
 		{name: "busy", err: store.ErrWorkerBusy, outcome: protocol.AgentSpawnOutcomeBusy},
+		{name: "result backlog", err: store.ErrResultPackageQuota, outcome: protocol.AgentSpawnOutcomeBusy},
 		{name: "transition", err: store.ErrWorkerTransition, outcome: protocol.AgentSpawnOutcomeIndeterminate},
 	}
 	for _, test := range tests {

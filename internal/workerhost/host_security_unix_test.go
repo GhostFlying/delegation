@@ -33,7 +33,7 @@ func TestHostRejectsManagedDirectoryPermissionDriftBeforeLaunch(t *testing.T) {
 }
 
 func TestHostCanonicalizesSymlinkedCodexBinaryWithoutGrantingEitherDirectory(t *testing.T) {
-	_, state, paths := newTestHost(t, 1)
+	fixtureHost, state, paths := newTestHost(t, 1)
 	targetDirectory := t.TempDir()
 	target := filepath.Join(targetDirectory, "codex")
 	if err := os.WriteFile(target, []byte("test"), 0o700); err != nil {
@@ -63,6 +63,7 @@ func TestHostCanonicalizesSymlinkedCodexBinaryWithoutGrantingEitherDirectory(t *
 		WorkspaceRoot:    filepath.Join(filepath.Dir(paths.configPath), "workspaces"),
 		MaxWorkerSlots:   1,
 		Store:            state,
+		ResultPackages:   fixtureHost.resultPackages,
 	})
 	if err != nil {
 		t.Fatal(err)

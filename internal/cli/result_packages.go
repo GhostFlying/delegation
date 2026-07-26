@@ -31,7 +31,7 @@ type managedResultPackagePublisher interface {
 		context.Context,
 		store.ResultOutboxKey,
 		protocol.ResultPackageMetadata,
-	) (store.ResultOutbox, error)
+	) (store.WorkerResultFinalization, error)
 }
 
 type managedResultPackageSource struct {
@@ -128,7 +128,7 @@ func (s managedResultPackageSource) AcknowledgeResultPackageMetadata(
 		SourceDeviceID: publication.Source.DeviceID,
 		PackageID:      manifest.PackageID,
 	}
-	outbox, err := s.packages.AcknowledgeResultPackageMetadata(
+	finalization, err := s.packages.AcknowledgeResultPackageMetadata(
 		ctx, key, publication.Params.Metadata,
 	)
 	if err != nil {
@@ -137,6 +137,7 @@ func (s managedResultPackageSource) AcknowledgeResultPackageMetadata(
 		}
 		return err
 	}
+	outbox := finalization.Outbox
 	if outbox.ResultOutboxKey != key || outbox.State != store.ResultOutboxDeliveryPending ||
 		!protocol.SameResultPackageMetadata(outbox.Metadata, publication.Params.Metadata) {
 		return permanentResultPackageSourceError(errors.New(

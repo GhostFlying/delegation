@@ -18,14 +18,18 @@ func TestCaptureCompressedSegmentRoundTrip(t *testing.T) {
 		outcome  Outcome
 	}{
 		{name: "completed", terminal: "task_complete", outcome: OutcomeCompleted},
+		{name: "failed", terminal: "task_complete_with_error", outcome: OutcomeFailed},
 		{name: "aborted", terminal: "turn_aborted", outcome: OutcomeAborted},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			beforeOffset := "outside saved offset\n"
 			preStart := rolloutLine("event_msg", "thread_settings_applied", "")
+			terminal := rolloutLine("event_msg", test.terminal, testThreadID)
+			if test.outcome == OutcomeFailed {
+				terminal = failedRolloutLine(testThreadID)
+			}
 			segment := rolloutLine("event_msg", "task_started", testThreadID) +
-				rolloutLine("response_item", "", "") +
-				rolloutLine("event_msg", test.terminal, testThreadID)
+				rolloutLine("response_item", "", "") + terminal
 			var output bytes.Buffer
 			got, err := CaptureCompressedSegment(
 				context.Background(),

@@ -52,6 +52,21 @@ func TestCaptureSegmentReportsAbortedTurn(t *testing.T) {
 	}
 }
 
+func TestCaptureSegmentReportsFailedTurn(t *testing.T) {
+	input := rolloutLine("event_msg", "task_started", testThreadID) +
+		failedRolloutLine(testThreadID)
+	var output bytes.Buffer
+	got, err := CaptureSegment(
+		context.Background(), strings.NewReader(input), 0, testThreadID, &output,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Outcome != OutcomeFailed || output.String() != input {
+		t.Fatalf("failed segment = %#v, output %q", got, output.String())
+	}
+}
+
 func TestCaptureSegmentRejectsIncompleteAndConflictingTurns(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -172,4 +187,9 @@ func rolloutLine(outerType, eventType, turnID string) string {
 	}
 	return "{\"type\":\"event_msg\",\"payload\":{\"type\":\"" + eventType +
 		"\",\"turn_id\":\"" + turnID + "\"}}\n"
+}
+
+func failedRolloutLine(turnID string) string {
+	return "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"" +
+		turnID + "\",\"error\":{\"message\":\"managed turn failed\"}}}\n"
 }

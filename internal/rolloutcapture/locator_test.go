@@ -1,6 +1,7 @@
 package rolloutcapture
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,6 +28,37 @@ func TestLocateManagedRollout(t *testing.T) {
 	want := Locator{Path: path, Offset: 8}
 	if got != want {
 		t.Fatalf("locator = %#v, want %#v", got, want)
+	}
+}
+
+func TestOpenValidatedKeepsValidatedHandleAfterPathReplacement(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(
+		home, "sessions", "rollout-2026-07-26T00-00-00-"+testThreadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("validated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, locator, err := OpenValidated(home, testThreadID, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := os.Rename(path, path+".replaced"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "validated\n" || locator.Path != path || locator.Offset != int64(len(data)) {
+		t.Fatalf("opened rollout = %q, %#v", data, locator)
 	}
 }
 
