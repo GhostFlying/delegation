@@ -63,6 +63,7 @@ type WorkerReservation struct {
 	Status           WorkerStatus
 	RetryTarget      WorkerStatus
 	ActiveTurnID     string
+	LastBoundTurnID  string
 	FailureCode      string
 	FinalTarget      WorkerStatus
 	FinalFailureCode string
@@ -503,6 +504,7 @@ func (s *PeerStore) transitionWorker(
 		case WorkerRunning:
 			worker.RetryTarget = ""
 			worker.ActiveTurnID = detail
+			worker.LastBoundTurnID = detail
 		case WorkerIdle:
 			worker.RetryTarget = ""
 			worker.ActiveTurnID = ""
@@ -516,13 +518,15 @@ func (s *PeerStore) transitionWorker(
 		}
 		if _, err := connection.ExecContext(ctx, `
 UPDATE worker_reservations SET
-    codex_thread_id = ?, status = ?, retry_target = ?, active_turn_id = ?, failure_code = ?, revision = ?, updated_at = ?
+    codex_thread_id = ?, status = ?, retry_target = ?, active_turn_id = ?, last_bound_turn_id = ?,
+	failure_code = ?, revision = ?, updated_at = ?
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 `,
 			worker.CodexThreadID,
 			worker.Status,
 			worker.RetryTarget,
 			worker.ActiveTurnID,
+			worker.LastBoundTurnID,
 			worker.FailureCode,
 			worker.Revision,
 			worker.UpdatedAt,
@@ -606,7 +610,7 @@ const workerSelect = `
 SELECT controller_id, tree_id, agent_id, parent_agent_id, device_id,
 	   task_name, prompt_digest, workspace_id, workspace_path, working_directory,
 	   codex_thread_id, profile_version,
-	   status, retry_target, active_turn_id, failure_code,
+	   status, retry_target, active_turn_id, last_bound_turn_id, failure_code,
 	   final_target_status, final_failure_code, revision, created_at, updated_at
 FROM worker_reservations
 `
@@ -629,6 +633,7 @@ func scanWorker(scanner rowScanner) (WorkerReservation, error) {
 		&worker.Status,
 		&worker.RetryTarget,
 		&worker.ActiveTurnID,
+		&worker.LastBoundTurnID,
 		&worker.FailureCode,
 		&worker.FinalTarget,
 		&worker.FinalFailureCode,
@@ -715,6 +720,11 @@ func (w WorkerReservation) Validate() error {
 			return fmt.Errorf("activeTurnId %w", err)
 		}
 	}
+	if w.LastBoundTurnID != "" {
+		if err := identity.ValidateID(w.LastBoundTurnID); err != nil {
+			return fmt.Errorf("lastBoundTurnId %w", err)
+		}
+	}
 	if err := validateFailureCode(w.FailureCode); err != nil {
 		return err
 	}
@@ -754,11 +764,13 @@ func (w WorkerReservation) Validate() error {
 			return errors.New("worker lifecycle details do not match its status")
 		}
 	case WorkerRunning:
-		if w.CodexThreadID == "" || w.ActiveTurnID == "" || w.FailureCode != "" || w.RetryTarget != "" {
+		if w.CodexThreadID == "" || w.ActiveTurnID == "" || w.ActiveTurnID != w.LastBoundTurnID ||
+			w.FailureCode != "" || w.RetryTarget != "" {
 			return errors.New("worker lifecycle details do not match its status")
 		}
 	case WorkerFinalizing:
-		if w.CodexThreadID == "" || w.ActiveTurnID == "" || w.FailureCode != "" || w.RetryTarget != "" ||
+		if w.CodexThreadID == "" || w.ActiveTurnID == "" || w.ActiveTurnID != w.LastBoundTurnID ||
+			w.FailureCode != "" || w.RetryTarget != "" ||
 			!w.FinalTarget.finalTarget() ||
 			(w.FinalTarget == WorkerIdle && w.FinalFailureCode != "") ||
 			(w.FinalTarget != WorkerIdle && w.FinalFailureCode == "") {
@@ -784,7 +796,7 @@ func (w WorkerReservation) Validate() error {
 
 func validateNewWorkerReservation(reservation WorkerReservation) error {
 	if reservation.Status != "" || reservation.RetryTarget != "" || reservation.CodexThreadID != "" ||
-		reservation.ActiveTurnID != "" || reservation.FailureCode != "" ||
+		reservation.ActiveTurnID != "" || reservation.LastBoundTurnID != "" || reservation.FailureCode != "" ||
 		reservation.FinalTarget != "" || reservation.FinalFailureCode != "" ||
 		reservation.Revision != 0 || reservation.CreatedAt != 0 || reservation.UpdatedAt != 0 {
 		return errors.New("new worker reservation must not contain lifecycle state")

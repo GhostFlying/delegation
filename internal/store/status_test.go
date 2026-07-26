@@ -202,6 +202,7 @@ func TestPeerStatusSnapshotUsesAdmissionStatesAndArtifactBacklogs(t *testing.T) 
 		worker.UpdatedAt = worker.CreatedAt
 		if status == WorkerFinalizing {
 			worker.ActiveTurnID = changesTestID(60_000 + index)
+			worker.LastBoundTurnID = worker.ActiveTurnID
 			worker.FinalTarget = WorkerIdle
 		}
 		insertPeerStatusWorker(t, state, worker)
@@ -242,13 +243,13 @@ func insertPeerStatusWorker(t *testing.T, state *PeerStore, worker WorkerReserva
 INSERT INTO worker_reservations(
 	controller_id, tree_id, agent_id, parent_agent_id, device_id,
 	task_name, prompt_digest, workspace_id, workspace_path, working_directory,
-	codex_thread_id, profile_version, status, retry_target, active_turn_id,
+	codex_thread_id, profile_version, status, retry_target, active_turn_id, last_bound_turn_id,
 	failure_code, final_target_status, final_failure_code, revision, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, worker.ControllerID, worker.TreeID, worker.AgentID, worker.ParentAgentID, worker.DeviceID,
 		worker.TaskName, worker.PromptDigest, worker.WorkspaceID, worker.WorkspacePath,
 		worker.WorkingDirectory, worker.CodexThreadID, worker.ProfileVersion, worker.Status,
-		worker.RetryTarget, worker.ActiveTurnID, worker.FailureCode, worker.FinalTarget,
+		worker.RetryTarget, worker.ActiveTurnID, worker.LastBoundTurnID, worker.FailureCode, worker.FinalTarget,
 		worker.FinalFailureCode, worker.Revision, worker.CreatedAt, worker.UpdatedAt)
 	if err != nil {
 		t.Fatal(err)
