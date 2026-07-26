@@ -77,7 +77,7 @@ func TestSelfTargetResultPackageTransferKeepsOutboxAndInboxIsolated(t *testing.T
 				t.Fatalf("source read race outbox = %#v, %v", stored, err)
 			}
 			if _, err := fixture.state.AcknowledgeResultOutboxMetadata(
-				context.Background(), stored.ResultOutboxKey, start.Add(2*time.Second),
+				context.Background(), stored.ResultOutboxKey, stored.Metadata, start.Add(2*time.Second),
 			); err != nil {
 				t.Fatal(err)
 			}
