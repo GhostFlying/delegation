@@ -393,6 +393,7 @@ func waitForWorkspaceArtifact(
 			MessageLimit:  protocol.MaximumAgentWaitMessages,
 			ActivityLimit: protocol.MaximumAgentWaitActivities,
 			ArtifactLimit: protocol.MaximumAgentWaitArtifacts,
+			ResultLimit:   protocol.MaximumAgentWaitResults,
 		},
 		&result,
 	); err != nil {

@@ -49,7 +49,7 @@ func TestPublishChangesArtifactWakesRootAndReplaysExactly(t *testing.T) {
 	fixture := prepareBrokerChangesFixture(t, harness.registry, root, true)
 
 	waitRequest := principalRequest(t, protocol.MethodWaitAgent, protocol.WaitAgentParams{
-		TimeoutMillis: 2_000, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1,
+		TimeoutMillis: 2_000, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
 	}, root)
 	writeEnvelope(t, rootConnection, waitRequest)
 	waitForPendingAgentWait(
@@ -133,7 +133,7 @@ func TestPublishChangesArtifactWakesRootAndReplaysExactly(t *testing.T) {
 	drained := writeAndRead(t, rootConnection, principalRequest(
 		t, protocol.MethodWaitAgent,
 		protocol.WaitAgentParams{
-			ArtifactCursor: 1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1,
+			ArtifactCursor: 1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
 		},
 		root,
 	))

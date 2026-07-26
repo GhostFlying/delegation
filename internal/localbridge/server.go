@@ -38,12 +38,28 @@ type StatusProvider interface {
 	LocalStatus(context.Context) (StatusSnapshot, error)
 }
 
+type ResultPackageAvailabilityLookup struct {
+	Root     control.PrincipalIdentity
+	Manifest protocol.ResultManifest
+}
+
+// ResultPackageAvailabilityProvider verifies broker result metadata against
+// the root peer's durable inbox. Implementations must not infer availability
+// from broker delivery state alone.
+type ResultPackageAvailabilityProvider interface {
+	LookupResultPackageAvailability(
+		context.Context,
+		ResultPackageAvailabilityLookup,
+	) (protocol.ResultPackageAvailability, error)
+}
+
 type Server struct {
 	listener      net.Listener
 	identity      ServiceIdentity
 	backend       Backend
 	authorizer    Authorizer
 	status        StatusProvider
+	results       ResultPackageAvailabilityProvider
 	connectionSem chan struct{}
 	waitSem       chan struct{}
 	controlSem    chan struct{}
@@ -77,6 +93,17 @@ func ListenWithStatus(
 	authorizer Authorizer,
 	status StatusProvider,
 ) (*Server, error) {
+	return ListenWithResultPackages(endpoint, identity, backend, authorizer, status, nil)
+}
+
+func ListenWithResultPackages(
+	endpoint string,
+	identity ServiceIdentity,
+	backend Backend,
+	authorizer Authorizer,
+	status StatusProvider,
+	results ResultPackageAvailabilityProvider,
+) (*Server, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
@@ -89,6 +116,7 @@ func ListenWithStatus(
 	}
 	return &Server{
 		listener: listener, identity: identity, backend: backend, authorizer: authorizer, status: status,
+		results:       results,
 		connectionSem: make(chan struct{}, maximumConcurrentCalls),
 		waitSem:       make(chan struct{}, maximumConcurrentWaitCalls),
 		controlSem:    make(chan struct{}, maximumConcurrentControlCalls),
@@ -331,6 +359,9 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		ctx, request.Method, request.TreeID, request.Source, request.Payload, &result,
 	)
 	if err == nil {
+		if request.Method == protocol.MethodWaitAgent {
+			return s.decorateAgentWait(ctx, request, result)
+		}
 		return result, nil
 	}
 	var brokerError *connector.RPCError
@@ -341,6 +372,51 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "delegation service unavailable"}
 	}
 	return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "delegation service failed"}
+}
+
+func (s *Server) decorateAgentWait(
+	ctx context.Context,
+	request request,
+	payload json.RawMessage,
+) (json.RawMessage, *protocol.Error) {
+	result, err := protocol.DecodePayload[protocol.WaitAgentResult](payload)
+	if err != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "invalid agent wait result"}
+	}
+	if len(result.Results) > protocol.MaximumAgentWaitResults {
+		return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "invalid agent wait result"}
+	}
+	if len(result.Results) == 0 {
+		return payload, nil
+	}
+	if request.Source == nil || request.Source.ParentAgentID != "" || request.TreeID != request.Source.TreeID ||
+		s.results == nil {
+		return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "result package availability unavailable"}
+	}
+	for index := range result.Results {
+		handle := &result.Results[index]
+		if err := handle.Validate(); err != nil || handle.Availability != protocol.ResultPackageUnverified ||
+			handle.Manifest.ControllerID != request.Source.ControllerID ||
+			handle.Manifest.TreeID != request.Source.TreeID {
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "invalid result package metadata"}
+		}
+		availability, err := s.results.LookupResultPackageAvailability(
+			ctx,
+			ResultPackageAvailabilityLookup{Root: *request.Source, Manifest: handle.Manifest},
+		)
+		if err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "result package availability unavailable"}
+		}
+		if availability != protocol.ResultPackageAvailable && availability != protocol.ResultPackageEvicted {
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "invalid result package availability"}
+		}
+		handle.Availability = availability
+	}
+	decorated, err := json.Marshal(result)
+	if err != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode agent wait result"}
+	}
+	return decorated, nil
 }
 
 func (s *Server) admitCall(method string) (func(), bool) {

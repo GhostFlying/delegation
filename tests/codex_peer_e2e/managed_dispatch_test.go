@@ -87,6 +87,7 @@ type managedWaitCursor struct {
 	mailbox   uint64
 	lifecycle uint64
 	artifact  uint64
+	result    uint64
 }
 
 func testManagedAdmission(
@@ -439,21 +440,23 @@ func waitForManagedRootMessage(
 		rootSource := root.root.Principal.Identity()
 		err := root.client.Call(ctx, protocol.MethodWaitAgent, root.root.Tree.TreeID, &rootSource, protocol.WaitAgentParams{
 			MailboxCursor: cursor.mailbox, LifecycleCursor: cursor.lifecycle,
-			ArtifactCursor: cursor.artifact,
-			TimeoutMillis:  10_000, MessageLimit: protocol.MaximumAgentWaitMessages,
+			ArtifactCursor: cursor.artifact, ResultCursor: cursor.result,
+			TimeoutMillis: 10_000, MessageLimit: protocol.MaximumAgentWaitMessages,
 			ActivityLimit: protocol.MaximumAgentWaitActivities,
 			ArtifactLimit: protocol.MaximumAgentWaitArtifacts,
+			ResultLimit:   protocol.MaximumAgentWaitResults,
 		}, &result)
 		if err != nil {
 			t.Fatalf("wait for managed root message %s: %v", messageID, err)
 		}
 		if result.NextMailboxCursor < cursor.mailbox || result.NextLifecycleCursor < cursor.lifecycle ||
-			result.NextArtifactCursor < cursor.artifact {
+			result.NextArtifactCursor < cursor.artifact || result.NextResultCursor < cursor.result {
 			t.Fatalf("managed root wait cursors regressed: %#v", result)
 		}
 		cursor.mailbox = result.NextMailboxCursor
 		cursor.lifecycle = result.NextLifecycleCursor
 		cursor.artifact = result.NextArtifactCursor
+		cursor.result = result.NextResultCursor
 		for _, received := range result.Messages {
 			if received.MessageID != messageID {
 				continue

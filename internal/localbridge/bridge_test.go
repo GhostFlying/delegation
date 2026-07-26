@@ -229,12 +229,6 @@ func TestBridgeForwardsRootAgentControlsAndRejectsWorkers(t *testing.T) {
 				AgentID:     bridgeTestAgentID,
 			},
 		},
-		{
-			method: protocol.MethodWaitAgent,
-			params: protocol.WaitAgentParams{
-				TimeoutMillis: 1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1,
-			},
-		},
 	}
 	for _, test := range tests {
 		var result struct {
@@ -249,8 +243,27 @@ func TestBridgeForwardsRootAgentControlsAndRejectsWorkers(t *testing.T) {
 			t.Fatalf("root %s result = %#v", test.method, result)
 		}
 	}
+	waitParams := protocol.WaitAgentParams{
+		TimeoutMillis: 1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
+	}
+	waitPayload, err := json.Marshal(protocol.WaitAgentResult{
+		Messages: []protocol.MailboxMessage{}, Activities: []protocol.AgentLifecycleActivity{},
+		Artifacts: []protocol.ChangesArtifactMetadata{}, Results: []protocol.ResultPackageHandle{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.Lock()
+	backend.result = waitPayload
+	backend.mu.Unlock()
+	var waited protocol.WaitAgentResult
+	if err := client.Call(
+		context.Background(), protocol.MethodWaitAgent, root.TreeID, &root, waitParams, &waited,
+	); err != nil {
+		t.Fatalf("root %s: %v", protocol.MethodWaitAgent, err)
+	}
 	calls := backend.snapshot()
-	if len(calls) != len(tests) {
+	if len(calls) != len(tests)+1 {
 		t.Fatalf("root agent control calls = %#v", calls)
 	}
 	for index, test := range tests {
@@ -259,12 +272,16 @@ func TestBridgeForwardsRootAgentControlsAndRejectsWorkers(t *testing.T) {
 			t.Fatalf("root agent control call %d = %#v", index, calls[index])
 		}
 	}
+	if call := calls[len(tests)]; call.method != protocol.MethodWaitAgent || call.source == nil ||
+		*call.source != root {
+		t.Fatalf("root agent wait call = %#v", call)
+	}
 
 	worker := control.NewWorkerPrincipal(
 		bridgeTestControllerID, bridgeTestTreeID, bridgeTestAgentID,
 		"123e4567-e89b-42d3-a456-426614174307", bridgeTestDeviceID,
 	).Identity()
-	err := client.Call(
+	err = client.Call(
 		context.Background(), protocol.MethodSendAgent, worker.TreeID, &worker,
 		protocol.SendAgentParams{
 			AgentID:   bridgeTestAgentID,
@@ -276,11 +293,11 @@ func TestBridgeForwardsRootAgentControlsAndRejectsWorkers(t *testing.T) {
 	assertRPCCode(t, err, protocol.ErrorForbidden)
 	err = client.Call(
 		context.Background(), protocol.MethodWaitAgent, worker.TreeID, &worker,
-		protocol.WaitAgentParams{TimeoutMillis: 1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
+		protocol.WaitAgentParams{TimeoutMillis: 1, MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1},
 		nil,
 	)
 	assertRPCCode(t, err, protocol.ErrorForbidden)
-	if calls := backend.snapshot(); len(calls) != len(tests) {
+	if calls := backend.snapshot(); len(calls) != len(tests)+1 {
 		t.Fatalf("worker agent control reached backend: %#v", calls)
 	}
 }
@@ -567,7 +584,7 @@ func (b *saturatedWaitBackend) Call(
 	ctx context.Context,
 	method, _ string,
 	_ *control.PrincipalIdentity,
-	_, result any,
+	params, result any,
 ) error {
 	if method == protocol.MethodWaitMailbox {
 		b.started <- struct{}{}
@@ -576,6 +593,23 @@ func (b *saturatedWaitBackend) Call(
 			return ctx.Err()
 		case <-b.release:
 		}
+	}
+	if method == protocol.MethodWaitAgent {
+		input, err := protocol.DecodePayload[protocol.WaitAgentParams](params.(json.RawMessage))
+		if err != nil {
+			return err
+		}
+		payload, err := json.Marshal(protocol.WaitAgentResult{
+			Messages: []protocol.MailboxMessage{}, Activities: []protocol.AgentLifecycleActivity{},
+			Artifacts: []protocol.ChangesArtifactMetadata{}, Results: []protocol.ResultPackageHandle{},
+			NextMailboxCursor: input.MailboxCursor, NextLifecycleCursor: input.LifecycleCursor,
+			NextArtifactCursor: input.ArtifactCursor, NextResultCursor: input.ResultCursor,
+		})
+		if err != nil {
+			return err
+		}
+		*result.(*json.RawMessage) = payload
+		return nil
 	}
 	*result.(*json.RawMessage) = json.RawMessage(`{"ok":true}`)
 	return nil
@@ -631,7 +665,7 @@ func TestBridgeWorkerWaitCapacityPreservesControlHeadroom(t *testing.T) {
 	}{
 		{method: protocol.MethodListDevices, params: protocol.ListDevicesParams{Limit: 1}},
 		{method: protocol.MethodWaitAgent, params: protocol.WaitAgentParams{
-			MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1,
+			MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
 		}},
 		{method: protocol.MethodSendMessage, params: protocol.SendMessageParams{
 			MessageID: "123e4567-e89b-42d3-a456-426614174399",
@@ -639,6 +673,13 @@ func TestBridgeWorkerWaitCapacityPreservesControlHeadroom(t *testing.T) {
 			Message:   "control remains available",
 		}},
 	} {
+		if call.method == protocol.MethodWaitAgent {
+			var result protocol.WaitAgentResult
+			if err := client.Call(ctx, call.method, root.TreeID, &root, call.params, &result); err != nil {
+				t.Fatalf("%s while worker waits occupied = %v", call.method, err)
+			}
+			continue
+		}
 		var result struct {
 			OK bool `json:"ok"`
 		}

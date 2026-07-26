@@ -14,10 +14,20 @@ import (
 )
 
 const (
-	agentWaitWorkerID   = "123e4567-e89b-42d3-a456-426614174160"
-	agentWaitMessageID  = "123e4567-e89b-42d3-a456-426614174161"
-	agentWaitMessageID2 = "123e4567-e89b-42d3-a456-426614174162"
-	agentWaitMessageID3 = "123e4567-e89b-42d3-a456-426614174163"
+	agentWaitWorkerID         = "123e4567-e89b-42d3-a456-426614174160"
+	agentWaitMessageID        = "123e4567-e89b-42d3-a456-426614174161"
+	agentWaitMessageID2       = "123e4567-e89b-42d3-a456-426614174162"
+	agentWaitMessageID3       = "123e4567-e89b-42d3-a456-426614174163"
+	agentWaitResultSpawnID1   = "123e4567-e89b-42d3-a456-426614174164"
+	agentWaitResultAgentID1   = "123e4567-e89b-42d3-a456-426614174165"
+	agentWaitResultThreadID1  = "123e4567-e89b-42d3-a456-426614174166"
+	agentWaitResultTurnID1    = "123e4567-e89b-42d3-a456-426614174167"
+	agentWaitResultPackageID1 = "123e4567-e89b-42d3-a456-426614174168"
+	agentWaitResultSpawnID2   = "123e4567-e89b-42d3-a456-426614174169"
+	agentWaitResultAgentID2   = "123e4567-e89b-42d3-a456-42661417416a"
+	agentWaitResultThreadID2  = "123e4567-e89b-42d3-a456-42661417416b"
+	agentWaitResultTurnID2    = "123e4567-e89b-42d3-a456-42661417416c"
+	agentWaitResultPackageID2 = "123e4567-e89b-42d3-a456-42661417416d"
 )
 
 func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
@@ -50,6 +60,7 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 		MessageLimit:  protocol.MaximumAgentWaitMessages,
 		ActivityLimit: protocol.MaximumAgentWaitActivities,
 		ArtifactLimit: protocol.MaximumAgentWaitArtifacts,
+		ResultLimit:   protocol.MaximumAgentWaitResults,
 	}, root)
 	writeEnvelope(t, rootConnection, waitRequest)
 	workerSend := writeAndRead(t, workerConnection, principalRequest(
@@ -103,7 +114,7 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 		protocol.MethodWaitAgent,
 		protocol.WaitAgentParams{
 			MailboxCursor: result.NextMailboxCursor,
-			MessageLimit:  1, ActivityLimit: 1, ArtifactLimit: 1,
+			MessageLimit:  1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
 		},
 		root,
 	))
@@ -118,7 +129,7 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 		protocol.MethodWaitAgent,
 		protocol.WaitAgentParams{
 			MailboxCursor: continuedResult.NextMailboxCursor,
-			MessageLimit:  1, ActivityLimit: 1, ArtifactLimit: 1,
+			MessageLimit:  1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
 		},
 		root,
 	))
@@ -132,7 +143,7 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 	workerBypass := writeAndRead(t, workerConnection, principalRequest(
 		t,
 		protocol.MethodWaitAgent,
-		protocol.WaitAgentParams{MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
+		protocol.WaitAgentParams{MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1},
 		worker,
 	))
 	if workerBypass.Error == nil || workerBypass.Error.Code != protocol.ErrorForbidden {
@@ -141,7 +152,7 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 	crossDeviceRoot := writeAndRead(t, workerConnection, principalRequest(
 		t,
 		protocol.MethodWaitAgent,
-		protocol.WaitAgentParams{MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
+		protocol.WaitAgentParams{MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1},
 		root,
 	))
 	if crossDeviceRoot.Error == nil || crossDeviceRoot.Error.Code != protocol.ErrorForbidden {
@@ -152,12 +163,183 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 		protocol.MethodWaitAgent,
 		protocol.WaitAgentParams{
 			MailboxCursor: 1, LifecycleCursor: 1,
-			MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1,
+			MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
 		},
 		root,
 	))
 	if ahead.Error == nil || ahead.Error.Code != protocol.ErrorConflict {
 		t.Fatalf("ahead lifecycle cursor = %#v", ahead)
+	}
+}
+
+func TestAgentWaitPaginatesDeliveredResultsWithIndependentCursor(t *testing.T) {
+	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	rootConnection, _, err := dialBroker(harness, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rootConnection.Close(websocket.StatusNormalClosure, "done")
+	sendHello(t, rootConnection)
+	root := ensureRootPrincipal(t, rootConnection)
+
+	targetConnection, _, err := dialBroker(harness, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer targetConnection.Close(websocket.StatusNormalClosure, "done")
+	targetHello := hello()
+	targetHello.DeviceID = brokerTestSecondDeviceID
+	targetHello.DeviceName = "result-target"
+	targetHello.WorkerRevision = 2
+	if response := writeAndRead(
+		t, targetConnection, request(t, protocol.MethodHello, targetHello),
+	); response.Error != nil {
+		t.Fatalf("target hello = %#v", response.Error)
+	}
+
+	workers := []struct {
+		spawnID, agentID, threadID, turnID, packageID string
+		revision                                      uint64
+	}{
+		{
+			spawnID: agentWaitResultSpawnID1, agentID: agentWaitResultAgentID1,
+			threadID: agentWaitResultThreadID1, turnID: agentWaitResultTurnID1,
+			packageID: agentWaitResultPackageID1, revision: 1,
+		},
+		{
+			spawnID: agentWaitResultSpawnID2, agentID: agentWaitResultAgentID2,
+			threadID: agentWaitResultThreadID2, turnID: agentWaitResultTurnID2,
+			packageID: agentWaitResultPackageID2, revision: 2,
+		},
+	}
+	receipts := make([]store.AgentSpawnReceipt, 0, len(workers))
+	snapshots := make([]protocol.WorkerLifecycleSnapshot, 0, len(workers))
+	for _, worker := range workers {
+		receipt, err := harness.registry.BeginAgentSpawn(
+			context.Background(),
+			store.AgentSpawnIntent{
+				Source: root.Identity(), SpawnID: worker.spawnID, AgentID: worker.agentID,
+				TargetDeviceID: brokerTestSecondDeviceID, TaskName: "result_wait_worker",
+				PromptDigest: sha256.Sum256([]byte(worker.agentID)),
+			},
+			time.Unix(10+int64(worker.revision), 0),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := harness.registry.MarkAgentSpawnStarted(
+			context.Background(),
+			store.AgentSpawnKey{
+				ControllerID: root.ControllerID, TreeID: root.TreeID,
+				SourceAgentID: root.AgentID, SpawnID: worker.spawnID,
+			},
+			time.Unix(20+int64(worker.revision), 0),
+		); err != nil {
+			t.Fatal(err)
+		}
+		receipts = append(receipts, receipt)
+		snapshots = append(snapshots, protocol.WorkerLifecycleSnapshot{
+			TreeID: root.TreeID, AgentID: worker.agentID, Revision: worker.revision,
+			Phase: protocol.WorkerLifecycleFinalizing, CodexThreadID: worker.threadID,
+			ActiveTurnID: worker.turnID,
+		})
+	}
+	response := writeAndRead(
+		t,
+		targetConnection,
+		request(t, protocol.MethodSyncWorkerLifecycle, protocol.SyncWorkerLifecycleParams{
+			BaseRevision: 0, ThroughRevision: 2, Complete: true, Workers: snapshots,
+		}),
+	)
+	if response.Error != nil {
+		t.Fatalf("worker lifecycle sync = %#v", response.Error)
+	}
+	for index, worker := range workers {
+		manifest := protocol.ResultManifest{
+			Version: protocol.ResultManifestVersion, PackageID: worker.packageID,
+			ControllerID: root.ControllerID, TreeID: root.TreeID,
+			SourceAgentID: worker.agentID, SourceDeviceID: brokerTestSecondDeviceID,
+			ManagedThreadID: worker.threadID, TurnID: worker.turnID,
+			LifecycleRevision: worker.revision,
+			Terminal:          protocol.ResultTerminal{Outcome: protocol.ResultTerminalCompleted},
+			CapturedAt:        30 + int64(worker.revision),
+			Rollout: protocol.ResultRolloutComponent{
+				Status: protocol.ResultRolloutCaptureFailed, FailureCode: "rollout_unavailable",
+			},
+			Workspace: protocol.ResultWorkspaceComponent{
+				Status:       protocol.ResultWorkspaceNotManaged,
+				BaseWarnings: []string{}, ResultWarnings: []string{},
+			},
+			Parts: []protocol.ResultPackagePartDescriptor{},
+		}
+		manifestBytes, manifestDescriptor, err := protocol.EncodeResultManifest(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := harness.registry.PublishResultPackage(
+			context.Background(), brokerTestSecondDeviceID, receipts[index].Agent.Principal,
+			protocol.PublishResultPackageParams{Metadata: protocol.ResultPackageMetadata{
+				Manifest: manifestBytes, ManifestDescriptor: manifestDescriptor,
+			}},
+			time.Unix(40+int64(worker.revision), 0),
+		); err != nil {
+			t.Fatal(err)
+		}
+		delivered, err := harness.registry.MarkResultPackageDelivered(
+			context.Background(), root.DeviceID, root.Identity(), worker.packageID,
+			time.Unix(50+int64(worker.revision), 0),
+		)
+		if err != nil || delivered.Sequence != uint64(index+1) {
+			t.Fatalf("deliver result package %d = %#v, error %v", index, delivered, err)
+		}
+	}
+
+	first := writeAndRead(t, rootConnection, principalRequest(
+		t, protocol.MethodWaitAgent, protocol.WaitAgentParams{
+			LifecycleCursor: 2,
+			MessageLimit:    1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
+		}, root,
+	))
+	if first.Error != nil {
+		t.Fatalf("first result page error = %#v", first.Error)
+	}
+	firstResult := decodeResult[protocol.WaitAgentResult](t, first)
+	if len(firstResult.Results) != 1 ||
+		firstResult.Results[0].Manifest.PackageID != agentWaitResultPackageID1 ||
+		firstResult.Results[0].Sequence != 1 ||
+		firstResult.Results[0].Availability != protocol.ResultPackageUnverified ||
+		firstResult.NextResultCursor != 1 || !firstResult.MoreResults ||
+		firstResult.NextMailboxCursor != 0 || firstResult.NextLifecycleCursor != 2 ||
+		firstResult.NextArtifactCursor != 0 {
+		t.Fatalf("first result page = %#v", firstResult)
+	}
+	second := writeAndRead(t, rootConnection, principalRequest(
+		t, protocol.MethodWaitAgent, protocol.WaitAgentParams{
+			LifecycleCursor: 2, ResultCursor: firstResult.NextResultCursor,
+			MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
+		}, root,
+	))
+	if second.Error != nil {
+		t.Fatalf("second result page error = %#v", second.Error)
+	}
+	secondResult := decodeResult[protocol.WaitAgentResult](t, second)
+	if len(secondResult.Results) != 1 ||
+		secondResult.Results[0].Manifest.PackageID != agentWaitResultPackageID2 ||
+		secondResult.Results[0].Sequence != 2 ||
+		secondResult.Results[0].Availability != protocol.ResultPackageUnverified ||
+		secondResult.NextResultCursor != 2 || secondResult.MoreResults ||
+		secondResult.NextMailboxCursor != 0 || secondResult.NextLifecycleCursor != 2 ||
+		secondResult.NextArtifactCursor != 0 {
+		t.Fatalf("second result page = %#v", secondResult)
+	}
+	ahead := writeAndRead(t, rootConnection, principalRequest(
+		t, protocol.MethodWaitAgent, protocol.WaitAgentParams{
+			LifecycleCursor: 2, ResultCursor: 3,
+			MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
+		}, root,
+	))
+	if ahead.Error == nil || ahead.Error.Code != protocol.ErrorConflict {
+		t.Fatalf("ahead result cursor = %#v", ahead)
 	}
 }
 
@@ -221,6 +403,7 @@ func TestAgentWaitWakesOnWorkerLifecycleNotification(t *testing.T) {
 		TimeoutMillis: 2_000,
 		MessageLimit:  protocol.MaximumAgentWaitMessages, ActivityLimit: protocol.MaximumAgentWaitActivities,
 		ArtifactLimit: protocol.MaximumAgentWaitArtifacts,
+		ResultLimit:   protocol.MaximumAgentWaitResults,
 	}, root)
 	writeEnvelope(t, rootConnection, waitRequest)
 	rootSession := activeBrokerSession(t, harness.server, brokerTestDeviceID)
@@ -268,6 +451,7 @@ func TestAgentWaitCancellationReleasesCapacityAndSubscriptions(t *testing.T) {
 		TimeoutMillis: protocol.MaximumAgentWaitMillis,
 		MessageLimit:  protocol.MaximumAgentWaitMessages, ActivityLimit: protocol.MaximumAgentWaitActivities,
 		ArtifactLimit: protocol.MaximumAgentWaitArtifacts,
+		ResultLimit:   protocol.MaximumAgentWaitResults,
 	}, root)
 	writeEnvelope(t, connection, waitRequest)
 	waitForPendingAgentWait(t, harness.server, session, root, waitRequest.RequestID)
@@ -281,7 +465,7 @@ func TestAgentWaitCancellationReleasesCapacityAndSubscriptions(t *testing.T) {
 	immediate := writeAndRead(t, connection, principalRequest(
 		t,
 		protocol.MethodWaitAgent,
-		protocol.WaitAgentParams{MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1},
+		protocol.WaitAgentParams{MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1},
 		root,
 	))
 	result := decodeResult[protocol.WaitAgentResult](t, immediate)
@@ -326,11 +510,18 @@ func waitForPendingAgentWait(
 			artifactWaiters = artifactWatch.waiters
 		}
 		server.artifactNotifier.mu.Unlock()
+		server.resultNotifier.mu.Lock()
+		resultWatch := server.resultNotifier.watches[artifact]
+		resultWaiters := 0
+		if resultWatch != nil {
+			resultWaiters = resultWatch.waiters
+		}
+		server.resultNotifier.mu.Unlock()
 		session.asyncMu.Lock()
 		_, cancellable := session.asyncCancels[requestID]
 		session.asyncMu.Unlock()
 		if len(session.asyncSem) == 1 && mailboxWaiters == 1 && lifecycleWaiters == 1 &&
-			artifactWaiters == 1 && cancellable {
+			artifactWaiters == 1 && resultWaiters == 1 && cancellable {
 			return
 		}
 		time.Sleep(time.Millisecond)
@@ -367,11 +558,14 @@ func assertAgentWaitCleanedUp(
 	server.artifactNotifier.mu.Lock()
 	artifactWatches := len(server.artifactNotifier.watches)
 	server.artifactNotifier.mu.Unlock()
+	server.resultNotifier.mu.Lock()
+	resultWatches := len(server.resultNotifier.watches)
+	server.resultNotifier.mu.Unlock()
 	if len(session.asyncSem) != 0 || cancellable || mailboxWatches != 0 ||
-		lifecycleWatches != 0 || artifactWatches != 0 {
+		lifecycleWatches != 0 || artifactWatches != 0 || resultWatches != 0 {
 		t.Fatalf(
-			"agent wait cleanup = slots %d, cancellable %v, mailbox watches %d, lifecycle watches %d, artifact watches %d",
-			len(session.asyncSem), cancellable, mailboxWatches, lifecycleWatches, artifactWatches,
+			"agent wait cleanup = slots %d, cancellable %v, mailbox watches %d, lifecycle watches %d, artifact watches %d, result watches %d",
+			len(session.asyncSem), cancellable, mailboxWatches, lifecycleWatches, artifactWatches, resultWatches,
 		)
 	}
 }

@@ -21,6 +21,8 @@ const (
 	rootMCPTurnID              = "123e4567-e89b-42d3-a456-426614174410"
 	rootMCPArtifactWorkspaceID = "123e4567-e89b-42d3-a456-426614174411"
 	rootMCPOtherTreeID         = "123e4567-e89b-42d3-a456-426614174412"
+	rootMCPResultPackageID     = "123e4567-e89b-42d3-a456-426614174413"
+	rootMCPManagedThreadID     = "123e4567-e89b-42d3-a456-426614174414"
 )
 
 type serialWaitBackend struct {
@@ -49,9 +51,9 @@ func (b *repollWaitBackend) Call(
 		input := params.(protocol.WaitAgentParams)
 		response := protocol.WaitAgentResult{
 			Messages: []protocol.MailboxMessage{}, Activities: []protocol.AgentLifecycleActivity{},
-			Artifacts:         []protocol.ChangesArtifactMetadata{},
+			Artifacts: []protocol.ChangesArtifactMetadata{}, Results: []protocol.ResultPackageHandle{},
 			NextMailboxCursor: input.MailboxCursor, NextLifecycleCursor: input.LifecycleCursor,
-			NextArtifactCursor: input.ArtifactCursor,
+			NextArtifactCursor: input.ArtifactCursor, NextResultCursor: input.ResultCursor,
 		}
 		if sequence == 3 {
 			response.Activities = []protocol.AgentLifecycleActivity{{
@@ -97,8 +99,8 @@ func (b *serialWaitBackend) Call(
 				Sequence: uint64(sequence), ObservedAt: int64(sequence),
 			}},
 			NextMailboxCursor: input.MailboxCursor, NextLifecycleCursor: uint64(sequence),
-			Artifacts:          []protocol.ChangesArtifactMetadata{},
-			NextArtifactCursor: input.ArtifactCursor,
+			Artifacts: []protocol.ChangesArtifactMetadata{}, Results: []protocol.ResultPackageHandle{},
+			NextArtifactCursor: input.ArtifactCursor, NextResultCursor: input.ResultCursor,
 		}
 		return nil
 	default:
@@ -110,6 +112,7 @@ func TestWaitAgentKeepsIndependentCursorsOutOfModelInput(t *testing.T) {
 	worker := control.NewWorkerPrincipal(
 		rootMCPControllerID, rootMCPTreeID, rootMCPWorkerID, rootMCPAgentID, rootMCPDeviceID,
 	).Identity()
+	handle := rootMCPResultHandle(protocol.ResultPackageAvailable)
 	backend := &fakeRootBackend{waitResults: []protocol.WaitAgentResult{
 		{
 			Messages: []protocol.MailboxMessage{{
@@ -120,10 +123,13 @@ func TestWaitAgentKeepsIndependentCursorsOutOfModelInput(t *testing.T) {
 			Artifacts: []protocol.ChangesArtifactMetadata{
 				rootMCPChangesArtifact(protocol.ChangesArtifactAvailable),
 			},
+			Results:             []protocol.ResultPackageHandle{handle},
 			NextMailboxCursor:   1,
 			NextLifecycleCursor: 0,
 			NextArtifactCursor:  1,
+			NextResultCursor:    handle.Sequence,
 			MoreMessages:        true,
+			MoreResults:         true,
 		},
 		{
 			Messages: []protocol.MailboxMessage{},
@@ -136,6 +142,8 @@ func TestWaitAgentKeepsIndependentCursorsOutOfModelInput(t *testing.T) {
 			NextLifecycleCursor: 1,
 			Artifacts:           []protocol.ChangesArtifactMetadata{},
 			NextArtifactCursor:  1,
+			Results:             []protocol.ResultPackageHandle{},
+			NextResultCursor:    handle.Sequence,
 		},
 	}}
 	ctx, clientSession, closeSessions := connectRootMCP(t, backend)
@@ -150,11 +158,29 @@ func TestWaitAgentKeepsIndependentCursorsOutOfModelInput(t *testing.T) {
 	var firstOutput WaitAgentOutput
 	decodeStructured(t, first.StructuredContent, &firstOutput)
 	if len(firstOutput.Messages) != 1 || len(firstOutput.Activities) != 0 ||
-		len(firstOutput.Artifacts) != 1 ||
+		len(firstOutput.Artifacts) != 1 || len(firstOutput.Results) != 1 ||
 		firstOutput.Messages[0].SourceAgentID != rootMCPWorkerID ||
 		firstOutput.Artifacts[0].ArtifactID != rootMCPArtifactID ||
+		firstOutput.Results[0].PackageID != rootMCPResultPackageID ||
+		firstOutput.Results[0].Availability != protocol.ResultPackageAvailable ||
+		firstOutput.Results[0].ManagedThreadID != rootMCPManagedThreadID ||
+		firstOutput.Results[0].TurnID != rootMCPTurnID ||
 		firstOutput.Messages[0].Message != "worker result" || !firstOutput.HasMore {
 		t.Fatalf("first wait_agent output = %#v", firstOutput)
+	}
+	encodedResult, err := json.Marshal(firstOutput.Results[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"controller_id", "tree_id", "manifest", "rawSha256", "workspaceId"} {
+		if strings.Contains(string(encodedResult), forbidden) {
+			t.Fatalf("root result handle leaked %q routing data: %s", forbidden, encodedResult)
+		}
+	}
+	for _, required := range []string{"raw_sha256", "base_warnings", "result_warnings"} {
+		if !strings.Contains(string(encodedResult), required) {
+			t.Fatalf("root result handle omitted %q summary data: %s", required, encodedResult)
+		}
 	}
 
 	second := callTool(t, ctx, clientSession, ToolWaitAgent, rootMCPThreadID, map[string]any{
@@ -166,7 +192,7 @@ func TestWaitAgentKeepsIndependentCursorsOutOfModelInput(t *testing.T) {
 	var secondOutput WaitAgentOutput
 	decodeStructured(t, second.StructuredContent, &secondOutput)
 	if len(secondOutput.Messages) != 0 || len(secondOutput.Activities) != 1 ||
-		len(secondOutput.Artifacts) != 0 ||
+		len(secondOutput.Artifacts) != 0 || len(secondOutput.Results) != 0 ||
 		secondOutput.Activities[0].AgentID != rootMCPWorkerID ||
 		secondOutput.Activities[0].Phase != protocol.WorkerLifecycleIdle || secondOutput.HasMore {
 		t.Fatalf("second wait_agent output = %#v", secondOutput)
@@ -179,11 +205,13 @@ func TestWaitAgentKeepsIndependentCursorsOutOfModelInput(t *testing.T) {
 		}
 	}
 	if len(waits) != 2 || waits[0].MailboxCursor != 0 || waits[0].LifecycleCursor != 0 ||
-		waits[0].ArtifactCursor != 0 || waits[1].MailboxCursor != 1 ||
+		waits[0].ArtifactCursor != 0 || waits[0].ResultCursor != 0 || waits[1].MailboxCursor != 1 ||
 		waits[1].LifecycleCursor != 0 || waits[1].ArtifactCursor != 1 ||
+		waits[1].ResultCursor != handle.Sequence ||
 		waits[0].MessageLimit != agentWaitMessageLimit ||
 		waits[0].ActivityLimit != agentWaitActivityLimit ||
-		waits[0].ArtifactLimit != agentWaitArtifactLimit {
+		waits[0].ArtifactLimit != agentWaitArtifactLimit ||
+		waits[0].ResultLimit != agentWaitResultLimit {
 		t.Fatalf("wait_agent broker params = %#v", waits)
 	}
 }
@@ -284,7 +312,7 @@ func TestWaitAgentRejectsMismatchedArtifactIdentity(t *testing.T) {
 				Artifacts: []protocol.ChangesArtifactMetadata{artifact}, NextArtifactCursor: 1,
 			}
 			if err := validateWaitAgentResult(result, protocol.WaitAgentParams{
-				MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1,
+				MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
 			}, rootResult(rootMCPThreadID).Principal); err == nil {
 				t.Fatalf("mismatched artifact was accepted: %#v", artifact)
 			}
@@ -301,13 +329,72 @@ func TestWaitAgentBoundsInvalidArtifactValidationErrors(t *testing.T) {
 		Artifacts: []protocol.ChangesArtifactMetadata{artifact}, NextArtifactCursor: 1,
 	}
 	err := validateWaitAgentResult(result, protocol.WaitAgentParams{
-		MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1,
+		MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
 	}, rootResult(rootMCPThreadID).Principal)
 	if err == nil || err.Error() != "delegation service returned an invalid changes artifact" {
 		t.Fatalf("invalid artifact error = %v", err)
 	}
 	if strings.Contains(err.Error(), "untrusted-artifact-status") || len(err.Error()) > 128 {
 		t.Fatalf("invalid artifact error reflected backend input: %q", err)
+	}
+}
+
+func TestWaitAgentRejectsUnverifiedOrMismatchedResultPackages(t *testing.T) {
+	root := rootResult(rootMCPThreadID).Principal
+	tests := []struct {
+		name         string
+		cursor       uint64
+		mutateHandle func(*protocol.ResultPackageHandle)
+	}{
+		{name: "unverified", mutateHandle: func(handle *protocol.ResultPackageHandle) {
+			handle.Availability = protocol.ResultPackageUnverified
+		}},
+		{name: "controller", mutateHandle: func(handle *protocol.ResultPackageHandle) {
+			handle.Manifest.ControllerID = rootMCPOtherTreeID
+		}},
+		{name: "tree", mutateHandle: func(handle *protocol.ResultPackageHandle) {
+			handle.Manifest.TreeID = rootMCPOtherTreeID
+		}},
+		{name: "root as source", mutateHandle: func(handle *protocol.ResultPackageHandle) {
+			handle.Manifest.SourceAgentID = rootMCPAgentID
+		}},
+		{name: "wrong workspace source", mutateHandle: func(handle *protocol.ResultPackageHandle) {
+			handle.Manifest = rootMCPManagedResultHandle(protocol.ResultPackageAvailable).Manifest
+			handle.Manifest.Workspace.SourceDeviceID = rootMCPOtherTreeID
+		}},
+		{name: "invalid manifest", mutateHandle: func(handle *protocol.ResultPackageHandle) {
+			handle.Manifest.PackageID = "not-an-id"
+		}},
+		{name: "unordered", cursor: 1, mutateHandle: func(*protocol.ResultPackageHandle) {}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handle := rootMCPResultHandle(protocol.ResultPackageAvailable)
+			test.mutateHandle(&handle)
+			result := protocol.WaitAgentResult{
+				Messages: []protocol.MailboxMessage{}, Activities: []protocol.AgentLifecycleActivity{},
+				Artifacts: []protocol.ChangesArtifactMetadata{}, Results: []protocol.ResultPackageHandle{handle},
+				NextResultCursor: handle.Sequence,
+			}
+			err := validateWaitAgentResult(result, protocol.WaitAgentParams{
+				ResultCursor: test.cursor, MessageLimit: 1, ActivityLimit: 1,
+				ArtifactLimit: 1, ResultLimit: 1,
+			}, root)
+			if err == nil {
+				t.Fatalf("mismatched result package was accepted: %#v", handle)
+			}
+		})
+	}
+
+	evicted := rootMCPResultHandle(protocol.ResultPackageEvicted)
+	if err := validateWaitAgentResult(protocol.WaitAgentResult{
+		Messages: []protocol.MailboxMessage{}, Activities: []protocol.AgentLifecycleActivity{},
+		Artifacts: []protocol.ChangesArtifactMetadata{}, Results: []protocol.ResultPackageHandle{evicted},
+		NextResultCursor: evicted.Sequence,
+	}, protocol.WaitAgentParams{
+		MessageLimit: 1, ActivityLimit: 1, ArtifactLimit: 1, ResultLimit: 1,
+	}, root); err != nil {
+		t.Fatalf("evicted result package was rejected: %v", err)
 	}
 }
 
@@ -409,6 +496,7 @@ func TestMaximumWaitAgentPageFitsOutputLimit(t *testing.T) {
 		Messages:   make([]protocol.MailboxMessage, 0, agentWaitMessageLimit),
 		Activities: make([]protocol.AgentLifecycleActivity, 0, agentWaitActivityLimit),
 		Artifacts:  []protocol.ChangesArtifactMetadata{rootMCPChangesArtifact(protocol.ChangesArtifactAvailable)},
+		Results:    []protocol.ResultPackageHandle{rootMCPManagedResultHandle(protocol.ResultPackageAvailable)},
 	}
 	for range agentWaitMessageLimit {
 		result.Messages = append(result.Messages, protocol.MailboxMessage{
@@ -451,9 +539,22 @@ func TestMaximumWaitAgentPageFitsOutputLimit(t *testing.T) {
 			SHA256: strings.Repeat("9", 64),
 		},
 	}
+	result.Results[0].Manifest.LifecycleRevision = math.MaxInt64
+	result.Results[0].Manifest.CapturedAt = math.MaxInt64
+	result.Results[0].Manifest.Rollout.RawSize = protocol.MaximumResultRolloutRawBytes
+	result.Results[0].Manifest.Workspace.ObjectFormat = "sha256"
+	result.Results[0].Manifest.Workspace.BaseHeadOID = strings.Repeat("1", 64)
+	result.Results[0].Manifest.Workspace.ResultHeadOID = strings.Repeat("4", 64)
+	result.Results[0].Manifest.Workspace.BaseWarnings = append([]string{}, warnings...)
+	result.Results[0].Manifest.Workspace.ResultWarnings = append([]string{}, warnings...)
+	result.Results[0].Manifest.Parts[0].Size = protocol.MaximumResultChangesBundleBytes
+	result.Results[0].Manifest.Parts[1].Size = protocol.MaximumResultRolloutBytes
+	result.Results[0].Sequence = math.MaxInt64
+	result.Results[0].DeliveredAt = math.MaxInt64
+	result.NextResultCursor = math.MaxInt64
 	if err := validateWaitAgentResult(result, protocol.WaitAgentParams{
 		MessageLimit: agentWaitMessageLimit, ActivityLimit: agentWaitActivityLimit,
-		ArtifactLimit: agentWaitArtifactLimit,
+		ArtifactLimit: agentWaitArtifactLimit, ResultLimit: agentWaitResultLimit,
 	}, rootResult(rootMCPThreadID).Principal); err != nil {
 		t.Fatal(err)
 	}
@@ -506,6 +607,51 @@ func rootMCPChangesArtifact(status protocol.ChangesArtifactStatus) protocol.Chan
 		artifact.FailureCode = "changes_capture_failed"
 	}
 	return artifact
+}
+
+func rootMCPResultHandle(availability protocol.ResultPackageAvailability) protocol.ResultPackageHandle {
+	return protocol.ResultPackageHandle{
+		Manifest: protocol.ResultManifest{
+			Version: protocol.ResultManifestVersion, PackageID: rootMCPResultPackageID,
+			ControllerID: rootMCPControllerID, TreeID: rootMCPTreeID,
+			SourceAgentID: rootMCPWorkerID, SourceDeviceID: rootMCPDeviceID,
+			ManagedThreadID: rootMCPManagedThreadID, TurnID: rootMCPTurnID,
+			LifecycleRevision: 2,
+			Terminal:          protocol.ResultTerminal{Outcome: protocol.ResultTerminalCompleted},
+			CapturedAt:        12,
+			Rollout: protocol.ResultRolloutComponent{
+				Status: protocol.ResultRolloutAvailable, RawSize: 42,
+				RawSHA256: strings.Repeat("a", 64),
+			},
+			Workspace: protocol.ResultWorkspaceComponent{
+				Status:       protocol.ResultWorkspaceNotManaged,
+				BaseWarnings: []string{}, ResultWarnings: []string{},
+			},
+			Parts: []protocol.ResultPackagePartDescriptor{{
+				Kind: protocol.ResultPackagePartRollout, Size: 21,
+				SHA256: strings.Repeat("b", 64),
+			}},
+		},
+		Availability: availability, Sequence: 1, DeliveredAt: 13,
+	}
+}
+
+func rootMCPManagedResultHandle(availability protocol.ResultPackageAvailability) protocol.ResultPackageHandle {
+	handle := rootMCPResultHandle(availability)
+	handle.Manifest.Workspace = protocol.ResultWorkspaceComponent{
+		Status: protocol.ResultWorkspaceChanged, WorkspaceID: rootMCPArtifactWorkspaceID,
+		SourceDeviceID: rootMCPDeviceID, TargetDeviceID: rootMCPDeviceID,
+		ObjectFormat: "sha1", BaseHeadOID: strings.Repeat("1", 40),
+		BaseManifestHash: strings.Repeat("2", 64), BaseSnapshotHash: strings.Repeat("3", 64),
+		BaseClean: true, ResultHeadOID: strings.Repeat("4", 40),
+		ResultSnapshotHash: strings.Repeat("5", 64), ResultClean: true,
+		BaseWarnings: []string{}, ResultWarnings: []string{},
+	}
+	handle.Manifest.Parts = []protocol.ResultPackagePartDescriptor{
+		{Kind: protocol.ResultPackagePartChangesBundle, Size: 32, SHA256: strings.Repeat("6", 64)},
+		{Kind: protocol.ResultPackagePartRollout, Size: 21, SHA256: strings.Repeat("b", 64)},
+	}
+	return handle
 }
 
 func agentArtifactOutput(artifact protocol.ChangesArtifactMetadata) AgentArtifactOutput {
