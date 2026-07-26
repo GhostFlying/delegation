@@ -719,67 +719,149 @@ func TestResultPackagePeerReconnectWakesDeferredRelay(t *testing.T) {
 	}
 }
 
-func TestResultPackagePeerReconnectContinuesAfterAnExactFullPage(t *testing.T) {
+func TestResultPackageRelayBoundsResidentFlightsAndDrainsBacklog(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	worker := resultPackageRelayPrincipalsForRequest()
-	requests := make([]resultPackageRelayRequest, maximumPendingResultPackageRelays)
-	for index := range requests {
-		requests[index] = resultPackageRelayRequest{
+	firstPage := make([]resultPackageRelayRequest, maximumPendingResultPackageRelays)
+	for index := range firstPage {
+		firstPage[index] = resultPackageRelayRequest{
 			source:    worker,
 			packageID: fmt.Sprintf("123e4567-e89b-42d3-a456-%012d", index+1),
 		}
 	}
+	lastRequest := resultPackageRelayRequest{
+		source: worker,
+		packageID: fmt.Sprintf(
+			"123e4567-e89b-42d3-a456-%012d",
+			maximumPendingResultPackageRelays+1,
+		),
+	}
 	next := &store.ResultPackageRelayCursor{
 		PublishedAt: 40,
-		PackageID:   requests[len(requests)-1].packageID,
+		PackageID:   firstPage[len(firstPage)-1].packageID,
 	}
-	secondPage := make(chan struct{}, 1)
+	secondPage := make(chan struct{})
+	var secondPageOnce sync.Once
+	attempted := make(chan string, maximumPendingResultPackageRelays*3)
+	completed := make(chan string, maximumPendingResultPackageRelays+1)
+	completedPackages := make(map[string]bool)
+	var completedMu sync.Mutex
+	var recovered atomic.Bool
+	var coordinator *resultPackageRelayCoordinator
+	var maximumResident atomic.Int32
 	var relays atomic.Int32
-	coordinator := newResultPackageRelayCoordinator(
+	coordinator = newResultPackageRelayCoordinator(
 		ctx,
-		func(context.Context, resultPackageRelayRequest) error {
+		func(_ context.Context, request resultPackageRelayRequest) error {
 			relays.Add(1)
-			return retryResultPackageRelayAfter(
-				fmt.Errorf("%w: peer offline", errResultPackageRelayDeferred),
-				time.Hour,
-			)
+			coordinator.mu.Lock()
+			resident := int32(len(coordinator.active))
+			coordinator.mu.Unlock()
+			for current := maximumResident.Load(); resident > current; current = maximumResident.Load() {
+				if maximumResident.CompareAndSwap(current, resident) {
+					break
+				}
+			}
+			attempted <- request.packageID
+			if !recovered.Load() {
+				return retryResultPackageRelayAfter(
+					fmt.Errorf("%w: peer offline", errResultPackageRelayDeferred),
+					time.Hour,
+				)
+			}
+			completedMu.Lock()
+			if !completedPackages[request.packageID] {
+				completedPackages[request.packageID] = true
+				completed <- request.packageID
+			}
+			completedMu.Unlock()
+			return nil
 		},
 		func(
 			_ context.Context,
 			deviceID string,
 			after *store.ResultPackageRelayCursor,
 		) (resultPackageRelayScanPage, error) {
-			if deviceID != resultRelayRootPeer {
+			if deviceID != worker.DeviceID {
 				return resultPackageRelayScanPage{}, fmt.Errorf(
-					"unexpected reconnect peer %s",
+					"unexpected durable scan peer %s",
 					deviceID,
 				)
 			}
 			if after == nil {
+				completedMu.Lock()
+				requests := make([]resultPackageRelayRequest, 0, len(firstPage))
+				for _, request := range firstPage {
+					if !completedPackages[request.packageID] {
+						requests = append(requests, request)
+					}
+				}
+				completedMu.Unlock()
 				return resultPackageRelayScanPage{requests: requests, nextAfter: next}, nil
 			}
 			if *after != *next {
 				return resultPackageRelayScanPage{}, fmt.Errorf("unexpected cursor %#v", after)
 			}
-			secondPage <- struct{}{}
-			return resultPackageRelayScanPage{}, nil
+			secondPageOnce.Do(func() { close(secondPage) })
+			completedMu.Lock()
+			isCompleted := completedPackages[lastRequest.packageID]
+			completedMu.Unlock()
+			if isCompleted {
+				return resultPackageRelayScanPage{}, nil
+			}
+			return resultPackageRelayScanPage{requests: []resultPackageRelayRequest{lastRequest}}, nil
 		},
 		nil,
 	)
-	if !coordinator.schedulePeerReconnect(resultRelayRootPeer) {
-		t.Fatal("full reconnect page was not scheduled")
+	for _, request := range firstPage {
+		if !coordinator.schedule(request) {
+			t.Fatal("initial relay page did not fit within the resident cap")
+		}
+	}
+	if coordinator.schedule(lastRequest) {
+		t.Fatal("relay beyond the resident cap started before durable rescan capacity")
+	}
+	for range maximumPendingResultPackageRelays {
+		select {
+		case <-attempted:
+		case <-time.After(time.Second):
+			t.Fatal("initial resident relay page did not start")
+		}
 	}
 	select {
 	case <-secondPage:
 	case <-time.After(time.Second):
-		t.Fatal("deferred exact-full reconnect page did not continue with its cursor")
+		t.Fatal("bounded relay scan did not continue to the durable backlog")
+	}
+	coordinator.mu.Lock()
+	resident := len(coordinator.active)
+	coordinator.mu.Unlock()
+	if resident != maximumActiveResultPackageRelays {
+		t.Fatalf("resident relays = %d, want cap %d", resident, maximumActiveResultPackageRelays)
+	}
+	if relays.Load() != maximumActiveResultPackageRelays {
+		t.Fatalf("relay attempts before recovery = %d, want %d", relays.Load(), maximumActiveResultPackageRelays)
+	}
+
+	recovered.Store(true)
+	coordinator.schedulePeerReconnect(worker.DeviceID)
+	for range maximumPendingResultPackageRelays + 1 {
+		select {
+		case <-completed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("bounded durable relay backlog did not drain after reconnect")
+		}
 	}
 	cancel()
 	coordinator.stop()
 	coordinator.waitForShutdown()
-	if got := relays.Load(); got != maximumPendingResultPackageRelays {
-		t.Fatalf("relays = %d, want %d", got, maximumPendingResultPackageRelays)
+	if maximumResident.Load() > maximumActiveResultPackageRelays {
+		t.Fatalf(
+			"maximum resident relays = %d, want at most %d",
+			maximumResident.Load(),
+			maximumActiveResultPackageRelays,
+		)
 	}
 }
 

@@ -21,7 +21,7 @@ const (
 	resultPackageCancelTimeout        = 5 * time.Second
 	resultPackageReconnectScanTimeout = 30 * time.Second
 	maximumPendingResultPackageRelays = 128
-	maximumConcurrentResultRelays     = 128
+	maximumActiveResultPackageRelays  = 128
 	initialResultPackageRelayBackoff  = time.Second
 	maximumResultPackageRelayBackoff  = 30 * time.Second
 )
@@ -90,7 +90,7 @@ type resultPackageRelayCoordinator struct {
 	mu         sync.Mutex
 	active     map[resultPackageRelayKey]*resultPackageRelayFlight
 	activeScan map[string]*resultPackageRelayPeerScan
-	attempts   chan struct{}
+	capacity   chan struct{}
 	stopped    bool
 	wait       sync.WaitGroup
 }
@@ -111,11 +111,18 @@ func newResultPackageRelayCoordinator(
 		report:     report,
 		active:     make(map[resultPackageRelayKey]*resultPackageRelayFlight),
 		activeScan: make(map[string]*resultPackageRelayPeerScan),
-		attempts:   make(chan struct{}, maximumConcurrentResultRelays),
+		capacity:   make(chan struct{}),
 	}
 }
 
 func (c *resultPackageRelayCoordinator) schedulePeerReconnect(deviceID string) bool {
+	return c.schedulePeerScan(deviceID, true)
+}
+
+func (c *resultPackageRelayCoordinator) schedulePeerScan(
+	deviceID string,
+	wakeFlights bool,
+) bool {
 	if c == nil || c.context == nil || c.scan == nil {
 		return false
 	}
@@ -124,11 +131,21 @@ func (c *resultPackageRelayCoordinator) schedulePeerReconnect(deviceID string) b
 		c.mu.Unlock()
 		return false
 	}
+	if wakeFlights {
+		for _, flight := range c.active {
+			select {
+			case flight.wake <- struct{}{}:
+			default:
+			}
+		}
+	}
 	if current := c.activeScan[deviceID]; current != nil {
 		current.restart = true
-		select {
-		case current.wake <- struct{}{}:
-		default:
+		if wakeFlights {
+			select {
+			case current.wake <- struct{}{}:
+			default:
+			}
 		}
 		c.mu.Unlock()
 		return false
@@ -181,10 +198,11 @@ func (c *resultPackageRelayCoordinator) schedulePeerReconnect(deviceID string) b
 			scanAttempt = 0
 			flights := make([]*resultPackageRelayFlight, 0, len(page.requests))
 			for _, request := range page.requests {
-				flight, _ := c.scheduleFlight(request)
-				if flight != nil {
-					flights = append(flights, flight)
+				flight, ok := c.scheduleScannedFlight(scan, request)
+				if !ok {
+					return
 				}
+				flights = append(flights, flight)
 			}
 			if !c.waitForResultPackageRelayAttempts(scan, flights) {
 				return
@@ -207,6 +225,35 @@ func (c *resultPackageRelayCoordinator) schedulePeerReconnect(deviceID string) b
 		}
 	}()
 	return true
+}
+
+func (c *resultPackageRelayCoordinator) scheduleScannedFlight(
+	scan *resultPackageRelayPeerScan,
+	request resultPackageRelayRequest,
+) (*resultPackageRelayFlight, bool) {
+	for {
+		flight, _ := c.scheduleFlight(request)
+		if flight != nil {
+			return flight, true
+		}
+		c.mu.Lock()
+		if c.stopped || c.context.Err() != nil {
+			c.mu.Unlock()
+			return nil, false
+		}
+		if len(c.active) < maximumActiveResultPackageRelays {
+			c.mu.Unlock()
+			continue
+		}
+		capacity := c.capacity
+		c.mu.Unlock()
+		select {
+		case <-capacity:
+		case <-scan.wake:
+		case <-c.context.Done():
+			return nil, false
+		}
+	}
 }
 
 func (c *resultPackageRelayCoordinator) waitForResultPackageRelayAttempts(
@@ -238,7 +285,15 @@ flights:
 // the caller's goroutine, because that goroutine may be the only reader for the
 // source peer's full-duplex session.
 func (c *resultPackageRelayCoordinator) schedule(request resultPackageRelayRequest) bool {
-	_, started := c.scheduleFlight(request)
+	flight, started := c.scheduleFlight(request)
+	if flight == nil {
+		c.schedulePeerScan(request.source.DeviceID, false)
+	} else if !started {
+		select {
+		case flight.wake <- struct{}{}:
+		default:
+		}
+	}
 	return started
 }
 
@@ -258,12 +313,12 @@ func (c *resultPackageRelayCoordinator) scheduleFlight(
 		return nil, false
 	}
 	if current := c.active[key]; current != nil {
-		select {
-		case current.wake <- struct{}{}:
-		default:
-		}
 		c.mu.Unlock()
 		return current, false
+	}
+	if len(c.active) >= maximumActiveResultPackageRelays {
+		c.mu.Unlock()
+		return nil, false
 	}
 	flight := &resultPackageRelayFlight{
 		wake:             make(chan struct{}, 1),
@@ -278,20 +333,13 @@ func (c *resultPackageRelayCoordinator) scheduleFlight(
 		defer func() {
 			c.mu.Lock()
 			delete(c.active, key)
+			close(c.capacity)
+			c.capacity = make(chan struct{})
 			c.mu.Unlock()
 		}()
 		firstAttempt := true
 		for attempt := 0; ; attempt++ {
-			select {
-			case c.attempts <- struct{}{}:
-			case <-c.context.Done():
-				if firstAttempt {
-					close(flight.firstAttemptDone)
-				}
-				return
-			}
 			err := c.relay(c.context, request)
-			<-c.attempts
 			if firstAttempt {
 				close(flight.firstAttemptDone)
 				firstAttempt = false
@@ -342,6 +390,8 @@ func (c *resultPackageRelayCoordinator) stop() {
 	}
 	c.mu.Lock()
 	c.stopped = true
+	close(c.capacity)
+	c.capacity = make(chan struct{})
 	c.mu.Unlock()
 }
 
