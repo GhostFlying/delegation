@@ -141,6 +141,7 @@ func TestTokenConnectionHeartbeatUnknownMethodsAndDisconnect(t *testing.T) {
 	if err != nil || !record.Device.Online || record.Device.Revision != 1 {
 		t.Fatalf("registered device = %#v, error %v", record, err)
 	}
+	registeredAt := record.Device.LastSeenAt
 	writeEnvelope(t, connection, protocol.Envelope{
 		ProtocolVersion: protocol.Version,
 		Kind:            protocol.KindNotification,
@@ -155,8 +156,19 @@ func TestTokenConnectionHeartbeatUnknownMethodsAndDisconnect(t *testing.T) {
 		t.Fatalf("heartbeat response error = %#v", heartbeatResponse.Error)
 	}
 	heartbeatResult := decodeResult[protocol.HeartbeatResult](t, heartbeatResponse)
-	if heartbeatResult.Revision != 1 || heartbeatResult.ServerTime != 2 {
-		t.Fatalf("heartbeat result = %#v", heartbeatResult)
+	record, err = harness.registry.DescribeDevice(
+		context.Background(), brokerTestControllerID, brokerTestDeviceID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if heartbeatResult.Revision != 1 ||
+		heartbeatResult.ServerTime != record.Device.LastSeenAt ||
+		heartbeatResult.ServerTime <= registeredAt {
+		t.Fatalf(
+			"heartbeat result = %#v, registeredAt = %d, device = %#v",
+			heartbeatResult, registeredAt, record.Device,
+		)
 	}
 	unknown := writeAndRead(t, connection, request(t, "future.request", struct{}{}))
 	if unknown.Error == nil || unknown.Error.Code != protocol.ErrorMethodNotFound {
