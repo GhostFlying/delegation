@@ -1,10 +1,14 @@
 package store
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/GhostFlying/delegation/internal/protocol"
+)
 
 const (
 	peerStoreApplicationID = 0x444c4750 // "DLGP"
-	peerSchemaVersion      = 11
+	peerSchemaVersion      = 12
 )
 
 var peerSchemaCurrent = fmt.Sprintf(`
@@ -215,9 +219,143 @@ CREATE TABLE peer_changes_artifacts (
 	)
 ) STRICT;
 
-CREATE INDEX peer_changes_artifacts_by_state
-	ON peer_changes_artifacts(state, created_at, controller_id, tree_id, agent_id, turn_id);
+	CREATE INDEX peer_changes_artifacts_by_state
+		ON peer_changes_artifacts(state, created_at, controller_id, tree_id, agent_id, turn_id);
 
-PRAGMA application_id = %d;
-PRAGMA user_version = %d;
-`, peerStoreApplicationID, peerSchemaVersion)
+	CREATE TABLE peer_result_outbox (
+		controller_id TEXT NOT NULL,
+		tree_id TEXT NOT NULL,
+		source_agent_id TEXT NOT NULL,
+		source_device_id TEXT NOT NULL CHECK (length(source_device_id) = 36),
+		package_id TEXT NOT NULL UNIQUE CHECK (length(package_id) = 36),
+		state TEXT NOT NULL CHECK (
+			state IN ('capturePending', 'publishPending', 'deliveryPending', 'delivered')
+		),
+		managed_thread_id TEXT NOT NULL DEFAULT '',
+		turn_id TEXT NOT NULL DEFAULT '',
+		lifecycle_revision INTEGER NOT NULL DEFAULT 0 CHECK (lifecycle_revision >= 0),
+		manifest_bytes BLOB NOT NULL DEFAULT X'',
+		manifest_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (
+			manifest_size_bytes BETWEEN 0 AND %d
+		),
+		manifest_sha256 TEXT NOT NULL DEFAULT '',
+		parts_json TEXT NOT NULL DEFAULT '[]',
+		reservation_limit_bytes INTEGER NOT NULL CHECK (reservation_limit_bytes BETWEEN 1 AND %d),
+		reserved_bytes INTEGER NOT NULL CHECK (reserved_bytes BETWEEN 1 AND %d),
+		package_bytes INTEGER NOT NULL DEFAULT 0 CHECK (package_bytes BETWEEN 0 AND %d),
+		delivery_sequence INTEGER NOT NULL DEFAULT 0 CHECK (delivery_sequence >= 0),
+		created_at INTEGER NOT NULL CHECK (created_at >= 0),
+		updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+		PRIMARY KEY (controller_id, tree_id, source_agent_id, package_id),
+		FOREIGN KEY (controller_id, tree_id, source_agent_id)
+			REFERENCES worker_reservations(controller_id, tree_id, agent_id),
+		CHECK (
+			(state = 'capturePending' AND managed_thread_id = '' AND turn_id = '' AND
+			 lifecycle_revision = 0 AND length(manifest_bytes) = 0 AND manifest_size_bytes = 0 AND
+			 manifest_sha256 = '' AND parts_json = '[]' AND reserved_bytes = reservation_limit_bytes AND
+			 package_bytes = 0 AND
+			 delivery_sequence = 0) OR
+			(state IN ('publishPending', 'deliveryPending') AND managed_thread_id <> '' AND
+			 turn_id <> '' AND lifecycle_revision > 0 AND length(manifest_bytes) = manifest_size_bytes AND
+			 manifest_size_bytes > 0 AND length(manifest_sha256) = 64 AND
+			 manifest_sha256 NOT GLOB '*[^0-9a-f]*' AND reservation_limit_bytes >= package_bytes AND
+			 reserved_bytes = package_bytes AND
+			 package_bytes > 0 AND delivery_sequence = 0) OR
+			(state = 'delivered' AND managed_thread_id <> '' AND turn_id <> '' AND
+			 lifecycle_revision > 0 AND length(manifest_bytes) = manifest_size_bytes AND
+			 manifest_size_bytes > 0 AND length(manifest_sha256) = 64 AND
+			 manifest_sha256 NOT GLOB '*[^0-9a-f]*' AND reservation_limit_bytes >= package_bytes AND
+			 reserved_bytes = package_bytes AND
+			 package_bytes > 0 AND delivery_sequence > 0)
+		)
+	) STRICT;
+
+	CREATE UNIQUE INDEX peer_result_outbox_by_turn
+		ON peer_result_outbox(controller_id, tree_id, source_agent_id, turn_id)
+		WHERE turn_id <> '';
+
+	CREATE INDEX peer_result_outbox_by_state
+		ON peer_result_outbox(state, updated_at, created_at, controller_id, tree_id, source_agent_id);
+
+	CREATE TABLE peer_result_inbox (
+		controller_id TEXT NOT NULL,
+		tree_id TEXT NOT NULL,
+		root_agent_id TEXT NOT NULL CHECK (length(root_agent_id) = 36),
+		root_device_id TEXT NOT NULL CHECK (length(root_device_id) = 36),
+		source_agent_id TEXT NOT NULL CHECK (length(source_agent_id) = 36),
+		source_device_id TEXT NOT NULL CHECK (length(source_device_id) = 36),
+		managed_thread_id TEXT NOT NULL CHECK (length(managed_thread_id) = 36),
+		turn_id TEXT NOT NULL CHECK (length(turn_id) = 36),
+		package_id TEXT NOT NULL UNIQUE CHECK (length(package_id) = 36),
+		state TEXT NOT NULL CHECK (state IN ('receiving', 'available', 'evictionTombstone')),
+		attempt_id TEXT NOT NULL CHECK (length(attempt_id) = 36),
+		lease_expires_at INTEGER NOT NULL CHECK (lease_expires_at > 0),
+		lifecycle_revision INTEGER NOT NULL CHECK (lifecycle_revision > 0),
+		manifest_bytes BLOB NOT NULL,
+		manifest_size_bytes INTEGER NOT NULL CHECK (manifest_size_bytes BETWEEN 1 AND %d),
+		manifest_sha256 TEXT NOT NULL CHECK (
+			length(manifest_sha256) = 64 AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'
+		),
+		parts_json TEXT NOT NULL,
+		package_bytes INTEGER NOT NULL CHECK (package_bytes BETWEEN 1 AND %d),
+		created_at INTEGER NOT NULL CHECK (created_at >= 0),
+		updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+		PRIMARY KEY (controller_id, tree_id, root_agent_id, package_id),
+		CHECK (length(manifest_bytes) = manifest_size_bytes)
+	) STRICT;
+
+	CREATE INDEX peer_result_inbox_by_state
+		ON peer_result_inbox(state, updated_at, created_at, controller_id, tree_id, root_agent_id);
+
+	CREATE TABLE peer_result_inbox_parts (
+		package_id TEXT NOT NULL,
+		kind TEXT NOT NULL CHECK (kind IN ('changesBundle', 'changesOverlay', 'rollout')),
+		size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+		sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+		next_offset INTEGER NOT NULL DEFAULT 0 CHECK (next_offset >= 0 AND next_offset <= size_bytes),
+		PRIMARY KEY (package_id, kind),
+		FOREIGN KEY (package_id) REFERENCES peer_result_inbox(package_id) ON DELETE CASCADE
+	) STRICT;
+
+	CREATE TABLE peer_result_inbox_chunks (
+		package_id TEXT NOT NULL,
+		attempt_id TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		offset_bytes INTEGER NOT NULL CHECK (offset_bytes >= 0),
+		size_bytes INTEGER NOT NULL CHECK (size_bytes BETWEEN 1 AND %d),
+		sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+		PRIMARY KEY (package_id, attempt_id, kind, offset_bytes),
+		FOREIGN KEY (package_id, kind) REFERENCES peer_result_inbox_parts(package_id, kind)
+			ON DELETE CASCADE
+	) STRICT;
+
+	CREATE TABLE peer_result_inbox_attempt_receipts (
+		controller_id TEXT NOT NULL CHECK (length(controller_id) = 36),
+		tree_id TEXT NOT NULL CHECK (length(tree_id) = 36),
+		root_agent_id TEXT NOT NULL CHECK (length(root_agent_id) = 36),
+		root_device_id TEXT NOT NULL CHECK (length(root_device_id) = 36),
+		package_id TEXT NOT NULL CHECK (length(package_id) = 36),
+		attempt_id TEXT NOT NULL CHECK (length(attempt_id) = 36),
+		outcome TEXT NOT NULL CHECK (outcome IN ('cancelled', 'reclaimed')),
+		phase TEXT NOT NULL CHECK (phase IN ('prepared', 'completed')),
+		created_at INTEGER NOT NULL CHECK (created_at >= 0),
+		updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+		PRIMARY KEY (package_id, attempt_id)
+	) STRICT;
+
+	CREATE INDEX peer_result_inbox_attempt_receipts_by_age
+		ON peer_result_inbox_attempt_receipts(phase, updated_at, created_at, package_id, attempt_id);
+
+	PRAGMA application_id = %d;
+	PRAGMA user_version = %d;
+	`,
+	protocol.MaximumResultManifestBytes,
+	protocol.MaximumResultPackageBytes,
+	protocol.MaximumResultPackageBytes,
+	protocol.MaximumResultPackageBytes,
+	protocol.MaximumResultManifestBytes,
+	protocol.MaximumResultPackageBytes,
+	protocol.ResultPackageChunkBytes,
+	peerStoreApplicationID,
+	peerSchemaVersion,
+)
