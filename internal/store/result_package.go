@@ -16,6 +16,7 @@ import (
 
 var (
 	ErrResultPackageCursorAhead       = errors.New("result package cursor is ahead of the stored sequence")
+	ErrResultPackageCorrupt           = errors.New("stored result package metadata is corrupt")
 	ErrResultPackageLifecycleNotReady = errors.New("result package lifecycle authority is not ready")
 	ErrResultPackageSequenceExhausted = errors.New("result package sequence is exhausted")
 )
@@ -703,7 +704,9 @@ func scanResultPackage(scanner rowScanner) (ResultPackageRecord, error) {
 	}
 	manifest, err := record.Metadata.DecodeManifest()
 	if err != nil {
-		return ResultPackageRecord{}, fmt.Errorf("stored result package manifest is invalid: %w", err)
+		return ResultPackageRecord{}, corruptResultPackage(
+			fmt.Errorf("stored result package manifest is invalid: %w", err),
+		)
 	}
 	record.Manifest = manifest
 	record.SourcePrincipal = control.PrincipalIdentity{
@@ -723,38 +726,60 @@ func scanResultPackage(scanner rowScanner) (ResultPackageRecord, error) {
 		manifest.PackageID != packageID || manifest.SourceAgentID != sourceAgentID ||
 		manifest.SourceDeviceID != sourceDeviceID || manifest.ManagedThreadID != managedThreadID ||
 		manifest.TurnID != turnID || manifest.LifecycleRevision != lifecycleRevision {
-		return ResultPackageRecord{}, errors.New("stored result package authority differs from its manifest")
+		return ResultPackageRecord{}, corruptResultPackage(
+			errors.New("stored result package authority differs from its manifest"),
+		)
 	}
 	if err := identity.ValidateID(record.RootDeviceID); err != nil {
-		return ResultPackageRecord{}, fmt.Errorf("stored result package rootDeviceId %w", err)
+		return ResultPackageRecord{}, corruptResultPackage(
+			fmt.Errorf("stored result package rootDeviceId %w", err),
+		)
 	}
 	if principalSourceDeviceID != sourceDeviceID || treeRootDeviceID != record.RootDeviceID {
-		return ResultPackageRecord{}, errors.New("stored result package principals differ from its authority")
+		return ResultPackageRecord{}, corruptResultPackage(
+			errors.New("stored result package principals differ from its authority"),
+		)
 	}
 	if err := record.SourcePrincipal.Validate(); err != nil || record.SourcePrincipal.ParentAgentID == "" {
-		return ResultPackageRecord{}, errors.New("stored result package source principal is invalid")
+		return ResultPackageRecord{}, corruptResultPackage(
+			errors.New("stored result package source principal is invalid"),
+		)
 	}
 	if err := record.RootPrincipal.Validate(); err != nil || record.RootPrincipal.ParentAgentID != "" {
-		return ResultPackageRecord{}, errors.New("stored result package root principal is invalid")
+		return ResultPackageRecord{}, corruptResultPackage(
+			errors.New("stored result package root principal is invalid"),
+		)
 	}
 	if record.PublishedAt < 0 {
-		return ResultPackageRecord{}, errors.New("stored result package publication time is invalid")
+		return ResultPackageRecord{}, corruptResultPackage(
+			errors.New("stored result package publication time is invalid"),
+		)
 	}
 	switch record.State {
 	case ResultPackageDeliveryPending:
 		if record.Sequence != 0 || record.DeliveredAt != 0 || record.SourceAcknowledgedAt != 0 {
-			return ResultPackageRecord{}, errors.New("stored pending result package contains delivery state")
+			return ResultPackageRecord{}, corruptResultPackage(
+				errors.New("stored pending result package contains delivery state"),
+			)
 		}
 	case ResultPackageDelivered:
 		if record.Sequence == 0 || record.Sequence > math.MaxInt64 ||
 			record.DeliveredAt < record.PublishedAt ||
 			(record.SourceAcknowledgedAt != 0 && record.SourceAcknowledgedAt < record.DeliveredAt) {
-			return ResultPackageRecord{}, errors.New("stored delivered result package state is invalid")
+			return ResultPackageRecord{}, corruptResultPackage(
+				errors.New("stored delivered result package state is invalid"),
+			)
 		}
 	default:
-		return ResultPackageRecord{}, fmt.Errorf("stored result package has unsupported state %q", record.State)
+		return ResultPackageRecord{}, corruptResultPackage(
+			fmt.Errorf("stored result package has unsupported state %q", record.State),
+		)
 	}
 	return record, nil
+}
+
+func corruptResultPackage(err error) error {
+	return fmt.Errorf("%w: %v", ErrResultPackageCorrupt, err)
 }
 
 func nextTreeResultPackageSequence(

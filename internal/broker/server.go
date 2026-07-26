@@ -122,6 +122,7 @@ type Server struct {
 	mailboxNotifier   *mailboxNotifier
 	lifecycleNotifier *treeNotifier
 	artifactNotifier  *treeNotifier
+	resultNotifier    *treeNotifier
 	agentOperations   *agentOperationQueue
 	workspaceSyncs    *workspaceSyncFlights
 	resultRelays      *resultPackageRelayCoordinator
@@ -255,6 +256,7 @@ func New(options Options) (*Server, error) {
 		mailboxNotifier:      newMailboxNotifier(),
 		lifecycleNotifier:    newTreeNotifier(),
 		artifactNotifier:     newTreeNotifier(),
+		resultNotifier:       newTreeNotifier(),
 		agentOperations:      newAgentOperationQueue(),
 		workspaceSyncs:       newWorkspaceSyncFlights(maximumActiveWorkspaceSyncs),
 		offlineRetries:       map[string]uint64{},
@@ -266,7 +268,6 @@ func New(options Options) (*Server, error) {
 	server.context, server.cancel = context.WithCancel(context.Background())
 	server.resultRelays = newResultPackageRelayCoordinator(
 		server.context,
-		resultPackageRelayRequestTimeout,
 		server.relayResultPackage,
 		server.pendingResultPackageRelays,
 		reportError,

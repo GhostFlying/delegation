@@ -70,6 +70,34 @@ type fakeResultPackageDeliveryRegistry struct {
 	) (store.ResultPackageRecord, error)
 }
 
+type fakeResultPackageLoadRegistry struct {
+	Registry
+	record store.ResultPackageRecord
+	err    error
+}
+
+func (r *fakeResultPackageLoadRegistry) GetResultPackageForDelivery(
+	_ context.Context,
+	_ string,
+	_ control.PrincipalIdentity,
+	_ string,
+) (store.ResultPackageRecord, error) {
+	return r.record, r.err
+}
+
+type blockingResultPackagePeer struct{}
+
+func (blockingResultPackagePeer) callPeer(
+	ctx context.Context,
+	_ string,
+	_ string,
+	_ control.PrincipalIdentity,
+	_ any,
+) (json.RawMessage, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func (r *fakeResultPackageDeliveryRegistry) MarkResultPackageDelivered(
 	_ context.Context,
 	connectedDeviceID string,
@@ -198,6 +226,26 @@ func TestTransferResultPackageResumesAndUsesFixedChunks(t *testing.T) {
 		protocol.MethodFinishResultPackage,
 	}; !equalStrings(got, want) {
 		t.Fatalf("root methods = %v, want %v", got, want)
+	}
+}
+
+func TestResultPackagePeerCallHasAnOperationDeadline(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	started := time.Now()
+	_, err := callResultPackagePeer(
+		context.Background(),
+		timeout,
+		blockingResultPackagePeer{},
+		protocol.MethodBeginResultPackage,
+		resultRelayTreeID,
+		resultPackageRelayPrincipalsForRequest(),
+		protocol.BeginResultPackageParams{},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("bounded peer call error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bounded peer call took %s", elapsed)
 	}
 }
 
@@ -334,15 +382,15 @@ func TestMarkResultPackageDeliveredWakesTreeWaiters(t *testing.T) {
 		},
 	}
 	server := &Server{
-		registry:         registry,
-		artifactNotifier: newTreeNotifier(),
-		now:              func() time.Time { return time.Unix(50, 0) },
+		registry:       registry,
+		resultNotifier: newTreeNotifier(),
+		now:            func() time.Time { return time.Unix(50, 0) },
 	}
 	key := treeKey{
 		controllerID: record.Manifest.ControllerID,
 		treeID:       record.Manifest.TreeID,
 	}
-	subscription := server.artifactNotifier.subscribe(key)
+	subscription := server.resultNotifier.subscribe(key)
 	defer subscription.release()
 	if _, err := server.markResultPackageDelivered(
 		context.Background(), root, resultRelayPackageID,
@@ -369,18 +417,49 @@ func TestMarkResultPackageDeliveredWakesTreeWaiters(t *testing.T) {
 				return store.ResultPackageRecord{}, errors.New("broker commit failed")
 			},
 		},
-		artifactNotifier: failedNotifier,
-		now:              func() time.Time { return time.Unix(50, 0) },
+		resultNotifier: failedNotifier,
+		now:            func() time.Time { return time.Unix(50, 0) },
 	}
 	if _, err := server.markResultPackageDelivered(
 		context.Background(), root, resultRelayPackageID,
-	); err == nil {
-		t.Fatal("failed delivery mark returned no error")
+	); !errors.Is(err, errResultPackageRelayDeferred) {
+		t.Fatalf("failed delivery mark error = %v, want deferred relay", err)
 	}
 	select {
 	case <-failedSubscription.channel():
 		t.Fatal("failed delivery mark woke the root tree")
 	default:
+	}
+}
+
+func TestDeliveredResultPackageReplayWakesTreeBeforeSourceReconnect(t *testing.T) {
+	record := resultPackageRelayRecord(t, []byte("payload"))
+	worker, root := resultPackageRelayPrincipals()
+	record.SourcePrincipal = worker
+	record.RootPrincipal = root
+	record.State = store.ResultPackageDelivered
+	record.Sequence = 1
+	record.DeliveredAt = 50
+	server := &Server{
+		registry:       &fakeResultPackageLoadRegistry{record: record},
+		resultNotifier: newTreeNotifier(),
+	}
+	key := treeKey{
+		controllerID: record.Manifest.ControllerID,
+		treeID:       record.Manifest.TreeID,
+	}
+	subscription := server.resultNotifier.subscribe(key)
+	defer subscription.release()
+	err := server.relayResultPackage(context.Background(), resultPackageRelayRequest{
+		source: worker, packageID: resultRelayPackageID,
+	})
+	if !errors.Is(err, errResultPackageRelayDeferred) {
+		t.Fatalf("offline source replay error = %v, want deferred", err)
+	}
+	select {
+	case <-subscription.channel():
+	case <-time.After(time.Second):
+		t.Fatal("delivered replay did not wake the root before source reconnect")
 	}
 }
 
@@ -393,7 +472,6 @@ func TestResultPackageRelayCoordinatorIsAsyncDeduplicatedAndRetryable(t *testing
 	var reports atomic.Int32
 	coordinator := newResultPackageRelayCoordinator(
 		ctx,
-		time.Second,
 		func(context.Context, resultPackageRelayRequest) error {
 			attempt := int(attempts.Add(1))
 			started <- attempt
@@ -434,6 +512,145 @@ func TestResultPackageRelayCoordinatorIsAsyncDeduplicatedAndRetryable(t *testing
 	}
 }
 
+func TestResultPackageRelaySurvivesMoreThanEightUnavailableAttempts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attempted := make(chan int, 12)
+	var attempts atomic.Int32
+	var reports atomic.Int32
+	coordinator := newResultPackageRelayCoordinator(
+		ctx,
+		func(context.Context, resultPackageRelayRequest) error {
+			attempt := int(attempts.Add(1))
+			attempted <- attempt
+			if attempt <= 9 {
+				return fmt.Errorf("%w: peer unavailable", errResultPackageRelayDeferred)
+			}
+			return nil
+		},
+		nil,
+		func(error) { reports.Add(1) },
+	)
+	request := resultPackageRelayRequest{
+		source:    resultPackageRelayPrincipalsForRequest(),
+		packageID: resultRelayPackageID,
+	}
+	if !coordinator.schedule(request) {
+		t.Fatal("durable relay was not scheduled")
+	}
+	for want := 1; want <= 10; want++ {
+		select {
+		case got := <-attempted:
+			if got != want {
+				t.Fatalf("relay attempt = %d, want %d", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("relay stopped after %d unavailable attempts", want-1)
+		}
+		if want < 10 && coordinator.schedule(request) {
+			t.Fatal("durable relay lost its single-flight while deferred")
+		}
+	}
+	coordinator.stop()
+	coordinator.waitForShutdown()
+	if reports.Load() != 0 {
+		t.Fatalf("recoverable unavailable relay reported %d errors", reports.Load())
+	}
+}
+
+func TestResultPackageRelayRetriesTransientStoreFailures(t *testing.T) {
+	t.Run("metadata load", func(t *testing.T) {
+		record := resultPackageRelayRecord(t, []byte("payload"))
+		record.SourcePrincipal = resultPackageRelayPrincipalsForRequest()
+		record.State = store.ResultPackageDelivered
+		record.Sequence = 1
+		record.DeliveredAt = 50
+		record.SourceAcknowledgedAt = 60
+		registry := &fakeResultPackageLoadRegistry{
+			record: record,
+			err:    errors.New("database busy"),
+		}
+		server := &Server{registry: registry, resultNotifier: newTreeNotifier()}
+		var attempts atomic.Int32
+		assertResultPackageRelayRetries(t, func(ctx context.Context) error {
+			if attempts.Add(1) == 2 {
+				registry.err = nil
+			}
+			return server.relayResultPackage(ctx, resultPackageRelayRequest{
+				source: record.SourcePrincipal, packageID: resultRelayPackageID,
+			})
+		})
+	})
+
+	t.Run("delivery mark", func(t *testing.T) {
+		record := resultPackageRelayRecord(t, []byte("payload"))
+		record.State = store.ResultPackageDelivered
+		record.Sequence = 1
+		record.DeliveredAt = 50
+		_, root := resultPackageRelayPrincipals()
+		var attempts atomic.Int32
+		registry := &fakeResultPackageDeliveryRegistry{
+			handler: func(
+				string,
+				control.PrincipalIdentity,
+				string,
+				time.Time,
+			) (store.ResultPackageRecord, error) {
+				if attempts.Add(1) == 1 {
+					return store.ResultPackageRecord{}, errors.New("database busy")
+				}
+				return record, nil
+			},
+		}
+		server := &Server{
+			registry:       registry,
+			resultNotifier: newTreeNotifier(),
+			now:            func() time.Time { return time.Unix(50, 0) },
+		}
+		assertResultPackageRelayRetries(t, func(ctx context.Context) error {
+			_, err := server.markResultPackageDelivered(ctx, root, resultRelayPackageID)
+			return err
+		})
+	})
+}
+
+func assertResultPackageRelayRetries(t *testing.T, relay func(context.Context) error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attempted := make(chan int, 2)
+	var attempts atomic.Int32
+	coordinator := newResultPackageRelayCoordinator(
+		ctx,
+		func(ctx context.Context, _ resultPackageRelayRequest) error {
+			attempt := int(attempts.Add(1))
+			attempted <- attempt
+			return relay(ctx)
+		},
+		nil,
+		nil,
+	)
+	request := resultPackageRelayRequest{
+		source:    resultPackageRelayPrincipalsForRequest(),
+		packageID: resultRelayPackageID,
+	}
+	if !coordinator.schedule(request) {
+		t.Fatal("store retry relay was not scheduled")
+	}
+	for want := 1; want <= 2; want++ {
+		select {
+		case got := <-attempted:
+			if got != want {
+				t.Fatalf("store retry attempt = %d, want %d", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("store retry stopped after attempt %d", want-1)
+		}
+	}
+	coordinator.stop()
+	coordinator.waitForShutdown()
+}
+
 func TestResultPackagePeerReconnectWakesDeferredRelay(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -446,7 +663,6 @@ func TestResultPackagePeerReconnectWakesDeferredRelay(t *testing.T) {
 	var scans atomic.Int32
 	coordinator := newResultPackageRelayCoordinator(
 		ctx,
-		time.Minute,
 		func(context.Context, resultPackageRelayRequest) error {
 			attempt := int(attempts.Add(1))
 			attempted <- attempt
@@ -522,10 +738,12 @@ func TestResultPackagePeerReconnectContinuesAfterAnExactFullPage(t *testing.T) {
 	var relays atomic.Int32
 	coordinator := newResultPackageRelayCoordinator(
 		ctx,
-		time.Second,
 		func(context.Context, resultPackageRelayRequest) error {
 			relays.Add(1)
-			return nil
+			return retryResultPackageRelayAfter(
+				fmt.Errorf("%w: peer offline", errResultPackageRelayDeferred),
+				time.Hour,
+			)
 		},
 		func(
 			_ context.Context,
@@ -555,8 +773,9 @@ func TestResultPackagePeerReconnectContinuesAfterAnExactFullPage(t *testing.T) {
 	select {
 	case <-secondPage:
 	case <-time.After(time.Second):
-		t.Fatal("exact-full reconnect page did not continue with its cursor")
+		t.Fatal("deferred exact-full reconnect page did not continue with its cursor")
 	}
+	cancel()
 	coordinator.stop()
 	coordinator.waitForShutdown()
 	if got := relays.Load(); got != maximumPendingResultPackageRelays {
@@ -574,7 +793,6 @@ func TestResultPackageRelayCoordinatorShutdownStopsPagination(t *testing.T) {
 	var scans atomic.Int32
 	coordinator := newResultPackageRelayCoordinator(
 		ctx,
-		time.Hour,
 		func(ctx context.Context, _ resultPackageRelayRequest) error {
 			close(started)
 			<-ctx.Done()
@@ -635,7 +853,6 @@ func TestResultPackageCancelLossRetriesAfterLeaseExpiry(t *testing.T) {
 	const leaseDelay = 20 * time.Millisecond
 	coordinator := newResultPackageRelayCoordinator(
 		ctx,
-		time.Second,
 		func(context.Context, resultPackageRelayRequest) error {
 			attempted <- time.Now()
 			if attempts.Add(1) == 1 {
@@ -710,6 +927,44 @@ func TestResultPackagePublicationErrorMappingAndConnectionAuthority(t *testing.T
 				test.wantReport,
 			)
 		}
+	}
+}
+
+func TestResultPackageStoreRelayErrorSeparatesPermanentFailures(t *testing.T) {
+	for _, err := range []error{
+		store.ErrAuthorizationDenied,
+		store.ErrNotFound,
+		store.ErrConflict,
+		store.ErrResultPackageCorrupt,
+		store.ErrResultPackageSequenceExhausted,
+		context.Canceled,
+	} {
+		mapped := resultPackageStoreRelayError("test operation", err)
+		if errors.Is(mapped, errResultPackageRelayDeferred) || !errors.Is(mapped, err) {
+			t.Fatalf("permanent store error %v mapped to %v", err, mapped)
+		}
+	}
+	transient := errors.New("database temporarily unavailable")
+	if mapped := resultPackageStoreRelayError("test operation", transient); !errors.Is(
+		mapped,
+		errResultPackageRelayDeferred,
+	) {
+		t.Fatalf("transient store error mapped to %v", mapped)
+	}
+	if mapped := deferResultPackagePeerError("test peer operation", store.ErrAuthorizationDenied); errors.Is(
+		mapped,
+		errResultPackageRelayDeferred,
+	) {
+		t.Fatalf("peer authority error mapped to deferred relay: %v", mapped)
+	}
+}
+
+func TestResultPackageReceivingLeaseMatchesPeerInboxWindow(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	want := now.Add(store.MaximumResultInboxLease).Unix()
+	if got := resultPackageReceivingLeaseExpiresAt(now); got != want ||
+		store.MaximumResultInboxLease != 10*time.Minute {
+		t.Fatalf("receiving lease expires at %d, want %d", got, want)
 	}
 }
 
