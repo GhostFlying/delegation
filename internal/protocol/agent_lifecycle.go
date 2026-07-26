@@ -50,11 +50,13 @@ func (p WorkerLifecyclePhase) Validate(failureCode string) error {
 }
 
 type WorkerLifecycleSnapshot struct {
-	TreeID      string               `json:"treeId"`
-	AgentID     string               `json:"agentId"`
-	Revision    uint64               `json:"revision"`
-	Phase       WorkerLifecyclePhase `json:"phase"`
-	FailureCode string               `json:"failureCode"`
+	TreeID        string               `json:"treeId"`
+	AgentID       string               `json:"agentId"`
+	Revision      uint64               `json:"revision"`
+	Phase         WorkerLifecyclePhase `json:"phase"`
+	FailureCode   string               `json:"failureCode"`
+	CodexThreadID string               `json:"codexThreadId"`
+	ActiveTurnID  string               `json:"activeTurnId"`
 }
 
 func (s WorkerLifecycleSnapshot) Validate() error {
@@ -67,7 +69,46 @@ func (s WorkerLifecycleSnapshot) Validate() error {
 	if s.Revision == 0 || s.Revision > math.MaxInt64 {
 		return errors.New("worker lifecycle revision is outside the supported range")
 	}
-	return s.Phase.Validate(s.FailureCode)
+	if err := s.Phase.Validate(s.FailureCode); err != nil {
+		return err
+	}
+	if s.CodexThreadID != "" {
+		if err := identity.ValidateID(s.CodexThreadID); err != nil {
+			return fmt.Errorf("codexThreadId %w", err)
+		}
+	}
+	if s.ActiveTurnID != "" {
+		if err := identity.ValidateID(s.ActiveTurnID); err != nil {
+			return fmt.Errorf("activeTurnId %w", err)
+		}
+	}
+	switch s.Phase {
+	case WorkerLifecycleReserved:
+		if s.CodexThreadID != "" || s.ActiveTurnID != "" {
+			return errors.New("reserved worker lifecycle must not contain thread or turn identity")
+		}
+	case WorkerLifecyclePending, WorkerLifecycleStarting:
+		if s.ActiveTurnID != "" {
+			return errors.New("pending or starting worker lifecycle must not contain activeTurnId")
+		}
+	case WorkerLifecyclePreflight, WorkerLifecycleReady, WorkerLifecycleIdle:
+		if s.CodexThreadID == "" || s.ActiveTurnID != "" {
+			return errors.New("worker lifecycle phase requires a thread and no active turn")
+		}
+	case WorkerLifecycleRunning, WorkerLifecycleFinalizing:
+		if s.CodexThreadID == "" || s.ActiveTurnID == "" {
+			return errors.New("running or finalizing worker lifecycle requires thread and turn identity")
+		}
+	case WorkerLifecycleInterrupted:
+		if s.CodexThreadID == "" {
+			return errors.New("interrupted worker lifecycle requires codexThreadId")
+		}
+	case WorkerLifecycleFailed:
+		if s.ActiveTurnID != "" {
+			return errors.New("failed worker lifecycle must not contain activeTurnId")
+		}
+	}
+	return nil
 }
 
 type SyncWorkerLifecycleParams struct {

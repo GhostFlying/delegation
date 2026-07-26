@@ -7,6 +7,8 @@ import (
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
+const lifecycleActiveTurnID = "123e4567-e89b-42d3-a456-426614174220"
+
 type lifecycleHostStub struct {
 	workers  []store.WorkerReservation
 	revision uint64
@@ -37,6 +39,17 @@ func TestManagedWorkerLifecycleSourceMapsPersistedState(t *testing.T) {
 	workers := make([]store.WorkerReservation, 0, len(statuses))
 	for index, status := range statuses {
 		failureCode := ""
+		codexThreadID := ""
+		activeTurnID := ""
+		switch status {
+		case store.WorkerReserved:
+		case store.WorkerPending, store.WorkerStarting, store.WorkerPreflight,
+			store.WorkerReady, store.WorkerIdle, store.WorkerFailed:
+			codexThreadID = runtimeManagedThreadID
+		case store.WorkerRunning, store.WorkerFinalizing, store.WorkerInterrupted:
+			codexThreadID = runtimeManagedThreadID
+			activeTurnID = lifecycleActiveTurnID
+		}
 		if status == store.WorkerFailed {
 			failureCode = "turn_failed"
 		}
@@ -47,6 +60,7 @@ func TestManagedWorkerLifecycleSourceMapsPersistedState(t *testing.T) {
 				AgentID:      runtimeAgentIDFor(index),
 			},
 			DeviceID: runtimeDeviceID, Status: status,
+			CodexThreadID: codexThreadID, ActiveTurnID: activeTurnID,
 			FailureCode: failureCode, Revision: uint64(index + 1),
 		})
 	}
@@ -68,6 +82,10 @@ func TestManagedWorkerLifecycleSourceMapsPersistedState(t *testing.T) {
 	for index, snapshot := range snapshots {
 		if string(snapshot.Phase) != string(statuses[index]) || snapshot.Revision != uint64(index+1) {
 			t.Fatalf("lifecycle snapshot %d = %#v", index, snapshot)
+		}
+		if snapshot.CodexThreadID != workers[index].CodexThreadID ||
+			snapshot.ActiveTurnID != workers[index].ActiveTurnID {
+			t.Fatalf("lifecycle snapshot %d lost thread or turn identity: %#v", index, snapshot)
 		}
 		if statuses[index] == store.WorkerFailed && snapshot.FailureCode != "turn_failed" {
 			t.Fatalf("failed lifecycle snapshot = %#v", snapshot)

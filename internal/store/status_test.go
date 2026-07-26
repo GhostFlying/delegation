@@ -108,7 +108,8 @@ func TestStatusSnapshotCountsDurableStateAndLifetimeStarts(t *testing.T) {
 	applyLifecyclePage(t, registry, session, 0, 3,
 		protocol.WorkerLifecycleSnapshot{
 			TreeID: root.TreeID, AgentID: worker.AgentID, Revision: 1,
-			Phase: protocol.WorkerLifecycleRunning,
+			Phase:         protocol.WorkerLifecycleRunning,
+			CodexThreadID: lifecycleCodexThreadOne, ActiveTurnID: lifecycleTurnOne,
 		},
 		lifecycleSnapshotFor(pending, 2, protocol.WorkerLifecycleReady),
 		protocol.WorkerLifecycleSnapshot{
@@ -154,7 +155,8 @@ func TestStatusSnapshotExcludesWorkersOnUnsynchronizedDevices(t *testing.T) {
 	applyLifecyclePage(t, registry, session, 0, 1,
 		protocol.WorkerLifecycleSnapshot{
 			TreeID: root.TreeID, AgentID: worker.AgentID, Revision: 1,
-			Phase: protocol.WorkerLifecycleRunning,
+			Phase:         protocol.WorkerLifecycleRunning,
+			CodexThreadID: lifecycleCodexThreadOne, ActiveTurnID: lifecycleTurnOne,
 		},
 	)
 

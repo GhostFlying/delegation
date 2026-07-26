@@ -37,6 +37,8 @@ const (
 	lifecycleTargetDeviceID = "123e4567-e89b-42d3-a456-426614174150"
 	lifecycleSpawnID        = "123e4567-e89b-42d3-a456-426614174151"
 	lifecycleAgentID        = "123e4567-e89b-42d3-a456-426614174152"
+	lifecycleCodexThreadID  = "123e4567-e89b-42d3-a456-426614174153"
+	lifecycleTurnID         = "123e4567-e89b-42d3-a456-426614174154"
 )
 
 func TestWorkerLifecycleSyncGatesDispatchAndRenewsHeartbeatLease(t *testing.T) {
@@ -109,9 +111,20 @@ func TestWorkerLifecycleSyncGatesDispatchAndRenewsHeartbeatLease(t *testing.T) {
 		Workers: []protocol.WorkerLifecycleSnapshot{{
 			TreeID: root.TreeID, AgentID: receipt.Agent.Principal.AgentID,
 			Revision: 1, Phase: protocol.WorkerLifecycleRunning,
+			CodexThreadID: lifecycleCodexThreadID, ActiveTurnID: lifecycleTurnID,
 		}},
 	}
+	invalid := first
+	invalid.Workers = append([]protocol.WorkerLifecycleSnapshot(nil), first.Workers...)
+	invalid.Workers[0].ActiveTurnID = ""
 	response := writeAndRead(
+		t, targetConnection, request(t, protocol.MethodSyncWorkerLifecycle, invalid),
+	)
+	if response.Error == nil || response.Error.Code != protocol.ErrorInvalidParams {
+		t.Fatalf("lifecycle sync without turn binding = %#v", response.Error)
+	}
+	waitForBrokerConnectionState(t, harness.server, lifecycleTargetDeviceID, false)
+	response = writeAndRead(
 		t, targetConnection, request(t, protocol.MethodSyncWorkerLifecycle, first),
 	)
 	if response.Error != nil {
@@ -141,6 +154,7 @@ func TestWorkerLifecycleSyncGatesDispatchAndRenewsHeartbeatLease(t *testing.T) {
 		Workers: []protocol.WorkerLifecycleSnapshot{{
 			TreeID: root.TreeID, AgentID: receipt.Agent.Principal.AgentID,
 			Revision: 2, Phase: protocol.WorkerLifecycleIdle,
+			CodexThreadID: lifecycleCodexThreadID,
 		}},
 	}
 	response = writeAndRead(
