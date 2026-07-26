@@ -186,7 +186,7 @@ func TestReplacementHandshakeImmediatelyFencesDispatchToPriorSession(t *testing.
 	blocked := &blockingLifecycleClaimRegistry{
 		Store: harness.registry, started: make(chan struct{}), release: make(chan struct{}),
 	}
-	harness.server.registry = blocked
+	harness.replaceRegistry(blocked)
 	replacement, _, err := dialBroker(harness, nil)
 	if err != nil {
 		t.Fatal(err)

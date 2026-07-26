@@ -147,7 +147,7 @@ func TestRootTreeRPCReportsUnexpectedStoreFailure(t *testing.T) {
 	}
 	sendHello(t, connection)
 	failure := errors.New("root tree database failed")
-	harness.server.registry = &rootTreeFaultRegistry{Registry: harness.registry, err: failure}
+	harness.replaceRegistry(&rootTreeFaultRegistry{Registry: harness.registry, err: failure})
 	response := writeAndRead(t, connection, request(
 		t, protocol.MethodEnsureRootTree, protocol.EnsureRootTreeParams{ExternalThreadID: brokerTestThreadID},
 	))

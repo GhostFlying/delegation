@@ -125,7 +125,7 @@ func TestMailboxRPCIsBidirectionalAndDoesNotBlockTheConnectionReadLoop(t *testin
 func TestMailboxRPCIdempotencyAndStableQuotaError(t *testing.T) {
 	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
 	registry := &mailboxTestRegistry{Store: harness.registry}
-	harness.server.registry = registry
+	harness.replaceRegistry(registry)
 	rootConnection, _, err := dialBroker(harness, nil)
 	if err != nil {
 		t.Fatal(err)
