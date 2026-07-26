@@ -224,6 +224,9 @@ func (s *PeerStore) BindWorkerTurnStartIntent(
 		if queryErr != nil {
 			return queryErr
 		}
+		if turnID == intent.PreviousTurnID {
+			return ErrWorkerTurnStartIntentConflict
+		}
 		if intent.State == WorkerTurnStartBound {
 			if intent.TurnID != turnID {
 				return ErrWorkerTurnStartIntentConflict
@@ -617,7 +620,8 @@ func (i WorkerTurnStartIntent) Validate() error {
 		if err := identity.ValidateID(i.TurnID); err != nil {
 			return fmt.Errorf("turnId %w", err)
 		}
-		if i.RejectionFailureCode != "" || i.ResolutionRevision <= i.PreparedRevision {
+		if i.TurnID == i.PreviousTurnID || i.RejectionFailureCode != "" ||
+			i.ResolutionRevision <= i.PreparedRevision {
 			return errors.New("bound worker turn-start intent has invalid resolution details")
 		}
 	case WorkerTurnStartRejected:
@@ -825,6 +829,16 @@ func queryPreparedWorkerTurnStartIntent(
 	return scanWorkerTurnStartIntent(queryer.QueryRowContext(ctx, workerTurnStartIntentSelect+`
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND state = 'prepared'
 `, key.ControllerID, key.TreeID, key.AgentID))
+}
+
+func queryPreparedWorkerTurnStartIntentByOperation(
+	ctx context.Context,
+	queryer rowQueryer,
+	controllerID, operationID string,
+) (WorkerTurnStartIntent, error) {
+	return scanWorkerTurnStartIntent(queryer.QueryRowContext(ctx, workerTurnStartIntentSelect+`
+WHERE controller_id = ? AND operation_id = ? AND state = 'prepared'
+`, controllerID, operationID))
 }
 
 func queryWorkerTurnStartIntentByTurn(

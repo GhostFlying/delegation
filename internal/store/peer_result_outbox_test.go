@@ -13,10 +13,11 @@ import (
 
 func TestResultOutboxLifecycleIsIdempotentAndReleasesUnusedReservation(t *testing.T) {
 	ctx := context.Background()
-	state, worker, threadID, turnID := newFinalizingResultWorker(t)
+	packageID := changesTestID(5001)
+	state, worker, threadID, turnID := newFinalizingResultWorker(t, packageID)
 	defer state.Close()
 	key := ResultOutboxKey{
-		WorkerKey: worker.WorkerKey, SourceDeviceID: worker.DeviceID, PackageID: changesTestID(5001),
+		WorkerKey: worker.WorkerKey, SourceDeviceID: worker.DeviceID, PackageID: packageID,
 	}
 	now := time.Unix(1_700_000_100, 0)
 	reserved, err := state.ReserveResultOutbox(
@@ -103,14 +104,16 @@ func TestResultOutboxLifecycleIsIdempotentAndReleasesUnusedReservation(t *testin
 
 func TestResultOutboxEnforcesWorkerAuthorityAndIdentity(t *testing.T) {
 	ctx := context.Background()
-	state, worker, threadID, turnID := newFinalizingResultWorker(t)
+	packageID := changesTestID(5010)
+	state, worker, threadID, turnID := newFinalizingResultWorker(t, packageID)
 	defer state.Close()
 	key := ResultOutboxKey{
-		WorkerKey: worker.WorkerKey, SourceDeviceID: worker.DeviceID, PackageID: changesTestID(5010),
+		WorkerKey: worker.WorkerKey, SourceDeviceID: worker.DeviceID, PackageID: packageID,
 	}
 	now := time.Unix(1_700_001_000, 0)
 	wrongDevice := key
 	wrongDevice.SourceDeviceID = changesTestID(5011)
+	wrongDevice.PackageID = changesTestID(5015)
 	if _, err := state.ReserveResultOutbox(ctx, wrongDevice, 1024, now); !errors.Is(
 		err, ErrResultPackageAuthority,
 	) {
@@ -120,6 +123,18 @@ func TestResultOutboxEnforcesWorkerAuthorityAndIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	metadata := resultMetadata(t, key, threadID, turnID, 21)
+	wrongPackage := key
+	wrongPackage.PackageID = changesTestID(5014)
+	if _, err := state.ReserveResultOutbox(
+		ctx, wrongPackage, protocol.MaximumResultPackageBytes, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.CommitResultOutboxCapture(
+		ctx, wrongPackage, resultMetadata(t, wrongPackage, threadID, turnID, 21), now,
+	); !errors.Is(err, ErrResultPackageAuthority) {
+		t.Fatalf("unbound package capture error = %v, want ErrResultPackageAuthority", err)
+	}
 	wrongThread := resultMetadata(t, key, changesTestID(5012), turnID, 21)
 	if _, err := state.CommitResultOutboxCapture(ctx, key, wrongThread, now); !errors.Is(
 		err, ErrResultPackageAuthority,
@@ -167,7 +182,7 @@ func TestResultOutboxEnforcesWorkerAuthorityAndIdentity(t *testing.T) {
 func TestResultOutboxAdmissionEnforcesCountAndByteBudgets(t *testing.T) {
 	t.Run("count", func(t *testing.T) {
 		ctx := context.Background()
-		state, worker, _, _ := newFinalizingResultWorker(t)
+		state, worker, _, _ := newFinalizingResultWorker(t, "")
 		defer state.Close()
 		now := time.Unix(1_700_002_000, 0)
 		for index := 0; index < MaximumPeerResultPackages; index++ {
@@ -192,7 +207,7 @@ func TestResultOutboxAdmissionEnforcesCountAndByteBudgets(t *testing.T) {
 
 	t.Run("bytes", func(t *testing.T) {
 		ctx := context.Background()
-		state, worker, _, _ := newFinalizingResultWorker(t)
+		state, worker, _, _ := newFinalizingResultWorker(t, "")
 		defer state.Close()
 		now := time.Unix(1_700_003_000, 0)
 		for index := 0; index < 3; index++ {
@@ -218,7 +233,10 @@ func TestResultOutboxAdmissionEnforcesCountAndByteBudgets(t *testing.T) {
 	})
 }
 
-func newFinalizingResultWorker(t *testing.T) (*PeerStore, WorkerReservation, string, string) {
+func newFinalizingResultWorker(
+	t *testing.T,
+	packageID string,
+) (*PeerStore, WorkerReservation, string, string) {
 	t.Helper()
 	ctx := context.Background()
 	state, err := OpenPeer(ctx, filepath.Join(t.TempDir(), "state", "peer.sqlite3"))
@@ -244,10 +262,26 @@ func newFinalizingResultWorker(t *testing.T) (*PeerStore, WorkerReservation, str
 		t.Fatal(err)
 	}
 	turnID := changesTestID(5403)
-	worker, err = state.MarkWorkerRunning(ctx, worker.WorkerKey, turnID, now.Add(3*time.Second))
-	if err != nil {
-		state.Close()
-		t.Fatal(err)
+	if packageID == "" {
+		worker, err = state.MarkWorkerRunning(ctx, worker.WorkerKey, turnID, now.Add(3*time.Second))
+		if err != nil {
+			state.Close()
+			t.Fatal(err)
+		}
+	} else {
+		request := unavailableTurnIntentRequest(worker, changesTestID(5404), packageID, "")
+		if _, _, err := state.PrepareWorkerTurnStartIntent(ctx, request, now.Add(3*time.Second)); err != nil {
+			state.Close()
+			t.Fatal(err)
+		}
+		resolution, err := state.BindWorkerTurnStartIntent(
+			ctx, worker.WorkerKey, request.IntentID, turnID, now.Add(4*time.Second),
+		)
+		if err != nil {
+			state.Close()
+			t.Fatal(err)
+		}
+		worker = resolution.Worker
 	}
 	if _, err := state.db.ExecContext(ctx, `
 UPDATE worker_reservations SET

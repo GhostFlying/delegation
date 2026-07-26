@@ -445,6 +445,9 @@ func (s *PeerStore) transitionWorker(
 		if worker.Status == to && transitionAlreadyApplied(worker, threadID, detail) {
 			return nil
 		}
+		if err := requireNoUnresolvedWorkerTurnStartIntent(ctx, connection, worker); err != nil {
+			return err
+		}
 		if !slices.Contains(from, worker.Status) {
 			return fmt.Errorf("%w: cannot move from %s to %s", ErrWorkerTransition, worker.Status, to)
 		}
@@ -539,6 +542,29 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 		return nil
 	})
 	return worker, err
+}
+
+func requireNoUnresolvedWorkerTurnStartIntent(
+	ctx context.Context,
+	queryer rowQueryer,
+	worker WorkerReservation,
+) error {
+	if _, err := queryPreparedWorkerTurnStartIntent(ctx, queryer, worker.WorkerKey); err == nil {
+		return ErrWorkerTurnStartIntentConflict
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	if worker.ActiveTurnID == "" {
+		return nil
+	}
+	if _, err := queryWorkerTurnStartIntentByTurn(
+		ctx, queryer, worker.WorkerKey, worker.ActiveTurnID,
+	); err == nil {
+		return ErrWorkerTurnStartIntentConflict
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	return nil
 }
 
 func transitionAlreadyApplied(worker WorkerReservation, threadID, detail string) bool {
