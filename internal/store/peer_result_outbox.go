@@ -143,6 +143,9 @@ func (s *PeerStore) CommitResultOutboxCapture(
 			}
 			return ErrResultPackageConflict
 		}
+		if err := validateResultOutboxTurnIntentAuthority(ctx, connection, stored, manifest); err != nil {
+			return err
+		}
 		if packageBytes > stored.ReservationLimitBytes {
 			return ErrResultPackageQuota
 		}
@@ -175,6 +178,28 @@ WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND package_id =
 		return nil
 	})
 	return stored, err
+}
+
+func validateResultOutboxTurnIntentAuthority(
+	ctx context.Context,
+	queryer rowQueryer,
+	outbox ResultOutbox,
+	manifest protocol.ResultManifest,
+) error {
+	intent, err := queryWorkerTurnStartIntentByPackage(ctx, queryer, outbox.PackageID)
+	if errors.Is(err, ErrNotFound) {
+		return ErrResultPackageAuthority
+	}
+	if err != nil {
+		return err
+	}
+	if intent.State != WorkerTurnStartBound || intent.WorkerKey != outbox.WorkerKey ||
+		intent.DeviceID != outbox.SourceDeviceID || intent.ManagedThreadID != manifest.ManagedThreadID ||
+		intent.TurnID != manifest.TurnID || intent.PackageID != outbox.PackageID ||
+		intent.ReservationLimitBytes != outbox.ReservationLimitBytes {
+		return ErrResultPackageAuthority
+	}
+	return nil
 }
 
 // AcknowledgeResultOutboxMetadata records the broker's authoritative metadata

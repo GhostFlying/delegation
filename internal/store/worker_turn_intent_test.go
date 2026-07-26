@@ -100,6 +100,47 @@ func TestWorkerTurnStartIntentPrepareBindAndRecoveryAreIdempotent(t *testing.T) 
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("competing prepare reserved a result package: %v", err)
 	}
+	for name, transition := range map[string]func() error{
+		"restore pending": func() error {
+			_, err := state.RestoreWorkerPendingAfterUnsent(ctx, worker.WorkerKey, now.Add(5*time.Second))
+			return err
+		},
+		"restore idle": func() error {
+			_, err := state.RestoreWorkerIdleAfterUnsent(ctx, worker.WorkerKey, now.Add(5*time.Second))
+			return err
+		},
+		"mark running": func() error {
+			_, err := state.MarkWorkerRunning(
+				ctx,
+				worker.WorkerKey,
+				"123e4567-e89b-42d3-a456-426614175118",
+				now.Add(5*time.Second),
+			)
+			return err
+		},
+		"mark idle": func() error {
+			_, err := state.MarkWorkerIdle(ctx, worker.WorkerKey, now.Add(5*time.Second))
+			return err
+		},
+		"fail": func() error {
+			_, err := state.FailWorker(ctx, worker.WorkerKey, "ordinary_transition", now.Add(5*time.Second))
+			return err
+		},
+	} {
+		t.Run("prepared intent fences "+name, func(t *testing.T) {
+			if err := transition(); !errors.Is(err, ErrWorkerTurnStartIntentConflict) {
+				t.Fatalf("transition error = %v, want ErrWorkerTurnStartIntentConflict", err)
+			}
+			storedWorker, err := state.GetWorker(ctx, worker.WorkerKey)
+			if err != nil || storedWorker != worker {
+				t.Fatalf("worker changed after fenced transition = %#v, %v; want %#v", storedWorker, err, worker)
+			}
+			storedIntent, err := state.GetWorkerTurnStartIntent(ctx, worker.WorkerKey, request.IntentID)
+			if err != nil || storedIntent != prepared {
+				t.Fatalf("intent changed after fenced transition = %#v, %v; want %#v", storedIntent, err, prepared)
+			}
+		})
+	}
 
 	turnID := "123e4567-e89b-42d3-a456-426614175114"
 	bound, err := state.BindWorkerTurnStartIntent(
@@ -133,6 +174,26 @@ func TestWorkerTurnStartIntentPrepareBindAndRecoveryAreIdempotent(t *testing.T) 
 		ctx, request, now.Add(8*time.Second),
 	); err != nil || !replay || replayed != bound.Intent {
 		t.Fatalf("terminal prepare replay = %#v, %t, %v", replayed, replay, err)
+	}
+	for name, transition := range map[string]func() error{
+		"mark idle": func() error {
+			_, err := state.MarkWorkerIdle(ctx, worker.WorkerKey, now.Add(8*time.Second))
+			return err
+		},
+		"fail": func() error {
+			_, err := state.FailWorker(ctx, worker.WorkerKey, "ordinary_transition", now.Add(8*time.Second))
+			return err
+		},
+	} {
+		t.Run("bound intent fences "+name, func(t *testing.T) {
+			if err := transition(); !errors.Is(err, ErrWorkerTurnStartIntentConflict) {
+				t.Fatalf("transition error = %v, want ErrWorkerTurnStartIntentConflict", err)
+			}
+			storedWorker, err := state.GetWorker(ctx, worker.WorkerKey)
+			if err != nil || storedWorker != bound.Worker {
+				t.Fatalf("worker changed after fenced transition = %#v, %v; want %#v", storedWorker, err, bound.Worker)
+			}
+		})
 	}
 
 	if err := state.Close(); err != nil {
@@ -202,6 +263,31 @@ func TestWorkerTurnStartIntentFollowupBindCompletesReceiptAtomically(t *testing.
 	if err != nil || replay || prepared.RetryTarget != WorkerIdle {
 		t.Fatalf("followup prepare = %#v, %t, %v", prepared, replay, err)
 	}
+	if _, err := state.CompleteWorkerOperation(
+		ctx,
+		worker.WorkerKey,
+		operationID,
+		WorkerOutcomeStarted,
+		"",
+		now.Add(10*time.Second),
+	); !errors.Is(err, ErrWorkerOperationConflict) {
+		t.Fatalf("external operation completion error = %v, want ErrWorkerOperationConflict", err)
+	}
+	if stored, err := state.GetWorkerOperation(
+		ctx, worker.ControllerID, operationID,
+	); err != nil || stored != pending {
+		t.Fatalf("externally completed prepared receipt = %#v, %v; want %#v", stored, err, pending)
+	}
+	if _, err := state.BindWorkerTurnStartIntent(
+		ctx, worker.WorkerKey, request.IntentID, request.PreviousTurnID, now.Add(10*time.Second),
+	); !errors.Is(err, ErrWorkerTurnStartIntentConflict) {
+		t.Fatalf("previous turn bind error = %v, want ErrWorkerTurnStartIntentConflict", err)
+	}
+	if stored, err := state.GetWorkerTurnStartIntent(
+		ctx, worker.WorkerKey, request.IntentID,
+	); err != nil || stored != prepared {
+		t.Fatalf("previous turn bind changed intent = %#v, %v; want %#v", stored, err, prepared)
+	}
 	turnID := "123e4567-e89b-42d3-a456-426614175207"
 	if _, err := state.db.ExecContext(ctx, `
 CREATE TRIGGER fail_test_turn_intent_bind
@@ -255,11 +341,12 @@ END
 
 func TestWorkerTurnStartIntentRejectReleasesReservationAndRestoresRetryState(t *testing.T) {
 	ctx := context.Background()
-	state, err := OpenPeer(ctx, filepath.Join(t.TempDir(), "state", "peer.sqlite3"))
+	path := filepath.Join(t.TempDir(), "state", "peer.sqlite3")
+	state, err := OpenPeer(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer state.Close()
+	defer func() { _ = state.Close() }()
 	now := time.Unix(3_000, 0)
 
 	initial := readyInitialTurnWorker(
@@ -350,6 +437,52 @@ func TestWorkerTurnStartIntentRejectReleasesReservationAndRestoresRetryState(t *
 		ctx, followup.WorkerKey, followupRequest.IntentID, "different_rejection", now.Add(23*time.Second),
 	); !errors.Is(err, ErrWorkerTurnStartIntentConflict) {
 		t.Fatalf("changed reject replay error = %v", err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state, err = OpenPeer(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]WorkerTurnStartResolution{
+		"initial":  initialRejected,
+		"followup": rejected,
+	} {
+		t.Run("reopened "+name, func(t *testing.T) {
+			storedIntent, err := state.GetWorkerTurnStartIntent(
+				ctx, want.Worker.WorkerKey, want.Intent.IntentID,
+			)
+			if err != nil || storedIntent != want.Intent {
+				t.Fatalf("stored rejected intent = %#v, %v; want %#v", storedIntent, err, want.Intent)
+			}
+			storedWorker, err := state.GetWorker(ctx, want.Worker.WorkerKey)
+			if err != nil || storedWorker != want.Worker {
+				t.Fatalf("stored retryable worker = %#v, %v; want %#v", storedWorker, err, want.Worker)
+			}
+			if _, err := state.GetResultOutbox(ctx, ResultOutboxKey{
+				WorkerKey: want.Intent.WorkerKey, SourceDeviceID: want.Intent.DeviceID,
+				PackageID: want.Intent.PackageID,
+			}); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("reopened rejection retained outbox reservation: %v", err)
+			}
+		})
+	}
+	storedReceipt, err := state.GetWorkerOperation(ctx, followup.ControllerID, operationID)
+	if err != nil || rejected.Operation == nil || storedReceipt != *rejected.Operation {
+		t.Fatalf("reopened rejected receipt = %#v, %v; want %#v", storedReceipt, err, rejected.Operation)
+	}
+	unresolved, err := state.ListUnresolvedWorkerTurnStartIntents(
+		ctx, initial.ControllerID, initial.DeviceID, 10,
+	)
+	if err != nil || len(unresolved) != 0 {
+		t.Fatalf("reopened rejected intents are unresolved = %#v, %v", unresolved, err)
+	}
+	replayedAfterRestart, err := state.RejectWorkerTurnStartIntent(
+		ctx, followup.WorkerKey, followupRequest.IntentID, "turn_start_rejected", now.Add(24*time.Second),
+	)
+	if err != nil || !reflect.DeepEqual(replayedAfterRestart, rejected) {
+		t.Fatalf("restarted reject replay = %#v, %v; want %#v", replayedAfterRestart, err, rejected)
 	}
 }
 

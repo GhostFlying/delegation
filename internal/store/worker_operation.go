@@ -157,6 +157,13 @@ func (s *PeerStore) CompleteWorkerOperation(
 	}
 	var receipt WorkerOperationReceipt
 	err = withImmediateTransaction(ctx, s.db, "peer", func(connection *sql.Conn) error {
+		if _, queryErr := queryPreparedWorkerTurnStartIntentByOperation(
+			ctx, connection, key.ControllerID, operationID,
+		); queryErr == nil {
+			return ErrWorkerOperationConflict
+		} else if !errors.Is(queryErr, ErrNotFound) {
+			return queryErr
+		}
 		receipt, err = completeWorkerOperationReceipt(
 			ctx, connection, key, operationID, outcome, failureCode, timestamp,
 		)
