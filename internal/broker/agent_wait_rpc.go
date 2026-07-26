@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/control"
@@ -85,10 +86,12 @@ func (s *session) handleWaitAgent(
 		mailboxSubscription := s.server.mailboxNotifier.subscribe(mailboxKey)
 		lifecycleSubscription := s.server.lifecycleNotifier.subscribe(treeKey)
 		artifactSubscription := s.server.artifactNotifier.subscribe(treeKey)
+		resultSubscription := s.server.resultNotifier.subscribe(treeKey)
 		releaseSubscriptions := func() {
 			mailboxSubscription.release()
 			lifecycleSubscription.release()
 			artifactSubscription.release()
+			resultSubscription.release()
 		}
 		result, err := s.readAgentWait(ctx, principal, params)
 		if err != nil {
@@ -102,7 +105,7 @@ func (s *session) handleWaitAgent(
 		default:
 		}
 		if len(result.Messages) != 0 || len(result.Activities) != 0 ||
-			len(result.Artifacts) != 0 || params.TimeoutMillis == 0 {
+			len(result.Artifacts) != 0 || len(result.Results) != 0 || params.TimeoutMillis == 0 {
 			releaseSubscriptions()
 			return s.writeResult(ctx, request, result)
 		}
@@ -128,6 +131,9 @@ func (s *session) handleWaitAgent(
 			timer.Stop()
 			releaseSubscriptions()
 		case <-artifactSubscription.channel():
+			timer.Stop()
+			releaseSubscriptions()
+		case <-resultSubscription.channel():
 			timer.Stop()
 			releaseSubscriptions()
 		case <-timer.C:
@@ -170,19 +176,42 @@ func (s *session) readAgentWait(
 	if err != nil {
 		return protocol.WaitAgentResult{}, err
 	}
+	packages, err := s.server.registry.ListDeliveredResultPackages(
+		ctx,
+		principal.Identity(),
+		store.ResultPackagePageRequest{
+			AfterSequence: params.ResultCursor,
+			Limit:         params.ResultLimit + 1,
+		},
+	)
+	if err != nil {
+		return protocol.WaitAgentResult{}, err
+	}
 	result := protocol.WaitAgentResult{
 		Messages:       mailbox.Messages,
 		Activities:     make([]protocol.AgentLifecycleActivity, 0, len(lifecycle.Activities)),
 		Artifacts:      artifacts.Artifacts,
+		Results:        make([]protocol.ResultPackageHandle, 0, len(packages.Packages)),
 		MoreMessages:   len(mailbox.Messages) > params.MessageLimit,
 		MoreActivities: len(lifecycle.Activities) > params.ActivityLimit,
 		MoreArtifacts:  len(artifacts.Artifacts) > params.ArtifactLimit,
+		MoreResults:    len(packages.Packages) > params.ResultLimit,
 	}
 	if result.MoreMessages {
 		result.Messages = result.Messages[:params.MessageLimit]
 	}
 	if result.MoreArtifacts {
 		result.Artifacts = result.Artifacts[:params.ArtifactLimit]
+	}
+	for _, record := range packages.Packages[:min(len(packages.Packages), params.ResultLimit)] {
+		handle := protocol.ResultPackageHandle{
+			Manifest: record.Manifest, Availability: protocol.ResultPackageUnverified,
+			Sequence: record.Sequence, DeliveredAt: record.DeliveredAt,
+		}
+		if err := handle.Validate(); err != nil {
+			return protocol.WaitAgentResult{}, fmt.Errorf("stored result package handle: %w", err)
+		}
+		result.Results = append(result.Results, handle)
 	}
 	for _, activity := range lifecycle.Activities[:min(len(lifecycle.Activities), params.ActivityLimit)] {
 		result.Activities = append(result.Activities, protocol.AgentLifecycleActivity{
@@ -203,6 +232,10 @@ func (s *session) readAgentWait(
 	result.NextArtifactCursor = params.ArtifactCursor
 	if len(result.Artifacts) != 0 {
 		result.NextArtifactCursor = result.Artifacts[len(result.Artifacts)-1].Sequence
+	}
+	result.NextResultCursor = params.ResultCursor
+	if len(result.Results) != 0 {
+		result.NextResultCursor = result.Results[len(result.Results)-1].Sequence
 	}
 	return result, nil
 }
@@ -251,7 +284,8 @@ func (s *session) handleAgentWaitStoreError(
 ) error {
 	if errors.Is(err, store.ErrMailboxCursorAhead) ||
 		errors.Is(err, store.ErrAgentLifecycleCursorAhead) ||
-		errors.Is(err, store.ErrChangesArtifactCursorAhead) {
+		errors.Is(err, store.ErrChangesArtifactCursorAhead) ||
+		errors.Is(err, store.ErrResultPackageCursorAhead) {
 		return s.writeError(
 			ctx, request, protocol.ErrorConflict, "agent wait cursor is ahead of stored state",
 		)

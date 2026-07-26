@@ -318,6 +318,7 @@ func TestCanceledAgentWaitSendsCancellationWithoutClosingConnector(t *testing.T)
 				TimeoutMillis: protocol.MaximumAgentWaitMillis,
 				MessageLimit:  protocol.MaximumAgentWaitMessages, ActivityLimit: protocol.MaximumAgentWaitActivities,
 				ArtifactLimit: protocol.MaximumAgentWaitArtifacts,
+				ResultLimit:   protocol.MaximumAgentWaitResults,
 			},
 			&result,
 		)

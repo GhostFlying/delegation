@@ -209,9 +209,9 @@ func (b *fakeRootBackend) Call(
 		}
 		*result.(*protocol.WaitAgentResult) = protocol.WaitAgentResult{
 			Messages: []protocol.MailboxMessage{}, Activities: []protocol.AgentLifecycleActivity{},
-			Artifacts:         []protocol.ChangesArtifactMetadata{},
+			Artifacts: []protocol.ChangesArtifactMetadata{}, Results: []protocol.ResultPackageHandle{},
 			NextMailboxCursor: input.MailboxCursor, NextLifecycleCursor: input.LifecycleCursor,
-			NextArtifactCursor: input.ArtifactCursor,
+			NextArtifactCursor: input.ArtifactCursor, NextResultCursor: input.ResultCursor,
 		}
 	default:
 		return fmt.Errorf("unexpected method %q", method)
@@ -330,7 +330,7 @@ func TestRootMCPWaitAgentDescriptionCoversAllEventStreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "Wait for managed-agent lifecycle activity, worker messages, and changes-artifact metadata in this root task."
+	const want = "Wait for managed-agent lifecycle activity, worker messages, changes artifacts, and verified result-package metadata in this root task."
 	for _, tool := range tools.Tools {
 		if tool.Name == ToolWaitAgent {
 			if tool.Description != want {
