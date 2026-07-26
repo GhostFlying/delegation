@@ -76,6 +76,7 @@ type Registry interface {
 	GetResultPackageForDelivery(context.Context, string, control.PrincipalIdentity, string) (store.ResultPackageRecord, error)
 	ListPendingResultPackageRelaysForPeer(context.Context, string, string, store.ResultPackageRelayPageRequest) (store.ResultPackageRelayPage, error)
 	MarkResultPackageDelivered(context.Context, string, control.PrincipalIdentity, string, time.Time) (store.ResultPackageRecord, error)
+	MarkResultPackageSourceAcknowledged(context.Context, string, control.PrincipalIdentity, string, time.Time) (store.ResultPackageRecord, error)
 	BeginWorkspaceSync(context.Context, store.WorkspaceSyncIntent, time.Time) (store.WorkspaceSyncReceipt, error)
 	PinWorkspaceSyncManifest(context.Context, store.WorkspaceSyncKey, protocol.WorkspaceManifest, time.Time) (store.WorkspaceSyncReceipt, error)
 	FinishWorkspaceSync(context.Context, store.WorkspaceSyncKey, protocol.WorkspaceSummary, time.Time) (store.WorkspaceSyncReceipt, error)

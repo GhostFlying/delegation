@@ -41,6 +41,45 @@ type resultPackagePeerCall struct {
 	params any
 }
 
+type fakeResultPackageSourceAcknowledger struct {
+	mu      sync.Mutex
+	calls   int
+	handler func(control.PrincipalIdentity, string, time.Time) (store.ResultPackageRecord, error)
+}
+
+func (r *fakeResultPackageSourceAcknowledger) MarkResultPackageSourceAcknowledged(
+	_ context.Context,
+	_ string,
+	source control.PrincipalIdentity,
+	packageID string,
+	acknowledgedAt time.Time,
+) (store.ResultPackageRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	return r.handler(source, packageID, acknowledgedAt)
+}
+
+type fakeResultPackageDeliveryRegistry struct {
+	Registry
+	handler func(
+		string,
+		control.PrincipalIdentity,
+		string,
+		time.Time,
+	) (store.ResultPackageRecord, error)
+}
+
+func (r *fakeResultPackageDeliveryRegistry) MarkResultPackageDelivered(
+	_ context.Context,
+	connectedDeviceID string,
+	root control.PrincipalIdentity,
+	packageID string,
+	deliveredAt time.Time,
+) (store.ResultPackageRecord, error) {
+	return r.handler(connectedDeviceID, root, packageID, deliveredAt)
+}
+
 func (p *fakeResultPackagePeer) callPeer(
 	_ context.Context,
 	method, treeID string,
@@ -214,6 +253,134 @@ func TestTransferResultPackageRejectsRootOffsetOutsideManifest(t *testing.T) {
 	}
 	if len(source.methods()) != 0 {
 		t.Fatalf("out-of-range root offset read source: %v", source.methods())
+	}
+}
+
+func TestResultPackageSourceAcknowledgementRetriesLostBrokerMark(t *testing.T) {
+	record := resultPackageRelayRecord(t, []byte("payload"))
+	record.State = store.ResultPackageDelivered
+	record.Sequence = 7
+	record.DeliveredAt = 50
+	worker, _ := resultPackageRelayPrincipals()
+	source := &fakeResultPackagePeer{handler: func(call resultPackagePeerCall) (any, error) {
+		if call.method != protocol.MethodAcknowledgeResultPackage || call.source != worker {
+			return nil, fmt.Errorf("unexpected source acknowledgement %#v", call)
+		}
+		return protocol.AcknowledgeResultPackageResult(
+			call.params.(protocol.AcknowledgeResultPackageParams),
+		), nil
+	}}
+	markFailed := true
+	registry := &fakeResultPackageSourceAcknowledger{
+		handler: func(
+			source control.PrincipalIdentity,
+			packageID string,
+			acknowledgedAt time.Time,
+		) (store.ResultPackageRecord, error) {
+			if source != worker || packageID != resultRelayPackageID || acknowledgedAt.Unix() != 60 {
+				return store.ResultPackageRecord{}, errors.New("unexpected broker acknowledgement mark")
+			}
+			if markFailed {
+				markFailed = false
+				return store.ResultPackageRecord{}, errors.New("broker commit lost")
+			}
+			record.SourceAcknowledgedAt = acknowledgedAt.Unix()
+			return record, nil
+		},
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		err := acknowledgeAndMarkResultPackage(
+			context.Background(), source, registry, worker, record, time.Unix(60, 0),
+		)
+		if attempt == 1 && !errors.Is(err, errResultPackageRelayDeferred) {
+			t.Fatalf("lost broker mark error = %v, want deferred relay", err)
+		}
+		if attempt == 2 && err != nil {
+			t.Fatalf("source acknowledgement replay: %v", err)
+		}
+	}
+	if got := source.methods(); !equalStrings(got, []string{
+		protocol.MethodAcknowledgeResultPackage,
+		protocol.MethodAcknowledgeResultPackage,
+	}) {
+		t.Fatalf("source acknowledgement methods = %v", got)
+	}
+	registry.mu.Lock()
+	markCalls := registry.calls
+	registry.mu.Unlock()
+	if markCalls != 2 {
+		t.Fatalf("broker acknowledgement marks = %d, want 2", markCalls)
+	}
+}
+
+func TestMarkResultPackageDeliveredWakesTreeWaiters(t *testing.T) {
+	record := resultPackageRelayRecord(t, []byte("payload"))
+	record.State = store.ResultPackageDelivered
+	record.Sequence = 1
+	record.DeliveredAt = 50
+	_, root := resultPackageRelayPrincipals()
+	registry := &fakeResultPackageDeliveryRegistry{
+		handler: func(
+			connectedDeviceID string,
+			principal control.PrincipalIdentity,
+			packageID string,
+			deliveredAt time.Time,
+		) (store.ResultPackageRecord, error) {
+			if connectedDeviceID != root.DeviceID || principal != root ||
+				packageID != resultRelayPackageID || deliveredAt.Unix() != 50 {
+				return store.ResultPackageRecord{}, errors.New("unexpected delivery mark")
+			}
+			return record, nil
+		},
+	}
+	server := &Server{
+		registry:         registry,
+		artifactNotifier: newTreeNotifier(),
+		now:              func() time.Time { return time.Unix(50, 0) },
+	}
+	key := treeKey{
+		controllerID: record.Manifest.ControllerID,
+		treeID:       record.Manifest.TreeID,
+	}
+	subscription := server.artifactNotifier.subscribe(key)
+	defer subscription.release()
+	if _, err := server.markResultPackageDelivered(
+		context.Background(), root, resultRelayPackageID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-subscription.channel():
+	case <-time.After(time.Second):
+		t.Fatal("durable result package did not wake its root tree")
+	}
+
+	failedNotifier := newTreeNotifier()
+	failedSubscription := failedNotifier.subscribe(key)
+	defer failedSubscription.release()
+	server = &Server{
+		registry: &fakeResultPackageDeliveryRegistry{
+			handler: func(
+				string,
+				control.PrincipalIdentity,
+				string,
+				time.Time,
+			) (store.ResultPackageRecord, error) {
+				return store.ResultPackageRecord{}, errors.New("broker commit failed")
+			},
+		},
+		artifactNotifier: failedNotifier,
+		now:              func() time.Time { return time.Unix(50, 0) },
+	}
+	if _, err := server.markResultPackageDelivered(
+		context.Background(), root, resultRelayPackageID,
+	); err == nil {
+		t.Fatal("failed delivery mark returned no error")
+	}
+	select {
+	case <-failedSubscription.channel():
+		t.Fatal("failed delivery mark woke the root tree")
+	default:
 	}
 }
 

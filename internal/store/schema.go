@@ -269,6 +269,7 @@ CREATE TABLE result_packages (
 	result_sequence INTEGER NOT NULL DEFAULT 0 CHECK (result_sequence >= 0),
 	published_at INTEGER NOT NULL CHECK (published_at >= 0),
 	delivered_at INTEGER NOT NULL DEFAULT 0 CHECK (delivered_at >= 0),
+	source_acknowledged_at INTEGER NOT NULL DEFAULT 0 CHECK (source_acknowledged_at >= 0),
 	PRIMARY KEY (controller_id, tree_id, package_id),
 	UNIQUE (controller_id, tree_id, source_agent_id, turn_id),
 	FOREIGN KEY (controller_id, tree_id)
@@ -280,8 +281,9 @@ CREATE TABLE result_packages (
 	FOREIGN KEY (controller_id, root_device_id)
 		REFERENCES devices(controller_id, device_id),
 	CHECK (
-		(state = 'deliveryPending' AND result_sequence = 0 AND delivered_at = 0) OR
-		(state = 'delivered' AND result_sequence > 0 AND delivered_at >= published_at)
+		(state = 'deliveryPending' AND result_sequence = 0 AND delivered_at = 0 AND source_acknowledged_at = 0) OR
+		(state = 'delivered' AND result_sequence > 0 AND delivered_at >= published_at AND
+			(source_acknowledged_at = 0 OR source_acknowledged_at >= delivered_at))
 	)
 ) STRICT;
 
@@ -290,7 +292,9 @@ CREATE UNIQUE INDEX result_packages_by_tree_sequence
 	WHERE result_sequence > 0;
 
 CREATE INDEX result_packages_by_source_delivery
-	ON result_packages(controller_id, source_device_id, state, published_at, package_id);
+	ON result_packages(
+		controller_id, source_device_id, state, source_acknowledged_at, published_at, package_id
+	);
 
 CREATE INDEX result_packages_by_root_delivery
 	ON result_packages(controller_id, root_device_id, state, published_at, package_id);

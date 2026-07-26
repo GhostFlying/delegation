@@ -312,6 +312,16 @@ type resultPackagePeer interface {
 	) (json.RawMessage, error)
 }
 
+type resultPackageSourceAcknowledger interface {
+	MarkResultPackageSourceAcknowledged(
+		context.Context,
+		string,
+		control.PrincipalIdentity,
+		string,
+		time.Time,
+	) (store.ResultPackageRecord, error)
+}
+
 func (s *Server) relayResultPackage(
 	ctx context.Context,
 	request resultPackageRelayRequest,
@@ -325,12 +335,17 @@ func (s *Server) relayResultPackage(
 	if record.SourcePrincipal != request.source {
 		return errors.New("stored result package source differs from its relay request")
 	}
+	if record.SourceAcknowledgedAt != 0 {
+		return nil
+	}
 	source := s.connection(record.SourcePrincipal.DeviceID)
 	if source == nil {
 		return fmt.Errorf("%w: source peer is offline", errResultPackageRelayDeferred)
 	}
 	if record.State == store.ResultPackageDelivered {
-		return acknowledgeResultPackage(ctx, source, record.SourcePrincipal, record)
+		return acknowledgeAndMarkResultPackage(
+			ctx, source, s.registry, record.SourcePrincipal, record, s.now(),
+		)
 	}
 	root := s.connection(record.RootPrincipal.DeviceID)
 	if root == nil {
@@ -359,13 +374,31 @@ func (s *Server) relayResultPackage(
 		}
 		return err
 	}
-	delivered, err := s.registry.MarkResultPackageDelivered(
-		ctx, record.RootPrincipal.DeviceID, record.RootPrincipal, request.packageID, s.now(),
-	)
+	delivered, err := s.markResultPackageDelivered(ctx, record.RootPrincipal, request.packageID)
 	if err != nil {
 		return fmt.Errorf("record durable result package delivery: %w", err)
 	}
-	return acknowledgeResultPackage(ctx, source, record.SourcePrincipal, delivered)
+	return acknowledgeAndMarkResultPackage(
+		ctx, source, s.registry, record.SourcePrincipal, delivered, s.now(),
+	)
+}
+
+func (s *Server) markResultPackageDelivered(
+	ctx context.Context,
+	root control.PrincipalIdentity,
+	packageID string,
+) (store.ResultPackageRecord, error) {
+	delivered, err := s.registry.MarkResultPackageDelivered(
+		ctx, root.DeviceID, root, packageID, s.now(),
+	)
+	if err != nil {
+		return store.ResultPackageRecord{}, err
+	}
+	s.artifactNotifier.notify(treeKey{
+		controllerID: delivered.Manifest.ControllerID,
+		treeID:       delivered.Manifest.TreeID,
+	})
+	return delivered, nil
 }
 
 func (s *Server) pendingResultPackageRelays(
@@ -597,6 +630,33 @@ func acknowledgeResultPackage(
 	if err != nil || acknowledged.Validate() != nil ||
 		acknowledged != protocol.AcknowledgeResultPackageResult(params) {
 		return errors.New("source returned an invalid result package delivery acknowledgement")
+	}
+	return nil
+}
+
+func acknowledgeAndMarkResultPackage(
+	ctx context.Context,
+	source resultPackagePeer,
+	registry resultPackageSourceAcknowledger,
+	workerPrincipal control.PrincipalIdentity,
+	record store.ResultPackageRecord,
+	acknowledgedAt time.Time,
+) error {
+	if err := acknowledgeResultPackage(ctx, source, workerPrincipal, record); err != nil {
+		return err
+	}
+	if _, err := registry.MarkResultPackageSourceAcknowledged(
+		ctx,
+		workerPrincipal.DeviceID,
+		workerPrincipal,
+		record.Manifest.PackageID,
+		acknowledgedAt,
+	); err != nil {
+		return fmt.Errorf(
+			"%w: record source result package acknowledgement: %v",
+			errResultPackageRelayDeferred,
+			err,
+		)
 	}
 	return nil
 }
