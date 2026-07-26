@@ -152,6 +152,51 @@ type WorkspaceTransferManager interface {
 	CleanupWorkspaceTransfers(context.Context) error
 }
 
+type ResultPackageReadRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.ReadResultPackagePartParams
+}
+
+type ResultPackageBeginRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.BeginResultPackageParams
+}
+
+type ResultPackageWriteRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.WriteResultPackagePartParams
+}
+
+type ResultPackageFinishRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.FinishResultPackageParams
+}
+
+type ResultPackageCancelRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.CancelResultPackageParams
+}
+
+type ResultPackageAcknowledgeRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.AcknowledgeResultPackageParams
+}
+
+type ResultPackageManager interface {
+	ReadResultPackagePart(context.Context, ResultPackageReadRequest) (protocol.ReadResultPackagePartResult, error)
+	BeginResultPackage(context.Context, ResultPackageBeginRequest) (protocol.BeginResultPackageResult, error)
+	WriteResultPackagePart(context.Context, ResultPackageWriteRequest) (protocol.WriteResultPackagePartResult, error)
+	FinishResultPackage(context.Context, ResultPackageFinishRequest) (protocol.FinishResultPackageResult, error)
+	CancelResultPackage(context.Context, ResultPackageCancelRequest) (protocol.CancelResultPackageResult, error)
+	AcknowledgeResultPackage(context.Context, ResultPackageAcknowledgeRequest) (protocol.AcknowledgeResultPackageResult, error)
+}
+
 type Options struct {
 	BrokerURL                string
 	AllowInsecureNonLoopback bool
@@ -172,6 +217,7 @@ type Options struct {
 	WorkerLifecycleSource    WorkerLifecycleSource
 	ChangesArtifactSource    ChangesArtifactSource
 	WorkspaceManager         WorkspaceManager
+	ResultPackageManager     ResultPackageManager
 }
 
 type Status struct {
@@ -209,6 +255,7 @@ type Client struct {
 	artifactChanges   <-chan struct{}
 	workspaceManager  WorkspaceManager
 	workspaceTransfer WorkspaceTransferManager
+	resultPackages    ResultPackageManager
 	running           atomic.Bool
 	cleanupPending    atomic.Bool
 
@@ -338,7 +385,8 @@ func New(options Options) (*Client, error) {
 		changesArtifacts: options.ChangesArtifactSource,
 		artifactChanges:  artifactChanges,
 		workspaceManager: options.WorkspaceManager, workspaceTransfer: workspaceTransfer,
-		updates: make(chan struct{}),
+		resultPackages: options.ResultPackageManager,
+		updates:        make(chan struct{}),
 	}, nil
 }
 
