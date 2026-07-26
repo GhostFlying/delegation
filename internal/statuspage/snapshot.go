@@ -25,6 +25,7 @@ type Snapshot struct {
 	LifetimeTurns uint64         `json:"lifetimeTurns"`
 	Trees         uint64         `json:"trees"`
 	Artifacts     ArtifactCounts `json:"artifacts"`
+	Results       ResultCounts   `json:"results"`
 }
 
 // DeviceCounts summarizes registered and usable devices without identifying
@@ -51,6 +52,13 @@ type ArtifactCounts struct {
 	CaptureFailed uint64 `json:"captureFailed"`
 }
 
+// ResultCounts summarizes broker-side result package delivery progress.
+type ResultCounts struct {
+	DeliveryPending    uint64 `json:"deliveryPending"`
+	Delivered          uint64 `json:"delivered"`
+	SourceAcknowledged uint64 `json:"sourceAcknowledged"`
+}
+
 // Validate checks that a snapshot is safe for bounded status presentation.
 func (s Snapshot) Validate() error {
 	if !validOptionalText(s.Version) {
@@ -66,6 +74,9 @@ func (s Snapshot) Validate() error {
 	}
 	if s.RunningTurns > s.OccupiedSlots {
 		return errors.New("worker counts are inconsistent")
+	}
+	if s.Results.SourceAcknowledged > s.Results.Delivered {
+		return errors.New("result package counts are inconsistent")
 	}
 	return nil
 }

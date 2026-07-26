@@ -178,6 +178,53 @@ func TestStatusSnapshotExcludesWorkersOnUnsynchronizedDevices(t *testing.T) {
 	}
 }
 
+func TestStatusSnapshotCountsResultPackageDelivery(t *testing.T) {
+	ctx := context.Background()
+	registry, root, worker, _, _ := prepareChangesArtifactStore(t, true, true)
+	states := []struct {
+		state                ResultPackageDeliveryState
+		sequence             int
+		deliveredAt          int64
+		sourceAcknowledgedAt int64
+	}{
+		{state: ResultPackageDeliveryPending},
+		{state: ResultPackageDelivered, sequence: 1, deliveredAt: 20},
+		{state: ResultPackageDelivered, sequence: 2, deliveredAt: 21, sourceAcknowledgedAt: 22},
+	}
+	for index, resultState := range states {
+		packageID := changesTestID(100_000 + index)
+		threadID := changesTestID(101_000 + index)
+		turnID := changesTestID(102_000 + index)
+		metadata := statusResultMetadata(
+			t, worker.ControllerID, worker.TreeID, worker.AgentID, worker.DeviceID,
+			packageID, threadID, turnID, false,
+		)
+		if _, err := registry.db.ExecContext(ctx, `
+INSERT INTO result_packages(
+	controller_id, tree_id, package_id, source_agent_id, source_device_id,
+	managed_thread_id, turn_id, lifecycle_revision, root_device_id,
+	manifest_bytes, manifest_size, manifest_sha256, state, result_sequence,
+	published_at, delivered_at, source_acknowledged_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 10, ?, ?)
+`, root.ControllerID, root.TreeID, packageID, worker.AgentID, worker.DeviceID,
+			threadID, turnID, root.DeviceID, metadata.Manifest,
+			metadata.ManifestDescriptor.Size, metadata.ManifestDescriptor.SHA256,
+			resultState.state, resultState.sequence, resultState.deliveredAt,
+			resultState.sourceAcknowledgedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := registry.ReadStatusSnapshot(ctx, root.ControllerID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := StatusResultCounts{DeliveryPending: 1, Delivered: 2, SourceAcknowledged: 1}
+	if got.Results != want {
+		t.Fatalf("result package status = %#v, want %#v", got.Results, want)
+	}
+}
+
 func TestPeerStatusSnapshotUsesAdmissionStatesAndArtifactBacklogs(t *testing.T) {
 	ctx := context.Background()
 	state := openPeerTestStore(t)
@@ -216,6 +263,8 @@ UPDATE peer_metadata SET worker_revision = 77 WHERE singleton = 1
 	insertPeerStatusArtifact(t, state, workers[0], 1, ChangesCapturePending)
 	insertPeerStatusArtifact(t, state, workers[0], 2, ChangesPublishPending)
 	insertPeerStatusArtifact(t, state, workers[0], 3, ChangesPublished)
+	outboxBytes := insertPeerStatusResults(t, state, workers)
+	inboxBytes := insertPeerStatusResultInboxes(t, state)
 
 	got, err := state.ReadPeerStatusSnapshot(ctx, workerControllerID, workerDeviceID)
 	if err != nil {
@@ -231,10 +280,197 @@ UPDATE peer_metadata SET worker_revision = 77 WHERE singleton = 1
 		Artifacts: PeerStatusArtifactCounts{
 			CaptureBacklog: 1, PublishBacklog: 1, Retained: 1, RetainedBytes: 30,
 		},
+		Results: PeerStatusResultCounts{
+			OutboxCapturePending: 1, OutboxPublishPending: 1,
+			OutboxDeliveryPending: 1, OutboxDelivered: 1,
+			OutboxRetainedBytes: outboxBytes,
+			InboxReceiving:      1, InboxAvailable: 1, InboxEvictionPending: 1,
+			InboxRetainedBytes:   inboxBytes,
+			RolloutCaptureFailed: 3, WorkspaceCaptureFailed: 1,
+		},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("peer status snapshot = %#v, want %#v", got, want)
 	}
+}
+
+func TestPeerStatusSnapshotRejectsResultOutboxOverQuota(t *testing.T) {
+	state := openPeerTestStore(t)
+	worker := workerReservation(t, changesTestID(140_000), "over quota result status")
+	worker.Status = WorkerReserved
+	worker.Revision = 1
+	worker.CreatedAt = 1
+	worker.UpdatedAt = 1
+	insertPeerStatusWorker(t, state, worker)
+	for index := range MaximumPeerResultPackages + 1 {
+		insertPeerStatusCapturedResult(
+			t, state, worker, 1000+index, ResultOutboxPublishPending, false,
+		)
+	}
+	if _, err := state.ReadPeerStatusSnapshot(
+		context.Background(), workerControllerID, workerDeviceID,
+	); err == nil || !strings.Contains(err.Error(), "exceeds its package quota") {
+		t.Fatalf("over-quota result status error = %v", err)
+	}
+}
+
+func insertPeerStatusResults(
+	t *testing.T,
+	state *PeerStore,
+	workers []WorkerReservation,
+) int64 {
+	t.Helper()
+	const captureReservationBytes = 4096
+	ctx := context.Background()
+	capturePackageID := changesTestID(110_000)
+	if _, err := state.db.ExecContext(ctx, `
+INSERT INTO peer_result_outbox(
+	controller_id, tree_id, source_agent_id, source_device_id, package_id,
+	state, reservation_limit_bytes, reserved_bytes, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, 'capturePending', ?, ?, 1, 1)
+`, workers[0].ControllerID, workers[0].TreeID, workers[0].AgentID,
+		workers[0].DeviceID, capturePackageID, captureReservationBytes,
+		captureReservationBytes); err != nil {
+		t.Fatal(err)
+	}
+
+	retainedBytes := int64(captureReservationBytes)
+	states := []ResultOutboxState{
+		ResultOutboxPublishPending,
+		ResultOutboxDeliveryPending,
+		ResultOutboxDelivered,
+	}
+	for index, resultState := range states {
+		retainedBytes += insertPeerStatusCapturedResult(
+			t, state, workers[index+1], index, resultState, index == 0,
+		)
+	}
+	return retainedBytes
+}
+
+func insertPeerStatusCapturedResult(
+	t *testing.T,
+	state *PeerStore,
+	worker WorkerReservation,
+	index int,
+	resultState ResultOutboxState,
+	workspaceCaptureFailed bool,
+) int64 {
+	t.Helper()
+	packageID := changesTestID(111_000 + index)
+	threadID := changesTestID(112_000 + index)
+	turnID := changesTestID(113_000 + index)
+	metadata := statusResultMetadata(
+		t, worker.ControllerID, worker.TreeID, worker.AgentID, worker.DeviceID,
+		packageID, threadID, turnID, workspaceCaptureFailed,
+	)
+	packageBytes := metadata.ManifestDescriptor.Size
+	deliverySequence := 0
+	if resultState == ResultOutboxDelivered {
+		deliverySequence = 1
+	}
+	if _, err := state.db.ExecContext(context.Background(), `
+INSERT INTO peer_result_outbox(
+	controller_id, tree_id, source_agent_id, source_device_id, package_id,
+	state, managed_thread_id, turn_id, lifecycle_revision,
+	manifest_bytes, manifest_size_bytes, manifest_sha256, parts_json,
+	reservation_limit_bytes, reserved_bytes, package_bytes, delivery_sequence,
+	created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?)
+`, worker.ControllerID, worker.TreeID, worker.AgentID, worker.DeviceID, packageID,
+		resultState, threadID, turnID, metadata.Manifest,
+		metadata.ManifestDescriptor.Size, metadata.ManifestDescriptor.SHA256,
+		protocol.MaximumResultPackageBytes, packageBytes, packageBytes,
+		deliverySequence, index+2, index+2); err != nil {
+		t.Fatal(err)
+	}
+	return packageBytes
+}
+
+func insertPeerStatusResultInboxes(t *testing.T, state *PeerStore) int64 {
+	t.Helper()
+	ctx := context.Background()
+	authority := ResultInboxAuthority{
+		ControllerID: workerControllerID,
+		TreeID:       workerTreeID,
+		RootAgentID:  changesTestID(120_000),
+		RootDeviceID: workerDeviceID,
+	}
+	states := []ResultInboxState{
+		ResultInboxReceiving,
+		ResultInboxAvailable,
+		ResultInboxEvictionTombstone,
+	}
+	now := time.Unix(1_700_020_000, 0)
+	var retainedBytes int64
+	for index, resultState := range states {
+		packageID := changesTestID(121_000 + index)
+		metadata := statusResultMetadata(
+			t, workerControllerID, workerTreeID, changesTestID(122_000+index),
+			changesSourceDeviceID, packageID, changesTestID(123_000+index),
+			changesTestID(124_000+index), false,
+		)
+		attemptID := changesTestID(125_000 + index)
+		if _, err := state.BeginResultInbox(ctx, authority, protocol.BeginResultPackageParams{
+			AttemptID: attemptID, PackageID: packageID,
+			LeaseExpiresAt: now.Add(time.Minute).Unix(), Metadata: metadata,
+		}, now); err != nil {
+			t.Fatal(err)
+		}
+		retainedBytes += metadata.ManifestDescriptor.Size
+		if resultState == ResultInboxReceiving {
+			continue
+		}
+		if _, err := state.CommitResultInboxAvailable(
+			ctx, authority, attemptID, packageID, now.Add(time.Second),
+		); err != nil {
+			t.Fatal(err)
+		}
+		if resultState == ResultInboxEvictionTombstone {
+			if _, err := state.PrepareResultInboxEviction(
+				ctx, authority, packageID, now.Add(2*time.Second),
+			); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return retainedBytes
+}
+
+func statusResultMetadata(
+	t *testing.T,
+	controllerID, treeID, sourceAgentID, sourceDeviceID string,
+	packageID, managedThreadID, turnID string,
+	workspaceCaptureFailed bool,
+) protocol.ResultPackageMetadata {
+	t.Helper()
+	workspace := unmanagedResultWorkspace()
+	if workspaceCaptureFailed {
+		workspace = protocol.ResultWorkspaceComponent{
+			Status:         protocol.ResultWorkspaceCaptureFailed,
+			WorkspaceID:    changesTestID(130_000),
+			SourceDeviceID: changesSourceDeviceID, TargetDeviceID: sourceDeviceID,
+			ObjectFormat: "sha1", BaseHeadOID: strings.Repeat("a", 40),
+			BaseManifestHash: strings.Repeat("b", 64),
+			BaseSnapshotHash: strings.Repeat("c", 64), BaseClean: true,
+			BaseWarnings: []string{}, ResultWarnings: []string{},
+			FailureCode: "workspace_capture_failed",
+		}
+	}
+	manifest := protocol.ResultManifest{
+		Version: protocol.ResultManifestVersion, PackageID: packageID,
+		ControllerID: controllerID, TreeID: treeID,
+		SourceAgentID: sourceAgentID, SourceDeviceID: sourceDeviceID,
+		ManagedThreadID: managedThreadID, TurnID: turnID, LifecycleRevision: 1,
+		Terminal:   protocol.ResultTerminal{Outcome: protocol.ResultTerminalCompleted},
+		CapturedAt: 1_700_020_000,
+		Rollout: protocol.ResultRolloutComponent{
+			Status: protocol.ResultRolloutCaptureFailed, FailureCode: "rollout_unavailable",
+		},
+		Workspace: workspace,
+		Parts:     []protocol.ResultPackagePartDescriptor{},
+	}
+	return encodeResultMetadata(t, manifest)
 }
 
 func insertPeerStatusWorker(t *testing.T, state *PeerStore, worker WorkerReservation) {

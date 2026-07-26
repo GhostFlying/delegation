@@ -79,6 +79,10 @@ func TestHTMLStatusIsAccessibleEscapedAndOmitsControllerID(t *testing.T) {
 		`<tr><th scope="row">Available</th><td>11</td></tr>`,
 		`<tr><th scope="row">Unchanged</th><td>12</td></tr>`,
 		`<tr><th scope="row">Capture failed</th><td>13</td></tr>`,
+		`<th colspan="2" scope="rowgroup">Results</th>`,
+		`<tr><th scope="row">Delivery pending</th><td>14</td></tr>`,
+		`<tr><th scope="row">Delivered</th><td>16</td></tr>`,
+		`<tr><th scope="row">Source acknowledged</th><td>15</td></tr>`,
 	} {
 		if !strings.Contains(body, required) {
 			t.Errorf("body missing %q", required)
@@ -266,6 +270,14 @@ func TestStatusProviderFailuresReturnBoundedError(t *testing.T) {
 				return snapshot, nil
 			},
 		},
+		{
+			name: "inconsistent result counts",
+			provider: func(context.Context) (Snapshot, error) {
+				snapshot := testSnapshot()
+				snapshot.Results.SourceAcknowledged = snapshot.Results.Delivered + 1
+				return snapshot, nil
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -309,6 +321,9 @@ func testSnapshot() Snapshot {
 			Available:     11,
 			Unchanged:     12,
 			CaptureFailed: 13,
+		},
+		Results: ResultCounts{
+			DeliveryPending: 14, Delivered: 16, SourceAcknowledged: 15,
 		},
 	}
 }

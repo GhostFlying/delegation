@@ -73,6 +73,12 @@ const statusDocument = `<!doctype html>
 <tr><th scope="row">Unchanged</th><td>{{.Artifacts.Unchanged}}</td></tr>
 <tr><th scope="row">Capture failed</th><td>{{.Artifacts.CaptureFailed}}</td></tr>
 </tbody>
+<tbody>
+<tr class="group"><th colspan="2" scope="rowgroup">Results</th></tr>
+<tr><th scope="row">Delivery pending</th><td>{{.Results.DeliveryPending}}</td></tr>
+<tr><th scope="row">Delivered</th><td>{{.Results.Delivered}}</td></tr>
+<tr><th scope="row">Source acknowledged</th><td>{{.Results.SourceAcknowledged}}</td></tr>
+</tbody>
 </table>
 </main>
 </body>
@@ -93,6 +99,7 @@ type pageData struct {
 	LifetimeTurns uint64
 	Trees         uint64
 	Artifacts     ArtifactCounts
+	Results       ResultCounts
 }
 
 // NewHandler returns an HTTP handler for the aggregate HTML and JSON status
@@ -181,6 +188,7 @@ func renderHTML(snapshot Snapshot) ([]byte, error) {
 		LifetimeTurns: snapshot.LifetimeTurns,
 		Trees:         snapshot.Trees,
 		Artifacts:     snapshot.Artifacts,
+		Results:       snapshot.Results,
 	}
 	var body bytes.Buffer
 	if err := statusTemplate.Execute(&body, data); err != nil {
