@@ -7,8 +7,10 @@ import (
 )
 
 const (
-	lifecycleTreeID  = "123e4567-e89b-42d3-a456-426614175000"
-	lifecycleAgentID = "123e4567-e89b-42d3-a456-426614175001"
+	lifecycleTreeID   = "123e4567-e89b-42d3-a456-426614175000"
+	lifecycleAgentID  = "123e4567-e89b-42d3-a456-426614175001"
+	lifecycleThreadID = "123e4567-e89b-42d3-a456-426614175002"
+	lifecycleTurnID   = "123e4567-e89b-42d3-a456-426614175003"
 )
 
 func TestWorkerLifecyclePhaseValidatesFailureCode(t *testing.T) {
@@ -61,7 +63,7 @@ func TestSyncWorkerLifecyclePageValidation(t *testing.T) {
 		BaseRevision: 32, ThroughRevision: 40, Complete: true,
 		Workers: []WorkerLifecycleSnapshot{{
 			TreeID: lifecycleTreeID, AgentID: lifecycleAgentID, Revision: 39,
-			Phase: WorkerLifecycleIdle,
+			Phase: WorkerLifecycleIdle, CodexThreadID: lifecycleThreadID,
 		}},
 	}
 	if err := validComplete.Validate(); err != nil {
@@ -74,6 +76,53 @@ func TestSyncWorkerLifecyclePageValidation(t *testing.T) {
 	applied, err := empty.AppliedRevision()
 	if err != nil || applied != 40 {
 		t.Fatalf("empty complete page = %v, applied %d", err, applied)
+	}
+}
+
+func TestWorkerLifecycleSnapshotValidatesThreadAndTurnBinding(t *testing.T) {
+	valid := []WorkerLifecycleSnapshot{
+		lifecycleSnapshotWithBinding(WorkerLifecycleReserved, "", ""),
+		lifecycleSnapshotWithBinding(WorkerLifecyclePending, "", ""),
+		lifecycleSnapshotWithBinding(WorkerLifecyclePending, lifecycleThreadID, ""),
+		lifecycleSnapshotWithBinding(WorkerLifecycleStarting, "", ""),
+		lifecycleSnapshotWithBinding(WorkerLifecycleStarting, lifecycleThreadID, ""),
+		lifecycleSnapshotWithBinding(WorkerLifecyclePreflight, lifecycleThreadID, ""),
+		lifecycleSnapshotWithBinding(WorkerLifecycleReady, lifecycleThreadID, ""),
+		lifecycleSnapshotWithBinding(WorkerLifecycleRunning, lifecycleThreadID, lifecycleTurnID),
+		lifecycleSnapshotWithBinding(WorkerLifecycleFinalizing, lifecycleThreadID, lifecycleTurnID),
+		lifecycleSnapshotWithBinding(WorkerLifecycleIdle, lifecycleThreadID, ""),
+		lifecycleSnapshotWithBinding(WorkerLifecycleInterrupted, lifecycleThreadID, ""),
+		lifecycleSnapshotWithBinding(WorkerLifecycleInterrupted, lifecycleThreadID, lifecycleTurnID),
+		lifecycleSnapshotWithBinding(WorkerLifecycleFailed, "", ""),
+		lifecycleSnapshotWithBinding(WorkerLifecycleFailed, lifecycleThreadID, ""),
+	}
+	for index, snapshot := range valid {
+		if err := snapshot.Validate(); err != nil {
+			t.Fatalf("valid snapshot %d (%s): %v", index, snapshot.Phase, err)
+		}
+	}
+
+	invalid := []WorkerLifecycleSnapshot{
+		lifecycleSnapshotWithBinding(WorkerLifecycleReserved, lifecycleThreadID, ""),
+		lifecycleSnapshotWithBinding(WorkerLifecyclePending, "", lifecycleTurnID),
+		lifecycleSnapshotWithBinding(WorkerLifecycleStarting, lifecycleThreadID, lifecycleTurnID),
+		lifecycleSnapshotWithBinding(WorkerLifecyclePreflight, "", ""),
+		lifecycleSnapshotWithBinding(WorkerLifecyclePreflight, lifecycleThreadID, lifecycleTurnID),
+		lifecycleSnapshotWithBinding(WorkerLifecycleReady, "", ""),
+		lifecycleSnapshotWithBinding(WorkerLifecycleRunning, "", lifecycleTurnID),
+		lifecycleSnapshotWithBinding(WorkerLifecycleRunning, lifecycleThreadID, ""),
+		lifecycleSnapshotWithBinding(WorkerLifecycleFinalizing, lifecycleThreadID, ""),
+		lifecycleSnapshotWithBinding(WorkerLifecycleIdle, "", ""),
+		lifecycleSnapshotWithBinding(WorkerLifecycleIdle, lifecycleThreadID, lifecycleTurnID),
+		lifecycleSnapshotWithBinding(WorkerLifecycleInterrupted, "", lifecycleTurnID),
+		lifecycleSnapshotWithBinding(WorkerLifecycleFailed, lifecycleThreadID, lifecycleTurnID),
+		lifecycleSnapshotWithBinding(WorkerLifecycleRunning, "invalid", lifecycleTurnID),
+		lifecycleSnapshotWithBinding(WorkerLifecycleRunning, lifecycleThreadID, "invalid"),
+	}
+	for index, snapshot := range invalid {
+		if err := snapshot.Validate(); err == nil {
+			t.Fatalf("invalid snapshot %d (%s) was accepted: %#v", index, snapshot.Phase, snapshot)
+		}
 	}
 }
 
@@ -124,8 +173,22 @@ func TestHelloRejectsUnrepresentableWorkerRevision(t *testing.T) {
 func lifecycleSnapshot(revision uint64) WorkerLifecycleSnapshot {
 	return WorkerLifecycleSnapshot{
 		TreeID: lifecycleTreeID, AgentID: lifecycleAgentID, Revision: revision,
-		Phase: WorkerLifecycleRunning,
+		Phase: WorkerLifecycleRunning, CodexThreadID: lifecycleThreadID, ActiveTurnID: lifecycleTurnID,
 	}
+}
+
+func lifecycleSnapshotWithBinding(
+	phase WorkerLifecyclePhase,
+	codexThreadID, activeTurnID string,
+) WorkerLifecycleSnapshot {
+	snapshot := WorkerLifecycleSnapshot{
+		TreeID: lifecycleTreeID, AgentID: lifecycleAgentID, Revision: 1,
+		Phase: phase, CodexThreadID: codexThreadID, ActiveTurnID: activeTurnID,
+	}
+	if phase == WorkerLifecycleFailed {
+		snapshot.FailureCode = "worker_failed"
+	}
+	return snapshot
 }
 
 func lifecycleID(value int) string {

@@ -233,6 +233,7 @@ func TestAgentWaitWakesOnWorkerLifecycleNotification(t *testing.T) {
 			Workers: []protocol.WorkerLifecycleSnapshot{{
 				TreeID: root.TreeID, AgentID: receipt.Agent.Principal.AgentID,
 				Revision: 1, Phase: protocol.WorkerLifecycleRunning,
+				CodexThreadID: lifecycleCodexThreadID, ActiveTurnID: lifecycleTurnID,
 			}},
 		}),
 	)

@@ -22,6 +22,10 @@ const (
 	lifecycleMissingAgent    = "123e4567-e89b-42d3-a456-426614175112"
 	lifecycleWrongTree       = "123e4567-e89b-42d3-a456-426614175120"
 	lifecycleSecondThread    = "123e4567-e89b-42d3-a456-426614175121"
+	lifecycleCodexThreadOne  = "123e4567-e89b-42d3-a456-426614175122"
+	lifecycleCodexThreadTwo  = "123e4567-e89b-42d3-a456-426614175123"
+	lifecycleTurnOne         = "123e4567-e89b-42d3-a456-426614175124"
+	lifecycleTurnTwo         = "123e4567-e89b-42d3-a456-426614175125"
 )
 
 func TestWorkerLifecycleSessionClaimFencesConnectionsAndRejectsPeerRollback(t *testing.T) {
@@ -95,7 +99,8 @@ func TestWorkerLifecyclePageIsAtomicAndRejectsStaleOrUnauthorizedTargets(t *test
 
 	invalid := protocol.WorkerLifecycleSnapshot{
 		TreeID: root.TreeID, AgentID: lifecycleMissingAgent, Revision: 2,
-		Phase: protocol.WorkerLifecycleRunning,
+		Phase:         protocol.WorkerLifecycleRunning,
+		CodexThreadID: lifecycleCodexThreadOne, ActiveTurnID: lifecycleTurnOne,
 	}
 	_, err := registry.ApplyWorkerLifecyclePage(context.Background(), WorkerLifecyclePageApply{
 		Session: session,
@@ -149,7 +154,8 @@ func TestWorkerLifecyclePageIsAtomicAndRejectsStaleOrUnauthorizedTargets(t *test
 	}
 	assertLifecycleApplyDenied(t, registry, session, 1, 2, protocol.WorkerLifecycleSnapshot{
 		TreeID: root.TreeID, AgentID: principal.AgentID, Revision: 2,
-		Phase: protocol.WorkerLifecycleRunning,
+		Phase:         protocol.WorkerLifecycleRunning,
+		CodexThreadID: lifecycleCodexThreadOne, ActiveTurnID: lifecycleTurnOne,
 	})
 	assertLifecycleStorage(t, registry, root, 1, 1, 1)
 }
@@ -192,31 +198,32 @@ func TestWorkerLifecycleActivityIsIndependentFromDispatchAndTreeScoped(t *testin
 		t.Fatalf("second lifecycle page = %#v, error %v", page, err)
 	}
 
-	applyLifecyclePage(
-		t, registry, session, 2, 3,
-		lifecycleSnapshotFor(first, 3, protocol.WorkerLifecycleRunning),
-	)
+	samePhase := lifecycleSnapshotFor(first, 3, protocol.WorkerLifecycleRunning)
+	samePhase.CodexThreadID = lifecycleCodexThreadTwo
+	samePhase.ActiveTurnID = lifecycleTurnTwo
+	applyLifecyclePage(t, registry, session, 2, 3, samePhase)
 	unchanged, err := registry.ListAgentLifecycleActivity(
 		context.Background(), root.Identity(), AgentLifecyclePageRequest{AfterSequence: 2, Limit: 2},
 	)
 	if err != nil || len(unchanged.Activities) != 0 || unchanged.NextSequence != 2 || unchanged.Highwater != 2 {
 		t.Fatalf("same-phase lifecycle activity = %#v, error %v", unchanged, err)
 	}
-	var targetRevision uint64
-	if err := registry.db.QueryRowContext(context.Background(), `
-SELECT target_revision FROM agent_lifecycle_states
-WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
-`, root.ControllerID, root.TreeID, first.Agent.Principal.AgentID).Scan(&targetRevision); err != nil {
+	authority, err := queryWorkerLifecycleAuthority(
+		context.Background(), registry.db, root.ControllerID, root.TreeID,
+		first.Agent.Principal.AgentID,
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if targetRevision != 3 {
-		t.Fatalf("same-phase target revision = %d", targetRevision)
+	if authority.TargetDeviceID != agentSpawnTargetID || authority.Snapshot != samePhase ||
+		authority.Sequence != 1 || authority.ObservedAt != 23 {
+		t.Fatalf("same-phase lifecycle authority = %#v", authority)
 	}
 
-	applyLifecyclePage(
-		t, registry, session, 3, 4,
-		lifecycleSnapshotFor(first, 4, protocol.WorkerLifecycleFinalizing),
-	)
+	finalizing := lifecycleSnapshotFor(first, 4, protocol.WorkerLifecycleFinalizing)
+	finalizing.CodexThreadID = lifecycleCodexThreadTwo
+	finalizing.ActiveTurnID = lifecycleTurnTwo
+	applyLifecyclePage(t, registry, session, 3, 4, finalizing)
 	changed, err := registry.ListAgentLifecycleActivity(
 		context.Background(), root.Identity(), AgentLifecyclePageRequest{AfterSequence: 2, Limit: 2},
 	)
@@ -224,10 +231,22 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 		changed.Activities[0].Phase != protocol.WorkerLifecycleFinalizing {
 		t.Fatalf("changed lifecycle activity = %#v, error %v", changed, err)
 	}
-	applyLifecyclePage(
-		t, registry, session, 4, 5,
-		lifecycleSnapshotFor(first, 5, protocol.WorkerLifecycleIdle),
+	authority, err = queryWorkerLifecycleAuthority(
+		context.Background(), registry.db, root.ControllerID, root.TreeID,
+		first.Agent.Principal.AgentID,
 	)
+	if err != nil || authority.Snapshot != finalizing || authority.Sequence != 3 {
+		t.Fatalf("finalizing lifecycle authority = %#v, error %v", authority, err)
+	}
+	if _, err := registry.db.ExecContext(context.Background(), `
+UPDATE agent_lifecycle_states SET active_turn_id = ''
+WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
+`, root.ControllerID, root.TreeID, first.Agent.Principal.AgentID); err == nil {
+		t.Fatal("broker schema accepted finalizing lifecycle without an active turn")
+	}
+	idle := lifecycleSnapshotFor(first, 5, protocol.WorkerLifecycleIdle)
+	idle.CodexThreadID = lifecycleCodexThreadTwo
+	applyLifecyclePage(t, registry, session, 4, 5, idle)
 	changed, err = registry.ListAgentLifecycleActivity(
 		context.Background(), root.Identity(), AgentLifecyclePageRequest{AfterSequence: 3, Limit: 2},
 	)
@@ -402,10 +421,14 @@ func lifecycleSnapshotFor(
 	revision uint64,
 	phase protocol.WorkerLifecyclePhase,
 ) protocol.WorkerLifecycleSnapshot {
-	return protocol.WorkerLifecycleSnapshot{
+	snapshot := protocol.WorkerLifecycleSnapshot{
 		TreeID: receipt.Agent.Principal.TreeID, AgentID: receipt.Agent.Principal.AgentID,
-		Revision: revision, Phase: phase,
+		Revision: revision, Phase: phase, CodexThreadID: lifecycleCodexThreadOne,
 	}
+	if phase == protocol.WorkerLifecycleRunning || phase == protocol.WorkerLifecycleFinalizing {
+		snapshot.ActiveTurnID = lifecycleTurnOne
+	}
+	return snapshot
 }
 
 func assertLifecycleApplyDenied(

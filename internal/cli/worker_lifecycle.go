@@ -61,6 +61,7 @@ func (s managedWorkerLifecycleSource) ListWorkerLifecycles(
 		snapshot := protocol.WorkerLifecycleSnapshot{
 			TreeID: worker.TreeID, AgentID: worker.AgentID, Revision: worker.Revision,
 			Phase: phase, FailureCode: failureCode,
+			CodexThreadID: worker.CodexThreadID, ActiveTurnID: worker.ActiveTurnID,
 		}
 		if err := snapshot.Validate(); err != nil {
 			return nil, fmt.Errorf("managed worker %d lifecycle: %w", index, err)

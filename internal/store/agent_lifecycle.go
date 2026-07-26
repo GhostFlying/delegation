@@ -51,6 +51,13 @@ type AgentLifecycleActivity struct {
 	ObservedAt     int64
 }
 
+type workerLifecycleAuthority struct {
+	TargetDeviceID string
+	Snapshot       protocol.WorkerLifecycleSnapshot
+	Sequence       uint64
+	ObservedAt     int64
+}
+
 type AgentLifecyclePageRequest struct {
 	AfterSequence uint64
 	Limit         int
@@ -324,56 +331,47 @@ func applyWorkerLifecycleSnapshot(
 	if err := authorizeWorkerLifecycleSnapshot(ctx, connection, session, snapshot); err != nil {
 		return err
 	}
-	var (
-		targetDeviceID   string
-		targetRevision   int64
-		phase            protocol.WorkerLifecyclePhase
-		failureCode      string
-		sequence         int64
-		storedObservedAt int64
+	stored, err := queryWorkerLifecycleAuthority(
+		ctx, connection, session.ControllerID, snapshot.TreeID, snapshot.AgentID,
 	)
-	err := connection.QueryRowContext(ctx, `
-SELECT target_device_id, target_revision, phase, failure_code, lifecycle_sequence, observed_at
-FROM agent_lifecycle_states
-WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
-`, session.ControllerID, snapshot.TreeID, snapshot.AgentID).Scan(
-		&targetDeviceID, &targetRevision, &phase, &failureCode, &sequence, &storedObservedAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		sequence, err = nextTreeLifecycleSequence(ctx, connection, session.ControllerID, snapshot.TreeID)
-		if err != nil {
-			return err
+	if errors.Is(err, ErrNotFound) {
+		sequence, sequenceErr := nextTreeLifecycleSequence(
+			ctx, connection, session.ControllerID, snapshot.TreeID,
+		)
+		if sequenceErr != nil {
+			return sequenceErr
 		}
 		if _, err := connection.ExecContext(ctx, `
 INSERT INTO agent_lifecycle_states(
     controller_id, tree_id, agent_id, target_device_id, target_revision,
-    phase, failure_code, lifecycle_sequence, observed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    codex_thread_id, active_turn_id, phase, failure_code, lifecycle_sequence, observed_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, session.ControllerID, snapshot.TreeID, snapshot.AgentID, session.DeviceID,
-			snapshot.Revision, snapshot.Phase, snapshot.FailureCode, sequence, observedAt); err != nil {
+			snapshot.Revision, snapshot.CodexThreadID, snapshot.ActiveTurnID,
+			snapshot.Phase, snapshot.FailureCode, sequence, observedAt); err != nil {
 			return fmt.Errorf("create agent lifecycle state: %w", err)
 		}
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("load agent lifecycle state: %w", err)
+		return err
 	}
-	if targetDeviceID != session.DeviceID {
+	if stored.TargetDeviceID != session.DeviceID {
 		return ErrAuthorizationDenied
 	}
-	if snapshot.Revision <= uint64(targetRevision) {
+	if snapshot.Revision <= stored.Snapshot.Revision {
 		return ErrWorkerLifecycleRevisionNotForward
 	}
-	if observedAt < storedObservedAt {
-		observedAt = storedObservedAt
+	if observedAt < stored.ObservedAt {
+		observedAt = stored.ObservedAt
 	}
-	if phase == snapshot.Phase && failureCode == snapshot.FailureCode {
+	if stored.Snapshot.Phase == snapshot.Phase && stored.Snapshot.FailureCode == snapshot.FailureCode {
 		result, err := connection.ExecContext(ctx, `
 UPDATE agent_lifecycle_states
-SET target_revision = ?, observed_at = ?
+SET target_revision = ?, codex_thread_id = ?, active_turn_id = ?, observed_at = ?
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND target_revision = ?
-`, snapshot.Revision, observedAt, session.ControllerID, snapshot.TreeID,
-			snapshot.AgentID, targetRevision)
+`, snapshot.Revision, snapshot.CodexThreadID, snapshot.ActiveTurnID, observedAt,
+			session.ControllerID, snapshot.TreeID, snapshot.AgentID, stored.Snapshot.Revision)
 		if err != nil {
 			return fmt.Errorf("advance unchanged agent lifecycle state: %w", err)
 		}
@@ -382,16 +380,18 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND target_revision = ?
 		}
 		return nil
 	}
-	sequence, err = nextTreeLifecycleSequence(ctx, connection, session.ControllerID, snapshot.TreeID)
+	sequence, err := nextTreeLifecycleSequence(ctx, connection, session.ControllerID, snapshot.TreeID)
 	if err != nil {
 		return err
 	}
 	result, err := connection.ExecContext(ctx, `
 UPDATE agent_lifecycle_states
-SET target_revision = ?, phase = ?, failure_code = ?, lifecycle_sequence = ?, observed_at = ?
+SET target_revision = ?, codex_thread_id = ?, active_turn_id = ?, phase = ?, failure_code = ?,
+    lifecycle_sequence = ?, observed_at = ?
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND target_revision = ?
-`, snapshot.Revision, snapshot.Phase, snapshot.FailureCode, sequence, observedAt,
-		session.ControllerID, snapshot.TreeID, snapshot.AgentID, targetRevision)
+`, snapshot.Revision, snapshot.CodexThreadID, snapshot.ActiveTurnID,
+		snapshot.Phase, snapshot.FailureCode, sequence, observedAt,
+		session.ControllerID, snapshot.TreeID, snapshot.AgentID, stored.Snapshot.Revision)
 	if err != nil {
 		return fmt.Errorf("update agent lifecycle state: %w", err)
 	}
@@ -399,6 +399,47 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND target_revision = ?
 		return err
 	}
 	return nil
+}
+
+func queryWorkerLifecycleAuthority(
+	ctx context.Context,
+	queryer rowQueryer,
+	controllerID, treeID, agentID string,
+) (workerLifecycleAuthority, error) {
+	authority := workerLifecycleAuthority{}
+	authority.Snapshot.TreeID = treeID
+	authority.Snapshot.AgentID = agentID
+	err := queryer.QueryRowContext(ctx, `
+SELECT target_device_id, target_revision, codex_thread_id, active_turn_id,
+       phase, failure_code, lifecycle_sequence, observed_at
+FROM agent_lifecycle_states
+WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
+`, controllerID, treeID, agentID).Scan(
+		&authority.TargetDeviceID,
+		&authority.Snapshot.Revision,
+		&authority.Snapshot.CodexThreadID,
+		&authority.Snapshot.ActiveTurnID,
+		&authority.Snapshot.Phase,
+		&authority.Snapshot.FailureCode,
+		&authority.Sequence,
+		&authority.ObservedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return workerLifecycleAuthority{}, ErrNotFound
+	}
+	if err != nil {
+		return workerLifecycleAuthority{}, fmt.Errorf("load worker lifecycle authority: %w", err)
+	}
+	if err := identity.ValidateID(authority.TargetDeviceID); err != nil {
+		return workerLifecycleAuthority{}, fmt.Errorf("stored worker lifecycle targetDeviceId %w", err)
+	}
+	if err := authority.Snapshot.Validate(); err != nil {
+		return workerLifecycleAuthority{}, fmt.Errorf("stored worker lifecycle snapshot is invalid: %w", err)
+	}
+	if authority.Sequence == 0 || authority.Sequence > math.MaxInt64 || authority.ObservedAt < 0 {
+		return workerLifecycleAuthority{}, errors.New("stored worker lifecycle metadata is invalid")
+	}
+	return authority, nil
 }
 
 func requireSingleLifecycleUpdate(result sql.Result) error {

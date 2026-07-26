@@ -206,6 +206,8 @@ CREATE TABLE agent_lifecycle_states (
 	agent_id TEXT NOT NULL,
 	target_device_id TEXT NOT NULL,
 	target_revision INTEGER NOT NULL CHECK (target_revision > 0),
+	codex_thread_id TEXT NOT NULL CHECK (length(codex_thread_id) IN (0, 36)),
+	active_turn_id TEXT NOT NULL CHECK (length(active_turn_id) IN (0, 36)),
 	phase TEXT NOT NULL CHECK (
 		phase IN ('reserved', 'pending', 'starting', 'preflight', 'ready',
 		          'running', 'finalizing', 'idle', 'interrupted', 'failed')
@@ -217,6 +219,14 @@ CREATE TABLE agent_lifecycle_states (
 	),
 	lifecycle_sequence INTEGER NOT NULL CHECK (lifecycle_sequence > 0),
 	observed_at INTEGER NOT NULL CHECK (observed_at >= 0),
+	CHECK (
+		(phase = 'reserved' AND codex_thread_id = '' AND active_turn_id = '') OR
+		(phase IN ('pending', 'starting') AND active_turn_id = '') OR
+		(phase IN ('preflight', 'ready', 'idle') AND codex_thread_id <> '' AND active_turn_id = '') OR
+		(phase IN ('running', 'finalizing') AND codex_thread_id <> '' AND active_turn_id <> '') OR
+		(phase = 'interrupted' AND codex_thread_id <> '') OR
+		(phase = 'failed' AND active_turn_id = '')
+	),
 	PRIMARY KEY (controller_id, tree_id, agent_id),
 	UNIQUE (controller_id, tree_id, lifecycle_sequence),
 	FOREIGN KEY (controller_id, target_device_id)

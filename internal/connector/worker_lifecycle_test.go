@@ -16,6 +16,11 @@ import (
 	"github.com/coder/websocket"
 )
 
+const (
+	lifecycleCodexThreadID = "123e4567-e89b-42d3-a456-426614174225"
+	lifecycleActiveTurnID  = "123e4567-e89b-42d3-a456-426614174226"
+)
+
 type lifecycleTestSource struct {
 	mu        sync.Mutex
 	revision  uint64
@@ -114,6 +119,12 @@ func TestConnectorDoesNotPublishReadyBeforeInitialLifecycleAck(t *testing.T) {
 	if params.BaseRevision != 0 || params.ThroughRevision != 2 || !params.Complete ||
 		len(params.Workers) != 2 {
 		t.Fatalf("initial lifecycle page = %#v", params)
+	}
+	if params.Workers[0].CodexThreadID != lifecycleCodexThreadID ||
+		params.Workers[0].ActiveTurnID != lifecycleActiveTurnID ||
+		params.Workers[1].CodexThreadID != lifecycleCodexThreadID ||
+		params.Workers[1].ActiveTurnID != "" {
+		t.Fatalf("initial lifecycle page lost thread or turn identity: %#v", params.Workers)
 	}
 	notReadyContext, cancelNotReady := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	err := client.WaitReady(notReadyContext)
@@ -360,9 +371,14 @@ func lifecycleSnapshot(
 	revision uint64,
 	phase protocol.WorkerLifecyclePhase,
 ) protocol.WorkerLifecycleSnapshot {
-	return protocol.WorkerLifecycleSnapshot{
+	snapshot := protocol.WorkerLifecycleSnapshot{
 		TreeID: connectorTestThreadID, AgentID: agentID, Revision: revision, Phase: phase,
+		CodexThreadID: lifecycleCodexThreadID,
 	}
+	if phase == protocol.WorkerLifecycleRunning || phase == protocol.WorkerLifecycleFinalizing {
+		snapshot.ActiveTurnID = lifecycleActiveTurnID
+	}
+	return snapshot
 }
 
 func containsFeature(features []string, wanted string) bool {
