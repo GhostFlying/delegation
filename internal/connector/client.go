@@ -95,6 +95,17 @@ type ChangesArtifactSource interface {
 	AcknowledgeChangesArtifact(context.Context, ChangesArtifactPublication, uint64) error
 }
 
+type ResultPackagePublication struct {
+	Source control.PrincipalIdentity
+	Params protocol.PublishResultPackageParams
+}
+
+type ResultPackageSource interface {
+	ResultPackageChanges() <-chan struct{}
+	ListPendingResultPackagePublications(context.Context) ([]ResultPackagePublication, error)
+	AcknowledgeResultPackageMetadata(context.Context, ResultPackagePublication) error
+}
+
 type WorkspaceInspectRequest struct {
 	TreeID string
 	Source control.PrincipalIdentity
@@ -216,6 +227,7 @@ type Options struct {
 	WorkerController         WorkerController
 	WorkerLifecycleSource    WorkerLifecycleSource
 	ChangesArtifactSource    ChangesArtifactSource
+	ResultPackageSource      ResultPackageSource
 	WorkspaceManager         WorkspaceManager
 	ResultPackageManager     ResultPackageManager
 }
@@ -253,6 +265,8 @@ type Client struct {
 	workerLifecycle   WorkerLifecycleSource
 	changesArtifacts  ChangesArtifactSource
 	artifactChanges   <-chan struct{}
+	resultSource      ResultPackageSource
+	resultChanges     <-chan struct{}
 	workspaceManager  WorkspaceManager
 	workspaceTransfer WorkspaceTransferManager
 	resultPackages    ResultPackageManager
@@ -298,6 +312,24 @@ func New(options Options) (*Client, error) {
 	artifactChanges := options.ChangesArtifactSource.ArtifactChanges()
 	if artifactChanges == nil {
 		return nil, errors.New("connector changes artifact notification channel is required")
+	}
+	resultSource := options.ResultPackageSource
+	if resultSource == nil {
+		resultSource, _ = options.WorkerSpawner.(ResultPackageSource)
+	}
+	if resultSource == nil {
+		return nil, errors.New("connector result package source is required")
+	}
+	resultChanges := resultSource.ResultPackageChanges()
+	if resultChanges == nil {
+		return nil, errors.New("connector result package notification channel is required")
+	}
+	resultManager := options.ResultPackageManager
+	if resultManager == nil {
+		resultManager, _ = options.WorkerSpawner.(ResultPackageManager)
+	}
+	if resultManager == nil {
+		return nil, errors.New("connector result package manager is required")
 	}
 	if options.WorkspaceManager == nil {
 		return nil, errors.New("connector workspace manager is required")
@@ -374,8 +406,10 @@ func New(options Options) (*Client, error) {
 		workerLifecycle:  options.WorkerLifecycleSource,
 		changesArtifacts: options.ChangesArtifactSource,
 		artifactChanges:  artifactChanges,
+		resultSource:     resultSource,
+		resultChanges:    resultChanges,
 		workspaceManager: options.WorkspaceManager, workspaceTransfer: workspaceTransfer,
-		resultPackages: options.ResultPackageManager,
+		resultPackages: resultManager,
 		updates:        make(chan struct{}),
 	}, nil
 }
@@ -409,6 +443,12 @@ func (c *Client) Run(ctx context.Context) error {
 			c.reportError(err)
 		}
 		if errors.Is(err, errChangesArtifactNotificationsClosed) {
+			return err
+		}
+		if errors.Is(err, errResultPackageNotificationsClosed) {
+			return err
+		}
+		if errors.Is(err, ErrPermanentResultPackagePublication) {
 			return err
 		}
 		if healthy {
@@ -534,6 +574,11 @@ func (c *Client) runSession(ctx context.Context) (healthy bool, returnErr error)
 		defer close(changesArtifactDone)
 		current.changesArtifactLoop()
 	}()
+	resultPackageDone := make(chan struct{})
+	go func() {
+		defer close(resultPackageDone)
+		current.resultPackagePublicationLoop()
+	}()
 	select {
 	case <-ctx.Done():
 		current.close(ctx.Err())
@@ -541,6 +586,7 @@ func (c *Client) runSession(ctx context.Context) (healthy bool, returnErr error)
 	}
 	c.unpublish(current)
 	<-changesArtifactDone
+	<-resultPackageDone
 	return current.heartbeatSucceeded.Load(), current.err()
 }
 

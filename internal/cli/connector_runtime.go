@@ -179,6 +179,10 @@ func runConnectorServiceWithProviderEnvironment(
 		resultErr = errors.Join(resultErr, resultPackages.Close())
 	}()
 	workerManager.resultPackages = resultPackages
+	resultSource := managedResultPackageSource{
+		packages: resultPackages, state: peerState,
+		controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
+	}
 	client, err := connector.New(connector.Options{
 		BrokerURL:                cfg.Broker.URL,
 		AllowInsecureNonLoopback: cfg.Broker.AllowInsecureNonLoopback,
@@ -193,6 +197,7 @@ func runConnectorServiceWithProviderEnvironment(
 			host: workers, controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 		},
 		ChangesArtifactSource: changesSource,
+		ResultPackageSource:   resultSource,
 		WorkspaceManager:      workerManager,
 		ResultPackageManager:  workerManager,
 		ReportError: func(err error) {

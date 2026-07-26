@@ -982,6 +982,27 @@ func TestConnectorValidatesStaticOptionsAndOfflineCalls(t *testing.T) {
 		t.Fatalf("connector accepted a changes artifact source without notifications: %v", err)
 	}
 	invalid = base
+	invalid.WorkerSpawner = spawnOnlyWorkerSpawner{}
+	invalid.WorkerController = testWorkerSpawner{}
+	invalid.ResultPackageSource = nil
+	invalid.ResultPackageManager = testWorkerSpawner{}
+	if _, err := New(invalid); err == nil || !strings.Contains(err.Error(), "result package source") {
+		t.Fatalf("connector accepted a missing result package source: %v", err)
+	}
+	invalid = base
+	invalid.ResultPackageSource = nilResultPackageSource{}
+	if _, err := New(invalid); err == nil || !strings.Contains(err.Error(), "notification channel") {
+		t.Fatalf("connector accepted a result package source without notifications: %v", err)
+	}
+	invalid = base
+	invalid.WorkerSpawner = spawnOnlyWorkerSpawner{}
+	invalid.WorkerController = testWorkerSpawner{}
+	invalid.ResultPackageSource = testWorkerSpawner{}
+	invalid.ResultPackageManager = nil
+	if _, err := New(invalid); err == nil || !strings.Contains(err.Error(), "result package manager") {
+		t.Fatalf("connector accepted a missing result package manager: %v", err)
+	}
+	invalid = base
 	invalid.WorkspaceManager = nil
 	if _, err := New(invalid); err == nil || !strings.Contains(err.Error(), "workspace manager") {
 		t.Fatalf("connector accepted a missing workspace manager: %v", err)
@@ -1153,7 +1174,10 @@ type spawnOnlyWorkerSpawner struct{}
 
 type nilChangesArtifactSource struct{}
 
+type nilResultPackageSource struct{}
+
 var testArtifactChanges = make(chan struct{})
+var testResultPackageChanges = make(chan struct{})
 
 func (testWorkerSpawner) WorkerRevision() uint64 { return 0 }
 
@@ -1179,6 +1203,80 @@ func (testWorkerSpawner) AcknowledgeChangesArtifact(
 	uint64,
 ) error {
 	return errors.New("not used")
+}
+
+func (testWorkerSpawner) ResultPackageChanges() <-chan struct{} {
+	return testResultPackageChanges
+}
+
+func (testWorkerSpawner) ListPendingResultPackagePublications(
+	context.Context,
+) ([]ResultPackagePublication, error) {
+	return []ResultPackagePublication{}, nil
+}
+
+func (testWorkerSpawner) AcknowledgeResultPackageMetadata(
+	context.Context,
+	ResultPackagePublication,
+) error {
+	return errors.New("not used")
+}
+
+func (nilResultPackageSource) ResultPackageChanges() <-chan struct{} { return nil }
+
+func (nilResultPackageSource) ListPendingResultPackagePublications(
+	context.Context,
+) ([]ResultPackagePublication, error) {
+	return []ResultPackagePublication{}, nil
+}
+
+func (nilResultPackageSource) AcknowledgeResultPackageMetadata(
+	context.Context,
+	ResultPackagePublication,
+) error {
+	return errors.New("not used")
+}
+
+func (testWorkerSpawner) ReadResultPackagePart(
+	context.Context,
+	ResultPackageReadRequest,
+) (protocol.ReadResultPackagePartResult, error) {
+	return protocol.ReadResultPackagePartResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) BeginResultPackage(
+	context.Context,
+	ResultPackageBeginRequest,
+) (protocol.BeginResultPackageResult, error) {
+	return protocol.BeginResultPackageResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) WriteResultPackagePart(
+	context.Context,
+	ResultPackageWriteRequest,
+) (protocol.WriteResultPackagePartResult, error) {
+	return protocol.WriteResultPackagePartResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) FinishResultPackage(
+	context.Context,
+	ResultPackageFinishRequest,
+) (protocol.FinishResultPackageResult, error) {
+	return protocol.FinishResultPackageResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) CancelResultPackage(
+	context.Context,
+	ResultPackageCancelRequest,
+) (protocol.CancelResultPackageResult, error) {
+	return protocol.CancelResultPackageResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) AcknowledgeResultPackage(
+	context.Context,
+	ResultPackageAcknowledgeRequest,
+) (protocol.AcknowledgeResultPackageResult, error) {
+	return protocol.AcknowledgeResultPackageResult{}, errors.New("not used")
 }
 
 func (nilChangesArtifactSource) ArtifactChanges() <-chan struct{} { return nil }
