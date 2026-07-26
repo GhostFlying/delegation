@@ -29,6 +29,10 @@ func (s *PeerStore) BeginResultInbox(
 	if err != nil {
 		return protocol.BeginResultPackageResult{}, err
 	}
+	localLeaseExpiresAt, err := resultInboxLeaseExpiresAt(timestamp)
+	if err != nil {
+		return protocol.BeginResultPackageResult{}, err
+	}
 	manifest, err := params.Metadata.DecodeManifest()
 	if err != nil {
 		return protocol.BeginResultPackageResult{}, err
@@ -73,7 +77,7 @@ func (s *PeerStore) BeginResultInbox(
 				}
 				return nil
 			case ResultInboxReceiving:
-				if existing.AttemptID != params.AttemptID || existing.LeaseExpiresAt != params.LeaseExpiresAt {
+				if existing.AttemptID != params.AttemptID || params.LeaseExpiresAt > existing.LeaseExpiresAt {
 					return ErrResultPackageConflict
 				}
 				result = protocol.BeginResultPackageResult{
@@ -98,12 +102,7 @@ func (s *PeerStore) BeginResultInbox(
 		} else if !errors.Is(queryErr, ErrNotFound) {
 			return queryErr
 		}
-		maximumLeaseSeconds := int64(MaximumResultInboxLease / time.Second)
-		if timestamp > math.MaxInt64-maximumLeaseSeconds {
-			return fmt.Errorf("result inbox observedAt is too large")
-		}
-		maximumLease := timestamp + maximumLeaseSeconds
-		if params.LeaseExpiresAt <= timestamp || params.LeaseExpiresAt > maximumLease {
+		if params.LeaseExpiresAt <= timestamp || params.LeaseExpiresAt > localLeaseExpiresAt {
 			return fmt.Errorf(
 				"leaseExpiresAt must be after observedAt and at most %s in the future",
 				MaximumResultInboxLease,
@@ -122,7 +121,7 @@ INSERT INTO peer_result_inbox(
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, authority.ControllerID, authority.TreeID, authority.RootAgentID, authority.RootDeviceID,
 			manifest.SourceAgentID, manifest.SourceDeviceID, manifest.ManagedThreadID, manifest.TurnID,
-			params.PackageID, ResultInboxReceiving, params.AttemptID, params.LeaseExpiresAt,
+			params.PackageID, ResultInboxReceiving, params.AttemptID, localLeaseExpiresAt,
 			manifest.LifecycleRevision, params.Metadata.Manifest, params.Metadata.ManifestDescriptor.Size,
 			params.Metadata.ManifestDescriptor.SHA256, partsJSON, packageBytes, timestamp, timestamp); execErr != nil {
 			return fmt.Errorf("begin result inbox: %w", execErr)
@@ -195,6 +194,12 @@ func (s *PeerStore) CommitResultInboxChunk(
 		if inbox.State != ResultInboxReceiving || inbox.AttemptID != attemptID {
 			return ErrResultPackageTransition
 		}
+		activityAt := max(timestamp, inbox.UpdatedAt)
+		leaseExpiresAt, leaseErr := resultInboxLeaseExpiresAt(activityAt)
+		if leaseErr != nil {
+			return leaseErr
+		}
+		leaseExpiresAt = max(leaseExpiresAt, inbox.LeaseExpiresAt)
 		var sizeBytes, nextOffset int64
 		var partSHA256 string
 		if queryErr := connection.QueryRowContext(ctx, `
@@ -232,7 +237,9 @@ WHERE package_id = ? AND attempt_id = ? AND kind = ? AND offset_bytes = ?
 				return ErrResultPackageConflict
 			}
 			committed = ResultInboxChunkCommitResult{NextOffset: nextOffset, Replay: true}
-			return nil
+			return updateResultInboxActivity(
+				ctx, connection, packageID, attemptID, activityAt, leaseExpiresAt,
+			)
 		}
 		if chunk.Offset != nextOffset {
 			return ErrResultPackageConflict
@@ -250,16 +257,38 @@ WHERE package_id = ? AND kind = ? AND next_offset = ? AND size_bytes = ? AND sha
 `, end, packageID, chunk.Kind, chunk.Offset, sizeBytes, partSHA256); execErr != nil {
 			return fmt.Errorf("advance result inbox part offset: %w", execErr)
 		}
-		if _, execErr := connection.ExecContext(ctx, `
-UPDATE peer_result_inbox SET updated_at = ?
-WHERE package_id = ? AND state = 'receiving' AND attempt_id = ?
-`, max(timestamp, inbox.UpdatedAt), packageID, attemptID); execErr != nil {
-			return fmt.Errorf("update result inbox chunk timestamp: %w", execErr)
+		if execErr := updateResultInboxActivity(
+			ctx, connection, packageID, attemptID, activityAt, leaseExpiresAt,
+		); execErr != nil {
+			return execErr
 		}
 		committed = ResultInboxChunkCommitResult{NextOffset: end}
 		return nil
 	})
 	return committed, err
+}
+
+func updateResultInboxActivity(
+	ctx context.Context,
+	connection *sql.Conn,
+	packageID, attemptID string,
+	updatedAt, leaseExpiresAt int64,
+) error {
+	if _, err := connection.ExecContext(ctx, `
+UPDATE peer_result_inbox SET updated_at = ?, lease_expires_at = ?
+WHERE package_id = ? AND state = 'receiving' AND attempt_id = ?
+`, updatedAt, leaseExpiresAt, packageID, attemptID); err != nil {
+		return fmt.Errorf("update result inbox chunk activity: %w", err)
+	}
+	return nil
+}
+
+func resultInboxLeaseExpiresAt(observedAt int64) (int64, error) {
+	maximumLeaseSeconds := int64(MaximumResultInboxLease / time.Second)
+	if observedAt > math.MaxInt64-maximumLeaseSeconds {
+		return 0, errors.New("result inbox observedAt is too large")
+	}
+	return observedAt + maximumLeaseSeconds, nil
 }
 
 // CommitResultInboxAvailable may be called only after the caller has verified
@@ -547,6 +576,27 @@ WHERE controller_id = ? AND root_device_id = ? AND state = 'receiving' AND lease
 ORDER BY lease_expires_at, created_at, tree_id, root_agent_id, package_id
 LIMIT ?
 `, controllerID, deviceID, timestamp, limit)
+}
+
+// ListReceivingResultInboxes returns every non-published inbox owned by the
+// peer. The filesystem manager uses this bounded list during startup to repair
+// bytes to their committed offsets before accepting new transfer requests.
+func (s *PeerStore) ListReceivingResultInboxes(
+	ctx context.Context,
+	controllerID, deviceID string,
+	limit int,
+) ([]ResultInbox, error) {
+	if err := validateChangesArtifactDevice(controllerID, deviceID); err != nil {
+		return nil, err
+	}
+	if err := validateResultPage(limit); err != nil {
+		return nil, err
+	}
+	return s.listResultInboxes(ctx, `
+WHERE controller_id = ? AND root_device_id = ? AND state = 'receiving'
+ORDER BY updated_at, created_at, tree_id, root_agent_id, package_id
+LIMIT ?
+`, controllerID, deviceID, limit)
 }
 
 func (s *PeerStore) ListPreparedResultInboxRemovals(

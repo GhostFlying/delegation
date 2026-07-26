@@ -135,6 +135,15 @@ func TestConnectorDispatchesResultPackageRPCs(t *testing.T) {
 	}
 }
 
+func TestConnectorAcceptsDurableChunkReplayOffsetBeyondRequestedChunk(t *testing.T) {
+	fixture := newResultPackageRPCFixture(t)
+	result := resultPackageManagerForFixture(fixture).writeResult
+	result.NextOffset += 3
+	if !validResultPackageWriteResponse(fixture.write, result) {
+		t.Fatalf("durable chunk replay response was rejected: %#v", result)
+	}
+}
+
 func TestConnectorRejectsWrongResultPackagePrincipalRole(t *testing.T) {
 	fixture := newResultPackageRPCFixture(t)
 	root := workerOperationRoot()

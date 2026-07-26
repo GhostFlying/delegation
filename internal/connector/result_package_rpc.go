@@ -107,9 +107,7 @@ func (s *session) handleWriteResultPackagePartRequest(request protocol.Envelope)
 			s.finishResultPackageError(request, "write result package part", operationErr)
 			return
 		}
-		if result.Validate() != nil || result.AttemptID != params.AttemptID ||
-			result.PackageID != params.PackageID || result.Kind != params.Kind ||
-			result.NextOffset != params.Offset+int64(len(params.Data)) {
+		if !validResultPackageWriteResponse(params, result) {
 			s.finishInvalidResultPackageResult(request)
 			return
 		}
@@ -117,6 +115,15 @@ func (s *session) handleWriteResultPackagePartRequest(request protocol.Envelope)
 			s.close(writeErr)
 		}
 	})
+}
+
+func validResultPackageWriteResponse(
+	params protocol.WriteResultPackagePartParams,
+	result protocol.WriteResultPackagePartResult,
+) bool {
+	return result.Validate() == nil && result.AttemptID == params.AttemptID &&
+		result.PackageID == params.PackageID && result.Kind == params.Kind &&
+		result.NextOffset >= params.Offset+int64(len(params.Data))
 }
 
 func (s *session) handleFinishResultPackageRequest(request protocol.Envelope) error {
