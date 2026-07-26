@@ -99,6 +99,16 @@ const (
 	MethodPublishChangesArtifact  = "artifact.changes.publish"
 )
 
+const (
+	MethodPublishResultPackage     = "artifact.result.publish"
+	MethodReadResultPackagePart    = "artifact.result.read"
+	MethodBeginResultPackage       = "artifact.result.begin"
+	MethodWriteResultPackagePart   = "artifact.result.write"
+	MethodFinishResultPackage      = "artifact.result.finish"
+	MethodCancelResultPackage      = "artifact.result.cancel"
+	MethodAcknowledgeResultPackage = "artifact.result.ack"
+)
+
 type CancelRequestParams struct {
 	RequestID string `json:"requestId"`
 }
@@ -123,6 +133,7 @@ const (
 	FeatureWorkspaceSync     = "workspaceSyncV1"
 	FeatureWorkspaceTransfer = "workspaceTransferV1"
 	FeatureChangesArtifact   = "changesArtifactV1"
+	FeatureResultPackage     = "resultPackageV2"
 )
 
 var methodPattern = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,63}$`)
