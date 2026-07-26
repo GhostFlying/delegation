@@ -66,6 +66,8 @@ CREATE TABLE trees (
 		CHECK (last_lifecycle_sequence >= 0),
 	last_artifact_sequence INTEGER NOT NULL DEFAULT 0
 		CHECK (last_artifact_sequence >= 0),
+	last_result_sequence INTEGER NOT NULL DEFAULT 0
+		CHECK (last_result_sequence >= 0),
     PRIMARY KEY (controller_id, external_thread_id),
     UNIQUE (controller_id, tree_id)
 ) STRICT;
@@ -206,6 +208,9 @@ CREATE TABLE agent_lifecycle_states (
 	agent_id TEXT NOT NULL,
 	target_device_id TEXT NOT NULL,
 	target_revision INTEGER NOT NULL CHECK (target_revision > 0),
+	authority_revision INTEGER NOT NULL CHECK (
+		authority_revision > 0 AND authority_revision <= target_revision
+	),
 	codex_thread_id TEXT NOT NULL CHECK (length(codex_thread_id) IN (0, 36)),
 	active_turn_id TEXT NOT NULL CHECK (length(active_turn_id) IN (0, 36)),
 	phase TEXT NOT NULL CHECK (
@@ -241,6 +246,51 @@ CREATE TABLE agent_lifecycle_states (
 
 CREATE INDEX agent_lifecycle_states_by_tree_sequence
 	ON agent_lifecycle_states(controller_id, tree_id, lifecycle_sequence);
+
+CREATE TABLE result_packages (
+	controller_id TEXT NOT NULL,
+	tree_id TEXT NOT NULL,
+	package_id TEXT NOT NULL CHECK (length(package_id) = 36),
+	source_agent_id TEXT NOT NULL CHECK (length(source_agent_id) = 36),
+	source_device_id TEXT NOT NULL CHECK (length(source_device_id) = 36),
+	managed_thread_id TEXT NOT NULL CHECK (length(managed_thread_id) = 36),
+	turn_id TEXT NOT NULL CHECK (length(turn_id) = 36),
+	lifecycle_revision INTEGER NOT NULL CHECK (lifecycle_revision > 0),
+	root_device_id TEXT NOT NULL CHECK (length(root_device_id) = 36),
+	manifest_bytes BLOB NOT NULL CHECK (
+		typeof(manifest_bytes) = 'blob' AND
+		length(manifest_bytes) BETWEEN 1 AND 65536
+	),
+	manifest_size INTEGER NOT NULL CHECK (
+		manifest_size BETWEEN 1 AND 65536 AND manifest_size = length(manifest_bytes)
+	),
+	manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+	state TEXT NOT NULL CHECK (state IN ('deliveryPending', 'delivered')),
+	result_sequence INTEGER NOT NULL DEFAULT 0 CHECK (result_sequence >= 0),
+	published_at INTEGER NOT NULL CHECK (published_at >= 0),
+	delivered_at INTEGER NOT NULL DEFAULT 0 CHECK (delivered_at >= 0),
+	PRIMARY KEY (controller_id, tree_id, package_id),
+	UNIQUE (controller_id, tree_id, source_agent_id, turn_id),
+	FOREIGN KEY (controller_id, tree_id)
+		REFERENCES trees(controller_id, tree_id) ON DELETE CASCADE,
+	FOREIGN KEY (controller_id, tree_id, source_agent_id)
+		REFERENCES principals(controller_id, tree_id, agent_id) ON DELETE CASCADE,
+	FOREIGN KEY (controller_id, source_device_id)
+		REFERENCES devices(controller_id, device_id),
+	FOREIGN KEY (controller_id, root_device_id)
+		REFERENCES devices(controller_id, device_id),
+	CHECK (
+		(state = 'deliveryPending' AND result_sequence = 0 AND delivered_at = 0) OR
+		(state = 'delivered' AND result_sequence > 0 AND delivered_at >= published_at)
+	)
+) STRICT;
+
+CREATE UNIQUE INDEX result_packages_by_tree_sequence
+	ON result_packages(controller_id, tree_id, result_sequence)
+	WHERE result_sequence > 0;
+
+CREATE INDEX result_packages_by_source_delivery
+	ON result_packages(controller_id, source_device_id, state, published_at, package_id);
 
 CREATE TABLE changes_artifacts (
 	controller_id TEXT NOT NULL,

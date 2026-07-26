@@ -53,9 +53,12 @@ type AgentLifecycleActivity struct {
 
 type workerLifecycleAuthority struct {
 	TargetDeviceID string
-	Snapshot       protocol.WorkerLifecycleSnapshot
-	Sequence       uint64
-	ObservedAt     int64
+	// AuthorityRevision is the peer revision that introduced the current
+	// phase/failure/thread/turn authority tuple. Routine refreshes preserve it.
+	AuthorityRevision uint64
+	Snapshot          protocol.WorkerLifecycleSnapshot
+	Sequence          uint64
+	ObservedAt        int64
 }
 
 type AgentLifecyclePageRequest struct {
@@ -343,11 +346,11 @@ func applyWorkerLifecycleSnapshot(
 		}
 		if _, err := connection.ExecContext(ctx, `
 INSERT INTO agent_lifecycle_states(
-    controller_id, tree_id, agent_id, target_device_id, target_revision,
-    codex_thread_id, active_turn_id, phase, failure_code, lifecycle_sequence, observed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	    controller_id, tree_id, agent_id, target_device_id, target_revision, authority_revision,
+	    codex_thread_id, active_turn_id, phase, failure_code, lifecycle_sequence, observed_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, session.ControllerID, snapshot.TreeID, snapshot.AgentID, session.DeviceID,
-			snapshot.Revision, snapshot.CodexThreadID, snapshot.ActiveTurnID,
+			snapshot.Revision, snapshot.Revision, snapshot.CodexThreadID, snapshot.ActiveTurnID,
 			snapshot.Phase, snapshot.FailureCode, sequence, observedAt); err != nil {
 			return fmt.Errorf("create agent lifecycle state: %w", err)
 		}
@@ -365,12 +368,21 @@ INSERT INTO agent_lifecycle_states(
 	if observedAt < stored.ObservedAt {
 		observedAt = stored.ObservedAt
 	}
-	if stored.Snapshot.Phase == snapshot.Phase && stored.Snapshot.FailureCode == snapshot.FailureCode {
+	sameLifecycleEvent := stored.Snapshot.Phase == snapshot.Phase &&
+		stored.Snapshot.FailureCode == snapshot.FailureCode
+	sameAuthority := sameLifecycleEvent &&
+		stored.Snapshot.CodexThreadID == snapshot.CodexThreadID &&
+		stored.Snapshot.ActiveTurnID == snapshot.ActiveTurnID
+	if sameLifecycleEvent {
+		authorityRevision := snapshot.Revision
+		if sameAuthority {
+			authorityRevision = stored.AuthorityRevision
+		}
 		result, err := connection.ExecContext(ctx, `
 UPDATE agent_lifecycle_states
-SET target_revision = ?, codex_thread_id = ?, active_turn_id = ?, observed_at = ?
+SET target_revision = ?, authority_revision = ?, codex_thread_id = ?, active_turn_id = ?, observed_at = ?
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND target_revision = ?
-`, snapshot.Revision, snapshot.CodexThreadID, snapshot.ActiveTurnID, observedAt,
+`, snapshot.Revision, authorityRevision, snapshot.CodexThreadID, snapshot.ActiveTurnID, observedAt,
 			session.ControllerID, snapshot.TreeID, snapshot.AgentID, stored.Snapshot.Revision)
 		if err != nil {
 			return fmt.Errorf("advance unchanged agent lifecycle state: %w", err)
@@ -386,10 +398,10 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND target_revision = ?
 	}
 	result, err := connection.ExecContext(ctx, `
 UPDATE agent_lifecycle_states
-SET target_revision = ?, codex_thread_id = ?, active_turn_id = ?, phase = ?, failure_code = ?,
-    lifecycle_sequence = ?, observed_at = ?
+SET target_revision = ?, authority_revision = ?, codex_thread_id = ?, active_turn_id = ?, phase = ?, failure_code = ?,
+	    lifecycle_sequence = ?, observed_at = ?
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND target_revision = ?
-`, snapshot.Revision, snapshot.CodexThreadID, snapshot.ActiveTurnID,
+`, snapshot.Revision, snapshot.Revision, snapshot.CodexThreadID, snapshot.ActiveTurnID,
 		snapshot.Phase, snapshot.FailureCode, sequence, observedAt,
 		session.ControllerID, snapshot.TreeID, snapshot.AgentID, stored.Snapshot.Revision)
 	if err != nil {
@@ -410,13 +422,14 @@ func queryWorkerLifecycleAuthority(
 	authority.Snapshot.TreeID = treeID
 	authority.Snapshot.AgentID = agentID
 	err := queryer.QueryRowContext(ctx, `
-SELECT target_device_id, target_revision, codex_thread_id, active_turn_id,
+SELECT target_device_id, target_revision, authority_revision, codex_thread_id, active_turn_id,
        phase, failure_code, lifecycle_sequence, observed_at
 FROM agent_lifecycle_states
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 `, controllerID, treeID, agentID).Scan(
 		&authority.TargetDeviceID,
 		&authority.Snapshot.Revision,
+		&authority.AuthorityRevision,
 		&authority.Snapshot.CodexThreadID,
 		&authority.Snapshot.ActiveTurnID,
 		&authority.Snapshot.Phase,
@@ -436,7 +449,8 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 	if err := authority.Snapshot.Validate(); err != nil {
 		return workerLifecycleAuthority{}, fmt.Errorf("stored worker lifecycle snapshot is invalid: %w", err)
 	}
-	if authority.Sequence == 0 || authority.Sequence > math.MaxInt64 || authority.ObservedAt < 0 {
+	if authority.AuthorityRevision == 0 || authority.AuthorityRevision > authority.Snapshot.Revision ||
+		authority.Sequence == 0 || authority.Sequence > math.MaxInt64 || authority.ObservedAt < 0 {
 		return workerLifecycleAuthority{}, errors.New("stored worker lifecycle metadata is invalid")
 	}
 	return authority, nil
