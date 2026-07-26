@@ -12,10 +12,11 @@ import (
 )
 
 type managedWorkerSpawner struct {
-	host         managedWorkerHost
-	state        managedWorkerState
-	controllerID string
-	deviceID     string
+	host           managedWorkerHost
+	state          managedWorkerState
+	resultPackages managedResultPackageManager
+	controllerID   string
+	deviceID       string
 }
 
 type managedWorkerHost interface {

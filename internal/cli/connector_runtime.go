@@ -17,6 +17,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/pathguard"
+	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
 	"github.com/GhostFlying/delegation/internal/serviceenv"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
@@ -165,6 +166,19 @@ func runConnectorServiceWithProviderEnvironment(
 		host: workers, state: peerState,
 		controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 	}
+	resultPackages, err := resultpackagefiles.New(ctx, resultpackagefiles.Options{
+		ControllerID:  cfg.ControllerID,
+		DeviceID:      cfg.DeviceID,
+		WorkspaceRoot: cfg.Peer.WorkspaceRoot,
+		Store:         peerState,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, resultPackages.Close())
+	}()
+	workerManager.resultPackages = resultPackages
 	client, err := connector.New(connector.Options{
 		BrokerURL:                cfg.Broker.URL,
 		AllowInsecureNonLoopback: cfg.Broker.AllowInsecureNonLoopback,
@@ -180,6 +194,7 @@ func runConnectorServiceWithProviderEnvironment(
 		},
 		ChangesArtifactSource: changesSource,
 		WorkspaceManager:      workerManager,
+		ResultPackageManager:  workerManager,
 		ReportError: func(err error) {
 			_ = writeStderr("delegation: connector reconnecting: %v\n", err)
 		},

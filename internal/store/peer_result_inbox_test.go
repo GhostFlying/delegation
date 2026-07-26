@@ -62,7 +62,7 @@ func TestResultInboxBeginBoundsLeaseAndRequiresExplicitExpiredReclaim(t *testing
 	}
 	differentAttempt := params
 	differentAttempt.AttemptID = changesTestID(6005)
-	differentAttempt.LeaseExpiresAt = now.Add(2 * time.Minute).Unix()
+	differentAttempt.LeaseExpiresAt = now.Add(11 * time.Minute).Unix()
 	if _, err := state.BeginResultInbox(
 		ctx, authority, differentAttempt, now.Add(61*time.Second),
 	); !errors.Is(err, ErrResultPackageConflict) {
@@ -74,7 +74,7 @@ func TestResultInboxBeginBoundsLeaseAndRequiresExplicitExpiredReclaim(t *testing
 		t.Fatalf("early reclaim error = %v, want ErrResultPackageTransition", err)
 	}
 	removal, err := state.PrepareExpiredResultInboxReclaim(
-		ctx, authority, params.AttemptID, params.PackageID, now.Add(time.Minute),
+		ctx, authority, params.AttemptID, params.PackageID, now.Add(MaximumResultInboxLease),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +95,9 @@ func TestResultInboxBeginBoundsLeaseAndRequiresExplicitExpiredReclaim(t *testing
 	); !errors.Is(err, ErrResultPackageTransition) {
 		t.Fatalf("prepared removal accepted a chunk: %v", err)
 	}
-	completed, err := state.CommitResultInboxRemoval(ctx, removal, now.Add(61*time.Second))
+	completed, err := state.CommitResultInboxRemoval(
+		ctx, removal, now.Add(MaximumResultInboxLease+time.Second),
+	)
 	if err != nil || completed.Phase != ResultInboxRemovalCompleted {
 		t.Fatalf("commit removal after filesystem deletion = %#v, %v", completed, err)
 	}
@@ -103,12 +105,12 @@ func TestResultInboxBeginBoundsLeaseAndRequiresExplicitExpiredReclaim(t *testing
 		t.Fatalf("completed removal retained inbox: %v", err)
 	}
 	if replayed, err := state.CommitResultInboxRemoval(
-		ctx, removal, now.Add(62*time.Second),
+		ctx, removal, now.Add(MaximumResultInboxLease+2*time.Second),
 	); err != nil || replayed.Phase != ResultInboxRemovalCompleted {
 		t.Fatalf("removal replay after second crash point = %#v, %v", replayed, err)
 	}
 	if _, err := state.BeginResultInbox(
-		ctx, authority, differentAttempt, now.Add(61*time.Second),
+		ctx, authority, differentAttempt, now.Add(MaximumResultInboxLease+time.Second),
 	); err != nil {
 		t.Fatalf("begin after explicit reclaim: %v", err)
 	}
@@ -212,6 +214,83 @@ func TestResultInboxChunkReceiptsFinishAndAvailableReplay(t *testing.T) {
 	availability, err := state.LookupResultInboxAvailability(ctx, authority, params.PackageID)
 	if err != nil || availability != ResultInboxAvailabilityAvailable {
 		t.Fatalf("availability = %q, %v", availability, err)
+	}
+}
+
+func TestResultInboxChunkActivityRenewsLocalLeaseAndAcceptsStaleBeginReplay(t *testing.T) {
+	ctx := context.Background()
+	state := openResultPeer(t)
+	defer state.Close()
+	authority := resultInboxAuthority()
+	key := resultInboxSourceKey(changesTestID(6090))
+	now := time.Unix(1_700_011_500, 0)
+	params := protocol.BeginResultPackageParams{
+		AttemptID: changesTestID(6091), PackageID: key.PackageID,
+		LeaseExpiresAt: now.Add(time.Minute).Unix(),
+		Metadata: resultMetadata(
+			t, key, changesTestID(6092), changesTestID(6093),
+			int64(protocol.ResultPackageChunkBytes)+2,
+		),
+	}
+	if _, err := state.BeginResultInbox(ctx, authority, params, now); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := state.GetResultInbox(ctx, authority, params.PackageID)
+	if err != nil || stored.LeaseExpiresAt != now.Add(MaximumResultInboxLease).Unix() {
+		t.Fatalf("initial local lease = %#v, %v", stored, err)
+	}
+	first := resultChunk(
+		protocol.ResultPackagePartRollout, 0,
+		bytes.Repeat([]byte{'a'}, protocol.ResultPackageChunkBytes),
+	)
+	activityAt := now.Add(9 * time.Minute)
+	if _, err := state.CommitResultInboxChunk(
+		ctx, authority, params.AttemptID, params.PackageID, first, activityAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = state.GetResultInbox(ctx, authority, params.PackageID)
+	if err != nil || stored.LeaseExpiresAt != activityAt.Add(MaximumResultInboxLease).Unix() {
+		t.Fatalf("renewed local lease = %#v, %v", stored, err)
+	}
+	if _, err := state.BeginResultInbox(ctx, authority, params, now.Add(11*time.Minute)); err != nil {
+		t.Fatalf("stale wire begin replay after lease renewal: %v", err)
+	}
+	if replay, err := state.CommitResultInboxChunk(
+		ctx, authority, params.AttemptID, params.PackageID, first, now.Add(5*time.Minute),
+	); err != nil || !replay.Replay {
+		t.Fatalf("out-of-order chunk activity replay = %#v, %v", replay, err)
+	}
+	stored, err = state.GetResultInbox(ctx, authority, params.PackageID)
+	if err != nil || stored.LeaseExpiresAt != activityAt.Add(MaximumResultInboxLease).Unix() {
+		t.Fatalf("lease shortened by out-of-order replay = %#v, %v", stored, err)
+	}
+	second := resultChunk(
+		protocol.ResultPackagePartRollout, int64(protocol.ResultPackageChunkBytes), []byte{'b', 'b'},
+	)
+	if _, err := state.CommitResultInboxChunk(
+		ctx, authority, params.AttemptID, params.PackageID, second, now.Add(6*time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = state.GetResultInbox(ctx, authority, params.PackageID)
+	if err != nil || stored.LeaseExpiresAt != activityAt.Add(MaximumResultInboxLease).Unix() {
+		t.Fatalf("lease shortened by out-of-order new chunk = %#v, %v", stored, err)
+	}
+	replayAt := now.Add(18 * time.Minute)
+	if replay, err := state.CommitResultInboxChunk(
+		ctx, authority, params.AttemptID, params.PackageID, first, replayAt,
+	); err != nil || !replay.Replay {
+		t.Fatalf("chunk activity replay = %#v, %v", replay, err)
+	}
+	stored, err = state.GetResultInbox(ctx, authority, params.PackageID)
+	if err != nil || stored.LeaseExpiresAt != replayAt.Add(MaximumResultInboxLease).Unix() {
+		t.Fatalf("replay-renewed local lease = %#v, %v", stored, err)
+	}
+	if _, err := state.PrepareExpiredResultInboxReclaim(
+		ctx, authority, params.AttemptID, params.PackageID, now.Add(20*time.Minute),
+	); !errors.Is(err, ErrResultPackageTransition) {
+		t.Fatalf("active renewed transfer reclaim error = %v", err)
 	}
 }
 
