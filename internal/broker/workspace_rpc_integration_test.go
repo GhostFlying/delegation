@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	workspaceRPCSyncID       = "123e4567-e89b-42d3-a456-426614174140"
-	workspaceRPCFailedSyncID = "123e4567-e89b-42d3-a456-426614174141"
-	workspaceRPCSpawnID      = "123e4567-e89b-42d3-a456-426614174142"
+	workspaceRPCSyncID                    = "123e4567-e89b-42d3-a456-426614174140"
+	workspaceRPCFailedSyncID              = "123e4567-e89b-42d3-a456-426614174141"
+	workspaceRPCSpawnID                   = "123e4567-e89b-42d3-a456-426614174142"
+	workspaceRPCCleanupObservationTimeout = cleanupTimeout + writeTimeout
 )
 
 type recordingWorkspacePeer struct {
@@ -238,7 +239,7 @@ func TestWorkspaceRPCPrepareFailureCancelsExactProvisionalTarget(t *testing.T) {
 			var cleanup connector.WorkspaceTransferControlRequest
 			select {
 			case cleanup = <-cancelObserved:
-			case <-time.After(10 * time.Second):
+			case <-time.After(workspaceRPCCleanupObservationTimeout):
 				t.Fatal("broker did not cancel the provisional target workspace")
 			}
 			wantCleanup := connector.WorkspaceTransferControlRequest{
@@ -401,7 +402,7 @@ func TestWorkspaceRPCCancellationStopsTargetPeerOperation(t *testing.T) {
 	}
 	select {
 	case <-cancelObserved:
-	case <-time.After(10 * time.Second):
+	case <-time.After(workspaceRPCCleanupObservationTimeout):
 		t.Fatal("broker did not finish provisional target cleanup")
 	}
 	waitForWorkspaceCleanupDrain(t, harness.server, brokerTestDeviceID, agentRPCTargetID)
