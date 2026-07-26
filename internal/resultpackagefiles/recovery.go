@@ -6,13 +6,18 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 
+	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/rolloutcapture"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
 func (m *Manager) recover(ctx context.Context) error {
+	if err := m.recoverPendingOutboxCaptures(ctx); err != nil {
+		return fmt.Errorf("recover pending result outbox captures: %w", err)
+	}
 	removals, err := m.state.ListPreparedResultInboxRemovals(
 		ctx, m.controllerID, m.deviceID, store.MaximumResultInboxRemovalReceipts,
 	)
@@ -130,6 +135,44 @@ func (m *Manager) finishOutboxRelease(ctx context.Context, key store.ResultOutbo
 		return err
 	}
 	return m.state.CompactResultOutboxRelease(ctx, key)
+}
+
+func (m *Manager) recoverPendingOutboxCaptures(ctx context.Context) error {
+	entries, err := fs.ReadDir(m.outbox.FS(), ".")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), publishingDirectoryPrefix) {
+			continue
+		}
+		packageID := strings.TrimPrefix(entry.Name(), publishingDirectoryPrefix)
+		if err := identity.ValidateID(packageID); err != nil {
+			return fmt.Errorf("invalid result package capture directory %q", entry.Name())
+		}
+		if err := removePublishingDirectory(m.outbox, entry.Name()); err != nil {
+			return err
+		}
+	}
+	captures, err := m.state.ListPendingResultCaptures(
+		ctx, m.controllerID, m.deviceID, store.MaximumPeerResultPackages,
+	)
+	if err != nil {
+		return err
+	}
+	for _, outbox := range captures {
+		exists, err := rootEntryExists(m.outbox, outbox.PackageID)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		if _, err := m.commitExistingCapture(ctx, outbox); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *Manager) reconcileReceiving(ctx context.Context, inbox store.ResultInbox) (bool, error) {

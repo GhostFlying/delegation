@@ -92,14 +92,14 @@ func (p *staticResultPackagePublisher) AcknowledgeResultPackageMetadata(
 	_ context.Context,
 	key store.ResultOutboxKey,
 	metadata protocol.ResultPackageMetadata,
-) (store.ResultOutbox, error) {
+) (store.WorkerResultFinalization, error) {
 	if !protocol.SameResultPackageMetadata(p.outboxes[0].Metadata, metadata) {
-		return store.ResultOutbox{}, store.ErrResultPackageConflict
+		return store.WorkerResultFinalization{}, store.ErrResultPackageConflict
 	}
 	p.acked = key
 	result := p.outboxes[0]
 	result.State = store.ResultOutboxDeliveryPending
-	return result, nil
+	return store.WorkerResultFinalization{Outbox: result}, nil
 }
 
 type resultPackageManagedWorkerState struct {

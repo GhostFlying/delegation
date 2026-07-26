@@ -47,6 +47,27 @@ func TestResultManifestCanonicalEncodingAndDigest(t *testing.T) {
 	}
 }
 
+func TestResultManifestRejectsPayloadThatCannotLeaveMaximumManifestHeadroom(t *testing.T) {
+	manifest := validChangedResultManifest()
+	manifest.Rollout = ResultRolloutComponent{
+		Status: ResultRolloutCaptureFailed, FailureCode: "rollout_unavailable",
+	}
+	manifest.Parts = []ResultPackagePartDescriptor{
+		{
+			Kind: ResultPackagePartChangesBundle, Size: MaximumResultChangesBundleBytes,
+			SHA256: strings.Repeat("c", 64),
+		},
+		{
+			Kind: ResultPackagePartChangesOverlay, Size: MaximumResultChangesOverlayBytes,
+			SHA256: strings.Repeat("d", 64),
+		},
+	}
+	if _, _, err := EncodeResultManifest(manifest); err == nil ||
+		!strings.Contains(err.Error(), "payload exceeds") {
+		t.Fatalf("payload-headroom error = %v", err)
+	}
+}
+
 func TestDecodeResultManifestRejectsNonStrictShapes(t *testing.T) {
 	data, _, err := EncodeResultManifest(validResultManifest())
 	if err != nil {

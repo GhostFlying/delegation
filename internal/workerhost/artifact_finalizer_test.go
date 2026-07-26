@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,8 +17,187 @@ import (
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/gitworkspace"
 	"github.com/GhostFlying/delegation/internal/protocol"
+	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
 	"github.com/GhostFlying/delegation/internal/store"
 )
+
+func TestResultPackageAggregateBudgetDeterministicallyDegradesWorkspace(t *testing.T) {
+	maximumPayloadBytes := protocol.MaximumResultPackageBytes - protocol.MaximumResultManifestBytes
+	boundaryOverlayBytes := maximumPayloadBytes -
+		protocol.MaximumResultRolloutBytes - protocol.MaximumResultChangesBundleBytes
+	if boundaryOverlayBytes < 1 || boundaryOverlayBytes >= protocol.MaximumResultChangesOverlayBytes {
+		t.Fatalf("invalid aggregate boundary overlay size %d", boundaryOverlayBytes)
+	}
+	tests := []struct {
+		name         string
+		overlayBytes int64
+		wantDegraded bool
+	}{
+		{name: "exact aggregate boundary", overlayBytes: boundaryOverlayBytes},
+		{name: "one byte over aggregate boundary", overlayBytes: boundaryOverlayBytes + 1, wantDegraded: true},
+		{name: "advertised component maxima", overlayBytes: protocol.MaximumResultChangesOverlayBytes, wantDegraded: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manifest, parts := aggregateBudgetResultFixture(test.overlayBytes)
+			kept, degraded, err := enforceResultPackageBudget(&manifest, parts)
+			if err != nil || degraded != test.wantDegraded {
+				t.Fatalf("enforceResultPackageBudget() degraded %t, err %v", degraded, err)
+			}
+			if test.wantDegraded {
+				if manifest.Workspace.Status != protocol.ResultWorkspaceCaptureFailed ||
+					manifest.Workspace.FailureCode != workspaceResultTooLargeCode ||
+					manifest.Workspace.ResultHeadOID != "" ||
+					manifest.Workspace.ResultSnapshotHash != "" ||
+					len(manifest.Parts) != 1 ||
+					manifest.Parts[0].Kind != protocol.ResultPackagePartRollout ||
+					len(kept) != 1 || kept[0].Kind != protocol.ResultPackagePartRollout {
+					t.Fatalf("degraded result package = %#v, sources %#v", manifest, kept)
+				}
+			} else if manifest.Workspace.Status != protocol.ResultWorkspaceChanged ||
+				len(manifest.Parts) != 3 || len(kept) != 3 {
+				t.Fatalf("boundary result package = %#v, sources %#v", manifest, kept)
+			}
+			if _, _, err := protocol.EncodeResultManifest(manifest); err != nil {
+				t.Fatalf("encode fitted result manifest: %v", err)
+			}
+		})
+	}
+}
+
+func aggregateBudgetResultFixture(
+	overlayBytes int64,
+) (protocol.ResultManifest, []resultpackagefiles.ResultPackagePartSource) {
+	digest := strings.Repeat("a", 64)
+	manifest := protocol.ResultManifest{
+		Version: protocol.ResultManifestVersion, PackageID: newTestID(),
+		ControllerID: testControllerID, TreeID: testTreeID,
+		SourceAgentID: newTestID(), SourceDeviceID: testDeviceID,
+		ManagedThreadID: newTestID(), TurnID: newTestID(), LifecycleRevision: 1,
+		Terminal:   protocol.ResultTerminal{Outcome: protocol.ResultTerminalCompleted},
+		CapturedAt: time.Now().Unix(),
+		Rollout: protocol.ResultRolloutComponent{
+			Status: protocol.ResultRolloutAvailable, RawSize: 1, RawSHA256: digest,
+		},
+		Workspace: protocol.ResultWorkspaceComponent{
+			Status: protocol.ResultWorkspaceChanged, WorkspaceID: newTestID(),
+			SourceDeviceID: newTestID(), TargetDeviceID: testDeviceID, ObjectFormat: "sha1",
+			BaseHeadOID: strings.Repeat("b", 40), BaseManifestHash: digest,
+			BaseSnapshotHash: strings.Repeat("c", 64), BaseClean: true,
+			ResultHeadOID: strings.Repeat("d", 40), ResultSnapshotHash: strings.Repeat("e", 64),
+			ResultClean: false, BaseWarnings: []string{}, ResultWarnings: []string{},
+		},
+		Parts: []protocol.ResultPackagePartDescriptor{
+			{Kind: protocol.ResultPackagePartChangesBundle, Size: protocol.MaximumResultChangesBundleBytes, SHA256: digest},
+			{Kind: protocol.ResultPackagePartChangesOverlay, Size: overlayBytes, SHA256: digest},
+			{Kind: protocol.ResultPackagePartRollout, Size: protocol.MaximumResultRolloutBytes, SHA256: digest},
+		},
+	}
+	parts := make([]resultpackagefiles.ResultPackagePartSource, len(manifest.Parts))
+	for index, descriptor := range manifest.Parts {
+		parts[index] = resultpackagefiles.ResultPackagePartSource{
+			Kind: descriptor.Kind, Path: filepath.Join("ignored", string(descriptor.Kind)),
+		}
+	}
+	return manifest, parts
+}
+
+func TestRolloutRecoverySharesFlushBudgetAcrossMaximumWorkerSlots(t *testing.T) {
+	for _, appendTerminals := range []bool{true, false} {
+		name := "budget exhausted"
+		if appendTerminals {
+			name = "terminals flush on final retry"
+		}
+		t.Run(name, func(t *testing.T) {
+			intents, terminalLines := incompleteRecoveryRollouts(
+				t,
+				config.MaximumWorkerSlots,
+			)
+			var delays []time.Duration
+			host := &Host{
+				waitForRolloutFlush: func(_ context.Context, delay time.Duration) error {
+					delays = append(delays, delay)
+					if appendTerminals && len(delays) == rolloutFlushAttempts-1 {
+						for path, terminal := range terminalLines {
+							if err := appendSyncedFile(path, terminal); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					return nil
+				},
+			}
+			targets, err := host.resolveResultTargetsAfterClientExit(
+				context.Background(),
+				intents,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantDelays := []time.Duration{
+				20 * time.Millisecond,
+				40 * time.Millisecond,
+				80 * time.Millisecond,
+				160 * time.Millisecond,
+				250 * time.Millisecond,
+				250 * time.Millisecond,
+			}
+			if !slices.Equal(delays, wantDelays) {
+				t.Fatalf("shared rollout recovery delays = %v, want %v", delays, wantDelays)
+			}
+			for index, target := range targets {
+				want := recoveredTurnTarget{
+					status: store.WorkerInterrupted, failureCode: "app_server_lost",
+				}
+				if appendTerminals {
+					want = recoveredTurnTarget{status: store.WorkerIdle}
+				}
+				if target != want {
+					t.Fatalf("target[%d] = %#v, want %#v", index, target, want)
+				}
+			}
+		})
+	}
+}
+
+func incompleteRecoveryRollouts(
+	t *testing.T,
+	count int,
+) ([]store.WorkerTurnStartIntent, map[string]string) {
+	t.Helper()
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	directory := filepath.Join(codexHome, "sessions", "2026", "07", "26")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	intents := make([]store.WorkerTurnStartIntent, 0, count)
+	terminals := make(map[string]string, count)
+	for range count {
+		threadID := newTestID()
+		turnID := newTestID()
+		path := filepath.Join(
+			directory,
+			"rollout-2026-07-26T00-00-00-"+threadID+".jsonl",
+		)
+		prefix := "{}\n"
+		if err := os.WriteFile(
+			path,
+			[]byte(prefix+testManagedRolloutLine("task_started", turnID)),
+			0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		intents = append(intents, store.WorkerTurnStartIntent{
+			IntentID: newTestID(), ManagedThreadID: threadID, TurnID: turnID,
+			Rollout: store.WorkerRolloutLocator{
+				Status: store.WorkerRolloutAvailable, CodexHome: codexHome,
+				Path: path, Offset: int64(len(prefix)),
+			},
+		})
+		terminals[path] = testManagedRolloutLine("task_complete", turnID)
+	}
+	return intents, terminals
+}
 
 func TestWorkspaceCompletionPublishesCommittedAndDirtyChangesBeforeTerminalState(t *testing.T) {
 	application := newFakeApplication()
@@ -67,43 +247,167 @@ func TestWorkspaceCompletionPublishesCommittedAndDirtyChangesBeforeTerminalState
 		started.Worker.CodexThreadID, started.Worker.ActiveTurnID, "completed",
 	)
 
-	artifact := waitChangesPublication(t, host)
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
 	worker := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerFinalizing)
-	if worker.FinalTarget != store.WorkerIdle || artifact.Status != store.ChangesAvailable ||
-		len(artifact.Parts) != 2 || artifact.Parts[0].Kind != store.ChangesArtifactBundle ||
-		artifact.Parts[1].Kind != store.ChangesArtifactOverlay || len(artifact.BaseWarnings) != 0 ||
-		!slices.Equal(artifact.ResultWarnings, []string{
+	if worker.FinalTarget != store.WorkerIdle ||
+		outbox.Manifest.Workspace.Status != protocol.ResultWorkspaceChanged ||
+		len(outbox.Manifest.Parts) != 2 ||
+		outbox.Manifest.Parts[0].Kind != protocol.ResultPackagePartChangesBundle ||
+		outbox.Manifest.Parts[1].Kind != protocol.ResultPackagePartChangesOverlay ||
+		len(outbox.Manifest.Workspace.BaseWarnings) != 0 ||
+		!slices.Equal(outbox.Manifest.Workspace.ResultWarnings, []string{
 			protocol.WorkspaceWarningLFSPayloadNotTransferred,
 			protocol.WorkspaceWarningSubmoduleRepositoryNotTransferred,
 		}) {
-		t.Fatalf("finalizing worker/artifact = %#v / %#v", worker, artifact)
+		t.Fatalf("finalizing worker/result = %#v / %#v", worker, outbox)
 	}
-	artifactDirectory := filepath.Join(
-		host.artifactRoot.Name(), changesArtifactPrefix+artifact.ArtifactID,
-	)
-	artifactRootRelative, err := filepath.Rel(host.workspaceRoot.Name(), host.artifactRoot.Name())
-	if err != nil || artifactRootRelative != changesArtifactRootName {
-		t.Fatalf("artifact root is not anchored below workspace root: %q, %v", artifactRootRelative, err)
-	}
-	for _, part := range artifact.Parts {
-		info, err := os.Stat(filepath.Join(artifactDirectory, part.Name))
-		if err != nil || !info.Mode().IsRegular() || info.Size() != part.SizeBytes {
-			t.Fatalf("artifact part %q = %#v, %v", part.Name, info, err)
-		}
-	}
-	finalization, err := host.AcknowledgeChangesArtifact(
-		context.Background(), worker.WorkerKey, artifact.ArtifactID, 7,
+	finalization, err := resultManager(host).AcknowledgeResultPackageMetadata(
+		context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if finalization.Worker.Status != store.WorkerIdle ||
-		finalization.Artifact.State != store.ChangesPublished {
+		finalization.Outbox.State != store.ResultOutboxDeliveryPending {
 		t.Fatalf("acknowledged finalization = %#v", finalization)
 	}
-	if publications, err := host.ListPendingChangesPublications(context.Background()); err != nil ||
+	if publications, err := state.ListPendingResultPublications(
+		context.Background(), testControllerID, testDeviceID, 10,
+	); err != nil ||
 		len(publications) != 0 {
 		t.Fatalf("pending publications after ACK = %#v, %v", publications, err)
+	}
+}
+
+func TestWorkspaceCompletionPublishesUnchangedResult(t *testing.T) {
+	application := newFakeApplication()
+	workspaceID := newTestID()
+	var workspacePath string
+	host, state, _ := newTestHostWithStateSetup(t, 1, "", func(state *store.PeerStore, root string) {
+		workspacePath = filepath.Join(root, workspaceSyncName(testTreeID, workspaceID))
+		initializeTestRepository(t, workspacePath)
+		recordExactPreparedWorkspace(t, state, testTreeID, workspaceID, workspacePath)
+	}, application)
+	started, err := host.Spawn(context.Background(), SpawnRequest{
+		TreeID: testTreeID, AgentID: newTestID(), ParentAgentID: testParentID,
+		TaskName: "unchanged", Prompt: "inspect without changing files", WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.notifyCompletion(
+		started.Worker.CodexThreadID, started.Worker.ActiveTurnID, "completed",
+	)
+
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
+	if outbox.Manifest.Workspace.Status != protocol.ResultWorkspaceUnchanged ||
+		outbox.Manifest.Workspace.ResultHeadOID != outbox.Manifest.Workspace.BaseHeadOID ||
+		!outbox.Manifest.Workspace.ResultClean || len(outbox.Manifest.Parts) != 0 {
+		t.Fatalf("unchanged result = %#v", outbox.Manifest)
+	}
+	if _, err := resultManager(host).AcknowledgeResultPackageMetadata(
+		context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompletionPublishesExactManagedRolloutSegment(t *testing.T) {
+	application := newFakeApplication()
+	application.threadID = newTestID()
+	host, state, paths := newTestHost(t, 1, application)
+	rolloutPath := filepath.Join(
+		paths.codexHome, "sessions", "2026", "07", "26",
+		"rollout-2026-07-26T00-00-00-"+application.threadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(rolloutPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		rolloutPath,
+		[]byte("{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\"}}\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	application.threadPath = rolloutPath
+	started := spawnTestWorker(t, host, newTestID(), "rollout capture")
+	segment := testManagedRolloutLine("task_started", started.Worker.ActiveTurnID) +
+		"{\"type\":\"response_item\",\"payload\":{}}\n" +
+		testManagedRolloutLine("task_complete", started.Worker.ActiveTurnID)
+	rollout, err := os.OpenFile(rolloutPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rollout.WriteString(segment); err != nil {
+		_ = rollout.Close()
+		t.Fatal(err)
+	}
+	if err := errors.Join(rollout.Sync(), rollout.Close()); err != nil {
+		t.Fatal(err)
+	}
+	application.notifyCompletion(
+		started.Worker.CodexThreadID, started.Worker.ActiveTurnID, "completed",
+	)
+
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
+	if outbox.Manifest.Rollout.Status != protocol.ResultRolloutAvailable ||
+		outbox.Manifest.Rollout.RawSize != int64(len(segment)) ||
+		outbox.Manifest.Rollout.RawSHA256 == "" || len(outbox.Manifest.Parts) != 1 ||
+		outbox.Manifest.Parts[0].Kind != protocol.ResultPackagePartRollout {
+		t.Fatalf("captured rollout result = %#v", outbox.Manifest)
+	}
+}
+
+func TestCompletionWaitsForTerminalRolloutFlush(t *testing.T) {
+	application := newFakeApplication()
+	application.threadID = newTestID()
+	host, state, paths := newTestHost(t, 1, application)
+	rolloutPath := filepath.Join(
+		paths.codexHome, "sessions", "2026", "07", "26",
+		"rollout-2026-07-26T00-00-00-"+application.threadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(rolloutPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rolloutPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	application.threadPath = rolloutPath
+	started := spawnTestWorker(t, host, newTestID(), "rollout flush")
+	start := testManagedRolloutLine("task_started", started.Worker.ActiveTurnID)
+	if err := appendSyncedFile(rolloutPath, start); err != nil {
+		t.Fatal(err)
+	}
+	firstIncomplete := make(chan struct{})
+	releaseRetry := make(chan struct{})
+	var once sync.Once
+	host.waitForRolloutFlush = func(ctx context.Context, _ time.Duration) error {
+		once.Do(func() { close(firstIncomplete) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-releaseRetry:
+			return nil
+		}
+	}
+	application.notifyCompletion(
+		started.Worker.CodexThreadID, started.Worker.ActiveTurnID, "completed",
+	)
+	select {
+	case <-firstIncomplete:
+	case <-time.After(5 * time.Second):
+		t.Fatal("rollout capture did not observe the unflushed terminal")
+	}
+	terminal := testManagedRolloutLine("task_complete", started.Worker.ActiveTurnID)
+	if err := appendSyncedFile(rolloutPath, terminal); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseRetry)
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
+	if outbox.Manifest.Rollout.Status != protocol.ResultRolloutAvailable ||
+		outbox.Manifest.Rollout.RawSize != int64(len(start)+len(terminal)) {
+		t.Fatalf("post-flush rollout result = %#v", outbox.Manifest.Rollout)
 	}
 }
 
@@ -133,24 +437,27 @@ func TestWorkspaceFailedTurnPublishesChangesBeforeExposingFailure(t *testing.T) 
 		started.Worker.CodexThreadID, started.Worker.ActiveTurnID, "failed",
 	)
 
-	artifact := waitChangesPublication(t, host)
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
 	worker := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerFinalizing)
 	if worker.FinalTarget != store.WorkerFailed || worker.FinalFailureCode != "turn_failed" ||
 		worker.FailureCode != "" || worker.ActiveTurnID != started.Worker.ActiveTurnID {
 		t.Fatalf("failed turn was exposed before artifact ACK: %#v", worker)
 	}
-	if artifact.State != store.ChangesPublishPending || artifact.Status != store.ChangesAvailable ||
-		artifact.TurnID != started.Worker.ActiveTurnID || artifact.WorkspaceID != workspaceID ||
-		artifact.CompletionTarget != store.WorkerFailed ||
-		artifact.CompletionFailureCode != "turn_failed" || artifact.ResultClean ||
-		len(artifact.Parts) != 1 || artifact.Parts[0].Kind != store.ChangesArtifactOverlay ||
-		len(artifact.BaseWarnings) != 0 || len(artifact.ResultWarnings) != 0 ||
-		artifact.FailureCode != "" {
-		t.Fatalf("failed turn pending artifact = %#v", artifact)
+	if outbox.State != store.ResultOutboxPublishPending ||
+		outbox.Manifest.Terminal != (protocol.ResultTerminal{
+			Outcome: protocol.ResultTerminalFailed, FailureCode: "turn_failed",
+		}) || outbox.Manifest.TurnID != started.Worker.ActiveTurnID ||
+		outbox.Manifest.Workspace.WorkspaceID != workspaceID ||
+		outbox.Manifest.Workspace.Status != protocol.ResultWorkspaceChanged ||
+		outbox.Manifest.Workspace.ResultClean || len(outbox.Manifest.Parts) != 1 ||
+		outbox.Manifest.Parts[0].Kind != protocol.ResultPackagePartChangesOverlay ||
+		len(outbox.Manifest.Workspace.BaseWarnings) != 0 ||
+		len(outbox.Manifest.Workspace.ResultWarnings) != 0 {
+		t.Fatalf("failed turn pending result = %#v", outbox)
 	}
 
-	finalization, err := host.AcknowledgeChangesArtifact(
-		context.Background(), worker.WorkerKey, artifact.ArtifactID, 13,
+	finalization, err := resultManager(host).AcknowledgeResultPackageMetadata(
+		context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -159,11 +466,12 @@ func TestWorkspaceFailedTurnPublishesChangesBeforeExposingFailure(t *testing.T) 
 		finalization.Worker.FailureCode != "turn_failed" ||
 		finalization.Worker.FinalTarget != "" || finalization.Worker.FinalFailureCode != "" ||
 		finalization.Worker.ActiveTurnID != "" ||
-		finalization.Artifact.State != store.ChangesPublished ||
-		finalization.Artifact.BrokerSequence != 13 {
+		finalization.Outbox.State != store.ResultOutboxDeliveryPending {
 		t.Fatalf("failed turn acknowledged finalization = %#v", finalization)
 	}
-	if publications, err := host.ListPendingChangesPublications(context.Background()); err != nil ||
+	if publications, err := state.ListPendingResultPublications(
+		context.Background(), testControllerID, testDeviceID, 10,
+	); err != nil ||
 		len(publications) != 0 {
 		t.Fatalf("pending publications after failed-turn ACK = %#v, %v", publications, err)
 	}
@@ -201,6 +509,58 @@ func TestStartupRecoversWorkspaceCapturePending(t *testing.T) {
 	}
 	if finalization.Worker.Status != store.WorkerInterrupted {
 		t.Fatalf("recovered ACK worker = %#v", finalization.Worker)
+	}
+}
+
+func TestStartupReconcilesPreparedAndBoundTerminalTurnIntents(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		bound bool
+	}{
+		{name: "prepared response loss", bound: false},
+		{name: "bound before crash", bound: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			application := newFakeApplication()
+			var key store.WorkerKey
+			host, state, _ := newTestHostWithStateSetup(
+				t, 1, "", func(state *store.PeerStore, root string) {
+					worker, intent, turnID := makeStartupTurnIntent(t, state, root, test.bound)
+					key = worker.WorkerKey
+					application.threadTurns[worker.CodexThreadID] = []turn{{
+						ID: turnID, Status: "completed",
+					}}
+					if test.bound && intent.TurnID != turnID {
+						t.Fatalf("bound startup intent = %#v", intent)
+					}
+				},
+				application,
+			)
+
+			outbox := waitResultPublication(t, state, key)
+			worker := waitWorkerStatus(t, state, key, store.WorkerFinalizing)
+			if worker.FinalTarget != store.WorkerIdle ||
+				outbox.Manifest.Terminal.Outcome != protocol.ResultTerminalCompleted ||
+				outbox.Manifest.TurnID != worker.ActiveTurnID {
+				t.Fatalf("recovered terminal result = %#v / %#v", worker, outbox.Manifest)
+			}
+			record := application.snapshot()
+			if len(record.resumes) != 1 || len(record.reads) != 1 ||
+				!record.reads[0].IncludeTurns || len(record.turns) != 0 {
+				t.Fatalf("startup reconciliation calls = %#v", record)
+			}
+			intent, err := state.GetWorkerTurnStartIntentByTurn(
+				context.Background(), key, worker.ActiveTurnID,
+			)
+			if err != nil || intent.State != store.WorkerTurnStartBound {
+				t.Fatalf("recovered bound intent = %#v, %v", intent, err)
+			}
+			if _, err := resultManager(host).AcknowledgeResultPackageMetadata(
+				context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
+			); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -296,23 +656,23 @@ func TestCaptureFailureIsPublishedAndFailsOnlyAfterACK(t *testing.T) {
 		started.Worker.CodexThreadID, started.Worker.ActiveTurnID, "completed",
 	)
 
-	artifact := waitChangesPublication(t, host)
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
 	worker := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerFinalizing)
-	if artifact.Status != store.ChangesCaptureFailed ||
-		artifact.FailureCode != changesCaptureFailureCode || worker.FinalTarget != store.WorkerFailed ||
-		!slices.Equal(artifact.BaseWarnings, []string{
+	if outbox.Manifest.Workspace.Status != protocol.ResultWorkspaceCaptureFailed ||
+		outbox.Manifest.Workspace.FailureCode != workspaceCaptureFailureCode ||
+		worker.FinalTarget != store.WorkerIdle ||
+		!slices.Equal(outbox.Manifest.Workspace.BaseWarnings, []string{
 			protocol.WorkspaceWarningLFSPayloadNotTransferred,
-		}) || len(artifact.ResultWarnings) != 0 {
-		t.Fatalf("failed capture = %#v / %#v", worker, artifact)
+		}) || len(outbox.Manifest.Workspace.ResultWarnings) != 0 {
+		t.Fatalf("failed capture = %#v / %#v", worker, outbox)
 	}
-	finalization, err := host.AcknowledgeChangesArtifact(
-		context.Background(), worker.WorkerKey, artifact.ArtifactID, 11,
+	finalization, err := resultManager(host).AcknowledgeResultPackageMetadata(
+		context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if finalization.Worker.Status != store.WorkerFailed ||
-		finalization.Worker.FailureCode != "changes_capture_failed" {
+	if finalization.Worker.Status != store.WorkerIdle || finalization.Worker.FailureCode != "" {
 		t.Fatalf("failed capture ACK = %#v", finalization.Worker)
 	}
 }
@@ -324,10 +684,93 @@ func TestCompletionWithoutWorkspaceRetainsDirectTerminalLifecycle(t *testing.T) 
 	application.notifyCompletion(
 		started.Worker.CodexThreadID, started.Worker.ActiveTurnID, "completed",
 	)
-	waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerIdle)
-	if publications, err := host.ListPendingChangesPublications(context.Background()); err != nil ||
-		len(publications) != 0 {
-		t.Fatalf("no-workspace publications = %#v, %v", publications, err)
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
+	worker := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerFinalizing)
+	if outbox.Manifest.Workspace.Status != protocol.ResultWorkspaceNotManaged ||
+		worker.FinalTarget != store.WorkerIdle {
+		t.Fatalf("no-workspace result = %#v / %#v", worker, outbox)
+	}
+	for {
+		select {
+		case <-host.Changes():
+		default:
+			goto changesDrained
+		}
+	}
+
+changesDrained:
+	finalization, err := resultManager(host).AcknowledgeResultPackageMetadata(
+		context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
+	)
+	if err != nil || finalization.Worker.Status != store.WorkerIdle {
+		t.Fatalf("no-workspace metadata ACK = %#v, %v", finalization, err)
+	}
+	if host.WorkerRevision() != finalization.Worker.Revision {
+		t.Fatalf("worker revision after metadata ACK = %d, want %d", host.WorkerRevision(), finalization.Worker.Revision)
+	}
+	select {
+	case <-host.Changes():
+	case <-time.After(time.Second):
+		t.Fatal("metadata ACK did not signal worker lifecycle change")
+	}
+}
+
+func TestResultFinalizationRetriesTransientPublicationFailure(t *testing.T) {
+	application := newFakeApplication()
+	var publisher *transientResultPackagePublisher
+	host, state, _ := newTestHostWithStateSetupAndResultPublisher(
+		t, 1, "", nil,
+		func(delegate *resultpackagefiles.Manager) resultPackagePublisher {
+			publisher = &transientResultPackagePublisher{
+				delegate: delegate,
+				failed:   make(chan struct{}),
+				retry:    make(chan struct{}),
+			}
+			return publisher
+		},
+		application,
+	)
+	started := spawnTestWorker(t, host, newTestID(), "transient result publication")
+	application.notifyCompletion(
+		started.Worker.CodexThreadID, started.Worker.ActiveTurnID, "completed",
+	)
+	select {
+	case <-publisher.failed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("transient publication failure was not exercised")
+	}
+	worker := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerFinalizing)
+	outboxes, err := state.ListPendingResultCaptures(
+		context.Background(), testControllerID, testDeviceID, 10,
+	)
+	if err != nil || len(outboxes) != 1 || outboxes[0].State != store.ResultOutboxCapturePending {
+		t.Fatalf("capture state after transient failure = %#v, %v", outboxes, err)
+	}
+	if worker.FinalTarget != store.WorkerIdle || host.Err() != nil {
+		t.Fatalf("transient failure terminated host/worker = %#v, %v", worker, host.Err())
+	}
+	close(publisher.retry)
+	waitResultPublication(t, state, started.Worker.WorkerKey)
+	if attempts := publisher.attempts.Load(); attempts != 2 {
+		t.Fatalf("publication attempts = %d, want 2", attempts)
+	}
+}
+
+func TestResultFinalizationIntegrityErrorsRemainFatal(t *testing.T) {
+	for _, err := range []error{
+		store.ErrNotFound,
+		store.ErrResultPackageAuthority,
+		store.ErrResultPackageConflict,
+		store.ErrResultPackageQuota,
+		store.ErrResultPackageTransition,
+		resultpackagefiles.ErrPublicationIntegrity,
+		&resultFinalizationIntegrityError{err: errors.New("invalid worker binding")},
+	} {
+		classified := classifyResultFinalizationError(err)
+		var retry *artifactRetentionError
+		if errors.As(classified, &retry) {
+			t.Fatalf("integrity error %v was classified retryable", err)
+		}
 	}
 }
 
@@ -350,7 +793,7 @@ func TestShutdownLeavesUnacknowledgedWorkspaceWorkerFinalizing(t *testing.T) {
 	application.notifyCompletion(
 		started.Worker.CodexThreadID, started.Worker.ActiveTurnID, "completed",
 	)
-	artifact := waitChangesPublication(t, host)
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := host.Close(ctx); err != nil {
 		cancel()
@@ -361,13 +804,11 @@ func TestShutdownLeavesUnacknowledgedWorkspaceWorkerFinalizing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err := state.GetChangesArtifact(
-		context.Background(), started.Worker.WorkerKey, artifact.ArtifactID,
-	)
+	stored, err := state.GetResultOutbox(context.Background(), outbox.ResultOutboxKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if worker.Status != store.WorkerFinalizing || stored.State != store.ChangesPublishPending {
+	if worker.Status != store.WorkerFinalizing || stored.State != store.ResultOutboxPublishPending {
 		t.Fatalf("shutdown finalized unacknowledged worker = %#v / %#v", worker, stored)
 	}
 }
@@ -778,6 +1219,67 @@ func TestChangesArtifactRootRejectsSymbolicLink(t *testing.T) {
 	}
 }
 
+func TestCleanupResultCaptureStagingRemovesValidDirectoryAndPreservesLegacyArtifacts(t *testing.T) {
+	path := t.TempDir()
+	validName := resultCapturePrefix + newTestID()
+	legacyName := changesArtifactPrefix + newTestID()
+	for _, name := range []string{validName, legacyName, "unrelated"} {
+		if err := os.Mkdir(filepath.Join(path, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupResultCaptureStaging(root); err != nil {
+		_ = root.Close()
+		t.Fatal(err)
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := os.OpenRoot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.Stat(validName); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("valid result staging survived durable cleanup: %v", err)
+	}
+	for _, name := range []string{legacyName, "unrelated"} {
+		if _, err := reopened.Stat(name); err != nil {
+			t.Fatalf("unrelated artifact directory %q was removed: %v", name, err)
+		}
+	}
+}
+
+func TestCleanupResultCaptureStagingFailsClosedOnMalformedName(t *testing.T) {
+	path := t.TempDir()
+	malformedName := resultCapturePrefix + "not-an-id"
+	legacyName := changesArtifactPrefix + newTestID()
+	for _, name := range []string{malformedName, legacyName} {
+		if err := os.Mkdir(filepath.Join(path, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := cleanupResultCaptureStaging(root); err == nil ||
+		!strings.Contains(err.Error(), "invalid result capture staging path") {
+		t.Fatalf("malformed result staging cleanup error = %v", err)
+	}
+	for _, name := range []string{malformedName, legacyName} {
+		if _, err := root.Stat(name); err != nil {
+			t.Fatalf("fail-closed cleanup removed %q: %v", name, err)
+		}
+	}
+}
+
 func waitChangesPublication(t *testing.T, host *Host) store.ChangesArtifact {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -794,6 +1296,80 @@ func waitChangesPublication(t *testing.T, host *Host) store.ChangesArtifact {
 	artifacts, err := host.ListPendingChangesPublications(context.Background())
 	t.Fatalf("changes publication = %#v, %v", artifacts, err)
 	return store.ChangesArtifact{}
+}
+
+func resultManager(host *Host) *resultpackagefiles.Manager {
+	return host.resultPackages.(*resultpackagefiles.Manager)
+}
+
+func waitResultPublication(
+	t *testing.T,
+	state *store.PeerStore,
+	key store.WorkerKey,
+) store.ResultOutbox {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		outboxes, err := state.ListPendingResultPublications(
+			context.Background(), testControllerID, testDeviceID, 10,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, outbox := range outboxes {
+			if outbox.WorkerKey == key {
+				return outbox
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	outboxes, err := state.ListPendingResultPublications(
+		context.Background(), testControllerID, testDeviceID, 10,
+	)
+	t.Fatalf("result publication = %#v, %v", outboxes, err)
+	return store.ResultOutbox{}
+}
+
+type transientResultPackagePublisher struct {
+	delegate *resultpackagefiles.Manager
+	attempts atomic.Int64
+	failed   chan struct{}
+	retry    chan struct{}
+}
+
+func (p *transientResultPackagePublisher) PublishResultPackage(
+	ctx context.Context,
+	request resultpackagefiles.PublishResultPackageRequest,
+) (store.ResultOutbox, error) {
+	if p.attempts.Add(1) == 1 {
+		close(p.failed)
+		return store.ResultOutbox{}, errors.New("transient result package filesystem failure")
+	}
+	select {
+	case <-ctx.Done():
+		return store.ResultOutbox{}, ctx.Err()
+	case <-p.retry:
+	}
+	return p.delegate.PublishResultPackage(ctx, request)
+}
+
+func testManagedRolloutLine(eventType, turnID string) string {
+	return "{\"type\":\"event_msg\",\"payload\":{\"type\":\"" + eventType +
+		"\",\"turn_id\":\"" + turnID + "\"}}\n"
+}
+
+func testManagedFailedRolloutLine(turnID string) string {
+	return "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"" +
+		turnID + "\",\"error\":{\"message\":\"managed turn failed\"}}}\n"
+}
+
+func appendSyncedFile(path, data string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.WriteString(data)
+	return errors.Join(writeErr, file.Sync(), file.Close())
 }
 
 func recordExactPreparedWorkspace(
@@ -842,6 +1418,69 @@ func recordExactPreparedWorkspace(
 		t.Fatal(err)
 	}
 	return workspace
+}
+
+func makeStartupTurnIntent(
+	t *testing.T,
+	state *store.PeerStore,
+	root string,
+	bound bool,
+) (store.WorkerReservation, store.WorkerTurnStartIntent, string) {
+	t.Helper()
+	ctx := context.Background()
+	key := store.WorkerKey{
+		ControllerID: testControllerID, TreeID: testTreeID, AgentID: newTestID(),
+	}
+	workspacePath := filepath.Join(root, workspaceName(key))
+	if err := os.Mkdir(workspacePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := state.ReserveWorkerStart(ctx, store.WorkerReservation{
+		WorkerKey: key, ParentAgentID: testParentID, DeviceID: testDeviceID,
+		TaskName: "startup reconciliation", PromptDigest: promptDigest("startup prompt"),
+		WorkspacePath: workspacePath, ProfileVersion: workerProfileVersion,
+	}, 1, time.Unix(1_700_100_000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadID := newTestID()
+	worker, err = state.AttachWorkerThread(ctx, key, threadID, time.Unix(1_700_100_001, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err = state.MarkWorkerReady(ctx, key, time.Unix(1_700_100_002, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, _, err := state.PrepareWorkerTurnStartIntent(
+		ctx,
+		store.PrepareWorkerTurnStartIntentRequest{
+			WorkerKey: key, IntentID: newTestID(), DeviceID: testDeviceID,
+			ManagedThreadID: threadID, PackageID: newTestID(),
+			Rollout: store.WorkerRolloutLocator{
+				Status: store.WorkerRolloutUnavailable, FailureCode: rolloutLocatorFailureCode,
+			},
+			ReservationLimitBytes: int64(
+				protocol.MaximumResultManifestBytes + protocol.MaximumResultRolloutBytes,
+			),
+		},
+		time.Unix(1_700_100_003, 0),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnID := newTestID()
+	if bound {
+		resolution, err := state.BindWorkerTurnStartIntent(
+			ctx, key, intent.IntentID, turnID, time.Unix(1_700_100_004, 0),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		worker = resolution.Worker
+		intent = resolution.Intent
+	}
+	return worker, intent, turnID
 }
 
 func makeRunningWorkspaceWorker(

@@ -30,8 +30,12 @@ A package directory uses fixed names and may contain only these regular files:
   256 MiB.
 - `changes-overlay.tar.zst`, present when the worker result is dirty, at most 256 MiB.
 
-The aggregate bound is the sum of the component bounds. A descriptor records the fixed part kind,
-byte size, and lowercase SHA-256 digest. Descriptors are sorted and unique. The manifest does not
+The aggregate manifest-plus-payload bound is 512 MiB. Payload descriptors reserve the full 64 KiB
+manifest allowance before capture, while rollout, bundle, and overlay retain their individual
+64/256/256 MiB bounds. If otherwise valid workspace artifacts would exceed the remaining aggregate
+budget, the target omits both workspace artifacts and records `workspace_result_too_large` while
+retaining a valid rollout and terminal manifest. A descriptor records the fixed part kind, byte
+size, and lowercase SHA-256 digest. Descriptors are sorted and unique. The manifest does not
 describe itself recursively.
 
 The exact `result-manifest.json` bytes are authoritative. The target encodes a versioned Go struct
@@ -185,21 +189,27 @@ contradictory responses, and any error whose response receipt is uncertain are n
 remain ambiguous.
 
 If the request outcome is ambiguous, the connector does not mark the worker interrupted, release
-its reservation, or issue another turn. With an available locator, it retires the uncertain
-app-server process and reconciles the intent after cold resume by locating exactly one
-`task_started` record after the saved rollout offset and confirming the same new turn with
+its reservation, or issue another turn. It retires the uncertain app-server process and reconciles
+the intent after cold resume by confirming exactly one new turn with
 `thread/read(includeTurns: true)`. The confirmed ID is durably bound and recovered whether the turn
-is still active or already terminal. No turn, multiple turns, unavailable locator, unsupported
-history, or conflicting evidence leaves the peer fail-stop and the reservation intact for operator
-recovery; it must never guess or replay a prompt that may already have executed. Startup performs
-the same reconciliation for every unresolved start intent.
+is still active or already terminal. The saved locator remains the boundary for later result
+capture, but is not needed to prove which turn was created. An
+unavailable locator only degrades the rollout component to `captureFailed`; exact thread history is
+still authoritative for start reconciliation. No turn, multiple turns, unsupported history, a
+missing previous boundary, or conflicting thread, turn, or status evidence leaves the peer
+fail-stop and the reservation intact for operator recovery; it must never guess or replay a prompt
+that may already have executed. Startup performs the same reconciliation for every unresolved start
+intent. Runtime app-server recovery performs it before reopening the operation fence: one replacement
+app-server cold-resumes each prepared thread and reads its exact history, without issuing another
+`turn/start`.
 
 Once a turn ID is durably bound, connector or app-server loss may not move that worker directly to
 idle, interrupted, or failed. Recovery first reserves finalization for the bound turn. If the exact
 terminal rollout record becomes available, its outcome is used; otherwise bounded recovery records
 an interrupted `app_server_lost` outcome and a `rollout.captureFailed` component. In both cases it
 still captures the current managed Git result and returns the mandatory manifest before releasing
-the worker slot.
+the worker slot. All bound turns from one shared app-server loss use the same seven inspection rounds
+and six flush waits; the retry window is not multiplied by the number of worker slots.
 
 After each managed `thread/start` and cold `thread/resume`, the connector calls
 `thread/read(includeTurns: false)` and records the returned rollout path only after validating that
@@ -240,6 +250,11 @@ component bounds. If it cannot reserve safely, admission fails with a bounded ba
 not start a turn and later evict an undelivered result. Root `available` packages may be pruned
 oldest-first only when admission needs capacity. A `receiving` package is never evicted, and target
 outbox packages are never pruned by local admission.
+
+`maxWorkerSlots` limits app-server concurrency; result-store capacity is an independent admission
+resource. A peer can therefore admit more no-workspace turns than worst-case workspace turns. When
+the 2 GiB result backlog cannot reserve another package, the target returns the retryable `busy`
+outcome before `turn/start`; peer status identifies the result backlog. It does not queue the turn.
 
 Outbox and inbox directories are distinct so self-target delivery cannot collide. All traversal and
 publication use anchored `os.Root` operations, reject symlinks and unexpected entries, create files

@@ -26,13 +26,20 @@ type threadResumeParams struct {
 
 type threadResult struct {
 	Thread struct {
-		ID string `json:"id"`
+		ID    string  `json:"id"`
+		Path  *string `json:"path"`
+		Turns []turn  `json:"turns"`
 	} `json:"thread"`
 	CWD                     string   `json:"cwd"`
 	RuntimeWorkspaceRoots   []string `json:"runtimeWorkspaceRoots"`
 	ActivePermissionProfile *struct {
 		ID string `json:"id"`
 	} `json:"activePermissionProfile"`
+}
+
+type threadReadParams struct {
+	ThreadID     string `json:"threadId"`
+	IncludeTurns bool   `json:"includeTurns"`
 }
 
 type mcpStatusParams struct {

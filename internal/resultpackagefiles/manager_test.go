@@ -1177,33 +1177,40 @@ func (f *managerFixture) publishOutbox(
 	if err == nil {
 		worker, err = f.state.MarkWorkerReady(ctx, worker.WorkerKey, start.Add(3*time.Second))
 	}
-	if err == nil {
-		_, _, err = f.state.PrepareWorkerTurnStartIntent(ctx, store.PrepareWorkerTurnStartIntentRequest{
-			WorkerKey: worker.WorkerKey, IntentID: testID(98), DeviceID: testDeviceID,
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, _, err := f.state.PrepareWorkerTurnStartIntent(
+		ctx,
+		store.PrepareWorkerTurnStartIntentRequest{
+			WorkerKey: worker.WorkerKey, IntentID: testID(99), DeviceID: testDeviceID,
 			ManagedThreadID: testThreadID, PackageID: packageID,
 			Rollout: store.WorkerRolloutLocator{
 				Status: store.WorkerRolloutUnavailable, FailureCode: "rollout_unavailable",
 			},
 			ReservationLimitBytes: protocol.MaximumResultPackageBytes,
-		}, start.Add(4*time.Second))
-	}
-	if err == nil {
-		var resolution store.WorkerTurnStartResolution
-		resolution, err = f.state.BindWorkerTurnStartIntent(
-			ctx, worker.WorkerKey, testID(98), testTurnID, start.Add(5*time.Second),
-		)
-		worker = resolution.Worker
-	}
+		},
+		start.Add(4*time.Second),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalization, err := f.state.BeginWorkerFinalization(
+	resolution, err := f.state.BindWorkerTurnStartIntent(
+		ctx, worker.WorkerKey, intent.IntentID, testTurnID, start.Add(5*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalization, err := f.state.BeginWorkerResultFinalization(
 		ctx, worker.WorkerKey, testTurnID, store.WorkerIdle, "", start.Add(6*time.Second),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	worker = finalization.Worker
+	if resolution.Intent.PackageID != packageID {
+		t.Fatal("bound turn intent changed result package identity")
+	}
 	descriptor := protocol.ResultPackagePartDescriptor{
 		Kind: protocol.ResultPackagePartChangesBundle,
 		Size: int64(len(bundle)), SHA256: sha256Hex(bundle),
@@ -1239,7 +1246,7 @@ func (f *managerFixture) publishOutbox(
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.state.CommitResultOutboxCapture(ctx, key, metadata, start.Add(7*time.Second)); err != nil {
+	if _, err := f.manager.CommitResultOutboxCapture(ctx, key, metadata); err != nil {
 		t.Fatal(err)
 	}
 	return metadata, worker

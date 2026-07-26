@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/appserver"
+	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -114,6 +115,117 @@ func TestHostSendSteersRunningWorkerAndReplaysReceipt(t *testing.T) {
 	}
 }
 
+func TestHostPreparedFollowupReplayValidatesAuthorityBeforeAppServer(t *testing.T) {
+	application := newFakeApplication()
+	application.completeBeforeReturn = true
+	host, state, _ := newTestHost(t, 1, application)
+	started := spawnTestWorker(t, host, newTestID(), "prepared followup authority")
+	worker := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerIdle)
+	operationID := newTestID()
+	message := "resume exact prepared follow-up"
+	receipt, replay, err := state.BeginWorkerOperation(
+		context.Background(), operationID, store.WorkerOperationFollowup,
+		worker.WorkerKey, []byte(message), time.Now(),
+	)
+	if err != nil || replay {
+		t.Fatalf("begin follow-up receipt = %#v, replay=%t, %v", receipt, replay, err)
+	}
+	worker, err = state.BeginWorkerStart(
+		context.Background(), worker.WorkerKey, 1, time.Now(),
+	)
+	if err == nil {
+		worker, err = state.AttachWorkerThread(
+			context.Background(), worker.WorkerKey, worker.CodexThreadID, time.Now(),
+		)
+	}
+	if err == nil {
+		worker, err = state.MarkWorkerReady(context.Background(), worker.WorkerKey, time.Now())
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, _, err := state.PrepareWorkerTurnStartIntent(
+		context.Background(),
+		store.PrepareWorkerTurnStartIntentRequest{
+			WorkerKey: worker.WorkerKey, IntentID: newTestID(), DeviceID: testDeviceID,
+			ManagedThreadID: worker.CodexThreadID, PreviousTurnID: worker.LastBoundTurnID,
+			PackageID: newTestID(), OperationID: operationID,
+			Rollout: store.WorkerRolloutLocator{
+				Status: store.WorkerRolloutUnavailable, FailureCode: rolloutLocatorFailureCode,
+			},
+			ReservationLimitBytes: protocol.MaximumResultManifestBytes + protocol.MaximumResultRolloutBytes,
+		},
+		time.Now(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := application.snapshot()
+	wrongKey := worker.WorkerKey
+	wrongKey.AgentID = newTestID()
+	for name, request := range map[string]FollowupRequest{
+		"key": {OperationID: operationID, Key: wrongKey, Message: message},
+		"message": {
+			OperationID: operationID, Key: worker.WorkerKey, Message: message + " changed",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := host.Followup(
+				context.Background(), request,
+			); !errors.Is(err, store.ErrWorkerOperationConflict) {
+				t.Fatalf("prepared follow-up authority error = %v", err)
+			}
+		})
+	}
+	if after := application.snapshot(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("authority mismatch reached app-server: before=%#v after=%#v", before, after)
+	}
+	stored, err := state.GetPreparedWorkerTurnStartIntent(context.Background(), worker.WorkerKey)
+	if err != nil || stored != intent {
+		t.Fatalf("prepared intent after rejected replay = %#v, %v; want %#v", stored, err, intent)
+	}
+}
+
+func TestHostFollowupRejectionReusesTurnStartReceipt(t *testing.T) {
+	application := newFakeApplication()
+	host, state, _ := newTestHost(t, 1, application)
+	started := spawnTestWorker(t, host, newTestID(), "follow-up rejection")
+	application.notifyCompletion(
+		started.Worker.CodexThreadID,
+		started.Worker.ActiveTurnID,
+		"completed",
+	)
+	worker := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerIdle)
+	application.turnStartErr = &appserver.RPCError{Code: -32602, Message: "rejected follow-up"}
+	request := FollowupRequest{
+		OperationID: newTestID(), Key: worker.WorkerKey, Message: "rejected follow-up",
+	}
+
+	result, err := host.Followup(context.Background(), request)
+	var rpcErr *appserver.RPCError
+	if !errors.As(err, &rpcErr) {
+		t.Fatalf("follow-up rejection error = %v, want app-server RPC error", err)
+	}
+	if result.Receipt.OperationID != request.OperationID ||
+		result.Receipt.Status != store.WorkerOperationFailed ||
+		result.Receipt.Outcome != store.WorkerOutcomeFailed ||
+		result.Receipt.FailureCode != "turn_start_failed" ||
+		result.Worker.Status != store.WorkerIdle {
+		t.Fatalf("follow-up rejection result = %#v", result)
+	}
+	if host.Err() != nil {
+		t.Fatalf("follow-up rejection failed the worker host: %v", host.Err())
+	}
+	turnCalls := len(application.snapshot().turns)
+	replayed, err := host.Followup(context.Background(), request)
+	if err != nil || replayed != result {
+		t.Fatalf("follow-up rejection replay = %#v, %v; want %#v", replayed, err, result)
+	}
+	if got := len(application.snapshot().turns); got != turnCalls {
+		t.Fatalf("turn/start calls after rejection replay = %d, want %d", got, turnCalls)
+	}
+}
+
 func TestHostSendQueuesWhenTurnCompletedBeforeSteer(t *testing.T) {
 	application := newFakeApplication()
 	host, state, _ := newTestHost(t, 1, application)
@@ -138,7 +250,7 @@ func TestHostPendingSendReplayDoesNotRepeatAmbiguousSteer(t *testing.T) {
 	application := newFakeApplication()
 	responseLost := errors.New("turn/steer response lost")
 	application.turnSteerErr = responseLost
-	host, _, _ := newTestHost(t, 1, application)
+	host, state, _ := newTestHost(t, 1, application)
 	started := spawnTestWorker(t, host, "123e4567-e89b-42d3-a456-426614174462", "steer-loss")
 	request := SendRequest{
 		Key: started.Worker.WorkerKey, MessageID: newTestID(), Message: "ambiguous steer",
@@ -149,15 +261,22 @@ func TestHostPendingSendReplayDoesNotRepeatAmbiguousSteer(t *testing.T) {
 	}
 	if result.Receipt.Status != store.WorkerOperationPending ||
 		result.Receipt.Outcome != store.WorkerOutcomePending ||
-		result.Worker.Status != store.WorkerInterrupted {
+		result.Worker.Status != store.WorkerFinalizing ||
+		result.Worker.FinalTarget != store.WorkerInterrupted {
 		t.Fatalf("ambiguous send result = %#v", result)
+	}
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
+	if _, err := resultManager(host).AcknowledgeResultPackageMetadata(
+		context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
+	); err != nil {
+		t.Fatal(err)
 	}
 	replayed, err := host.Send(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replayed.Receipt != result.Receipt || replayed.Worker != result.Worker {
-		t.Fatalf("pending replay = %#v, want %#v", replayed, result)
+	if replayed.Receipt != result.Receipt || replayed.Worker.Status != store.WorkerInterrupted {
+		t.Fatalf("pending replay after result ACK = %#v, want receipt %#v", replayed, result.Receipt)
 	}
 	if got := len(application.snapshot().steers); got != 1 {
 		t.Fatalf("turn/steer calls after pending replay = %d, want 1", got)
@@ -197,7 +316,10 @@ func TestHostInterruptAcknowledgesBeforeCompletionAndReplays(t *testing.T) {
 		started.Worker.ActiveTurnID,
 		"interrupted",
 	)
-	waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerIdle)
+	interrupted := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerInterrupted)
+	if interrupted.FailureCode != "turn_interrupted" {
+		t.Fatalf("interrupted worker = %#v", interrupted)
+	}
 }
 
 func TestHostChangesCoalesceAroundGlobalWorkerRevision(t *testing.T) {
@@ -236,8 +358,27 @@ func TestHostChangesCoalesceAroundGlobalWorkerRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if workers[0].Status != store.WorkerIdle || workers[0].Revision <= beforeCompletion ||
+	if workers[0].Status != store.WorkerFinalizing || workers[0].FinalTarget != store.WorkerIdle ||
+		workers[0].Revision <= beforeCompletion ||
 		workers[0].Revision != host.WorkerRevision() {
+		t.Fatalf("finalizing snapshot = %#v, high watermark = %d", workers, host.WorkerRevision())
+	}
+	outbox := waitResultPublication(t, host.state, started.Worker.WorkerKey)
+	if _, err := resultManager(host).AcknowledgeResultPackageMetadata(
+		context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
+	); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-host.Changes():
+	case <-time.After(time.Second):
+		t.Fatal("result metadata ACK did not emit a worker change")
+	}
+	workers, err = host.ListWorkers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workers[0].Status != store.WorkerIdle || workers[0].Revision != host.WorkerRevision() {
 		t.Fatalf("completed snapshot = %#v, high watermark = %d", workers, host.WorkerRevision())
 	}
 }

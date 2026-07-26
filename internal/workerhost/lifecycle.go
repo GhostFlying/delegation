@@ -71,8 +71,10 @@ func (h *Host) startNewThread(
 	if err != nil {
 		return StartedTurn{Worker: worker}, h.retireClient(client, err), err
 	}
-	h.markLoaded(client, worker.WorkerKey, worker.CodexThreadID)
-	return h.startTurn(ctx, client, worker, prompt, store.WorkerPending)
+	if err := h.refreshLoadedThreadPath(ctx, client, worker); err != nil {
+		return StartedTurn{Worker: worker}, h.retireClient(client, err), err
+	}
+	return h.startTurn(ctx, client, worker, prompt, "")
 }
 
 func (h *Host) resumeThread(
@@ -131,7 +133,9 @@ func (h *Host) resumeThread(
 	if err != nil {
 		return worker, h.retireClient(client, err), err
 	}
-	h.markLoaded(client, worker.WorkerKey, worker.CodexThreadID)
+	if err := h.refreshLoadedThreadPath(ctx, client, worker); err != nil {
+		return worker, h.retireClient(client, err), err
+	}
 	return worker, nil, nil
 }
 
@@ -140,35 +144,43 @@ func (h *Host) startTurn(
 	client application,
 	worker store.WorkerReservation,
 	prompt string,
-	retryStatus store.WorkerStatus,
+	operationID string,
 ) (StartedTurn, <-chan struct{}, error) {
+	intent, err := h.prepareTurnStartIntent(ctx, client, worker, operationID)
+	if err != nil {
+		restored, restoreErr := h.restoreWorkerAfterUnsent(worker, worker.RetryTarget, err)
+		return StartedTurn{Worker: restored}, nil, restoreErr
+	}
 	var result turnStartResult
-	err := client.TurnStart(ctx, turnStartParams{
+	err = client.TurnStart(ctx, turnStartParams{
 		ThreadID: worker.CodexThreadID,
 		Input:    []textInput{{Type: "text", Text: prompt, TextElements: []any{}}},
 	}, &result)
 	if err != nil {
 		if errors.Is(err, appserver.ErrRequestNotWritten) {
-			restored, restoreErr := h.restoreWorkerAfterUnsent(worker, retryStatus, err)
-			return StartedTurn{Worker: restored}, nil, restoreErr
+			resolution, rejectErr := h.rejectTurnStartIntent(worker.WorkerKey, intent.IntentID, "request_not_written")
+			return StartedTurn{Worker: resolution.Worker, Operation: resolution.Operation}, nil,
+				errors.Join(err, rejectErr)
 		}
 		if h.shouldRetire(client, err) {
 			return StartedTurn{Worker: worker}, h.retireClient(client, err), err
 		}
-		return StartedTurn{Worker: worker}, nil,
-			h.failWorker(worker.WorkerKey, "turn_start_failed", err)
+		resolution, rejectErr := h.rejectTurnStartIntent(worker.WorkerKey, intent.IntentID, "turn_start_failed")
+		return StartedTurn{Worker: resolution.Worker, Operation: resolution.Operation}, nil,
+			errors.Join(err, rejectErr)
 	}
 	if err := identity.ValidateID(result.Turn.ID); err != nil {
 		protocolErr := fmt.Errorf("app-server returned invalid turnId: %w", err)
 		return StartedTurn{Worker: worker}, h.retireClient(client, protocolErr), protocolErr
 	}
-	worker, err = h.recordWorkerChange(
-		h.state.MarkWorkerRunning(ctx, worker.WorkerKey, result.Turn.ID, time.Now()),
+	resolution, err := h.state.BindWorkerTurnStartIntent(
+		ctx, worker.WorkerKey, intent.IntentID, result.Turn.ID, time.Now(),
 	)
+	worker, err = h.recordWorkerChange(resolution.Worker, err)
 	if err != nil {
 		return StartedTurn{Worker: worker}, h.retireClient(client, err), err
 	}
-	return StartedTurn{Worker: worker}, nil, nil
+	return StartedTurn{Worker: worker, Operation: resolution.Operation}, nil, nil
 }
 
 func (h *Host) retryPendingThread(
@@ -207,7 +219,7 @@ func (h *Host) retryPendingThread(
 			return StartedTurn{Worker: worker}, recovery, err
 		}
 	}
-	return h.startTurn(ctx, client, worker, prompt, store.WorkerPending)
+	return h.startTurn(ctx, client, worker, prompt, "")
 }
 
 func (h *Host) restoreWorkerAfterUnsent(
@@ -299,6 +311,23 @@ func (h *Host) waitForCurrentRecovery(ctx context.Context) error {
 }
 
 func (h *Host) ensureClient(ctx context.Context) (application, error) {
+	return h.ensureClientOwned(ctx, nil)
+}
+
+func (h *Host) ensureClientForRecovery(
+	ctx context.Context,
+	recovering chan struct{},
+) (application, error) {
+	if recovering == nil {
+		return nil, errClientRecovering
+	}
+	return h.ensureClientOwned(ctx, recovering)
+}
+
+func (h *Host) ensureClientOwned(
+	ctx context.Context,
+	recovering chan struct{},
+) (application, error) {
 	for {
 		h.clientMu.Lock()
 		if h.fatalErr != nil {
@@ -310,7 +339,7 @@ func (h *Host) ensureClient(ctx context.Context) (application, error) {
 			h.clientMu.Unlock()
 			return nil, ErrClosed
 		}
-		if h.recovering != nil {
+		if !h.clientStartOwned(recovering) {
 			h.clientMu.Unlock()
 			return nil, errClientRecovering
 		}
@@ -352,7 +381,7 @@ func (h *Host) ensureClient(ctx context.Context) (application, error) {
 			h.clientMu.Unlock()
 			return nil, err
 		}
-		if h.closed || h.recovering != nil {
+		if h.closed || !h.clientStartOwned(recovering) {
 			closed := h.closed
 			h.clientMu.Unlock()
 			closeContext, cancel := context.WithTimeout(context.Background(), stateTimeout)
@@ -374,7 +403,7 @@ func (h *Host) ensureClient(ctx context.Context) (application, error) {
 			return nil, errClientRecovering
 		}
 		h.client = client
-		h.loaded = make(map[store.WorkerKey]string)
+		h.loaded = make(map[store.WorkerKey]loadedThread)
 		h.completionDrains[client] = make(chan struct{})
 		h.monitors.Add(1)
 		go h.monitorClient(client)
@@ -383,6 +412,14 @@ func (h *Host) ensureClient(ctx context.Context) (application, error) {
 		h.clientMu.Unlock()
 		return client, nil
 	}
+}
+
+// clientStartOwned is called only while clientMu is held.
+func (h *Host) clientStartOwned(recovering chan struct{}) bool {
+	if recovering == nil {
+		return h.recovering == nil
+	}
+	return h.recovering == recovering
 }
 
 func (h *Host) shouldRetire(client application, err error) bool {
@@ -552,10 +589,19 @@ func (h *Host) lockFor(key store.WorkerKey) *sync.Mutex {
 	return &h.workerLock[hash%workerLockCount]
 }
 
-func (h *Host) markLoaded(client application, key store.WorkerKey, threadID string) {
+func (h *Host) markLoaded(
+	client application,
+	key store.WorkerKey,
+	threadID string,
+	path *string,
+) {
 	h.clientMu.Lock()
 	if h.client == client {
-		h.loaded[key] = threadID
+		loaded := loadedThread{ID: threadID}
+		if path != nil {
+			loaded.Path = *path
+		}
+		h.loaded[key] = loaded
 	}
 	h.clientMu.Unlock()
 }
@@ -563,7 +609,7 @@ func (h *Host) markLoaded(client application, key store.WorkerKey, threadID stri
 func (h *Host) isLoaded(client application, key store.WorkerKey, threadID string) bool {
 	h.clientMu.Lock()
 	defer h.clientMu.Unlock()
-	return h.client == client && h.loaded[key] == threadID
+	return h.client == client && h.loaded[key].ID == threadID
 }
 
 func (h *Host) unmarkThread(client application, threadID string) {
@@ -572,8 +618,8 @@ func (h *Host) unmarkThread(client application, threadID string) {
 	if h.client != client {
 		return
 	}
-	for key, loadedThreadID := range h.loaded {
-		if loadedThreadID == threadID {
+	for key, loaded := range h.loaded {
+		if loaded.ID == threadID {
 			delete(h.loaded, key)
 		}
 	}

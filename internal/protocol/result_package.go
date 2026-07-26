@@ -26,9 +26,10 @@ const (
 	MaximumResultRolloutRawBytes     int64 = 64 * 1024 * 1024
 	MaximumResultChangesBundleBytes  int64 = 256 * 1024 * 1024
 	MaximumResultChangesOverlayBytes int64 = 256 * 1024 * 1024
-	MaximumResultPackageBytes              = MaximumResultManifestBytes + MaximumResultRolloutBytes +
-		MaximumResultChangesBundleBytes + MaximumResultChangesOverlayBytes
-	MaximumResultPackagePayloadParts = 3
+	// MaximumResultPackageBytes is the aggregate manifest plus payload bound.
+	// Individual parts retain their narrower component limits above.
+	MaximumResultPackageBytes        int64 = 512 * 1024 * 1024
+	MaximumResultPackagePayloadParts       = 3
 )
 
 type ResultPackagePartKind string
@@ -373,6 +374,7 @@ func (m ResultManifest) validateParts() error {
 		return fmt.Errorf("result manifest must contain at most %d payload parts", MaximumResultPackagePayloadParts)
 	}
 	var total int64
+	maximumPayloadBytes := MaximumResultPackageBytes - MaximumResultManifestBytes
 	previous := ResultPackagePartKind("")
 	hasRollout := false
 	hasBundle := false
@@ -388,8 +390,11 @@ func (m ResultManifest) validateParts() error {
 			return errors.New("result package parts must be sorted and unique")
 		}
 		previous = part.Kind
-		if part.Size > MaximumResultPackageBytes-total {
-			return fmt.Errorf("result package exceeds %d-byte limit", MaximumResultPackageBytes)
+		if part.Size > maximumPayloadBytes-total {
+			return fmt.Errorf(
+				"result package payload exceeds %d-byte limit",
+				maximumPayloadBytes,
+			)
 		}
 		total += part.Size
 		hasRollout = hasRollout || part.Kind == ResultPackagePartRollout
@@ -548,7 +553,21 @@ func (m ResultPackageMetadata) DecodeManifest() (ResultManifest, error) {
 	if fmt.Sprintf("%x", digest) != m.ManifestDescriptor.SHA256 {
 		return ResultManifest{}, errors.New("result manifest bytes do not match their descriptor digest")
 	}
-	return DecodeResultManifest(m.Manifest)
+	manifest, err := DecodeResultManifest(m.Manifest)
+	if err != nil {
+		return ResultManifest{}, err
+	}
+	total := m.ManifestDescriptor.Size
+	for _, part := range manifest.Parts {
+		if part.Size > MaximumResultPackageBytes-total {
+			return ResultManifest{}, fmt.Errorf(
+				"result package exceeds %d-byte aggregate limit",
+				MaximumResultPackageBytes,
+			)
+		}
+		total += part.Size
+	}
+	return manifest, nil
 }
 
 func SameResultPackageMetadata(left, right ResultPackageMetadata) bool {

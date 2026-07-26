@@ -22,6 +22,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/gitworkspace"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/pathguard"
+	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -44,6 +45,7 @@ var (
 	ErrWorkerNotRunning    = errors.New("managed worker is not running")
 	ErrMCPInjectionBlocked = errors.New("managed worker MCP injection is blocked")
 	errClientRecovering    = errors.New("managed app-server is recovering")
+	errTurnStartAmbiguous  = errors.New("managed turn start outcome remains ambiguous")
 )
 
 var hostAuthEnvironment = []string{
@@ -55,6 +57,7 @@ var hostAuthEnvironment = []string{
 type application interface {
 	ThreadStart(context.Context, any, any) error
 	ThreadResume(context.Context, any, any) error
+	ThreadRead(context.Context, any, any) error
 	MCPServerStatusList(context.Context, any, any) error
 	TurnStart(context.Context, any, any) error
 	TurnSteer(context.Context, any, any) error
@@ -82,6 +85,7 @@ type Options struct {
 	MaxWorkerSlots          int
 	CodexConfig             map[string]any
 	Store                   *store.PeerStore
+	ResultPackages          resultPackagePublisher
 	ReportError             func(error)
 
 	startApplication startApplication
@@ -114,7 +118,24 @@ type InterruptRequest struct {
 }
 
 type StartedTurn struct {
-	Worker store.WorkerReservation
+	Worker    store.WorkerReservation
+	Operation *store.WorkerOperationReceipt
+}
+
+type resultPackagePublisher interface {
+	PublishResultPackage(
+		context.Context,
+		resultpackagefiles.PublishResultPackageRequest,
+	) (store.ResultOutbox, error)
+}
+
+type resultFinalizationObserverRegistrar interface {
+	SetWorkerFinalizationObserver(func(store.WorkerResultFinalization) error)
+}
+
+type loadedThread struct {
+	ID   string
+	Path string
 }
 
 type OperationResult struct {
@@ -141,9 +162,11 @@ type Host struct {
 	pruneChangesArtifacts    func(context.Context, int, int64) error
 	artifactRetryMin         time.Duration
 	artifactRetryMax         time.Duration
+	waitForRolloutFlush      func(context.Context, time.Duration) error
 	maxWorkerSlots           int
 	codexConfig              map[string]any
 	state                    *store.PeerStore
+	resultPackages           resultPackagePublisher
 	startApplication         startApplication
 	reportError              func(error)
 	completionEvents         chan queuedCompletion
@@ -173,7 +196,7 @@ type Host struct {
 
 	clientMu   sync.Mutex
 	client     application
-	loaded     map[store.WorkerKey]string
+	loaded     map[store.WorkerKey]loadedThread
 	starting   chan struct{}
 	recovering chan struct{}
 	closed     bool
@@ -186,6 +209,9 @@ type Host struct {
 func New(ctx context.Context, options Options) (*Host, error) {
 	if options.Store == nil {
 		return nil, errors.New("worker host store is required")
+	}
+	if options.ResultPackages == nil {
+		return nil, errors.New("worker host result package publisher is required")
 	}
 	if err := identity.ValidateID(options.ControllerID); err != nil {
 		return nil, fmt.Errorf("controllerId %w", err)
@@ -283,6 +309,11 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		_ = root.Close()
 		return nil, err
 	}
+	if err := cleanupResultCaptureStaging(artifactRoot); err != nil {
+		_ = artifactRoot.Close()
+		_ = root.Close()
+		return nil, err
+	}
 	reportError := options.ReportError
 	if reportError == nil {
 		reportError = func(error) {}
@@ -320,8 +351,9 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		maxWorkerSlots:          options.MaxWorkerSlots,
 		removeWorkspaceTransfer: root.RemoveAll,
 		codexConfig:             codexconfig.Clone(options.CodexConfig), state: options.Store,
+		resultPackages:   options.ResultPackages,
 		startApplication: start, reportError: reportError,
-		loaded:              make(map[store.WorkerKey]string),
+		loaded:              make(map[store.WorkerKey]loadedThread),
 		completionEvents:    make(chan queuedCompletion, options.MaxWorkerSlots),
 		completionDone:      make(chan struct{}),
 		changes:             make(chan struct{}, 1),
@@ -336,9 +368,13 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		shutdownDone:        make(chan struct{}),
 	}
 	host.applyCompletion = host.completeTurn
+	if registrar, ok := options.ResultPackages.(resultFinalizationObserverRegistrar); ok {
+		registrar.SetWorkerFinalizationObserver(host.RecordResultPackageAcknowledgement)
+	}
 	host.pruneChangesArtifacts = host.prunePublishedChangesArtifacts
 	host.artifactRetryMin = 100 * time.Millisecond
 	host.artifactRetryMax = 5 * time.Second
+	host.waitForRolloutFlush = waitForRolloutFlush
 	if err := host.validateStoredAuthority(ctx); err != nil {
 		_ = artifactRoot.Close()
 		_ = root.Close()
@@ -362,6 +398,12 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	go host.processCompletions()
 	go host.processArtifactFinalizations(finalizerContext)
 	host.signalArtifactWork()
+	if err := host.recoverUnresolvedTurnIntents(ctx); err != nil {
+		closeContext, cancel := context.WithTimeout(context.Background(), stateTimeout)
+		closeErr := host.Close(closeContext)
+		cancel()
+		return nil, errors.Join(fmt.Errorf("recover managed turn intents: %w", err), closeErr)
+	}
 	return host, nil
 }
 
@@ -489,6 +531,24 @@ func (h *Host) spawnLocked(
 		}
 		if existing.Status == store.WorkerFailed {
 			return StartedTurn{Worker: existing}, nil, fmt.Errorf("%w: %s", ErrWorkerFailed, existing.FailureCode)
+		}
+		if existing.Status == store.WorkerReady {
+			intent, intentErr := h.state.GetPreparedWorkerTurnStartIntent(ctx, key)
+			if intentErr == nil {
+				operationContext, cancel, contextErr := detachedOperationContext(ctx)
+				if contextErr != nil {
+					return StartedTurn{Worker: existing}, nil, contextErr
+				}
+				defer cancel()
+				client, clientErr := h.ensureClient(operationContext)
+				if clientErr != nil {
+					return StartedTurn{Worker: existing}, nil, clientErr
+				}
+				return h.reconcilePreparedTurnIntent(operationContext, client, intent)
+			}
+			if !errors.Is(intentErr, store.ErrNotFound) {
+				return StartedTurn{Worker: existing}, nil, intentErr
+			}
 		}
 		switch existing.Status {
 		case store.WorkerReserved, store.WorkerPending:
@@ -618,7 +678,7 @@ func (h *Host) followupLocked(
 			return StartedTurn{Worker: worker}, recovery, err
 		}
 	}
-	return h.startTurn(operationContext, client, worker, request.Message, store.WorkerIdle)
+	return h.startTurn(operationContext, client, worker, request.Message, request.OperationID)
 }
 
 func detachedOperationContext(ctx context.Context) (context.Context, context.CancelFunc, error) {

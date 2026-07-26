@@ -453,6 +453,43 @@ func (s *PeerStore) GetWorkerTurnStartIntent(
 	return queryWorkerTurnStartIntent(ctx, s.db, key, intentID)
 }
 
+func (s *PeerStore) GetPreparedWorkerTurnStartIntent(
+	ctx context.Context,
+	key WorkerKey,
+) (WorkerTurnStartIntent, error) {
+	if err := key.Validate(); err != nil {
+		return WorkerTurnStartIntent{}, err
+	}
+	return queryPreparedWorkerTurnStartIntent(ctx, s.db, key)
+}
+
+func (s *PeerStore) GetPreparedWorkerTurnStartIntentByOperation(
+	ctx context.Context,
+	controllerID, operationID string,
+) (WorkerTurnStartIntent, error) {
+	if err := identity.ValidateID(controllerID); err != nil {
+		return WorkerTurnStartIntent{}, fmt.Errorf("controllerId %w", err)
+	}
+	if err := identity.ValidateID(operationID); err != nil {
+		return WorkerTurnStartIntent{}, fmt.Errorf("operationId %w", err)
+	}
+	return queryPreparedWorkerTurnStartIntentByOperation(ctx, s.db, controllerID, operationID)
+}
+
+func (s *PeerStore) GetWorkerTurnStartIntentByTurn(
+	ctx context.Context,
+	key WorkerKey,
+	turnID string,
+) (WorkerTurnStartIntent, error) {
+	if err := key.Validate(); err != nil {
+		return WorkerTurnStartIntent{}, err
+	}
+	if err := identity.ValidateID(turnID); err != nil {
+		return WorkerTurnStartIntent{}, fmt.Errorf("turnId %w", err)
+	}
+	return queryWorkerTurnStartIntentByTurn(ctx, s.db, key, turnID)
+}
+
 // ListUnresolvedWorkerTurnStartIntents returns every prepared intent and each
 // bound intent whose exact turn is still running or finalizing. These records
 // must be reconciled before ordinary worker recovery can change their state.

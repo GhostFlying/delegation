@@ -335,7 +335,7 @@ func TestWorkspaceOperationsRejectNonRootAndNonlocalAuthorities(t *testing.T) {
 	}
 	workspaceEntries := 0
 	for _, entry := range entries {
-		if entry.Name() != changesArtifactRootName {
+		if !strings.HasPrefix(entry.Name(), ".") {
 			workspaceEntries++
 		}
 	}

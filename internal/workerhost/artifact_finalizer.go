@@ -175,6 +175,9 @@ func (h *Host) processArtifactFinalizations(ctx context.Context) {
 }
 
 func (h *Host) processPendingArtifactFinalizations(ctx context.Context) error {
+	if err := h.processPendingResultFinalizations(ctx); err != nil {
+		return err
+	}
 	for {
 		artifacts, err := h.state.ListPendingChangesCaptures(
 			ctx, h.controllerID, h.deviceID, store.MaximumRetainedChangesArtifacts,

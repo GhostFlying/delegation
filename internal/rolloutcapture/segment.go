@@ -2,6 +2,7 @@ package rolloutcapture
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -29,6 +30,7 @@ type Outcome string
 
 const (
 	OutcomeCompleted Outcome = "completed"
+	OutcomeFailed    Outcome = "failed"
 	OutcomeAborted   Outcome = "aborted"
 )
 
@@ -147,7 +149,9 @@ func captureSegment(
 				return Segment{}, ErrConflict
 			}
 			outcome := OutcomeCompleted
-			if event.kind == "turn_aborted" {
+			if event.failed {
+				outcome = OutcomeFailed
+			} else if event.kind == "turn_aborted" {
 				outcome = OutcomeAborted
 			}
 			return Segment{
@@ -166,6 +170,7 @@ func captureSegment(
 type rolloutEvent struct {
 	kind   string
 	turnID string
+	failed bool
 }
 
 func decodeEvent(line []byte) (rolloutEvent, error) {
@@ -180,8 +185,9 @@ func decodeEvent(line []byte) (rolloutEvent, error) {
 		return rolloutEvent{}, nil
 	}
 	var payload struct {
-		Type   string `json:"type"`
-		TurnID string `json:"turn_id"`
+		Type   string          `json:"type"`
+		TurnID string          `json:"turn_id"`
+		Error  json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return rolloutEvent{}, fmt.Errorf("decode managed rollout event: %w", err)
@@ -191,7 +197,9 @@ func decodeEvent(line []byte) (rolloutEvent, error) {
 		if err := identity.ValidateID(payload.TurnID); err != nil {
 			return rolloutEvent{}, fmt.Errorf("managed rollout %s turnId %w", payload.Type, err)
 		}
-		return rolloutEvent{kind: payload.Type, turnID: payload.TurnID}, nil
+		failed := payload.Type == "task_complete" && len(payload.Error) != 0 &&
+			!bytes.Equal(bytes.TrimSpace(payload.Error), []byte("null"))
+		return rolloutEvent{kind: payload.Type, turnID: payload.TurnID, failed: failed}, nil
 	case "turn_aborted":
 		if payload.TurnID != "" {
 			if err := identity.ValidateID(payload.TurnID); err != nil {

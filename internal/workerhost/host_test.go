@@ -24,6 +24,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/protocol"
+	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -567,8 +568,8 @@ func TestHostRetriesDeferredCompletionWithoutConsumerDeadlock(t *testing.T) {
 	close(releaseRetry)
 	select {
 	case err := <-followupDone:
-		if err != nil {
-			t.Fatal(err)
+		if !errors.Is(err, ErrWorkerNotIdle) {
+			t.Fatalf("Followup after capture fence error = %v, want ErrWorkerNotIdle", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Followup remained blocked after completion retry")
@@ -576,7 +577,18 @@ func TestHostRetriesDeferredCompletionWithoutConsumerDeadlock(t *testing.T) {
 	if got := attempts.Load(); got < 2 {
 		t.Fatalf("completion attempts = %d, want at least 2", got)
 	}
-	waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerRunning)
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
+	if _, err := resultManager(host).AcknowledgeResultPackageMetadata(
+		context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
+	); err != nil {
+		t.Fatal(err)
+	}
+	followup, err := host.Followup(context.Background(), FollowupRequest{
+		OperationID: newTestID(), Key: started.Worker.WorkerKey, Message: "after publication",
+	})
+	if err != nil || followup.Worker.Status != store.WorkerRunning {
+		t.Fatalf("Followup after result ACK = %#v, %v", followup, err)
+	}
 }
 
 func TestHostFailsClosedWhenAppServerExitIsUnconfirmed(t *testing.T) {
@@ -623,7 +635,7 @@ func TestHostCloseDrainsAcceptedCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if worker.Status != store.WorkerIdle {
+	if worker.Status != store.WorkerFinalizing || worker.FinalTarget != store.WorkerIdle {
 		t.Fatalf("worker after drained Close() = %#v", worker)
 	}
 }
@@ -706,38 +718,6 @@ func TestHostFailsClosedWhenWorkerMCPInventoryIsWrong(t *testing.T) {
 				t.Fatalf("clean replacement calls = %#v", got)
 			}
 		})
-	}
-}
-
-func TestHostInterruptsAmbiguousInitialTurnForExplicitFollowup(t *testing.T) {
-	firstApplication := newFakeApplication()
-	firstApplication.turnStartErr = context.DeadlineExceeded
-	secondApplication := newFakeApplication()
-	host, state, _ := newTestHost(t, 1, firstApplication, secondApplication)
-	request := SpawnRequest{
-		TreeID: testTreeID, AgentID: "123e4567-e89b-42d3-a456-426614174435",
-		ParentAgentID: testParentID, TaskName: "ambiguous", Prompt: "must not be dropped",
-	}
-	started, err := host.Spawn(context.Background(), request)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("first Spawn() error = %v, want deadline exceeded", err)
-	}
-	interrupted := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerInterrupted)
-	if interrupted.FailureCode != "turn_start_interrupted" || interrupted.ActiveTurnID != "" {
-		t.Fatalf("interrupted worker = %#v", interrupted)
-	}
-	if _, err := host.Spawn(context.Background(), request); !errors.Is(err, ErrWorkerInterrupted) {
-		t.Fatalf("retry Spawn() error = %v, want ErrWorkerInterrupted", err)
-	}
-	if got := len(firstApplication.snapshot().turns); got != 1 {
-		t.Fatalf("turn/start calls = %d, want 1", got)
-	}
-	followup, err := host.Followup(context.Background(), FollowupRequest{
-		OperationID: newTestID(), Key: interrupted.WorkerKey,
-		Message: "continue only after explicit confirmation",
-	})
-	if err != nil || followup.Worker.Status != store.WorkerRunning {
-		t.Fatalf("explicit Followup() = %#v, %v", followup, err)
 	}
 }
 
@@ -883,6 +863,289 @@ func TestHostRetriesInitialTurnWhenRequestWasNotWritten(t *testing.T) {
 	}
 }
 
+func TestHostReadsThreadPathBeforePreparingInitialTurn(t *testing.T) {
+	application := newFakeApplication()
+	application.threadStartPath = filepath.Join(t.TempDir(), "untrusted-start-response.jsonl")
+	host, state, _ := newTestHost(t, 1, application)
+	started := spawnTestWorker(t, host, newTestID(), "read rollout path")
+	record := application.snapshot()
+	if len(record.reads) != 1 || record.reads[0].ThreadID != started.Worker.CodexThreadID ||
+		record.reads[0].IncludeTurns {
+		t.Fatalf("thread/read calls before initial turn = %#v", record.reads)
+	}
+	intent, err := state.GetWorkerTurnStartIntentByTurn(
+		context.Background(), started.Worker.WorkerKey, started.Worker.ActiveTurnID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.Rollout.Status != store.WorkerRolloutUnavailable || intent.Rollout.Path != "" {
+		t.Fatalf("intent trusted thread/start path without thread/read = %#v", intent.Rollout)
+	}
+}
+
+func TestHostRestoresPendingWhenResultBacklogRejectsInitialTurn(t *testing.T) {
+	application := newFakeApplication()
+	host, state, _ := newTestHost(t, 1, application)
+	fillResultCapacity(t, host, state, 4, protocol.MaximumResultPackageBytes)
+	request := SpawnRequest{
+		TreeID: testTreeID, AgentID: newTestID(), ParentAgentID: testParentID,
+		TaskName: "result_backlog", Prompt: "do not dispatch without result capacity",
+	}
+	for attempt := range 2 {
+		started, err := host.Spawn(context.Background(), request)
+		if !errors.Is(err, store.ErrResultPackageQuota) ||
+			started.Worker.Status != store.WorkerPending {
+			t.Fatalf("backlogged Spawn attempt %d = %#v, %v", attempt, started, err)
+		}
+		if host.Err() != nil {
+			t.Fatalf("result backlog failed host: %v", host.Err())
+		}
+	}
+	if got := len(application.snapshot().turns); got != 0 {
+		t.Fatalf("result backlog wrote %d turn/start requests", got)
+	}
+}
+
+func TestHostRestoresIdleAndFailsFollowupReceiptOnResultBacklog(t *testing.T) {
+	application := newFakeApplication()
+	application.completeBeforeReturn = true
+	host, state, _ := newTestHost(t, 1, application)
+	started := spawnTestWorker(t, host, newTestID(), "followup result backlog")
+	waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerIdle)
+	noWorkspaceReservation := int64(
+		protocol.MaximumResultManifestBytes + protocol.MaximumResultRolloutBytes,
+	)
+	fillResultCapacity(t, host, state, 31, noWorkspaceReservation)
+	request := FollowupRequest{
+		OperationID: newTestID(), Key: started.Worker.WorkerKey,
+		Message: "retry after result backlog drains",
+	}
+	result, err := host.Followup(context.Background(), request)
+	if !errors.Is(err, store.ErrResultPackageQuota) ||
+		result.Worker.Status != store.WorkerIdle ||
+		result.Receipt.Status != store.WorkerOperationFailed ||
+		result.Receipt.Outcome != store.WorkerOutcomeFailed ||
+		result.Receipt.FailureCode != operationFailureResultBacklog {
+		t.Fatalf("backlogged Followup = %#v, %v", result, err)
+	}
+	if got := len(application.snapshot().turns); got != 1 {
+		t.Fatalf("backlogged follow-up wrote another turn/start: %d calls", got)
+	}
+	replayed, err := host.Followup(context.Background(), request)
+	if err != nil || replayed != result || len(application.snapshot().turns) != 1 {
+		t.Fatalf("backlogged follow-up replay = %#v, %v; want %#v", replayed, err, result)
+	}
+}
+
+func TestAmbiguousTurnStartWithoutObservedTurnRetainsPreparedIntent(t *testing.T) {
+	firstApplication := newFakeApplication()
+	firstApplication.turnStartErr = context.DeadlineExceeded
+	secondApplication := newFakeApplication()
+	host, state, paths := newTestHost(t, 1, firstApplication, secondApplication)
+	paths.allowCloseError.Store(true)
+	request := SpawnRequest{
+		TreeID: testTreeID, AgentID: newTestID(), ParentAgentID: testParentID,
+		TaskName: "ambiguous turn", Prompt: "ambiguous turn prompt",
+	}
+	first, err := host.Spawn(context.Background(), request)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ambiguous initial Spawn() error = %v", err)
+	}
+	if first.Worker.Status != store.WorkerReady {
+		first.Worker = waitWorkerStatus(t, state, first.Worker.WorkerKey, store.WorkerReady)
+	}
+	_, err = host.Spawn(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "outcome remains ambiguous") {
+		t.Fatalf("ambiguous Spawn() reconciliation error = %v", err)
+	}
+	intent, err := state.GetPreparedWorkerTurnStartIntent(
+		context.Background(), first.Worker.WorkerKey,
+	)
+	if err != nil || intent.State != store.WorkerTurnStartPrepared {
+		t.Fatalf("retained turn intent = %#v, %v", intent, err)
+	}
+	captures, err := state.ListPendingResultCaptures(
+		context.Background(), testControllerID, testDeviceID, 10,
+	)
+	if err != nil || len(captures) != 1 || captures[0].PackageID != intent.PackageID {
+		t.Fatalf("retained result reservation = %#v, %v", captures, err)
+	}
+	if !errors.Is(host.Err(), errTurnStartAmbiguous) {
+		t.Fatalf("host fatal error = %v, want errTurnStartAmbiguous", host.Err())
+	}
+	_, err = host.Spawn(context.Background(), SpawnRequest{
+		TreeID: testTreeID, AgentID: newTestID(), ParentAgentID: testParentID,
+		TaskName: "blocked after ambiguity", Prompt: "must not start",
+	})
+	if !errors.Is(err, errTurnStartAmbiguous) {
+		t.Fatalf("Spawn() after ambiguous recovery error = %v", err)
+	}
+	record := secondApplication.snapshot()
+	if len(record.resumes) != 1 || len(record.reads) != 1 || !record.reads[0].IncludeTurns ||
+		len(record.turns) != 0 {
+		t.Fatalf("ambiguous reconciliation calls = %#v", record)
+	}
+}
+
+func TestAmbiguousTurnStartConflictingEvidenceFailsHost(t *testing.T) {
+	tests := map[string]func(*fakeApplication, *fakeApplication){
+		"multiple turns": func(first, replacement *fakeApplication) {
+			replacement.threadReadHook = mirrorFakeThreadTurns(first, func(turns []turn) []turn {
+				return append(turns, turn{ID: newTestID(), Status: "inProgress"})
+			})
+		},
+		"invalid turn ID": func(first, replacement *fakeApplication) {
+			replacement.threadReadHook = mirrorFakeThreadTurns(first, func(turns []turn) []turn {
+				turns[0].ID = "invalid"
+				return turns
+			})
+		},
+		"unsupported turn status": func(first, replacement *fakeApplication) {
+			replacement.threadReadHook = mirrorFakeThreadTurns(first, func(turns []turn) []turn {
+				turns[0].Status = "paused"
+				return turns
+			})
+		},
+		"workspace mismatch": func(_, application *fakeApplication) {
+			application.resumeResultHook = func(result *threadResult) {
+				result.CWD = filepath.Join(result.CWD, "unexpected")
+			}
+		},
+		"blocked worker MCP": func(_, application *fakeApplication) {
+			application.tools = []string{"send_message", "spawn_agent", "wait_agent"}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			firstApplication := newFakeApplication()
+			firstApplication.turnStartErr = context.DeadlineExceeded
+			firstApplication.turnStartResponseLost = true
+			secondApplication := newFakeApplication()
+			mutate(firstApplication, secondApplication)
+			host, state, paths := newTestHost(t, 1, firstApplication, secondApplication)
+			paths.allowCloseError.Store(true)
+			request := SpawnRequest{
+				TreeID: testTreeID, AgentID: newTestID(), ParentAgentID: testParentID,
+				TaskName: "conflicting turn evidence", Prompt: "execute exactly once",
+			}
+			first, err := host.Spawn(context.Background(), request)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("response-loss Spawn() error = %v", err)
+			}
+			if !errors.Is(host.Err(), errTurnStartAmbiguous) {
+				t.Fatalf("host error after automatic reconciliation = %v", host.Err())
+			}
+			intent, err := state.GetPreparedWorkerTurnStartIntent(
+				context.Background(), first.Worker.WorkerKey,
+			)
+			if err != nil || intent.State != store.WorkerTurnStartPrepared {
+				t.Fatalf("retained turn intent = %#v, %v", intent, err)
+			}
+			captures, err := state.ListPendingResultCaptures(
+				context.Background(), testControllerID, testDeviceID, 10,
+			)
+			if err != nil || len(captures) != 1 || captures[0].PackageID != intent.PackageID {
+				t.Fatalf("retained result reservation = %#v, %v", captures, err)
+			}
+		})
+	}
+}
+
+func TestAmbiguousFollowupMissingPreviousBoundaryFailsHost(t *testing.T) {
+	firstApplication := newFakeApplication()
+	firstApplication.completeBeforeReturn = true
+	secondApplication := newFakeApplication()
+	secondApplication.threadReadHook = mirrorFakeThreadTurns(
+		firstApplication,
+		func(turns []turn) []turn { return turns[1:] },
+	)
+	host, state, paths := newTestHost(t, 1, firstApplication, secondApplication)
+	paths.allowCloseError.Store(true)
+	started := spawnTestWorker(t, host, newTestID(), "missing previous boundary")
+	waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerIdle)
+
+	firstApplication.mu.Lock()
+	firstApplication.turnStartErr = context.DeadlineExceeded
+	firstApplication.turnStartResponseLost = true
+	firstApplication.mu.Unlock()
+	request := FollowupRequest{
+		OperationID: newTestID(), Key: started.Worker.WorkerKey,
+		Message: "execute this follow-up exactly once",
+	}
+	if _, err := host.Followup(context.Background(), request); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("response-loss Followup() error = %v", err)
+	}
+	firstApplication.mu.Lock()
+	turns := append([]turn(nil), firstApplication.threadTurns[started.Worker.CodexThreadID]...)
+	firstApplication.mu.Unlock()
+	if len(turns) != 2 {
+		t.Fatalf("written follow-up history = %#v", turns)
+	}
+	if !errors.Is(host.Err(), errTurnStartAmbiguous) {
+		t.Fatalf("host fatal error = %v, want errTurnStartAmbiguous", host.Err())
+	}
+	intent, err := state.GetPreparedWorkerTurnStartIntentByOperation(
+		context.Background(), testControllerID, request.OperationID,
+	)
+	if err != nil || intent.State != store.WorkerTurnStartPrepared ||
+		intent.PreviousTurnID != turns[0].ID {
+		t.Fatalf("retained follow-up intent = %#v, %v", intent, err)
+	}
+}
+
+func TestAmbiguousTurnStartBindsObservedTurnWithoutRedispatch(t *testing.T) {
+	firstApplication := newFakeApplication()
+	firstApplication.turnStartErr = context.DeadlineExceeded
+	firstApplication.turnStartResponseLost = true
+	secondApplication := newFakeApplication()
+	secondApplication.threadReadHook = mirrorFakeThreadTurns(firstApplication, nil)
+	host, state, _ := newTestHost(t, 1, firstApplication, secondApplication)
+	request := SpawnRequest{
+		TreeID: testTreeID, AgentID: newTestID(), ParentAgentID: testParentID,
+		TaskName: "lost response", Prompt: "execute exactly once",
+	}
+	first, err := host.Spawn(context.Background(), request)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("response-loss Spawn() error = %v", err)
+	}
+	firstApplication.mu.Lock()
+	turns := append([]turn(nil), firstApplication.threadTurns[first.Worker.CodexThreadID]...)
+	firstApplication.mu.Unlock()
+	if len(turns) != 1 {
+		t.Fatalf("written turn history = %#v", turns)
+	}
+	reconciled := waitWorkerStatus(t, state, first.Worker.WorkerKey, store.WorkerRunning)
+	if reconciled.ActiveTurnID != turns[0].ID {
+		t.Fatalf("automatically reconciled worker = %#v", reconciled)
+	}
+	if got := len(secondApplication.snapshot().turns); got != 0 {
+		t.Fatalf("response-loss reconciliation redispatched %d turns", got)
+	}
+	intent, err := state.GetWorkerTurnStartIntentByTurn(
+		context.Background(), reconciled.WorkerKey, turns[0].ID,
+	)
+	if err != nil || intent.State != store.WorkerTurnStartBound {
+		t.Fatalf("reconciled intent = %#v, %v", intent, err)
+	}
+	sent, err := host.Send(context.Background(), SendRequest{
+		Key: reconciled.WorkerKey, MessageID: newTestID(), Message: "after nil-path recovery",
+	})
+	if err != nil || sent.Receipt.Outcome != store.WorkerOutcomeSteered {
+		t.Fatalf("Send() after nil-path recovery = %#v, %v", sent, err)
+	}
+	interrupted, err := host.Interrupt(context.Background(), InterruptRequest{
+		OperationID: newTestID(), Key: reconciled.WorkerKey,
+	})
+	if err != nil || interrupted.Receipt.Outcome != store.WorkerOutcomeInterrupted {
+		t.Fatalf("Interrupt() after nil-path recovery = %#v, %v", interrupted, err)
+	}
+	record := secondApplication.snapshot()
+	if len(record.steers) != 1 || len(record.interrupts) != 1 {
+		t.Fatalf("nil-path recovery operations = %#v", record)
+	}
+}
+
 func TestHostRetriesInitialPreflightWhenRequestWasNotWritten(t *testing.T) {
 	application := newFakeApplication()
 	application.mcpStatusErr = errors.Join(appserver.ErrRequestNotWritten, context.Canceled)
@@ -957,7 +1220,8 @@ func TestHostColdResumesPendingInitialTurnAfterAppServerRestart(t *testing.T) {
 		t.Fatalf("cold pending retry = %#v, %v", retried, err)
 	}
 	record := secondApplication.snapshot()
-	if len(record.resumes) != 1 || len(record.starts) != 0 || record.preflights != 1 || len(record.turns) != 1 {
+	if len(record.resumes) != 1 || len(record.starts) != 0 || record.preflights != 1 ||
+		len(record.reads) != 1 || record.reads[0].IncludeTurns || len(record.turns) != 1 {
 		t.Fatalf("cold pending retry calls = %#v", record)
 	}
 }
@@ -969,7 +1233,8 @@ func TestHostRecoversRunningWorkerWhenAppServerDies(t *testing.T) {
 	started := spawnTestWorker(t, host, "123e4567-e89b-42d3-a456-426614174440", "running")
 	firstApplication.crash(errors.New("lost process"))
 	interrupted := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerInterrupted)
-	if interrupted.ActiveTurnID == "" || interrupted.FailureCode != "turn_interrupted" {
+	if interrupted.ActiveTurnID != "" || interrupted.LastBoundTurnID == "" ||
+		interrupted.FailureCode != "app_server_lost" {
 		t.Fatalf("interrupted worker = %#v", interrupted)
 	}
 	if _, err := host.Spawn(context.Background(), SpawnRequest{
@@ -983,6 +1248,80 @@ func TestHostRecoversRunningWorkerWhenAppServerDies(t *testing.T) {
 	})
 	if err != nil || resumed.Worker.Status != store.WorkerRunning {
 		t.Fatalf("Followup() = %#v, %v", resumed, err)
+	}
+}
+
+func TestHostRecoversPersistedCompletionWhenNotificationIsLost(t *testing.T) {
+	application := newFakeApplication()
+	application.threadID = newTestID()
+	host, state, paths := newTestHost(t, 1, application)
+	rolloutPath := filepath.Join(
+		paths.codexHome, "sessions", "2026", "07", "26",
+		"rollout-2026-07-26T00-00-00-"+application.threadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(rolloutPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rolloutPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	application.threadPath = rolloutPath
+	started := spawnTestWorker(t, host, newTestID(), "persisted completion")
+	segment := testManagedRolloutLine("task_started", started.Worker.ActiveTurnID) +
+		testManagedRolloutLine("task_complete", started.Worker.ActiveTurnID)
+	if err := appendSyncedFile(rolloutPath, segment); err != nil {
+		t.Fatal(err)
+	}
+	application.crash(errors.New("lost completion notification"))
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
+	if outbox.Manifest.Terminal.Outcome != protocol.ResultTerminalCompleted ||
+		outbox.Manifest.Terminal.FailureCode != "" ||
+		outbox.Manifest.Rollout.Status != protocol.ResultRolloutAvailable {
+		t.Fatalf("persisted completion result = %#v", outbox.Manifest)
+	}
+	finalization, err := resultManager(host).AcknowledgeResultPackageMetadata(
+		context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
+	)
+	if err != nil || finalization.Worker.Status != store.WorkerIdle ||
+		finalization.Worker.FailureCode != "" {
+		t.Fatalf("persisted completion ACK = %#v, %v", finalization, err)
+	}
+}
+
+func TestHostRecoversPersistedFailureWhenNotificationIsLost(t *testing.T) {
+	application := newFakeApplication()
+	application.threadID = newTestID()
+	host, state, paths := newTestHost(t, 1, application)
+	rolloutPath := filepath.Join(
+		paths.codexHome, "sessions", "2026", "07", "26",
+		"rollout-2026-07-26T00-00-00-"+application.threadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(rolloutPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rolloutPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	application.threadPath = rolloutPath
+	started := spawnTestWorker(t, host, newTestID(), "persisted failure")
+	segment := testManagedRolloutLine("task_started", started.Worker.ActiveTurnID) +
+		testManagedFailedRolloutLine(started.Worker.ActiveTurnID)
+	if err := appendSyncedFile(rolloutPath, segment); err != nil {
+		t.Fatal(err)
+	}
+	application.crash(errors.New("lost failure notification"))
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
+	if outbox.Manifest.Terminal.Outcome != protocol.ResultTerminalFailed ||
+		outbox.Manifest.Terminal.FailureCode != "turn_failed" ||
+		outbox.Manifest.Rollout.Status != protocol.ResultRolloutAvailable {
+		t.Fatalf("persisted failure result = %#v", outbox.Manifest)
+	}
+	finalization, err := resultManager(host).AcknowledgeResultPackageMetadata(
+		context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
+	)
+	if err != nil || finalization.Worker.Status != store.WorkerFailed ||
+		finalization.Worker.FailureCode != "turn_failed" {
+		t.Fatalf("persisted failure ACK = %#v, %v", finalization, err)
 	}
 }
 
@@ -1084,7 +1423,8 @@ func TestHostRecoversRunningWorkerWhenThreadCloses(t *testing.T) {
 	started := spawnTestWorker(t, host, "123e4567-e89b-42d3-a456-426614174443", "thread-closed")
 	application.notifyThreadClosed(started.Worker.CodexThreadID)
 	interrupted := waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerInterrupted)
-	if interrupted.ActiveTurnID == "" || interrupted.FailureCode != "turn_interrupted" {
+	if interrupted.ActiveTurnID != "" || interrupted.LastBoundTurnID == "" ||
+		interrupted.FailureCode != "app_server_lost" {
 		t.Fatalf("thread-closed worker = %#v", interrupted)
 	}
 }
@@ -1111,7 +1451,8 @@ func TestHostPreservesOtherWorkerCompletionWhileRetiringClient(t *testing.T) {
 	close(application.closeGate)
 
 	interrupted := waitWorkerStatus(t, state, first.Worker.WorkerKey, store.WorkerInterrupted)
-	if interrupted.ActiveTurnID == "" || interrupted.FailureCode != "turn_interrupted" {
+	if interrupted.ActiveTurnID != "" || interrupted.LastBoundTurnID == "" ||
+		interrupted.FailureCode != "app_server_lost" {
 		t.Fatalf("thread-closed worker = %#v", interrupted)
 	}
 	completed := waitWorkerStatus(t, state, second.Worker.WorkerKey, store.WorkerIdle)
@@ -1529,6 +1870,19 @@ func newTestHostWithStateSetup(
 	setup func(*store.PeerStore, string),
 	applications ...*fakeApplication,
 ) (*Host, *store.PeerStore, testHostPaths) {
+	return newTestHostWithStateSetupAndResultPublisher(
+		t, maxSlots, workspaceRoot, setup, nil, applications...,
+	)
+}
+
+func newTestHostWithStateSetupAndResultPublisher(
+	t *testing.T,
+	maxSlots int,
+	workspaceRoot string,
+	setup func(*store.PeerStore, string),
+	publisherFactory func(*resultpackagefiles.Manager) resultPackagePublisher,
+	applications ...*fakeApplication,
+) (*Host, *store.PeerStore, testHostPaths) {
 	t.Helper()
 	root := t.TempDir()
 	gitBinary, err := exec.LookPath("git")
@@ -1579,6 +1933,18 @@ func newTestHostWithStateSetup(
 	if setup != nil {
 		setup(state, workspaceRoot)
 	}
+	resultPackages, err := resultpackagefiles.New(context.Background(), resultpackagefiles.Options{
+		ControllerID: testControllerID, DeviceID: testDeviceID,
+		WorkspaceRoot: workspaceRoot, Store: state,
+	})
+	if err != nil {
+		state.Close()
+		t.Fatal(err)
+	}
+	var resultPublisher resultPackagePublisher = resultPackages
+	if publisherFactory != nil {
+		resultPublisher = publisherFactory(resultPackages)
+	}
 	var factoryMu sync.Mutex
 	applicationIndex := 0
 	host, err := New(context.Background(), Options{
@@ -1604,7 +1970,7 @@ func newTestHostWithStateSetup(
 				"env_key": "TEST_PROVIDER_VALUE", "requires_openai_auth": false,
 			},
 		},
-		Store: state,
+		Store: state, ResultPackages: resultPublisher,
 		startApplication: func(ctx context.Context, options appserver.Options) (application, error) {
 			factoryMu.Lock()
 			defer factoryMu.Unlock()
@@ -1633,6 +1999,9 @@ func newTestHostWithStateSetup(
 			t.Errorf("close host: %v", err)
 		}
 		cancel()
+		if err := resultPackages.Close(); err != nil {
+			t.Errorf("close result packages: %v", err)
+		}
 		if err := state.Close(); err != nil {
 			t.Errorf("close peer state: %v", err)
 		}
@@ -1650,6 +2019,54 @@ func spawnTestWorker(t *testing.T, host *Host, agentID, name string) StartedTurn
 		t.Fatal(err)
 	}
 	return started
+}
+
+func fillResultCapacity(
+	t *testing.T,
+	host *Host,
+	state *store.PeerStore,
+	count int,
+	reservationBytes int64,
+) {
+	t.Helper()
+	key := store.WorkerKey{
+		ControllerID: testControllerID, TreeID: testTreeID, AgentID: newTestID(),
+	}
+	workspacePath := filepath.Join(host.workspaceRoot.Name(), "quota-"+key.AgentID)
+	if err := os.Mkdir(workspacePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := state.ReserveWorkerStart(
+		context.Background(),
+		store.WorkerReservation{
+			WorkerKey: key, ParentAgentID: testParentID, DeviceID: testDeviceID,
+			TaskName: "quota_filler", PromptDigest: promptDigest("quota filler"),
+			WorkspacePath: workspacePath, ProfileVersion: workerProfileVersion,
+		},
+		1,
+		time.Now(),
+	)
+	if err == nil {
+		worker, err = state.FailWorker(
+			context.Background(), worker.WorkerKey, "quota_filler", time.Now(),
+		)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range count {
+		_, err := state.ReserveResultOutbox(
+			context.Background(),
+			store.ResultOutboxKey{
+				WorkerKey: worker.WorkerKey, SourceDeviceID: testDeviceID, PackageID: newTestID(),
+			},
+			reservationBytes,
+			time.Now().Add(time.Duration(index)*time.Second),
+		)
+		if err != nil {
+			t.Fatalf("fill result capacity %d: %v", index, err)
+		}
+	}
 }
 
 func assertManagedProfile(
@@ -1798,6 +2215,20 @@ func waitWorkerStatus(
 		if err == nil && worker.Status == status {
 			return worker
 		}
+		if err == nil && worker.Status == store.WorkerFinalizing && worker.FinalTarget == status {
+			outboxes, listErr := state.ListPendingResultPublications(
+				context.Background(), key.ControllerID, worker.DeviceID, 10,
+			)
+			if listErr == nil {
+				for _, outbox := range outboxes {
+					if outbox.WorkerKey == key {
+						_, _ = state.AcknowledgeResultOutboxMetadata(
+							context.Background(), outbox.ResultOutboxKey, outbox.Metadata, time.Now(),
+						)
+					}
+				}
+			}
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	worker, err := state.GetWorker(context.Background(), key)
@@ -1839,6 +2270,7 @@ func waitHostClosed(t *testing.T, host *Host) {
 type fakeRecord struct {
 	starts     []threadStartParams
 	resumes    []threadResumeParams
+	reads      []threadReadParams
 	turns      []turnStartParams
 	steers     []turnSteerParams
 	interrupts []turnInterruptParams
@@ -1846,46 +2278,55 @@ type fakeRecord struct {
 }
 
 type fakeApplication struct {
-	mu                   sync.Mutex
-	record               fakeRecord
-	tools                []string
-	resources            []json.RawMessage
-	resourceTemplates    []json.RawMessage
-	extraServers         []mcpServerStatus
-	authStatus           string
-	threadStartHook      func() error
-	threadStartErr       error
-	resumeErr            error
-	mcpStatusErr         error
-	turnStartErr         error
-	turnSteerErr         error
-	turnInterruptErr     error
-	turnSteerHook        func(turnSteerParams)
-	steerResponseTurnID  string
-	completeBeforeReturn bool
-	completionStatus     string
-	crashAfterComplete   bool
-	notifications        chan appserver.Notification
-	done                 chan struct{}
-	closeOnce            sync.Once
-	closeStartedOnce     sync.Once
-	startStartedOnce     sync.Once
-	turnStartStartedOnce sync.Once
-	startGate            chan struct{}
-	startStarted         chan struct{}
-	turnStartGate        chan struct{}
-	turnStartStarted     chan struct{}
-	closeGate            chan struct{}
-	closeStarted         chan struct{}
-	closeCalls           int
-	closeErr             error
-	err                  error
+	mu                    sync.Mutex
+	record                fakeRecord
+	tools                 []string
+	resources             []json.RawMessage
+	resourceTemplates     []json.RawMessage
+	extraServers          []mcpServerStatus
+	authStatus            string
+	threadStartHook       func() error
+	threadStartErr        error
+	threadID              string
+	threadStartPath       string
+	threadReadErr         error
+	threadReadHook        func(threadReadParams, *threadResult)
+	threadPath            string
+	threadTurns           map[string][]turn
+	resumeErr             error
+	resumeResultHook      func(*threadResult)
+	mcpStatusErr          error
+	turnStartErr          error
+	turnStartResponseLost bool
+	turnSteerErr          error
+	turnInterruptErr      error
+	turnSteerHook         func(turnSteerParams)
+	steerResponseTurnID   string
+	completeBeforeReturn  bool
+	completionStatus      string
+	crashAfterComplete    bool
+	notifications         chan appserver.Notification
+	done                  chan struct{}
+	closeOnce             sync.Once
+	closeStartedOnce      sync.Once
+	startStartedOnce      sync.Once
+	turnStartStartedOnce  sync.Once
+	startGate             chan struct{}
+	startStarted          chan struct{}
+	turnStartGate         chan struct{}
+	turnStartStarted      chan struct{}
+	closeGate             chan struct{}
+	closeStarted          chan struct{}
+	closeCalls            int
+	closeErr              error
+	err                   error
 }
 
 func newFakeApplication() *fakeApplication {
 	return &fakeApplication{
 		tools:         []string{"send_message", "wait_agent"},
 		authStatus:    "unsupported",
+		threadTurns:   make(map[string][]turn),
 		notifications: make(chan appserver.Notification, 16), done: make(chan struct{}),
 	}
 }
@@ -1896,6 +2337,7 @@ func (a *fakeApplication) ThreadStart(_ context.Context, params, result any) err
 	a.record.starts = append(a.record.starts, start)
 	hook := a.threadStartHook
 	threadStartErr := a.threadStartErr
+	threadID := a.threadID
 	a.mu.Unlock()
 	if hook != nil {
 		if err := hook(); err != nil {
@@ -1905,7 +2347,14 @@ func (a *fakeApplication) ThreadStart(_ context.Context, params, result any) err
 	if threadStartErr != nil {
 		return threadStartErr
 	}
-	setFakeThreadResult(result.(*threadResult), newTestID(), start.CWD, start.RuntimeWorkspaceRoots)
+	if threadID == "" {
+		threadID = newTestID()
+	}
+	setFakeThreadResult(result.(*threadResult), threadID, start.CWD, start.RuntimeWorkspaceRoots)
+	if a.threadStartPath != "" {
+		path := a.threadStartPath
+		result.(*threadResult).Thread.Path = &path
+	}
 	return nil
 }
 
@@ -1929,12 +2378,57 @@ func (a *fakeApplication) ThreadResume(_ context.Context, params, result any) er
 	a.mu.Lock()
 	a.record.resumes = append(a.record.resumes, resume)
 	resumeErr := a.resumeErr
+	resumeResultHook := a.resumeResultHook
 	a.mu.Unlock()
 	if resumeErr != nil {
 		return resumeErr
 	}
 	setFakeThreadResult(result.(*threadResult), resume.ThreadID, resume.CWD, resume.RuntimeWorkspaceRoots)
+	if resumeResultHook != nil {
+		resumeResultHook(result.(*threadResult))
+	}
 	return nil
+}
+
+func (a *fakeApplication) ThreadRead(_ context.Context, params, result any) error {
+	read := params.(threadReadParams)
+	a.mu.Lock()
+	a.record.reads = append(a.record.reads, read)
+	readErr := a.threadReadErr
+	readHook := a.threadReadHook
+	path := a.threadPath
+	turns := append([]turn(nil), a.threadTurns[read.ThreadID]...)
+	a.mu.Unlock()
+	if readErr != nil {
+		return readErr
+	}
+	response := result.(*threadResult)
+	response.Thread.ID = read.ThreadID
+	if path != "" {
+		response.Thread.Path = &path
+	}
+	if read.IncludeTurns {
+		response.Thread.Turns = turns
+	}
+	if readHook != nil {
+		readHook(read, response)
+	}
+	return nil
+}
+
+func mirrorFakeThreadTurns(
+	source *fakeApplication,
+	mutate func([]turn) []turn,
+) func(threadReadParams, *threadResult) {
+	return func(read threadReadParams, result *threadResult) {
+		source.mu.Lock()
+		turns := append([]turn(nil), source.threadTurns[read.ThreadID]...)
+		source.mu.Unlock()
+		if mutate != nil {
+			turns = mutate(turns)
+		}
+		result.Thread.Turns = turns
+	}
 }
 
 func setFakeThreadResult(result *threadResult, threadID, cwd string, roots []string) {
@@ -1986,6 +2480,7 @@ func (a *fakeApplication) TurnStart(ctx context.Context, params, result any) err
 	completionStatus := a.completionStatus
 	crashAfterComplete := a.crashAfterComplete
 	turnStartErr := a.turnStartErr
+	turnStartResponseLost := a.turnStartResponseLost
 	turnStartGate := a.turnStartGate
 	turnStartStarted := a.turnStartStarted
 	a.mu.Unlock()
@@ -1999,14 +2494,24 @@ func (a *fakeApplication) TurnStart(ctx context.Context, params, result any) err
 		case <-turnStartGate:
 		}
 	}
-	if turnStartErr != nil {
+	if turnStartErr != nil && !turnStartResponseLost {
 		return turnStartErr
 	}
-	result.(*turnStartResult).Turn = turn{ID: turnID, Status: "inProgress"}
+	started := turn{ID: turnID, Status: "inProgress"}
+	result.(*turnStartResult).Turn = started
+	a.mu.Lock()
+	a.threadTurns[turnParams.ThreadID] = append(a.threadTurns[turnParams.ThreadID], started)
+	a.mu.Unlock()
+	if turnStartResponseLost {
+		return turnStartErr
+	}
 	if complete {
 		if completionStatus == "" {
 			completionStatus = "completed"
 		}
+		a.mu.Lock()
+		a.threadTurns[turnParams.ThreadID][len(a.threadTurns[turnParams.ThreadID])-1].Status = completionStatus
+		a.mu.Unlock()
 		payload, _ := json.Marshal(turnCompletedNotification{
 			ThreadID: turnParams.ThreadID,
 			Turn:     turn{ID: turnID, Status: completionStatus, Error: json.RawMessage("null")},
@@ -2110,6 +2615,13 @@ func (a *fakeApplication) notifyThreadClosed(threadID string) {
 }
 
 func (a *fakeApplication) notifyCompletion(threadID, turnID, status string) {
+	a.mu.Lock()
+	for index := range a.threadTurns[threadID] {
+		if a.threadTurns[threadID][index].ID == turnID {
+			a.threadTurns[threadID][index].Status = status
+		}
+	}
+	a.mu.Unlock()
 	payload, _ := json.Marshal(turnCompletedNotification{
 		ThreadID: threadID,
 		Turn:     turn{ID: turnID, Status: status, Error: json.RawMessage("null")},
@@ -2123,6 +2635,7 @@ func (a *fakeApplication) snapshot() fakeRecord {
 	return fakeRecord{
 		starts:     append([]threadStartParams(nil), a.record.starts...),
 		resumes:    append([]threadResumeParams(nil), a.record.resumes...),
+		reads:      append([]threadReadParams(nil), a.record.reads...),
 		turns:      append([]turnStartParams(nil), a.record.turns...),
 		steers:     append([]turnSteerParams(nil), a.record.steers...),
 		interrupts: append([]turnInterruptParams(nil), a.record.interrupts...),

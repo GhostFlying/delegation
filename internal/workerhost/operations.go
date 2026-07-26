@@ -16,6 +16,7 @@ const (
 	operationFailureAppServerRejected    = "app_server_rejected"
 	operationFailureAppServerUnavailable = "app_server_unavailable"
 	operationFailureRequestNotWritten    = "request_not_written"
+	operationFailureResultBacklog        = "result_backlog"
 	operationFailureWorkerFailed         = "worker_failed"
 	operationFailureWorkerNotIdle        = "worker_not_idle"
 	operationFailureWorkerNotRunning     = "worker_not_running"
@@ -171,6 +172,39 @@ func (h *Host) followupOperationLocked(
 		return OperationResult{}, nil, err
 	}
 	defer cancel()
+	intent, intentErr := h.state.GetPreparedWorkerTurnStartIntentByOperation(
+		operationContext, h.controllerID, request.OperationID,
+	)
+	if intentErr == nil {
+		receipt, receiptErr := h.state.GetWorkerOperation(
+			operationContext, h.controllerID, request.OperationID,
+		)
+		if receiptErr != nil {
+			return OperationResult{}, nil, receiptErr
+		}
+		if intent.WorkerKey != request.Key || receipt.WorkerKey != request.Key ||
+			receipt.Action != store.WorkerOperationFollowup ||
+			receipt.PayloadDigest != promptDigest(request.Message) ||
+			receipt.Status != store.WorkerOperationPending ||
+			receipt.Outcome != store.WorkerOutcomePending || receipt.FailureCode != "" {
+			return OperationResult{}, nil, store.ErrWorkerOperationConflict
+		}
+		client, clientErr := h.ensureClient(operationContext)
+		if clientErr != nil {
+			return OperationResult{}, nil, clientErr
+		}
+		started, recovery, reconcileErr := h.reconcilePreparedTurnIntent(
+			operationContext, client, intent,
+		)
+		result := OperationResult{Worker: started.Worker}
+		if started.Operation != nil {
+			result.Receipt = *started.Operation
+		}
+		return result, recovery, reconcileErr
+	}
+	if !errors.Is(intentErr, store.ErrNotFound) {
+		return OperationResult{}, nil, intentErr
+	}
 	result, replay, err := h.beginWorkerOperation(
 		operationContext,
 		request.Key,
@@ -186,12 +220,14 @@ func (h *Host) followupOperationLocked(
 		result.Worker = started.Worker
 	}
 	if err == nil {
-		result, err = h.completeWorkerOperation(
-			operationContext,
-			result,
-			store.WorkerOutcomeStarted,
-			"",
-		)
+		if started.Operation == nil {
+			return result, nil, errors.New("turn start did not resolve its follow-up operation")
+		}
+		result.Receipt = *started.Operation
+		return result, nil, nil
+	}
+	if started.Operation != nil {
+		result.Receipt = *started.Operation
 		return result, nil, err
 	}
 	if recovery != nil {
@@ -431,7 +467,7 @@ func (h *Host) runningClient(worker store.WorkerReservation) (application, error
 	if h.recovering != nil {
 		return nil, errClientRecovering
 	}
-	if h.client == nil || h.loaded[worker.WorkerKey] != worker.CodexThreadID {
+	if h.client == nil || h.loaded[worker.WorkerKey].ID != worker.CodexThreadID {
 		return nil, errors.New("running worker thread is not loaded in the managed app-server")
 	}
 	return h.client, nil
@@ -449,6 +485,9 @@ func operationFailureCode(err error) string {
 	}
 	if errors.Is(err, ErrWorkerFailed) {
 		return operationFailureWorkerFailed
+	}
+	if errors.Is(err, store.ErrResultPackageQuota) {
+		return operationFailureResultBacklog
 	}
 	var rpcError *appserver.RPCError
 	if errors.As(err, &rpcError) {
