@@ -104,6 +104,7 @@ type integrationWorkerController struct{}
 type integrationWorkerLifecycleSource struct{}
 
 var integrationArtifactChanges = make(chan struct{})
+var integrationResultPackageChanges = make(chan struct{})
 
 func (integrationWorkerLifecycleSource) WorkerRevision() uint64 { return 0 }
 
@@ -131,6 +132,23 @@ func (integrationWorkerLifecycleSource) AcknowledgeChangesArtifact(
 	uint64,
 ) error {
 	return errors.New("changes artifact acknowledgement is outside this mailbox test")
+}
+
+func (integrationWorkerLifecycleSource) ResultPackageChanges() <-chan struct{} {
+	return integrationResultPackageChanges
+}
+
+func (integrationWorkerLifecycleSource) ListPendingResultPackagePublications(
+	context.Context,
+) ([]connector.ResultPackagePublication, error) {
+	return []connector.ResultPackagePublication{}, nil
+}
+
+func (integrationWorkerLifecycleSource) AcknowledgeResultPackageMetadata(
+	context.Context,
+	connector.ResultPackagePublication,
+) error {
+	return errors.New("result package acknowledgement is outside this mailbox test")
 }
 
 func (integrationWorkerSpawner) SpawnWorker(
@@ -234,6 +252,48 @@ func (integrationWorkerController) CancelWorkspaceTransfer(
 
 func (integrationWorkerController) CleanupWorkspaceTransfers(context.Context) error { return nil }
 
+func (integrationWorkerController) ReadResultPackagePart(
+	context.Context,
+	connector.ResultPackageReadRequest,
+) (protocol.ReadResultPackagePartResult, error) {
+	return protocol.ReadResultPackagePartResult{}, errors.New("not used")
+}
+
+func (integrationWorkerController) BeginResultPackage(
+	context.Context,
+	connector.ResultPackageBeginRequest,
+) (protocol.BeginResultPackageResult, error) {
+	return protocol.BeginResultPackageResult{}, errors.New("not used")
+}
+
+func (integrationWorkerController) WriteResultPackagePart(
+	context.Context,
+	connector.ResultPackageWriteRequest,
+) (protocol.WriteResultPackagePartResult, error) {
+	return protocol.WriteResultPackagePartResult{}, errors.New("not used")
+}
+
+func (integrationWorkerController) FinishResultPackage(
+	context.Context,
+	connector.ResultPackageFinishRequest,
+) (protocol.FinishResultPackageResult, error) {
+	return protocol.FinishResultPackageResult{}, errors.New("not used")
+}
+
+func (integrationWorkerController) CancelResultPackage(
+	context.Context,
+	connector.ResultPackageCancelRequest,
+) (protocol.CancelResultPackageResult, error) {
+	return protocol.CancelResultPackageResult{}, errors.New("not used")
+}
+
+func (integrationWorkerController) AcknowledgeResultPackage(
+	context.Context,
+	connector.ResultPackageAcknowledgeRequest,
+) (protocol.AcknowledgeResultPackageResult, error) {
+	return protocol.AcknowledgeResultPackageResult{}, errors.New("not used")
+}
+
 func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 	controllerID := newIntegrationID(t)
 	deviceID := newIntegrationID(t)
@@ -282,7 +342,9 @@ func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 		WorkerController:      integrationWorkerController{},
 		WorkerLifecycleSource: integrationWorkerLifecycleSource{},
 		ChangesArtifactSource: integrationWorkerLifecycleSource{},
+		ResultPackageSource:   integrationWorkerLifecycleSource{},
 		WorkspaceManager:      integrationWorkerController{},
+		ResultPackageManager:  integrationWorkerController{},
 	})
 	if err != nil {
 		cancelRun()

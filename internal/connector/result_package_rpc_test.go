@@ -105,7 +105,7 @@ func (m *resultPackageRPCManager) callCount() int {
 
 func TestConnectorDispatchesResultPackageRPCs(t *testing.T) {
 	fixture := newResultPackageRPCFixture(t)
-	root := workerOperationRoot()
+	root := resultPackageRoot()
 	worker := resultPackageWorker()
 	tests := []struct {
 		name   string
@@ -146,7 +146,7 @@ func TestConnectorAcceptsDurableChunkReplayOffsetBeyondRequestedChunk(t *testing
 
 func TestConnectorRejectsWrongResultPackagePrincipalRole(t *testing.T) {
 	fixture := newResultPackageRPCFixture(t)
-	root := workerOperationRoot()
+	root := resultPackageRoot()
 	worker := resultPackageWorker()
 	tests := []struct {
 		name   string
@@ -287,6 +287,15 @@ func resultPackageWorker() control.PrincipalIdentity {
 		connectorTestControllerID,
 		connectorTestThreadID,
 		connectorTestWorkerID,
+		connectorTestRootAgentID,
+		connectorTestDeviceID,
+	).Identity()
+}
+
+func resultPackageRoot() control.PrincipalIdentity {
+	return control.NewRootPrincipal(
+		connectorTestControllerID,
+		connectorTestThreadID,
 		connectorTestRootAgentID,
 		connectorTestDeviceID,
 	).Identity()

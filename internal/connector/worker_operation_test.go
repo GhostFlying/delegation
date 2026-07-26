@@ -433,6 +433,8 @@ func newTestClientWithWorkerManager(
 		WorkerSpawner: manager, WorkerController: manager,
 		WorkerLifecycleSource: testWorkerSpawner{}, WorkspaceManager: testWorkerSpawner{},
 		ChangesArtifactSource: testWorkerSpawner{},
+		ResultPackageSource:   testWorkerSpawner{},
+		ResultPackageManager:  testWorkerSpawner{},
 		ReportError:           reportError,
 	})
 	if err != nil {
