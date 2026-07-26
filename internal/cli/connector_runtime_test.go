@@ -196,18 +196,9 @@ func TestPeerServicesRegisterDevicesAndServeRootBridge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	statusContext, cancelStatus := context.WithTimeout(context.Background(), time.Second)
-	localStatus, err := localbridge.ReadStatus(statusContext, endpoint)
-	cancelStatus()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !localStatus.Connected || !localStatus.WorkerSyncReady ||
-		localStatus.ControllerID != runtimeControllerID ||
-		localStatus.DeviceID != runtimeDeviceID || localStatus.DeviceName != "peer-a" ||
-		localStatus.MaxWorkerSlots != firstConfig.Peer.MaxWorkerSlots {
-		t.Fatalf("connector local status = %#v", localStatus)
-	}
+	waitForReadyRuntimeStatus(
+		t, endpoint, runtimeDeviceID, "peer-a", firstConfig.Peer.MaxWorkerSlots,
+	)
 	bridgeClient, err := localbridge.NewClient(endpoint)
 	if err != nil {
 		t.Fatal(err)
@@ -723,6 +714,31 @@ func waitForRuntimeDevice(t *testing.T, registry *store.Store, deviceID string, 
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("device %s online state did not become %v", deviceID, online)
+}
+
+func waitForReadyRuntimeStatus(
+	t *testing.T,
+	endpoint, deviceID, deviceName string,
+	maxWorkerSlots int,
+) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var (
+		lastStatus localbridge.StatusSnapshot
+		lastErr    error
+	)
+	for time.Now().Before(deadline) {
+		statusContext, cancelStatus := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		lastStatus, lastErr = localbridge.ReadStatus(statusContext, endpoint)
+		cancelStatus()
+		if lastErr == nil && lastStatus.Connected && lastStatus.WorkerSyncReady &&
+			lastStatus.ControllerID == runtimeControllerID && lastStatus.DeviceID == deviceID &&
+			lastStatus.DeviceName == deviceName && lastStatus.MaxWorkerSlots == maxWorkerSlots {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("connector local status did not become ready: status=%#v, error=%v", lastStatus, lastErr)
 }
 
 func waitConnectorRuntime(done <-chan error) error {
