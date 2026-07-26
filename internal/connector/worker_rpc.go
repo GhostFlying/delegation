@@ -34,6 +34,18 @@ func (s *session) handleBrokerRequest(request protocol.Envelope) error {
 		return s.handleFinishWorkspaceTransferRequest(request)
 	case protocol.MethodCancelWorkspaceTransfer:
 		return s.handleCancelWorkspaceTransferRequest(request)
+	case protocol.MethodReadResultPackagePart:
+		return s.handleReadResultPackagePartRequest(request)
+	case protocol.MethodBeginResultPackage:
+		return s.handleBeginResultPackageRequest(request)
+	case protocol.MethodWriteResultPackagePart:
+		return s.handleWriteResultPackagePartRequest(request)
+	case protocol.MethodFinishResultPackage:
+		return s.handleFinishResultPackageRequest(request)
+	case protocol.MethodCancelResultPackage:
+		return s.handleCancelResultPackageRequest(request)
+	case protocol.MethodAcknowledgeResultPackage:
+		return s.handleAcknowledgeResultPackageRequest(request)
 	default:
 		return s.writeError(request, protocol.ErrorMethodNotFound, "method not found")
 	}
