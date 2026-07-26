@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -29,18 +30,22 @@ type resultPackageRPCFixture struct {
 	finish   protocol.FinishResultPackageParams
 	cancel   protocol.CancelResultPackageParams
 	ack      protocol.AcknowledgeResultPackageParams
+	release  protocol.ReleaseResultPackageParams
 }
 
 type resultPackageRPCManager struct {
 	mu    sync.Mutex
 	calls []string
 
-	readResult   protocol.ReadResultPackagePartResult
-	beginResult  protocol.BeginResultPackageResult
-	writeResult  protocol.WriteResultPackagePartResult
-	finishResult protocol.FinishResultPackageResult
-	cancelResult protocol.CancelResultPackageResult
-	ackResult    protocol.AcknowledgeResultPackageResult
+	readResult    protocol.ReadResultPackagePartResult
+	beginResult   protocol.BeginResultPackageResult
+	writeResult   protocol.WriteResultPackagePartResult
+	finishResult  protocol.FinishResultPackageResult
+	cancelResult  protocol.CancelResultPackageResult
+	ackResult     protocol.AcknowledgeResultPackageResult
+	releaseResult protocol.ReleaseResultPackageResult
+	cleanup       chan struct{}
+	cleanupErr    error
 }
 
 func (m *resultPackageRPCManager) ReadResultPackagePart(
@@ -91,6 +96,24 @@ func (m *resultPackageRPCManager) AcknowledgeResultPackage(
 	return m.ackResult, nil
 }
 
+func (m *resultPackageRPCManager) ReleaseResultPackage(
+	_ context.Context,
+	_ ResultPackageReleaseRequest,
+) (protocol.ReleaseResultPackageResult, error) {
+	m.record("release")
+	return m.releaseResult, nil
+}
+
+func (m *resultPackageRPCManager) CleanupResultPackages(context.Context) error {
+	if m.cleanup != nil {
+		select {
+		case m.cleanup <- struct{}{}:
+		default:
+		}
+	}
+	return m.cleanupErr
+}
+
 func (m *resultPackageRPCManager) record(method string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -119,6 +142,7 @@ func TestConnectorDispatchesResultPackageRPCs(t *testing.T) {
 		{name: "finish", method: protocol.MethodFinishResultPackage, source: root, params: fixture.finish},
 		{name: "cancel", method: protocol.MethodCancelResultPackage, source: root, params: fixture.cancel},
 		{name: "ack", method: protocol.MethodAcknowledgeResultPackage, source: worker, params: fixture.ack},
+		{name: "release", method: protocol.MethodReleaseResultPackage, source: worker, params: fixture.release},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -144,6 +168,43 @@ func TestConnectorAcceptsDurableChunkReplayOffsetBeyondRequestedChunk(t *testing
 	}
 }
 
+func TestResultPackageMaintenanceRunsImmediatelyAndReportsErrors(t *testing.T) {
+	cleanup := make(chan struct{}, 1)
+	reported := make(chan error, 1)
+	manager := &resultPackageRPCManager{cleanup: cleanup, cleanupErr: errors.New("storage unavailable")}
+	client := &Client{
+		resultPackages: manager,
+		reportError: func(err error) {
+			reported <- err
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client.resultPackageMaintenanceLoop(ctx)
+	}()
+	select {
+	case <-cleanup:
+	case <-time.After(time.Second):
+		t.Fatal("result package maintenance did not run immediately")
+	}
+	select {
+	case err := <-reported:
+		if !errors.Is(err, manager.cleanupErr) {
+			t.Fatalf("reported maintenance error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("result package maintenance error was not reported")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("result package maintenance did not stop on cancellation")
+	}
+}
+
 func TestConnectorRejectsWrongResultPackagePrincipalRole(t *testing.T) {
 	fixture := newResultPackageRPCFixture(t)
 	root := resultPackageRoot()
@@ -157,6 +218,7 @@ func TestConnectorRejectsWrongResultPackagePrincipalRole(t *testing.T) {
 		{name: "root reads worker outbox", method: protocol.MethodReadResultPackagePart, source: root, params: fixture.read},
 		{name: "worker begins root inbox", method: protocol.MethodBeginResultPackage, source: worker, params: fixture.begin},
 		{name: "root acknowledges worker outbox", method: protocol.MethodAcknowledgeResultPackage, source: root, params: fixture.ack},
+		{name: "root releases worker outbox", method: protocol.MethodReleaseResultPackage, source: root, params: fixture.release},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -257,7 +319,8 @@ func newResultPackageRPCFixture(t *testing.T) resultPackageRPCFixture {
 		cancel: protocol.CancelResultPackageParams{
 			AttemptID: resultPackageTestAttemptID, PackageID: resultPackageTestPackageID,
 		},
-		ack: protocol.AcknowledgeResultPackageParams{PackageID: resultPackageTestPackageID, Sequence: 9},
+		ack:     protocol.AcknowledgeResultPackageParams{PackageID: resultPackageTestPackageID, Sequence: 9},
+		release: protocol.ReleaseResultPackageParams{PackageID: resultPackageTestPackageID, Sequence: 9},
 	}
 }
 
@@ -276,9 +339,10 @@ func resultPackageManagerForFixture(fixture resultPackageRPCFixture) *resultPack
 			AttemptID: fixture.write.AttemptID, PackageID: fixture.write.PackageID,
 			Kind: fixture.write.Kind, NextOffset: int64(len(fixture.write.Data)),
 		},
-		finishResult: protocol.FinishResultPackageResult(fixture.finish),
-		cancelResult: protocol.CancelResultPackageResult(fixture.cancel),
-		ackResult:    protocol.AcknowledgeResultPackageResult(fixture.ack),
+		finishResult:  protocol.FinishResultPackageResult(fixture.finish),
+		cancelResult:  protocol.CancelResultPackageResult(fixture.cancel),
+		ackResult:     protocol.AcknowledgeResultPackageResult(fixture.ack),
+		releaseResult: protocol.ReleaseResultPackageResult(fixture.release),
 	}
 }
 

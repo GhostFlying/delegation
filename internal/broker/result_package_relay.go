@@ -18,6 +18,7 @@ const (
 	resultPackageChunkTimeout         = 30 * time.Second
 	resultPackageFinishTimeout        = 2 * time.Minute
 	resultPackageAcknowledgeTimeout   = 30 * time.Second
+	resultPackageReleaseTimeout       = 30 * time.Second
 	resultPackageCancelTimeout        = 5 * time.Second
 	resultPackageReconnectScanTimeout = 30 * time.Second
 	maximumPendingResultPackageRelays = 128
@@ -419,6 +420,13 @@ type resultPackageSourceAcknowledger interface {
 		string,
 		time.Time,
 	) (store.ResultPackageRecord, error)
+	MarkResultPackageSourceReleased(
+		context.Context,
+		string,
+		control.PrincipalIdentity,
+		string,
+		time.Time,
+	) (store.ResultPackageRecord, error)
 }
 
 func callResultPackagePeer(
@@ -455,7 +463,7 @@ func (s *Server) relayResultPackage(
 	if record.State == store.ResultPackageDelivered {
 		s.notifyResultPackageDelivered(record)
 	}
-	if record.SourceAcknowledgedAt != 0 {
+	if record.SourceReleasedAt != 0 {
 		return nil
 	}
 	source := s.connection(record.SourcePrincipal.DeviceID)
@@ -463,7 +471,7 @@ func (s *Server) relayResultPackage(
 		return fmt.Errorf("%w: source peer is offline", errResultPackageRelayDeferred)
 	}
 	if record.State == store.ResultPackageDelivered {
-		return acknowledgeAndMarkResultPackage(
+		return finalizeDeliveredResultPackage(
 			ctx, source, s.registry, record.SourcePrincipal, record, s.now(),
 		)
 	}
@@ -498,8 +506,36 @@ func (s *Server) relayResultPackage(
 	if err != nil {
 		return err
 	}
-	return acknowledgeAndMarkResultPackage(
+	acknowledged, err := acknowledgeAndMarkResultPackage(
 		ctx, source, s.registry, record.SourcePrincipal, delivered, s.now(),
+	)
+	if err != nil {
+		return err
+	}
+	return releaseAndMarkResultPackage(
+		ctx, source, s.registry, record.SourcePrincipal, acknowledged, s.now(),
+	)
+}
+
+func finalizeDeliveredResultPackage(
+	ctx context.Context,
+	source resultPackagePeer,
+	registry resultPackageSourceAcknowledger,
+	workerPrincipal control.PrincipalIdentity,
+	record store.ResultPackageRecord,
+	now time.Time,
+) error {
+	var err error
+	if record.SourceAcknowledgedAt == 0 {
+		record, err = acknowledgeAndMarkResultPackage(
+			ctx, source, registry, workerPrincipal, record, now,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return releaseAndMarkResultPackage(
+		ctx, source, registry, workerPrincipal, record, now,
 	)
 }
 
@@ -781,21 +817,77 @@ func acknowledgeAndMarkResultPackage(
 	workerPrincipal control.PrincipalIdentity,
 	record store.ResultPackageRecord,
 	acknowledgedAt time.Time,
-) error {
+) (store.ResultPackageRecord, error) {
 	if err := acknowledgeResultPackage(ctx, source, workerPrincipal, record); err != nil {
-		return err
+		return store.ResultPackageRecord{}, err
 	}
-	if _, err := registry.MarkResultPackageSourceAcknowledged(
+	acknowledged, err := registry.MarkResultPackageSourceAcknowledged(
 		ctx,
 		workerPrincipal.DeviceID,
 		workerPrincipal,
 		record.Manifest.PackageID,
 		acknowledgedAt,
-	); err != nil {
-		return resultPackageStoreRelayError(
+	)
+	if err != nil {
+		return store.ResultPackageRecord{}, resultPackageStoreRelayError(
 			"record source result package acknowledgement",
 			err,
 		)
+	}
+	return acknowledged, nil
+}
+
+func releaseResultPackage(
+	ctx context.Context,
+	source resultPackagePeer,
+	workerPrincipal control.PrincipalIdentity,
+	record store.ResultPackageRecord,
+) error {
+	params := protocol.ReleaseResultPackageParams{
+		PackageID: record.Manifest.PackageID,
+		Sequence:  record.Sequence,
+	}
+	payload, err := callResultPackagePeer(
+		ctx,
+		resultPackageReleaseTimeout,
+		source,
+		protocol.MethodReleaseResultPackage,
+		record.Manifest.TreeID,
+		workerPrincipal,
+		params,
+	)
+	if err != nil {
+		return deferResultPackagePeerError("release source result package", err)
+	}
+	released, err := protocol.DecodePayload[protocol.ReleaseResultPackageResult](payload)
+	if err != nil || released.Validate() != nil || released != protocol.ReleaseResultPackageResult(params) {
+		return errors.New("source returned an invalid result package release acknowledgement")
+	}
+	return nil
+}
+
+func releaseAndMarkResultPackage(
+	ctx context.Context,
+	source resultPackagePeer,
+	registry resultPackageSourceAcknowledger,
+	workerPrincipal control.PrincipalIdentity,
+	record store.ResultPackageRecord,
+	releasedAt time.Time,
+) error {
+	if record.SourceAcknowledgedAt == 0 {
+		return errors.New("result package release preceded source acknowledgement")
+	}
+	if err := releaseResultPackage(ctx, source, workerPrincipal, record); err != nil {
+		return err
+	}
+	if _, err := registry.MarkResultPackageSourceReleased(
+		ctx,
+		workerPrincipal.DeviceID,
+		workerPrincipal,
+		record.Manifest.PackageID,
+		releasedAt,
+	); err != nil {
+		return resultPackageStoreRelayError("record source result package release", err)
 	}
 	return nil
 }

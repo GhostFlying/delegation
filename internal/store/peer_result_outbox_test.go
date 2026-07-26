@@ -94,11 +94,20 @@ func TestResultOutboxLifecycleIsIdempotentAndReleasesUnusedReservation(t *testin
 	if err != nil || len(eligible) != 1 || eligible[0].PackageID != key.PackageID {
 		t.Fatalf("delivered GC list = %#v, %v", eligible, err)
 	}
-	if err := state.DeleteDeliveredResultOutbox(ctx, key); err != nil {
+	release, err := state.PrepareResultOutboxRelease(ctx, key, 9, now.Add(8*time.Second))
+	if err != nil || release.State != ResultOutboxReleasePending {
+		t.Fatalf("release preparation = %#v, %v", release, err)
+	}
+	if _, err := state.PrepareResultOutboxRelease(ctx, key, 10, now.Add(9*time.Second)); !errors.Is(
+		err, ErrResultPackageConflict,
+	) {
+		t.Fatalf("different release sequence error = %v, want ErrResultPackageConflict", err)
+	}
+	if err := state.CompactResultOutboxRelease(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.DeleteDeliveredResultOutbox(ctx, key); err != nil {
-		t.Fatalf("delete replay: %v", err)
+	if err := state.CompactResultOutboxRelease(ctx, key); err != nil {
+		t.Fatalf("release compact replay: %v", err)
 	}
 }
 

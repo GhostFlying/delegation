@@ -83,6 +83,7 @@ func (s *Server) buildStatusSnapshot(
 			DeliveryPending:    uint64(durable.Results.DeliveryPending),
 			Delivered:          uint64(durable.Results.Delivered),
 			SourceAcknowledged: uint64(durable.Results.SourceAcknowledged),
+			SourceReleased:     uint64(durable.Results.SourceReleased),
 		},
 	}
 }

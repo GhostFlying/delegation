@@ -45,6 +45,7 @@ type ResultPackageRecord struct {
 	PublishedAt          int64
 	DeliveredAt          int64
 	SourceAcknowledgedAt int64
+	SourceReleasedAt     int64
 }
 
 type ResultPackagePageRequest struct {
@@ -356,6 +357,77 @@ WHERE controller_id = ? AND tree_id = ? AND package_id = ?
 	return record, err
 }
 
+// MarkResultPackageSourceReleased records that the source peer completed the
+// broker-authorized payload deletion. Replays preserve the first timestamp.
+func (s *Store) MarkResultPackageSourceReleased(
+	ctx context.Context,
+	connectedDeviceID string,
+	source control.PrincipalIdentity,
+	packageID string,
+	releasedAt time.Time,
+) (ResultPackageRecord, error) {
+	if err := identity.ValidateID(connectedDeviceID); err != nil {
+		return ResultPackageRecord{}, fmt.Errorf("connectedDeviceId %w", err)
+	}
+	if err := source.Validate(); err != nil {
+		return ResultPackageRecord{}, fmt.Errorf("source: %w", err)
+	}
+	if err := identity.ValidateID(packageID); err != nil {
+		return ResultPackageRecord{}, fmt.Errorf("packageId %w", err)
+	}
+	timestamp, err := unixTime(releasedAt, "releasedAt")
+	if err != nil {
+		return ResultPackageRecord{}, err
+	}
+	var record ResultPackageRecord
+	err = s.withImmediateTransaction(ctx, func(connection *sql.Conn) error {
+		principal, err := authorizePrincipal(
+			ctx, connection, source, control.CapabilityArtifactPublishSelf,
+		)
+		if err != nil {
+			return err
+		}
+		if principal.ParentAgentID == "" || principal.DeviceID != connectedDeviceID {
+			return ErrAuthorizationDenied
+		}
+		record, err = queryResultPackageByID(
+			ctx, connection, source.ControllerID, source.TreeID, packageID,
+		)
+		if err != nil {
+			return err
+		}
+		if record.SourcePrincipal != source || record.Manifest.SourceDeviceID != connectedDeviceID {
+			return ErrAuthorizationDenied
+		}
+		if record.State != ResultPackageDelivered || record.SourceAcknowledgedAt == 0 {
+			return ErrConflict
+		}
+		if record.SourceReleasedAt != 0 {
+			return nil
+		}
+		timestamp = max(timestamp, record.SourceAcknowledgedAt, int64(1))
+		result, err := connection.ExecContext(ctx, `
+UPDATE result_packages
+SET source_released_at = ?
+WHERE controller_id = ? AND tree_id = ? AND package_id = ?
+  AND state = 'delivered' AND source_acknowledged_at > 0 AND source_released_at = 0
+`, timestamp, source.ControllerID, source.TreeID, packageID)
+		if err != nil {
+			return fmt.Errorf("mark result package source released: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect result package source release update: %w", err)
+		}
+		if affected != 1 {
+			return errors.New("result package state changed during source release")
+		}
+		record.SourceReleasedAt = timestamp
+		return nil
+	})
+	return record, err
+}
+
 func (s *Store) ListDeliveredResultPackages(
 	ctx context.Context,
 	root control.PrincipalIdentity,
@@ -478,7 +550,7 @@ func (s *Store) ListPendingResultPackageRelaysForPeer(
 	rows, err := s.db.QueryContext(ctx, resultPackageSelect+`
 WHERE r.controller_id = ? AND (
   (r.state = 'deliveryPending' AND (r.source_device_id = ? OR r.root_device_id = ?)) OR
-  (r.state = 'delivered' AND r.source_device_id = ? AND r.source_acknowledged_at = 0)
+  (r.state = 'delivered' AND r.source_device_id = ? AND r.source_released_at = 0)
 )
 AND (? = 0 OR r.published_at > ? OR (r.published_at = ? AND r.package_id > ?))
 ORDER BY r.published_at, r.package_id
@@ -690,7 +762,7 @@ func scanResultPackage(scanner rowScanner) (ResultPackageRecord, error) {
 		&managedThreadID, &turnID, &lifecycleRevision, &record.RootDeviceID,
 		&record.Metadata.Manifest, &manifestSize, &manifestSHA256, &record.State,
 		&record.Sequence, &record.PublishedAt, &record.DeliveredAt,
-		&record.SourceAcknowledgedAt,
+		&record.SourceAcknowledgedAt, &record.SourceReleasedAt,
 		&sourceParentAgentID, &principalSourceDeviceID, &rootAgentID, &treeRootDeviceID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -757,7 +829,8 @@ func scanResultPackage(scanner rowScanner) (ResultPackageRecord, error) {
 	}
 	switch record.State {
 	case ResultPackageDeliveryPending:
-		if record.Sequence != 0 || record.DeliveredAt != 0 || record.SourceAcknowledgedAt != 0 {
+		if record.Sequence != 0 || record.DeliveredAt != 0 || record.SourceAcknowledgedAt != 0 ||
+			record.SourceReleasedAt != 0 {
 			return ResultPackageRecord{}, corruptResultPackage(
 				errors.New("stored pending result package contains delivery state"),
 			)
@@ -765,7 +838,9 @@ func scanResultPackage(scanner rowScanner) (ResultPackageRecord, error) {
 	case ResultPackageDelivered:
 		if record.Sequence == 0 || record.Sequence > math.MaxInt64 ||
 			record.DeliveredAt < record.PublishedAt ||
-			(record.SourceAcknowledgedAt != 0 && record.SourceAcknowledgedAt < record.DeliveredAt) {
+			(record.SourceAcknowledgedAt != 0 && record.SourceAcknowledgedAt < record.DeliveredAt) ||
+			(record.SourceReleasedAt != 0 && (record.SourceAcknowledgedAt == 0 ||
+				record.SourceReleasedAt < record.SourceAcknowledgedAt)) {
 			return ResultPackageRecord{}, corruptResultPackage(
 				errors.New("stored delivered result package state is invalid"),
 			)
@@ -823,7 +898,7 @@ const resultPackageSelect = `
 SELECT r.controller_id, r.tree_id, r.package_id, r.source_agent_id, r.source_device_id,
 	r.managed_thread_id, r.turn_id, r.lifecycle_revision, r.root_device_id,
 	r.manifest_bytes, r.manifest_size, r.manifest_sha256, r.state, r.result_sequence,
-	r.published_at, r.delivered_at, r.source_acknowledged_at,
+	r.published_at, r.delivered_at, r.source_acknowledged_at, r.source_released_at,
 	source.parent_agent_id, source.device_id,
 	tree.root_agent_id, tree.root_device_id
 FROM result_packages AS r

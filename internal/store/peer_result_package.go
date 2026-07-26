@@ -36,6 +36,7 @@ const (
 	ResultOutboxPublishPending  ResultOutboxState = "publishPending"
 	ResultOutboxDeliveryPending ResultOutboxState = "deliveryPending"
 	ResultOutboxDelivered       ResultOutboxState = "delivered"
+	ResultOutboxReleasePending  ResultOutboxState = "releasePending"
 )
 
 type ResultInboxState string
@@ -172,7 +173,8 @@ func (r ResultOutbox) Validate() error {
 			r.ReservedBytes != r.ReservationLimitBytes || r.PackageBytes != 0 || r.DeliverySequence != 0 {
 			return errors.New("capture-pending result outbox contains captured metadata")
 		}
-	case ResultOutboxPublishPending, ResultOutboxDeliveryPending, ResultOutboxDelivered:
+	case ResultOutboxPublishPending, ResultOutboxDeliveryPending, ResultOutboxDelivered,
+		ResultOutboxReleasePending:
 		if err := validateStoredResultMetadata(r.ResultOutboxKey, r.Metadata, r.Manifest); err != nil {
 			return err
 		}
@@ -184,7 +186,7 @@ func (r ResultOutbox) Validate() error {
 			r.ReservationLimitBytes < packageBytes {
 			return errors.New("result outbox retained bytes do not match its metadata")
 		}
-		if r.State == ResultOutboxDelivered {
+		if r.State == ResultOutboxDelivered || r.State == ResultOutboxReleasePending {
 			if r.DeliverySequence == 0 || r.DeliverySequence > math.MaxInt64 {
 				return errors.New("delivered result outbox has invalid sequence")
 			}

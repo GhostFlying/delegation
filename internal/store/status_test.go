@@ -186,10 +186,12 @@ func TestStatusSnapshotCountsResultPackageDelivery(t *testing.T) {
 		sequence             int
 		deliveredAt          int64
 		sourceAcknowledgedAt int64
+		sourceReleasedAt     int64
 	}{
 		{state: ResultPackageDeliveryPending},
 		{state: ResultPackageDelivered, sequence: 1, deliveredAt: 20},
 		{state: ResultPackageDelivered, sequence: 2, deliveredAt: 21, sourceAcknowledgedAt: 22},
+		{state: ResultPackageDelivered, sequence: 3, deliveredAt: 23, sourceAcknowledgedAt: 24, sourceReleasedAt: 25},
 	}
 	for index, resultState := range states {
 		packageID := changesTestID(100_000 + index)
@@ -204,13 +206,13 @@ INSERT INTO result_packages(
 	controller_id, tree_id, package_id, source_agent_id, source_device_id,
 	managed_thread_id, turn_id, lifecycle_revision, root_device_id,
 	manifest_bytes, manifest_size, manifest_sha256, state, result_sequence,
-	published_at, delivered_at, source_acknowledged_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 10, ?, ?)
+		published_at, delivered_at, source_acknowledged_at, source_released_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 10, ?, ?, ?)
 `, root.ControllerID, root.TreeID, packageID, worker.AgentID, worker.DeviceID,
 			threadID, turnID, root.DeviceID, metadata.Manifest,
 			metadata.ManifestDescriptor.Size, metadata.ManifestDescriptor.SHA256,
 			resultState.state, resultState.sequence, resultState.deliveredAt,
-			resultState.sourceAcknowledgedAt); err != nil {
+			resultState.sourceAcknowledgedAt, resultState.sourceReleasedAt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -219,7 +221,7 @@ INSERT INTO result_packages(
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := StatusResultCounts{DeliveryPending: 1, Delivered: 2, SourceAcknowledged: 1}
+	want := StatusResultCounts{DeliveryPending: 1, Delivered: 3, SourceAcknowledged: 2, SourceReleased: 1}
 	if got.Results != want {
 		t.Fatalf("result package status = %#v, want %#v", got.Results, want)
 	}
@@ -256,7 +258,7 @@ func TestPeerStatusSnapshotUsesAdmissionStatesAndArtifactBacklogs(t *testing.T) 
 		workers = append(workers, worker)
 	}
 	if _, err := state.db.ExecContext(ctx, `
-UPDATE peer_metadata SET worker_revision = 77 WHERE singleton = 1
+UPDATE peer_metadata SET worker_revision = 77, result_inbox_evicted = 8 WHERE singleton = 1
 `); err != nil {
 		t.Fatal(err)
 	}
@@ -283,10 +285,12 @@ UPDATE peer_metadata SET worker_revision = 77 WHERE singleton = 1
 		Results: PeerStatusResultCounts{
 			OutboxCapturePending: 1, OutboxPublishPending: 1,
 			OutboxDeliveryPending: 1, OutboxDelivered: 1,
-			OutboxRetainedBytes: outboxBytes,
-			InboxReceiving:      1, InboxAvailable: 1, InboxEvictionPending: 1,
+			OutboxReleasePending: 1,
+			OutboxRetainedBytes:  outboxBytes,
+			InboxReceiving:       1, InboxAvailable: 1, InboxEvictionPending: 1,
+			InboxEvicted:         8,
 			InboxRetainedBytes:   inboxBytes,
-			RolloutCaptureFailed: 3, WorkspaceCaptureFailed: 1,
+			RolloutCaptureFailed: 4, WorkspaceCaptureFailed: 1,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -339,6 +343,7 @@ INSERT INTO peer_result_outbox(
 		ResultOutboxPublishPending,
 		ResultOutboxDeliveryPending,
 		ResultOutboxDelivered,
+		ResultOutboxReleasePending,
 	}
 	for index, resultState := range states {
 		retainedBytes += insertPeerStatusCapturedResult(
@@ -366,7 +371,7 @@ func insertPeerStatusCapturedResult(
 	)
 	packageBytes := metadata.ManifestDescriptor.Size
 	deliverySequence := 0
-	if resultState == ResultOutboxDelivered {
+	if resultState == ResultOutboxDelivered || resultState == ResultOutboxReleasePending {
 		deliverySequence = 1
 	}
 	if _, err := state.db.ExecContext(context.Background(), `

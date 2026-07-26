@@ -88,10 +88,12 @@ func (p peerLocalStatusProvider) LocalStatus(ctx context.Context) (localbridge.S
 			OutboxPublishPending:   int64(durable.Results.OutboxPublishPending),
 			OutboxDeliveryPending:  int64(durable.Results.OutboxDeliveryPending),
 			OutboxDelivered:        int64(durable.Results.OutboxDelivered),
+			OutboxReleasePending:   int64(durable.Results.OutboxReleasePending),
 			OutboxRetainedBytes:    durable.Results.OutboxRetainedBytes,
 			InboxReceiving:         int64(durable.Results.InboxReceiving),
 			InboxAvailable:         int64(durable.Results.InboxAvailable),
 			InboxEvictionPending:   int64(durable.Results.InboxEvictionPending),
+			InboxEvicted:           int64(durable.Results.InboxEvicted),
 			InboxRetainedBytes:     durable.Results.InboxRetainedBytes,
 			RolloutCaptureFailed:   int64(durable.Results.RolloutCaptureFailed),
 			WorkspaceCaptureFailed: int64(durable.Results.WorkspaceCaptureFailed),
@@ -227,10 +229,12 @@ func writePeerStatus(
 		fmt.Fprintf(&rendered, "  outbox publish pending: %d\n", status.Results.OutboxPublishPending)
 		fmt.Fprintf(&rendered, "  outbox delivery pending: %d\n", status.Results.OutboxDeliveryPending)
 		fmt.Fprintf(&rendered, "  outbox delivered: %d\n", status.Results.OutboxDelivered)
+		fmt.Fprintf(&rendered, "  outbox release pending: %d\n", status.Results.OutboxReleasePending)
 		fmt.Fprintf(&rendered, "  outbox retained bytes: %d\n", status.Results.OutboxRetainedBytes)
 		fmt.Fprintf(&rendered, "  inbox receiving: %d\n", status.Results.InboxReceiving)
 		fmt.Fprintf(&rendered, "  inbox available: %d\n", status.Results.InboxAvailable)
 		fmt.Fprintf(&rendered, "  inbox eviction pending: %d\n", status.Results.InboxEvictionPending)
+		fmt.Fprintf(&rendered, "  inbox evicted lifetime: %d\n", status.Results.InboxEvicted)
 		fmt.Fprintf(&rendered, "  inbox retained bytes: %d\n", status.Results.InboxRetainedBytes)
 		fmt.Fprintf(&rendered, "  rollout capture failed: %d\n", status.Results.RolloutCaptureFailed)
 		fmt.Fprintf(&rendered, "  workspace capture failed: %d\n", status.Results.WorkspaceCaptureFailed)

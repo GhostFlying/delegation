@@ -870,3 +870,29 @@ type AcknowledgeResultPackageResult struct {
 func (r AcknowledgeResultPackageResult) Validate() error {
 	return AcknowledgeResultPackageParams(r).Validate()
 }
+
+// ReleaseResultPackageParams authorizes the source peer to remove its
+// authoritative copy after the broker durably records the source
+// acknowledgement. Keeping this separate from delivery acknowledgement closes
+// the broker-commit crash window around source payload deletion.
+type ReleaseResultPackageParams struct {
+	PackageID string `json:"packageId"`
+	Sequence  uint64 `json:"sequence"`
+}
+
+func (p ReleaseResultPackageParams) Validate() error {
+	return AcknowledgeResultPackageParams(p).Validate()
+}
+
+func SameReleaseResultPackageParams(left, right ReleaseResultPackageParams) bool {
+	return left == right
+}
+
+type ReleaseResultPackageResult struct {
+	PackageID string `json:"packageId"`
+	Sequence  uint64 `json:"sequence"`
+}
+
+func (r ReleaseResultPackageResult) Validate() error {
+	return ReleaseResultPackageParams(r).Validate()
+}

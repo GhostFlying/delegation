@@ -8,16 +8,19 @@ import (
 
 const (
 	peerStoreApplicationID = 0x444c4750 // "DLGP"
-	peerSchemaVersion      = 13
+	peerSchemaVersion      = 14
 )
 
 var peerSchemaCurrent = fmt.Sprintf(`
 CREATE TABLE peer_metadata (
 	singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-	worker_revision INTEGER NOT NULL CHECK (worker_revision >= 0)
+	worker_revision INTEGER NOT NULL CHECK (worker_revision >= 0),
+	result_inbox_evicted INTEGER NOT NULL DEFAULT 0 CHECK (
+		result_inbox_evicted BETWEEN 0 AND 9223372036854775807
+	)
 ) STRICT;
 
-INSERT INTO peer_metadata(singleton, worker_revision) VALUES (1, 0);
+INSERT INTO peer_metadata(singleton, worker_revision, result_inbox_evicted) VALUES (1, 0, 0);
 
 CREATE TABLE prepared_workspaces (
 	controller_id TEXT NOT NULL,
@@ -307,7 +310,7 @@ CREATE TABLE peer_changes_artifacts (
 		source_device_id TEXT NOT NULL CHECK (length(source_device_id) = 36),
 		package_id TEXT NOT NULL UNIQUE CHECK (length(package_id) = 36),
 		state TEXT NOT NULL CHECK (
-			state IN ('capturePending', 'publishPending', 'deliveryPending', 'delivered')
+			state IN ('capturePending', 'publishPending', 'deliveryPending', 'delivered', 'releasePending')
 		),
 		managed_thread_id TEXT NOT NULL DEFAULT '',
 		turn_id TEXT NOT NULL DEFAULT '',
@@ -339,7 +342,7 @@ CREATE TABLE peer_changes_artifacts (
 			 manifest_sha256 NOT GLOB '*[^0-9a-f]*' AND reservation_limit_bytes >= package_bytes AND
 			 reserved_bytes = package_bytes AND
 			 package_bytes > 0 AND delivery_sequence = 0) OR
-			(state = 'delivered' AND managed_thread_id <> '' AND turn_id <> '' AND
+			(state IN ('delivered', 'releasePending') AND managed_thread_id <> '' AND turn_id <> '' AND
 			 lifecycle_revision > 0 AND length(manifest_bytes) = manifest_size_bytes AND
 			 manifest_size_bytes > 0 AND length(manifest_sha256) = 64 AND
 			 manifest_sha256 NOT GLOB '*[^0-9a-f]*' AND reservation_limit_bytes >= package_bytes AND

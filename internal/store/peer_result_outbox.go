@@ -328,8 +328,9 @@ func (s *PeerStore) ListPendingResultDeliveries(
 	return s.listResultOutboxes(ctx, controllerID, deviceID, ResultOutboxDeliveryPending, limit)
 }
 
-// ListDeliveredResultOutboxes returns only ordinary-GC-eligible records,
-// oldest first. Pending capture, publication, and delivery never appear.
+// ListDeliveredResultOutboxes returns records whose root delivery has been
+// acknowledged but whose broker release has not been received. They retain
+// payload bytes and are not ordinary-GC eligible.
 func (s *PeerStore) ListDeliveredResultOutboxes(
 	ctx context.Context,
 	controllerID, deviceID string,
@@ -342,10 +343,72 @@ func (s *PeerStore) GetResultOutboxRetention(ctx context.Context) (ResultPackage
 	return inspectResultStoreCapacity(ctx, s.db, "peer_result_outbox")
 }
 
-// DeleteDeliveredResultOutbox is the database commit boundary after the caller
-// has removed the package directory and fsynced its parent. Exact replay is a
-// no-op; non-delivered records remain protected.
-func (s *PeerStore) DeleteDeliveredResultOutbox(ctx context.Context, key ResultOutboxKey) error {
+// PrepareResultOutboxRelease commits the tombstone before payload deletion.
+// Startup can finish either side of the filesystem boundary.
+func (s *PeerStore) PrepareResultOutboxRelease(
+	ctx context.Context,
+	key ResultOutboxKey,
+	sequence uint64,
+	observedAt time.Time,
+) (ResultOutbox, error) {
+	if err := key.Validate(); err != nil {
+		return ResultOutbox{}, err
+	}
+	if sequence == 0 || sequence > math.MaxInt64 {
+		return ResultOutbox{}, errors.New("result outbox release sequence is invalid")
+	}
+	timestamp, err := resultObservedAt(observedAt)
+	if err != nil {
+		return ResultOutbox{}, err
+	}
+	var stored ResultOutbox
+	err = withImmediateTransaction(ctx, s.db, "peer", func(connection *sql.Conn) error {
+		stored, err = queryResultOutbox(ctx, connection, key)
+		if err != nil {
+			return err
+		}
+		if stored.DeliverySequence != sequence {
+			return ErrResultPackageConflict
+		}
+		if stored.State == ResultOutboxReleasePending {
+			return nil
+		}
+		if stored.State != ResultOutboxDelivered {
+			return ErrResultPackageTransition
+		}
+		stored.State = ResultOutboxReleasePending
+		stored.UpdatedAt = max(timestamp, stored.UpdatedAt)
+		result, execErr := connection.ExecContext(ctx, `
+UPDATE peer_result_outbox SET state = 'releasePending', updated_at = ?
+WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND package_id = ?
+	AND state = 'delivered' AND delivery_sequence = ?
+`, stored.UpdatedAt, key.ControllerID, key.TreeID, key.AgentID, key.PackageID, sequence)
+		if execErr != nil {
+			return fmt.Errorf("prepare result outbox release: %w", execErr)
+		}
+		affected, execErr := result.RowsAffected()
+		if execErr != nil {
+			return fmt.Errorf("inspect result outbox release: %w", execErr)
+		}
+		if affected != 1 {
+			return ErrResultPackageTransition
+		}
+		return nil
+	})
+	return stored, err
+}
+
+func (s *PeerStore) ListPendingResultOutboxReleases(
+	ctx context.Context,
+	controllerID, deviceID string,
+	limit int,
+) ([]ResultOutbox, error) {
+	return s.listResultOutboxes(ctx, controllerID, deviceID, ResultOutboxReleasePending, limit)
+}
+
+// CompactResultOutboxRelease is the database commit boundary after payload
+// removal and parent-directory fsync. Exact replay is a no-op.
+func (s *PeerStore) CompactResultOutboxRelease(ctx context.Context, key ResultOutboxKey) error {
 	if err := key.Validate(); err != nil {
 		return err
 	}
@@ -357,15 +420,15 @@ func (s *PeerStore) DeleteDeliveredResultOutbox(ctx context.Context, key ResultO
 		if err != nil {
 			return err
 		}
-		if stored.State != ResultOutboxDelivered {
+		if stored.State != ResultOutboxReleasePending {
 			return ErrResultPackageTransition
 		}
 		if _, err := connection.ExecContext(ctx, `
 DELETE FROM peer_result_outbox
 WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND package_id = ?
-	AND state = 'delivered'
+	AND state = 'releasePending'
 `, key.ControllerID, key.TreeID, key.AgentID, key.PackageID); err != nil {
-			return fmt.Errorf("delete delivered result outbox: %w", err)
+			return fmt.Errorf("compact result outbox release: %w", err)
 		}
 		return nil
 	})
@@ -384,7 +447,8 @@ func (s *PeerStore) listResultOutboxes(
 		return nil, err
 	}
 	switch state {
-	case ResultOutboxPublishPending, ResultOutboxDeliveryPending, ResultOutboxDelivered:
+	case ResultOutboxPublishPending, ResultOutboxDeliveryPending, ResultOutboxDelivered,
+		ResultOutboxReleasePending:
 	default:
 		return nil, fmt.Errorf("unsupported result outbox list state %q", state)
 	}

@@ -107,6 +107,7 @@ const (
 	MethodFinishResultPackage      = "artifact.result.finish"
 	MethodCancelResultPackage      = "artifact.result.cancel"
 	MethodAcknowledgeResultPackage = "artifact.result.ack"
+	MethodReleaseResultPackage     = "artifact.result.release"
 )
 
 type CancelRequestParams struct {
@@ -133,7 +134,7 @@ const (
 	FeatureWorkspaceSync     = "workspaceSyncV1"
 	FeatureWorkspaceTransfer = "workspaceTransferV1"
 	FeatureChangesArtifact   = "changesArtifactV1"
-	FeatureResultPackage     = "resultPackageV2"
+	FeatureResultPackage     = "resultPackageV3"
 )
 
 var methodPattern = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,63}$`)

@@ -819,6 +819,21 @@ func (s *PeerStore) CompactResultInboxEviction(
 		if result.State != ResultInboxEvictionTombstone {
 			return ErrResultPackageTransition
 		}
+		updated, err := connection.ExecContext(ctx, `
+UPDATE peer_metadata
+SET result_inbox_evicted = result_inbox_evicted + 1
+WHERE singleton = 1 AND result_inbox_evicted < 9223372036854775807
+`)
+		if err != nil {
+			return fmt.Errorf("increment result inbox eviction counter: %w", err)
+		}
+		affected, err := updated.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect result inbox eviction counter: %w", err)
+		}
+		if affected != 1 {
+			return errors.New("result inbox eviction counter is exhausted")
+		}
 		if _, err := connection.ExecContext(ctx, `
 DELETE FROM peer_result_inbox WHERE package_id = ? AND state = 'evictionTombstone'
 `, packageID); err != nil {

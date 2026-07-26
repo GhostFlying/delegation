@@ -170,7 +170,7 @@ func TestPendingResultPackageRelaysAreBoundedAndPeerScoped(t *testing.T) {
 	}
 }
 
-func TestResultPackageSourceAcknowledgementIsAuthorizedDurableAndIdempotent(t *testing.T) {
+func TestResultPackageSourceAcknowledgementAndReleaseAreAuthorizedDurableAndIdempotent(t *testing.T) {
 	fixture := prepareResultPackageFixture(t, false, true)
 	ctx := context.Background()
 	publishResultManifest(t, fixture, fixture.Manifest, 40)
@@ -182,6 +182,15 @@ func TestResultPackageSourceAcknowledgementIsAuthorizedDurableAndIdempotent(t *t
 		time.Unix(50, 0),
 	); !errors.Is(err, ErrConflict) {
 		t.Fatalf("pending source acknowledgement error = %v, want ErrConflict", err)
+	}
+	if _, err := fixture.Registry.MarkResultPackageSourceReleased(
+		ctx,
+		fixture.Worker.DeviceID,
+		fixture.Worker,
+		resultPackageOne,
+		time.Unix(50, 0),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("pending source release error = %v, want ErrConflict", err)
 	}
 	if _, err := fixture.Registry.MarkResultPackageDelivered(
 		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageOne, time.Unix(50, 0),
@@ -223,15 +232,55 @@ func TestResultPackageSourceAcknowledgementIsAuthorizedDurableAndIdempotent(t *t
 		fixture.Worker.DeviceID,
 		ResultPackageRelayPageRequest{Limit: 1},
 	)
+	if err != nil || len(page.Packages) != 1 || page.NextAfter == nil ||
+		page.Packages[0].SourceAcknowledgedAt != 50 || page.Packages[0].SourceReleasedAt != 0 {
+		t.Fatalf("acknowledged but unreleased source reconnect page = %#v, error %v", page, err)
+	}
+	if _, err := fixture.Registry.MarkResultPackageSourceReleased(
+		ctx,
+		fixture.Root.DeviceID,
+		fixture.Root.Identity(),
+		resultPackageOne,
+		time.Unix(60, 0),
+	); !errors.Is(err, ErrAuthorizationDenied) {
+		t.Fatalf("root source release error = %v, want authorization denied", err)
+	}
+	released, err := fixture.Registry.MarkResultPackageSourceReleased(
+		ctx,
+		fixture.Worker.DeviceID,
+		fixture.Worker,
+		resultPackageOne,
+		time.Unix(45, 0),
+	)
+	if err != nil || released.SourceReleasedAt != 50 {
+		t.Fatalf("source release = %#v, error %v", released, err)
+	}
+	replayedRelease, err := fixture.Registry.MarkResultPackageSourceReleased(
+		ctx,
+		fixture.Worker.DeviceID,
+		fixture.Worker,
+		resultPackageOne,
+		time.Unix(80, 0),
+	)
+	if err != nil || replayedRelease.SourceReleasedAt != 50 {
+		t.Fatalf("source release replay = %#v, error %v", replayedRelease, err)
+	}
+	page, err = fixture.Registry.ListPendingResultPackageRelaysForPeer(
+		ctx,
+		fixture.Worker.ControllerID,
+		fixture.Worker.DeviceID,
+		ResultPackageRelayPageRequest{Limit: 1},
+	)
 	if err != nil || len(page.Packages) != 0 || page.NextAfter != nil {
-		t.Fatalf("acknowledged source reconnect page = %#v, error %v", page, err)
+		t.Fatalf("released source reconnect page = %#v, error %v", page, err)
 	}
 	rootPage, err := fixture.Registry.ListDeliveredResultPackages(
 		ctx, fixture.Root.Identity(), ResultPackagePageRequest{Limit: 1},
 	)
 	if err != nil || len(rootPage.Packages) != 1 ||
-		rootPage.Packages[0].SourceAcknowledgedAt != 50 {
-		t.Fatalf("root delivered package after source acknowledgement = %#v, error %v", rootPage, err)
+		rootPage.Packages[0].SourceAcknowledgedAt != 50 ||
+		rootPage.Packages[0].SourceReleasedAt != 50 {
+		t.Fatalf("root delivered package after source release = %#v, error %v", rootPage, err)
 	}
 }
 

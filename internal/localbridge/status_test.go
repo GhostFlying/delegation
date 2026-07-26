@@ -35,7 +35,7 @@ func TestReadStatusReturnsValidatedLocalSnapshot(t *testing.T) {
 			OutboxDeliveryPending: 3, OutboxDelivered: 4,
 			OutboxRetainedBytes: 8192,
 			InboxReceiving:      1, InboxAvailable: 2, InboxEvictionPending: 3,
-			InboxRetainedBytes:   16384,
+			InboxEvicted: 4, InboxRetainedBytes: 16384,
 			RolloutCaptureFailed: 2, WorkspaceCaptureFailed: 1,
 		},
 	}

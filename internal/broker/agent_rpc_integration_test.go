@@ -200,6 +200,15 @@ func (agentRPCWorkerController) AcknowledgeResultPackage(
 	return protocol.AcknowledgeResultPackageResult{}, errors.New("not used")
 }
 
+func (agentRPCWorkerController) ReleaseResultPackage(
+	context.Context,
+	connector.ResultPackageReleaseRequest,
+) (protocol.ReleaseResultPackageResult, error) {
+	return protocol.ReleaseResultPackageResult{}, errors.New("not used")
+}
+
+func (agentRPCWorkerController) CleanupResultPackages(context.Context) error { return nil }
+
 func (agentRPCWorkerController) SendWorker(
 	_ context.Context,
 	request connector.WorkerSendRequest,

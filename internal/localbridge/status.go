@@ -43,10 +43,12 @@ type ResultCounts struct {
 	OutboxPublishPending   int64 `json:"outboxPublishPending"`
 	OutboxDeliveryPending  int64 `json:"outboxDeliveryPending"`
 	OutboxDelivered        int64 `json:"outboxDelivered"`
+	OutboxReleasePending   int64 `json:"outboxReleasePending"`
 	OutboxRetainedBytes    int64 `json:"outboxRetainedBytes"`
 	InboxReceiving         int64 `json:"inboxReceiving"`
 	InboxAvailable         int64 `json:"inboxAvailable"`
 	InboxEvictionPending   int64 `json:"inboxEvictionPending"`
+	InboxEvicted           int64 `json:"inboxEvicted"`
 	InboxRetainedBytes     int64 `json:"inboxRetainedBytes"`
 	RolloutCaptureFailed   int64 `json:"rolloutCaptureFailed"`
 	WorkspaceCaptureFailed int64 `json:"workspaceCaptureFailed"`
@@ -98,8 +100,10 @@ func (s StatusSnapshot) Validate() error {
 		s.Artifacts.RetainedBytes, s.Results.OutboxCapturePending,
 		s.Results.OutboxPublishPending, s.Results.OutboxDeliveryPending,
 		s.Results.OutboxDelivered, s.Results.OutboxRetainedBytes,
+		s.Results.OutboxReleasePending,
 		s.Results.InboxReceiving, s.Results.InboxAvailable,
-		s.Results.InboxEvictionPending, s.Results.InboxRetainedBytes,
+		s.Results.InboxEvictionPending, s.Results.InboxEvicted,
+		s.Results.InboxRetainedBytes,
 		s.Results.RolloutCaptureFailed, s.Results.WorkspaceCaptureFailed,
 	}
 	for _, count := range counts {
@@ -129,6 +133,7 @@ func (s StatusSnapshot) Validate() error {
 	outboxCount, ok := sumCounts(
 		s.Results.OutboxCapturePending, s.Results.OutboxPublishPending,
 		s.Results.OutboxDeliveryPending, s.Results.OutboxDelivered,
+		s.Results.OutboxReleasePending,
 	)
 	if !ok || (outboxCount == 0) != (s.Results.OutboxRetainedBytes == 0) {
 		return errors.New("result outbox counts are inconsistent")
@@ -136,6 +141,7 @@ func (s StatusSnapshot) Validate() error {
 	capturedOutboxCount, ok := sumCounts(
 		s.Results.OutboxPublishPending, s.Results.OutboxDeliveryPending,
 		s.Results.OutboxDelivered,
+		s.Results.OutboxReleasePending,
 	)
 	if !ok || s.Results.RolloutCaptureFailed > capturedOutboxCount ||
 		s.Results.WorkspaceCaptureFailed > capturedOutboxCount {

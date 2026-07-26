@@ -26,14 +26,16 @@ import (
 )
 
 const (
-	defaultReconnectMinimum = 250 * time.Millisecond
-	defaultReconnectMaximum = 10 * time.Second
-	connectTimeout          = 30 * time.Second
-	workspaceCleanupTimeout = 30 * time.Second
-	writeTimeout            = 10 * time.Second
-	maximumPendingCalls     = 128
-	maximumHeartbeat        = time.Hour
-	maximumReconnect        = 5 * time.Minute
+	defaultReconnectMinimum   = 250 * time.Millisecond
+	defaultReconnectMaximum   = 10 * time.Second
+	connectTimeout            = 30 * time.Second
+	workspaceCleanupTimeout   = 30 * time.Second
+	resultMaintenanceTimeout  = 30 * time.Second
+	resultMaintenanceInterval = time.Minute
+	writeTimeout              = 10 * time.Second
+	maximumPendingCalls       = 128
+	maximumHeartbeat          = time.Hour
+	maximumReconnect          = 5 * time.Minute
 )
 
 var (
@@ -199,6 +201,12 @@ type ResultPackageAcknowledgeRequest struct {
 	Params protocol.AcknowledgeResultPackageParams
 }
 
+type ResultPackageReleaseRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.ReleaseResultPackageParams
+}
+
 type ResultPackageManager interface {
 	ReadResultPackagePart(context.Context, ResultPackageReadRequest) (protocol.ReadResultPackagePartResult, error)
 	BeginResultPackage(context.Context, ResultPackageBeginRequest) (protocol.BeginResultPackageResult, error)
@@ -206,6 +214,8 @@ type ResultPackageManager interface {
 	FinishResultPackage(context.Context, ResultPackageFinishRequest) (protocol.FinishResultPackageResult, error)
 	CancelResultPackage(context.Context, ResultPackageCancelRequest) (protocol.CancelResultPackageResult, error)
 	AcknowledgeResultPackage(context.Context, ResultPackageAcknowledgeRequest) (protocol.AcknowledgeResultPackageResult, error)
+	ReleaseResultPackage(context.Context, ResultPackageReleaseRequest) (protocol.ReleaseResultPackageResult, error)
+	CleanupResultPackages(context.Context) error
 }
 
 type Options struct {
@@ -419,6 +429,16 @@ func (c *Client) Run(ctx context.Context) error {
 		return errors.New("connector client is already running")
 	}
 	defer c.running.Store(false)
+	maintenanceContext, stopMaintenance := context.WithCancel(ctx)
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		c.resultPackageMaintenanceLoop(maintenanceContext)
+	}()
+	defer func() {
+		stopMaintenance()
+		<-maintenanceDone
+	}()
 	backoff := c.reconnectMin
 	for {
 		if c.cleanupPending.Load() {
@@ -459,6 +479,24 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		if !healthy {
 			backoff = min(backoff*2, c.reconnectMax)
+		}
+	}
+}
+
+func (c *Client) resultPackageMaintenanceLoop(ctx context.Context) {
+	ticker := time.NewTicker(resultMaintenanceInterval)
+	defer ticker.Stop()
+	for {
+		maintenanceContext, cancel := context.WithTimeout(ctx, resultMaintenanceTimeout)
+		err := c.resultPackages.CleanupResultPackages(maintenanceContext)
+		cancel()
+		if err != nil && ctx.Err() == nil {
+			c.reportError(fmt.Errorf("maintain result package storage: %w", err))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }
