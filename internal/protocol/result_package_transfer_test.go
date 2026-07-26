@@ -151,6 +151,13 @@ func TestResultPackageControlAndAcknowledgementTypes(t *testing.T) {
 	if err := (AcknowledgeResultPackageResult(acknowledgement)).Validate(); err != nil {
 		t.Fatal(err)
 	}
+	release := ReleaseResultPackageParams(acknowledgement)
+	if err := release.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (ReleaseResultPackageResult(release)).Validate(); err != nil {
+		t.Fatal(err)
+	}
 	acknowledgement.Sequence = 0
 	if err := acknowledgement.Validate(); err == nil {
 		t.Fatal("acknowledgement accepted sequence zero")
@@ -236,6 +243,15 @@ func TestResultPackageIdempotencyComparisonsCoverRequestBytes(t *testing.T) {
 	changedAcknowledgement.Sequence++
 	if SameAcknowledgeResultPackageParams(acknowledgement, changedAcknowledgement) {
 		t.Fatal("acknowledgement comparison ignored sequence")
+	}
+	release := ReleaseResultPackageParams(acknowledgement)
+	if !SameReleaseResultPackageParams(release, release) {
+		t.Fatal("identical release parameters did not compare equal")
+	}
+	changedRelease := release
+	changedRelease.Sequence++
+	if SameReleaseResultPackageParams(release, changedRelease) {
+		t.Fatal("release comparison ignored sequence")
 	}
 }
 

@@ -57,6 +57,7 @@ type ResultCounts struct {
 	DeliveryPending    uint64 `json:"deliveryPending"`
 	Delivered          uint64 `json:"delivered"`
 	SourceAcknowledged uint64 `json:"sourceAcknowledged"`
+	SourceReleased     uint64 `json:"sourceReleased"`
 }
 
 // Validate checks that a snapshot is safe for bounded status presentation.
@@ -75,7 +76,8 @@ func (s Snapshot) Validate() error {
 	if s.RunningTurns > s.OccupiedSlots {
 		return errors.New("worker counts are inconsistent")
 	}
-	if s.Results.SourceAcknowledged > s.Results.Delivered {
+	if s.Results.SourceAcknowledged > s.Results.Delivered ||
+		s.Results.SourceReleased > s.Results.SourceAcknowledged {
 		return errors.New("result package counts are inconsistent")
 	}
 	return nil

@@ -42,9 +42,27 @@ type resultPackagePeerCall struct {
 }
 
 type fakeResultPackageSourceAcknowledger struct {
-	mu      sync.Mutex
-	calls   int
-	handler func(control.PrincipalIdentity, string, time.Time) (store.ResultPackageRecord, error)
+	mu             sync.Mutex
+	calls          int
+	releaseCalls   int
+	handler        func(control.PrincipalIdentity, string, time.Time) (store.ResultPackageRecord, error)
+	releaseHandler func(control.PrincipalIdentity, string, time.Time) (store.ResultPackageRecord, error)
+}
+
+func (r *fakeResultPackageSourceAcknowledger) MarkResultPackageSourceReleased(
+	_ context.Context,
+	_ string,
+	source control.PrincipalIdentity,
+	packageID string,
+	releasedAt time.Time,
+) (store.ResultPackageRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.releaseCalls++
+	if r.releaseHandler == nil {
+		return store.ResultPackageRecord{}, errors.New("unexpected source release mark")
+	}
+	return r.releaseHandler(source, packageID, releasedAt)
 }
 
 func (r *fakeResultPackageSourceAcknowledger) MarkResultPackageSourceAcknowledged(
@@ -337,7 +355,7 @@ func TestResultPackageSourceAcknowledgementRetriesLostBrokerMark(t *testing.T) {
 		},
 	}
 	for attempt := 1; attempt <= 2; attempt++ {
-		err := acknowledgeAndMarkResultPackage(
+		_, err := acknowledgeAndMarkResultPackage(
 			context.Background(), source, registry, worker, record, time.Unix(60, 0),
 		)
 		if attempt == 1 && !errors.Is(err, errResultPackageRelayDeferred) {
@@ -358,6 +376,191 @@ func TestResultPackageSourceAcknowledgementRetriesLostBrokerMark(t *testing.T) {
 	registry.mu.Unlock()
 	if markCalls != 2 {
 		t.Fatalf("broker acknowledgement marks = %d, want 2", markCalls)
+	}
+}
+
+func TestResultPackageSourceReleaseRetriesLostBrokerMark(t *testing.T) {
+	record := resultPackageRelayRecord(t, []byte("payload"))
+	record.State = store.ResultPackageDelivered
+	record.Sequence = 7
+	record.DeliveredAt = 50
+	record.SourceAcknowledgedAt = 60
+	worker, _ := resultPackageRelayPrincipals()
+	source := &fakeResultPackagePeer{handler: func(call resultPackagePeerCall) (any, error) {
+		if call.method != protocol.MethodReleaseResultPackage || call.source != worker {
+			return nil, fmt.Errorf("unexpected source release %#v", call)
+		}
+		return protocol.ReleaseResultPackageResult(
+			call.params.(protocol.ReleaseResultPackageParams),
+		), nil
+	}}
+	markFailed := true
+	registry := &fakeResultPackageSourceAcknowledger{
+		releaseHandler: func(
+			source control.PrincipalIdentity,
+			packageID string,
+			releasedAt time.Time,
+		) (store.ResultPackageRecord, error) {
+			if source != worker || packageID != resultRelayPackageID || releasedAt.Unix() != 70 {
+				return store.ResultPackageRecord{}, errors.New("unexpected broker release mark")
+			}
+			if markFailed {
+				markFailed = false
+				return store.ResultPackageRecord{}, errors.New("broker commit lost")
+			}
+			record.SourceReleasedAt = releasedAt.Unix()
+			return record, nil
+		},
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		err := releaseAndMarkResultPackage(
+			context.Background(), source, registry, worker, record, time.Unix(70, 0),
+		)
+		if attempt == 1 && !errors.Is(err, errResultPackageRelayDeferred) {
+			t.Fatalf("lost broker release mark error = %v, want deferred relay", err)
+		}
+		if attempt == 2 && err != nil {
+			t.Fatalf("source release replay: %v", err)
+		}
+	}
+	if got := source.methods(); !equalStrings(got, []string{
+		protocol.MethodReleaseResultPackage,
+		protocol.MethodReleaseResultPackage,
+	}) {
+		t.Fatalf("source release methods = %v", got)
+	}
+	registry.mu.Lock()
+	markCalls := registry.releaseCalls
+	registry.mu.Unlock()
+	if markCalls != 2 {
+		t.Fatalf("broker release marks = %d, want 2", markCalls)
+	}
+}
+
+func TestFinalizeDeliveredResultPackageAcknowledgesThenReleases(t *testing.T) {
+	record := resultPackageRelayRecord(t, []byte("payload"))
+	record.State = store.ResultPackageDelivered
+	record.Sequence = 7
+	record.DeliveredAt = 50
+	worker, _ := resultPackageRelayPrincipals()
+	source := &fakeResultPackagePeer{handler: func(call resultPackagePeerCall) (any, error) {
+		switch call.method {
+		case protocol.MethodAcknowledgeResultPackage:
+			return protocol.AcknowledgeResultPackageResult(
+				call.params.(protocol.AcknowledgeResultPackageParams),
+			), nil
+		case protocol.MethodReleaseResultPackage:
+			return protocol.ReleaseResultPackageResult(
+				call.params.(protocol.ReleaseResultPackageParams),
+			), nil
+		default:
+			return nil, fmt.Errorf("unexpected source finalization call %#v", call)
+		}
+	}}
+	registry := &fakeResultPackageSourceAcknowledger{
+		handler: func(
+			source control.PrincipalIdentity,
+			packageID string,
+			acknowledgedAt time.Time,
+		) (store.ResultPackageRecord, error) {
+			if source != worker || packageID != resultRelayPackageID {
+				return store.ResultPackageRecord{}, errors.New("unexpected acknowledgement authority")
+			}
+			record.SourceAcknowledgedAt = acknowledgedAt.Unix()
+			return record, nil
+		},
+		releaseHandler: func(
+			source control.PrincipalIdentity,
+			packageID string,
+			releasedAt time.Time,
+		) (store.ResultPackageRecord, error) {
+			if source != worker || packageID != resultRelayPackageID ||
+				releasedAt.Unix() != 60 || record.SourceAcknowledgedAt != 60 {
+				return store.ResultPackageRecord{}, errors.New("unexpected release authority or order")
+			}
+			record.SourceReleasedAt = releasedAt.Unix()
+			return record, nil
+		},
+	}
+	if err := finalizeDeliveredResultPackage(
+		context.Background(), source, registry, worker, record, time.Unix(60, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := source.methods(); !equalStrings(got, []string{
+		protocol.MethodAcknowledgeResultPackage,
+		protocol.MethodReleaseResultPackage,
+	}) {
+		t.Fatalf("source finalization methods = %v", got)
+	}
+	if registry.calls != 1 || registry.releaseCalls != 1 {
+		t.Fatalf("broker finalization marks = acknowledge %d, release %d", registry.calls, registry.releaseCalls)
+	}
+}
+
+func TestFinalizeDeliveredResultPackageSkipsDurableAcknowledgementReplay(t *testing.T) {
+	record := resultPackageRelayRecord(t, []byte("payload"))
+	record.State = store.ResultPackageDelivered
+	record.Sequence = 7
+	record.DeliveredAt = 50
+	record.SourceAcknowledgedAt = 55
+	worker, _ := resultPackageRelayPrincipals()
+	source := &fakeResultPackagePeer{handler: func(call resultPackagePeerCall) (any, error) {
+		if call.method != protocol.MethodReleaseResultPackage {
+			return nil, fmt.Errorf("unexpected source replay call %#v", call)
+		}
+		return protocol.ReleaseResultPackageResult(
+			call.params.(protocol.ReleaseResultPackageParams),
+		), nil
+	}}
+	registry := &fakeResultPackageSourceAcknowledger{
+		handler: func(
+			control.PrincipalIdentity,
+			string,
+			time.Time,
+		) (store.ResultPackageRecord, error) {
+			return store.ResultPackageRecord{}, errors.New("acknowledgement was already durable")
+		},
+		releaseHandler: func(
+			control.PrincipalIdentity,
+			string,
+			time.Time,
+		) (store.ResultPackageRecord, error) {
+			record.SourceReleasedAt = 60
+			return record, nil
+		},
+	}
+	if err := finalizeDeliveredResultPackage(
+		context.Background(), source, registry, worker, record, time.Unix(60, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := source.methods(); !equalStrings(got, []string{protocol.MethodReleaseResultPackage}) {
+		t.Fatalf("source replay methods = %v", got)
+	}
+	if registry.calls != 0 || registry.releaseCalls != 1 {
+		t.Fatalf("broker replay marks = acknowledge %d, release %d", registry.calls, registry.releaseCalls)
+	}
+}
+
+func TestReleaseResultPackageRejectsMissingSourceAcknowledgement(t *testing.T) {
+	record := resultPackageRelayRecord(t, []byte("payload"))
+	record.State = store.ResultPackageDelivered
+	record.Sequence = 7
+	record.DeliveredAt = 50
+	worker, _ := resultPackageRelayPrincipals()
+	source := &fakeResultPackagePeer{handler: func(resultPackagePeerCall) (any, error) {
+		return nil, errors.New("release must not reach the source")
+	}}
+	registry := &fakeResultPackageSourceAcknowledger{}
+	err := releaseAndMarkResultPackage(
+		context.Background(), source, registry, worker, record, time.Unix(60, 0),
+	)
+	if err == nil || err.Error() != "result package release preceded source acknowledgement" {
+		t.Fatalf("release-before-acknowledgement error = %v", err)
+	}
+	if len(source.methods()) != 0 || registry.releaseCalls != 0 {
+		t.Fatal("release-before-acknowledgement mutated source or broker state")
 	}
 }
 
@@ -566,6 +769,7 @@ func TestResultPackageRelayRetriesTransientStoreFailures(t *testing.T) {
 		record.Sequence = 1
 		record.DeliveredAt = 50
 		record.SourceAcknowledgedAt = 60
+		record.SourceReleasedAt = 61
 		registry := &fakeResultPackageLoadRegistry{
 			record: record,
 			err:    errors.New("database busy"),

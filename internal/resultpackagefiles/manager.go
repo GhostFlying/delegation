@@ -67,6 +67,12 @@ type AcknowledgeRequest struct {
 	Params protocol.AcknowledgeResultPackageParams
 }
 
+type ReleaseRequest struct {
+	TreeID string
+	Source control.PrincipalIdentity
+	Params protocol.ReleaseResultPackageParams
+}
+
 type Manager struct {
 	controllerID  string
 	deviceID      string
@@ -75,9 +81,11 @@ type Manager struct {
 	outbox        *os.Root
 	inbox         *os.Root
 	locks         [packageLockCount]sync.Mutex
+	evictionMu    sync.Mutex
 	outboxChanges chan struct{}
 	now           func() time.Time
 	syncRoot      func(*os.Root) error
+	removePackage func(*os.Root, string) error
 }
 
 func New(ctx context.Context, options Options) (*Manager, error) {
@@ -124,6 +132,7 @@ func New(ctx context.Context, options Options) (*Manager, error) {
 		outboxChanges: make(chan struct{}, 1),
 		now:           time.Now,
 		syncRoot:      syncDirectory,
+		removePackage: removePackageDirectory,
 	}
 	if err := manager.recover(ctx); err != nil {
 		return nil, errors.Join(fmt.Errorf("recover result package files: %w", err), manager.Close())

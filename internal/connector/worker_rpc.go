@@ -46,6 +46,8 @@ func (s *session) handleBrokerRequest(request protocol.Envelope) error {
 		return s.handleCancelResultPackageRequest(request)
 	case protocol.MethodAcknowledgeResultPackage:
 		return s.handleAcknowledgeResultPackageRequest(request)
+	case protocol.MethodReleaseResultPackage:
+		return s.handleReleaseResultPackageRequest(request)
 	default:
 		return s.writeError(request, protocol.ErrorMethodNotFound, "method not found")
 	}

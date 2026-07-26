@@ -15,7 +15,7 @@ The checkpoint ends when the package is durably available in the original root p
 It does not mutate the root workspace, expose raw rollout contents to the model, or add an apply
 tool.
 
-`resultPackageV2` is a required hello feature and replaces the pre-release `changesArtifactV1`
+`resultPackageV3` is a required hello feature and replaces the pre-release `changesArtifactV1`
 flow. A peer or broker missing the feature fails closed instead of silently publishing metadata
 without delivering the bytes.
 
@@ -66,8 +66,13 @@ The target peer owns the authoritative outbox payload and advances through:
 2. `publishPending`: fixed files and manifest are durably published in the target outbox.
 3. `deliveryPending`: the broker accepted authoritative metadata; the worker slot is released, but
    payload files remain protected from garbage collection.
-4. `delivered`: the original root peer durably acknowledged the complete package; normal retention
-   may remove the target copy.
+4. `delivered`: the original root peer durably acknowledged the complete package; the target copy
+   remains protected until the broker explicitly authorizes release.
+5. `releasePending`: the target durably recorded the broker release before deleting the package
+   directory. It fsyncs the outbox parent where the platform exposes a directory durability barrier
+   and then removes the row; startup completes either side of that filesystem boundary. Windows
+   relies on the durable intent and bounded retry because Go does not expose the same directory
+   barrier and transient file locks may delay removal.
 
 The root peer owns a separate inbox and advances through `receiving` and `available`. A finish
 request validates every descriptor and digest, fsyncs the files and containing directory, atomically
@@ -86,7 +91,11 @@ Metadata publication and payload delivery are separate acknowledgements:
   Root unavailability must not keep `maxWorkerSlots` occupied.
 - The root finish acknowledgement proves that the full package is durable and available. Only then
   does the broker mark the package delivered and allocate its tree event sequence.
-- The target delivery acknowledgement permits outbox garbage collection.
+- The target delivery acknowledgement changes the outbox to `delivered` but does not delete bytes.
+  The broker first durably records that acknowledgement, then sends a separate idempotent `release`
+  carrying the immutable package ID and delivery sequence. Only that release may delete the target
+  copy. If the source deletes the bytes but the broker's release record is lost, replay sees the
+  absent immutable package as success and completes the broker record without retransferring data.
 
 Assigning sequence at metadata publication is forbidden: a later package could otherwise become
 available first and advance a root cursor past an older pending package. Replays use `packageId` and
@@ -214,8 +223,10 @@ broker metadata expose only a bounded package handle and component status.
 ## Retention And Admission
 
 Each peer may retain at most 64 target-outbox packages and 64 root-inbox packages, with a 2 GiB byte
-budget for each store. `capturePending`, `publishPending`, `deliveryPending`, and `receiving` entries
-are not eligible for ordinary age-based garbage collection.
+budget for each store. `capturePending`, `publishPending`, `deliveryPending`, `delivered`,
+`releasePending`, and `receiving` entries are not eligible for ordinary age-based garbage
+collection. A target outbox is removed only by broker release; local periodic maintenance merely
+finishes a previously committed `releasePending` tombstone.
 
 Each `receiving` row is bound to one broker-issued transfer attempt and a bounded lease. On relay
 failure, the broker sends an exact `cancel` that removes only that attempt's partial root files; the
@@ -226,8 +237,9 @@ admission, and expired partial state is reclaimed before a backlog error is retu
 
 Before accepting a new managed turn, the peer reserves enough package capacity for the configured
 component bounds. If it cannot reserve safely, admission fails with a bounded backlog error; it does
-not start a turn and later evict an undelivered result. Available/delivered packages may be pruned
-oldest-first within the documented retention policy.
+not start a turn and later evict an undelivered result. Root `available` packages may be pruned
+oldest-first only when admission needs capacity. A `receiving` package is never evicted, and target
+outbox packages are never pruned by local admission.
 
 Outbox and inbox directories are distinct so self-target delivery cannot collide. All traversal and
 publication use anchored `os.Root` operations, reject symlinks and unexpected entries, create files

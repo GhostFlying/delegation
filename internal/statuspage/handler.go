@@ -78,6 +78,7 @@ const statusDocument = `<!doctype html>
 <tr><th scope="row">Delivery pending</th><td>{{.Results.DeliveryPending}}</td></tr>
 <tr><th scope="row">Delivered</th><td>{{.Results.Delivered}}</td></tr>
 <tr><th scope="row">Source acknowledged</th><td>{{.Results.SourceAcknowledged}}</td></tr>
+<tr><th scope="row">Source released</th><td>{{.Results.SourceReleased}}</td></tr>
 </tbody>
 </table>
 </main>

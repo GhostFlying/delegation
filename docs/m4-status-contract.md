@@ -18,6 +18,9 @@ implementation contract, not a compatibility promise for the pre-release wire fo
   identity and must survive detail garbage collection.
 - `devicesRegistered`, `devicesOnline`, `devicesConnected`, and `devicesSyncReady` are distinct.
   Persistent presence does not prove that a connector is currently connected or synchronized.
+- Peer result counts distinguish active outbox/inbox states from `inboxEvicted`, a monotonic
+  lifetime counter. The latter makes capacity-driven loss of an available result visible after its
+  deletion tombstone has been compacted.
 
 The product must not label an idle worker as completed or infer a lifecycle history from the
 latest-state table.

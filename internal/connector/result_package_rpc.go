@@ -225,6 +225,38 @@ func (s *session) handleAcknowledgeResultPackageRequest(request protocol.Envelop
 	})
 }
 
+func (s *session) handleReleaseResultPackageRequest(request protocol.Envelope) error {
+	if err := validateBrokerResultPackageRequest(
+		request, s.client.hello.DeviceID, resultPackageSourceWorker,
+	); err != nil {
+		return s.writeError(request, protocol.ErrorInvalidRequest, "invalid result package release request")
+	}
+	params, err := protocol.DecodePayload[protocol.ReleaseResultPackageParams](request.Payload)
+	if err != nil || params.Validate() != nil {
+		return s.writeError(request, protocol.ErrorInvalidParams, "invalid result package release payload")
+	}
+	if s.client.resultPackages == nil {
+		return s.writeError(request, protocol.ErrorUnavailable, "result package manager is unavailable")
+	}
+	source := *request.Source
+	return s.startWorkspaceInbound(request, func(ctx context.Context) {
+		result, operationErr := s.client.resultPackages.ReleaseResultPackage(
+			ctx, ResultPackageReleaseRequest{TreeID: request.TreeID, Source: source, Params: params},
+		)
+		if operationErr != nil {
+			s.finishResultPackageError(request, "release result package", operationErr)
+			return
+		}
+		if result.Validate() != nil || result != protocol.ReleaseResultPackageResult(params) {
+			s.finishInvalidResultPackageResult(request)
+			return
+		}
+		if writeErr := s.writeResult(request, result); writeErr != nil {
+			s.close(writeErr)
+		}
+	})
+}
+
 func validateBrokerResultPackageRequest(
 	request protocol.Envelope,
 	deviceID string,

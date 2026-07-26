@@ -278,6 +278,14 @@ func TestStatusProviderFailuresReturnBoundedError(t *testing.T) {
 				return snapshot, nil
 			},
 		},
+		{
+			name: "released result count exceeds acknowledgement",
+			provider: func(context.Context) (Snapshot, error) {
+				snapshot := testSnapshot()
+				snapshot.Results.SourceReleased = snapshot.Results.SourceAcknowledged + 1
+				return snapshot, nil
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -323,7 +331,7 @@ func testSnapshot() Snapshot {
 			CaptureFailed: 13,
 		},
 		Results: ResultCounts{
-			DeliveryPending: 14, Delivered: 16, SourceAcknowledged: 15,
+			DeliveryPending: 14, Delivered: 16, SourceAcknowledged: 15, SourceReleased: 14,
 		},
 	}
 }

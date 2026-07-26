@@ -97,12 +97,32 @@ func (m *Manager) BeginResultPackage(
 		return protocol.BeginResultPackageResult{}, err
 	}
 	lock := m.lock(request.Params.PackageID)
-	lock.Lock()
-	defer lock.Unlock()
-	result, err := m.state.BeginResultInbox(ctx, authority, request.Params, m.now())
+	var result protocol.BeginResultPackageResult
+	evictions := 0
+	for {
+		lock.Lock()
+		result, err = m.state.BeginResultInbox(ctx, authority, request.Params, m.now())
+		if !errors.Is(err, store.ErrResultPackageQuota) {
+			break
+		}
+		lock.Unlock()
+		evicted, evictErr := m.evictOldestAvailable(ctx)
+		if evictErr != nil {
+			return protocol.BeginResultPackageResult{}, evictErr
+		}
+		if !evicted {
+			return protocol.BeginResultPackageResult{}, err
+		}
+		evictions++
+		if evictions > store.MaximumPeerResultPackages {
+			return protocol.BeginResultPackageResult{}, err
+		}
+	}
 	if err != nil {
+		lock.Unlock()
 		return protocol.BeginResultPackageResult{}, err
 	}
+	defer lock.Unlock()
 	if result.Outcome == protocol.ResultPackageAlreadyAvailable {
 		inbox, err := m.state.GetResultInbox(ctx, authority, request.Params.PackageID)
 		if err != nil {
@@ -130,6 +150,57 @@ func (m *Manager) BeginResultPackage(
 		}, nil
 	}
 	return result, nil
+}
+
+func (m *Manager) evictOldestAvailable(ctx context.Context) (bool, error) {
+	m.evictionMu.Lock()
+	defer m.evictionMu.Unlock()
+
+	tombstones, err := m.state.ListResultInboxEvictionTombstones(
+		ctx, m.controllerID, m.deviceID, 1,
+	)
+	if err != nil {
+		return false, err
+	}
+	if len(tombstones) != 0 {
+		// A tombstone still consumes the capacity it is releasing. Finish or
+		// retry that deletion before choosing another available result, so a
+		// transient Windows file lock cannot cascade into extra evictions.
+		if err := m.completeInboxEvictions(ctx); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	available, err := m.state.ListAvailableResultInboxes(
+		ctx, m.controllerID, m.deviceID, 1,
+	)
+	if err != nil {
+		return false, err
+	}
+	if len(available) == 0 {
+		return false, nil
+	}
+	inbox := available[0]
+	lock := m.lock(inbox.PackageID)
+	lock.Lock()
+	defer lock.Unlock()
+	tombstone, err := m.state.PrepareResultInboxEviction(
+		ctx, inbox.Authority, inbox.PackageID, m.now(),
+	)
+	if errors.Is(err, store.ErrResultPackageTransition) || errors.Is(err, store.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := m.removePackage(m.inbox, tombstone.PackageID); err != nil {
+		return false, err
+	}
+	if err := m.state.CompactResultInboxEviction(ctx, tombstone.Authority, tombstone.PackageID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *Manager) WriteResultPackagePart(
@@ -384,6 +455,15 @@ func (m *Manager) AcknowledgeResultPackage(
 	lock.Lock()
 	defer lock.Unlock()
 	outbox, err := m.authorizeSource(ctx, request.TreeID, request.Source, request.Params.PackageID)
+	if errors.Is(err, store.ErrNotFound) {
+		// A successful later release removes the row. If the broker retries an
+		// earlier acknowledgement after losing its durable commit, absence is
+		// therefore the idempotent state for this immutable package ID.
+		if authorityErr := m.authorizeSourceWorker(ctx, request.TreeID, request.Source); authorityErr != nil {
+			return protocol.AcknowledgeResultPackageResult{}, authorityErr
+		}
+		return protocol.AcknowledgeResultPackageResult(request.Params), nil
+	}
 	if err != nil {
 		return protocol.AcknowledgeResultPackageResult{}, err
 	}
@@ -398,18 +478,77 @@ func (m *Manager) AcknowledgeResultPackage(
 	return protocol.AcknowledgeResultPackageResult(request.Params), nil
 }
 
+func (m *Manager) ReleaseResultPackage(
+	ctx context.Context,
+	request ReleaseRequest,
+) (protocol.ReleaseResultPackageResult, error) {
+	if err := request.Params.Validate(); err != nil {
+		return protocol.ReleaseResultPackageResult{}, err
+	}
+	lock := m.lock(request.Params.PackageID)
+	lock.Lock()
+	defer lock.Unlock()
+	outbox, err := m.authorizeSource(ctx, request.TreeID, request.Source, request.Params.PackageID)
+	if errors.Is(err, store.ErrNotFound) {
+		// A successful prior release removes the row and directory. Package IDs
+		// are immutable UUIDs, so absence is the idempotent replay state.
+		if authorityErr := m.authorizeSourceWorker(ctx, request.TreeID, request.Source); authorityErr != nil {
+			return protocol.ReleaseResultPackageResult{}, authorityErr
+		}
+		return protocol.ReleaseResultPackageResult(request.Params), nil
+	}
+	if err != nil {
+		return protocol.ReleaseResultPackageResult{}, err
+	}
+	if outbox.State != store.ResultOutboxDelivered && outbox.State != store.ResultOutboxReleasePending {
+		return protocol.ReleaseResultPackageResult{}, store.ErrResultPackageTransition
+	}
+	release, err := m.state.PrepareResultOutboxRelease(
+		ctx, outbox.ResultOutboxKey, request.Params.Sequence, m.now(),
+	)
+	if err != nil {
+		return protocol.ReleaseResultPackageResult{}, err
+	}
+	if err := m.finishOutboxRelease(ctx, release.ResultOutboxKey); err != nil {
+		return protocol.ReleaseResultPackageResult{}, err
+	}
+	return protocol.ReleaseResultPackageResult(request.Params), nil
+}
+
+func (m *Manager) authorizeSourceWorker(
+	ctx context.Context,
+	treeID string,
+	source control.PrincipalIdentity,
+) error {
+	if err := source.Validate(); err != nil {
+		return err
+	}
+	if source.ControllerID != m.controllerID || source.TreeID != treeID ||
+		source.DeviceID != m.deviceID || source.ParentAgentID == "" {
+		return store.ErrResultPackageAuthority
+	}
+	worker, err := m.state.GetWorker(ctx, store.WorkerKey{
+		ControllerID: source.ControllerID,
+		TreeID:       source.TreeID,
+		AgentID:      source.AgentID,
+	})
+	if err != nil {
+		return err
+	}
+	if worker.ParentAgentID != source.ParentAgentID || worker.DeviceID != source.DeviceID {
+		return store.ErrResultPackageAuthority
+	}
+	return nil
+}
+
 func (m *Manager) authorizeSource(
 	ctx context.Context,
 	treeID string,
 	source control.PrincipalIdentity,
 	packageID string,
 ) (store.ResultOutbox, error) {
-	if err := source.Validate(); err != nil {
+	if err := m.authorizeSourceWorker(ctx, treeID, source); err != nil {
 		return store.ResultOutbox{}, err
-	}
-	if source.ControllerID != m.controllerID || source.TreeID != treeID ||
-		source.DeviceID != m.deviceID || source.ParentAgentID == "" {
-		return store.ResultOutbox{}, store.ErrResultPackageAuthority
 	}
 	key := store.ResultOutboxKey{
 		WorkerKey: store.WorkerKey{
@@ -419,13 +558,6 @@ func (m *Manager) authorizeSource(
 		},
 		SourceDeviceID: source.DeviceID,
 		PackageID:      packageID,
-	}
-	worker, err := m.state.GetWorker(ctx, key.WorkerKey)
-	if err != nil {
-		return store.ResultOutbox{}, err
-	}
-	if worker.ParentAgentID != source.ParentAgentID || worker.DeviceID != source.DeviceID {
-		return store.ResultOutbox{}, store.ErrResultPackageAuthority
 	}
 	outbox, err := m.state.GetResultOutbox(ctx, key)
 	if err != nil {

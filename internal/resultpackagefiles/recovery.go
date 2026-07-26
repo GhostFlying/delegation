@@ -47,29 +47,89 @@ func (m *Manager) recover(ctx context.Context) error {
 		return fmt.Errorf("reclaim expired result inbox: %w", err)
 	}
 
+	// Terminal deletion intents are safe to retry. Do not make one locked or
+	// otherwise unremovable package prevent the peer from starting; the
+	// connector's immediate maintenance pass reports the failure and later
+	// passes retry it.
+	_ = m.completePendingOutboxReleases(ctx)
+	_ = m.completeInboxEvictions(ctx)
+
+	if err := m.verifyStoredInboxes(ctx); err != nil {
+		return err
+	}
+	return m.verifyStoredOutboxes(ctx)
+}
+
+// CleanupResultPackages performs bounded maintenance without evicting an
+// available root package merely because time passed. Admission performs that
+// eviction only when a new durable package needs capacity.
+func (m *Manager) CleanupResultPackages(ctx context.Context) error {
+	return errors.Join(
+		wrapMaintenanceError("reclaim expired result inbox", m.reclaimExpired(ctx)),
+		m.completePendingOutboxReleases(ctx),
+		m.completeInboxEvictions(ctx),
+	)
+}
+
+func wrapMaintenanceError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
+}
+
+func (m *Manager) completePendingOutboxReleases(ctx context.Context) error {
+	releases, err := m.state.ListPendingResultOutboxReleases(
+		ctx, m.controllerID, m.deviceID, store.MaximumPeerResultPackages,
+	)
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, outbox := range releases {
+		lock := m.lock(outbox.PackageID)
+		lock.Lock()
+		releaseErr := m.finishOutboxRelease(ctx, outbox.ResultOutboxKey)
+		lock.Unlock()
+		if releaseErr != nil {
+			failures = append(failures, fmt.Errorf(
+				"complete result outbox release %s: %w", outbox.PackageID, releaseErr,
+			))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func (m *Manager) completeInboxEvictions(ctx context.Context) error {
 	tombstones, err := m.state.ListResultInboxEvictionTombstones(
 		ctx, m.controllerID, m.deviceID, store.MaximumPeerResultPackages,
 	)
 	if err != nil {
 		return err
 	}
+	var failures []error
 	for _, inbox := range tombstones {
 		lock := m.lock(inbox.PackageID)
 		lock.Lock()
-		removeErr := removePackageDirectory(m.inbox, inbox.PackageID)
+		removeErr := m.removePackage(m.inbox, inbox.PackageID)
 		if removeErr == nil {
 			removeErr = m.state.CompactResultInboxEviction(ctx, inbox.Authority, inbox.PackageID)
 		}
 		lock.Unlock()
 		if removeErr != nil {
-			return fmt.Errorf("complete result inbox eviction: %w", removeErr)
+			failures = append(failures, fmt.Errorf(
+				"complete result inbox eviction %s: %w", inbox.PackageID, removeErr,
+			))
 		}
 	}
+	return errors.Join(failures...)
+}
 
-	if err := m.verifyStoredInboxes(ctx); err != nil {
+func (m *Manager) finishOutboxRelease(ctx context.Context, key store.ResultOutboxKey) error {
+	if err := m.removePackage(m.outbox, key.PackageID); err != nil {
 		return err
 	}
-	return m.verifyStoredOutboxes(ctx)
+	return m.state.CompactResultOutboxRelease(ctx, key)
 }
 
 func (m *Manager) reconcileReceiving(ctx context.Context, inbox store.ResultInbox) (bool, error) {
@@ -216,7 +276,14 @@ func (m *Manager) verifyStoredInboxes(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	tombstones, err := m.state.ListResultInboxEvictionTombstones(
+		ctx, m.controllerID, m.deviceID, store.MaximumPeerResultPackages,
+	)
+	if err != nil {
+		return err
+	}
 	expected := make(map[string]struct{}, len(available)+len(receiving))
+	tolerated := make(map[string]struct{}, len(tombstones))
 	for _, inbox := range available {
 		if err := m.verifyAvailable(ctx, inbox); err != nil {
 			return fmt.Errorf("verify available result package: %w", err)
@@ -226,7 +293,10 @@ func (m *Manager) verifyStoredInboxes(ctx context.Context) error {
 	for _, inbox := range receiving {
 		expected[receivingDirectoryName(inbox.PackageID, inbox.AttemptID)] = struct{}{}
 	}
-	return verifyTopLevelDirectories(m.inbox, expected)
+	for _, inbox := range tombstones {
+		tolerated[inbox.PackageID] = struct{}{}
+	}
+	return verifyTopLevelDirectories(m.inbox, expected, tolerated)
 }
 
 func (m *Manager) verifyStoredOutboxes(ctx context.Context) error {
@@ -242,14 +312,24 @@ func (m *Manager) verifyStoredOutboxes(ctx context.Context) error {
 		}
 		outboxes = append(outboxes, results...)
 	}
+	releases, err := m.state.ListPendingResultOutboxReleases(
+		ctx, m.controllerID, m.deviceID, store.MaximumPeerResultPackages,
+	)
+	if err != nil {
+		return err
+	}
 	expected := make(map[string]struct{}, len(outboxes))
+	tolerated := make(map[string]struct{}, len(releases))
 	for _, outbox := range outboxes {
 		if err := m.verifyOutbox(ctx, outbox); err != nil {
 			return fmt.Errorf("verify result package outbox: %w", err)
 		}
 		expected[outbox.PackageID] = struct{}{}
 	}
-	return verifyTopLevelDirectories(m.outbox, expected)
+	for _, outbox := range releases {
+		tolerated[outbox.PackageID] = struct{}{}
+	}
+	return verifyTopLevelDirectories(m.outbox, expected, tolerated)
 }
 
 func (m *Manager) verifyOutbox(ctx context.Context, outbox store.ResultOutbox) error {
@@ -299,12 +379,19 @@ func (m *Manager) verifyOutbox(ctx context.Context, outbox store.ResultOutbox) e
 	return nil
 }
 
-func verifyTopLevelDirectories(root *os.Root, expected map[string]struct{}) error {
+func verifyTopLevelDirectories(
+	root *os.Root,
+	expected map[string]struct{},
+	tolerated map[string]struct{},
+) error {
 	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
+		if _, ok := tolerated[entry.Name()]; ok {
+			continue
+		}
 		if _, ok := expected[entry.Name()]; !ok {
 			return fmt.Errorf("unexpected result package directory %q", entry.Name())
 		}

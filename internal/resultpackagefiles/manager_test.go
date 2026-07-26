@@ -137,6 +137,363 @@ func TestSelfTargetResultPackageTransferKeepsOutboxAndInboxIsolated(t *testing.T
 	}
 }
 
+func TestBrokerReleaseDurablyRemovesOnlyDeliveredOutbox(t *testing.T) {
+	fixture := newManagerFixture(t)
+	defer fixture.close()
+	start := time.Unix(1_700_000_000, 0)
+	fixture.manager.now = func() time.Time { return start }
+	packageID := testID(150)
+	metadata, worker := fixture.publishOutbox(t, packageID, []byte("result"), start)
+	key := store.ResultOutboxKey{
+		WorkerKey: worker.WorkerKey, SourceDeviceID: testDeviceID, PackageID: packageID,
+	}
+	if _, err := fixture.state.AcknowledgeResultOutboxMetadata(
+		context.Background(), key, metadata, start.Add(time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	workerPrincipal := control.NewWorkerPrincipal(
+		testControllerID, testTreeID, testWorkerID, testRootAgentID, testDeviceID,
+	).Identity()
+	release := ReleaseRequest{
+		TreeID: testTreeID, Source: workerPrincipal,
+		Params: protocol.ReleaseResultPackageParams{PackageID: packageID, Sequence: 9},
+	}
+	if _, err := fixture.manager.ReleaseResultPackage(context.Background(), release); !errors.Is(
+		err, store.ErrResultPackageTransition,
+	) {
+		t.Fatalf("release before delivery error = %v", err)
+	}
+	if _, err := fixture.manager.AcknowledgeResultPackage(context.Background(), AcknowledgeRequest{
+		TreeID: testTreeID, Source: workerPrincipal,
+		Params: protocol.AcknowledgeResultPackageParams{PackageID: packageID, Sequence: 9},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.manager.ReleaseResultPackage(context.Background(), release)
+	if err != nil || result != protocol.ReleaseResultPackageResult(release.Params) {
+		t.Fatalf("release = %#v, %v", result, err)
+	}
+	if _, err := fixture.state.GetResultOutbox(context.Background(), key); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("released outbox lookup error = %v", err)
+	}
+	if _, err := fixture.manager.outbox.Lstat(packageID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("released outbox directory error = %v", err)
+	}
+	if replay, err := fixture.manager.ReleaseResultPackage(context.Background(), release); err != nil ||
+		replay != result {
+		t.Fatalf("release replay = %#v, %v", replay, err)
+	}
+	acknowledgement := AcknowledgeRequest{
+		TreeID: testTreeID, Source: workerPrincipal,
+		Params: protocol.AcknowledgeResultPackageParams{PackageID: packageID, Sequence: 9},
+	}
+	if replay, err := fixture.manager.AcknowledgeResultPackage(
+		context.Background(), acknowledgement,
+	); err != nil || replay != protocol.AcknowledgeResultPackageResult(acknowledgement.Params) {
+		t.Fatalf("acknowledgement after release replay = %#v, %v", replay, err)
+	}
+	wrong := release
+	wrong.Source = control.NewWorkerPrincipal(
+		testControllerID, testTreeID, testID(151), testRootAgentID, testDeviceID,
+	).Identity()
+	if _, err := fixture.manager.ReleaseResultPackage(context.Background(), wrong); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown worker release error = %v", err)
+	}
+	wrongAcknowledgement := acknowledgement
+	wrongAcknowledgement.Source = wrong.Source
+	if _, err := fixture.manager.AcknowledgeResultPackage(
+		context.Background(), wrongAcknowledgement,
+	); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown worker acknowledgement error = %v", err)
+	}
+}
+
+func TestStartupCompletesOutboxReleaseOnBothCrashSides(t *testing.T) {
+	for _, removeBeforeRestart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("removed=%t", removeBeforeRestart), func(t *testing.T) {
+			fixture := newManagerFixture(t)
+			start := time.Unix(1_700_000_000, 0)
+			fixture.manager.now = func() time.Time { return start }
+			packageID := testID(160)
+			metadata, worker := fixture.publishOutbox(t, packageID, []byte("result"), start)
+			key := store.ResultOutboxKey{
+				WorkerKey: worker.WorkerKey, SourceDeviceID: testDeviceID, PackageID: packageID,
+			}
+			if _, err := fixture.state.AcknowledgeResultOutboxMetadata(
+				context.Background(), key, metadata, start.Add(time.Second),
+			); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.state.AcknowledgeResultOutboxDelivery(
+				context.Background(), key, 9, start.Add(2*time.Second),
+			); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.state.PrepareResultOutboxRelease(
+				context.Background(), key, 9, start.Add(3*time.Second),
+			); err != nil {
+				t.Fatal(err)
+			}
+			if removeBeforeRestart {
+				if err := removePackageDirectory(fixture.manager.outbox, packageID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := fixture.manager.Close(); err != nil {
+				t.Fatal(err)
+			}
+			fixture.manager = fixture.reopen(t)
+			if _, err := fixture.state.GetResultOutbox(context.Background(), key); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("recovered release lookup error = %v", err)
+			}
+			if _, err := fixture.manager.outbox.Lstat(packageID); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("recovered release directory error = %v", err)
+			}
+			fixture.close()
+		})
+	}
+}
+
+func TestRecoveryToleratesOnePendingDeletionAndMaintenanceRetriesIt(t *testing.T) {
+	fixture := newManagerFixture(t)
+	defer fixture.close()
+	ctx := context.Background()
+	start := time.Unix(1_700_000_000, 0)
+	fixture.manager.now = func() time.Time { return start }
+	outboxPackageID := testID(170)
+	metadata, worker := fixture.publishOutbox(t, outboxPackageID, []byte("result"), start)
+	outboxKey := store.ResultOutboxKey{
+		WorkerKey: worker.WorkerKey, SourceDeviceID: testDeviceID, PackageID: outboxPackageID,
+	}
+	if _, err := fixture.state.AcknowledgeResultOutboxMetadata(
+		ctx, outboxKey, metadata, start.Add(time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.state.AcknowledgeResultOutboxDelivery(
+		ctx, outboxKey, 9, start.Add(2*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.state.PrepareResultOutboxRelease(
+		ctx, outboxKey, 9, start.Add(3*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	inboxPackageID := testID(171)
+	inboxAttemptID := testID(172)
+	root := control.NewRootPrincipal(
+		testControllerID, testTreeID, testRootAgentID, testDeviceID,
+	).Identity()
+	if _, err := fixture.manager.BeginResultPackage(ctx, BeginRequest{
+		TreeID: testTreeID, Source: root,
+		Params: protocol.BeginResultPackageParams{
+			AttemptID: inboxAttemptID, PackageID: inboxPackageID,
+			LeaseExpiresAt: start.Add(5 * time.Minute).Unix(),
+			Metadata:       emptyMetadata(t, inboxPackageID),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.manager.FinishResultPackage(ctx, FinishRequest{
+		TreeID: testTreeID, Source: root,
+		Params: protocol.FinishResultPackageParams{
+			AttemptID: inboxAttemptID, PackageID: inboxPackageID,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inboxAuthority := store.ResultInboxAuthority{
+		ControllerID: testControllerID, TreeID: testTreeID,
+		RootAgentID: testRootAgentID, RootDeviceID: testDeviceID,
+	}
+	if _, err := fixture.state.PrepareResultInboxEviction(
+		ctx, inboxAuthority, inboxPackageID, start.Add(4*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	remove := fixture.manager.removePackage
+	wantRemovalError := errors.New("transient package lock")
+	fixture.manager.removePackage = func(root *os.Root, packageID string) error {
+		if packageID == outboxPackageID {
+			return wantRemovalError
+		}
+		return remove(root, packageID)
+	}
+	if err := fixture.manager.recover(ctx); err != nil {
+		t.Fatalf("recovery failed on retryable terminal deletion: %v", err)
+	}
+	if _, err := fixture.state.GetResultInbox(
+		ctx, inboxAuthority, inboxPackageID,
+	); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("later inbox eviction was not compacted: %v", err)
+	}
+	if err := fixture.manager.CleanupResultPackages(ctx); !errors.Is(err, wantRemovalError) {
+		t.Fatalf("maintenance error = %v, want transient removal error", err)
+	}
+	fixture.manager.removePackage = remove
+	if err := fixture.manager.CleanupResultPackages(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.state.GetResultOutbox(ctx, outboxKey); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("retried outbox release lookup error = %v", err)
+	}
+}
+
+func TestInboxAdmissionEvictsAvailableButNeverReceiving(t *testing.T) {
+	fixture := newManagerFixture(t)
+	defer fixture.close()
+	start := time.Unix(1_700_000_000, 0)
+	current := start
+	fixture.manager.now = func() time.Time { return current }
+	root := control.NewRootPrincipal(testControllerID, testTreeID, testRootAgentID, testDeviceID).Identity()
+	firstAvailable := testID(2000)
+	for index := 0; index < store.MaximumPeerResultPackages-1; index++ {
+		packageID := testID(2000 + index)
+		attemptID := testID(2100 + index)
+		current = start.Add(time.Duration(index) * time.Second)
+		if _, err := fixture.manager.BeginResultPackage(context.Background(), BeginRequest{
+			TreeID: testTreeID, Source: root,
+			Params: protocol.BeginResultPackageParams{
+				AttemptID: attemptID, PackageID: packageID,
+				LeaseExpiresAt: current.Add(store.MaximumResultInboxLease).Unix(), Metadata: emptyMetadata(t, packageID),
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.manager.FinishResultPackage(context.Background(), FinishRequest{
+			TreeID: testTreeID, Source: root,
+			Params: protocol.FinishResultPackageParams{AttemptID: attemptID, PackageID: packageID},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receivingID := testID(2200)
+	receivingAttempt := testID(2201)
+	current = start.Add(10 * time.Minute)
+	if _, err := fixture.manager.BeginResultPackage(context.Background(), BeginRequest{
+		TreeID: testTreeID, Source: root,
+		Params: protocol.BeginResultPackageParams{
+			AttemptID: receivingAttempt, PackageID: receivingID,
+			LeaseExpiresAt: current.Add(store.MaximumResultInboxLease).Unix(), Metadata: emptyMetadata(t, receivingID),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newPackageID := testID(2202)
+	newAttemptID := testID(2203)
+	current = current.Add(time.Second)
+	if _, err := fixture.manager.BeginResultPackage(context.Background(), BeginRequest{
+		TreeID: testTreeID, Source: root,
+		Params: protocol.BeginResultPackageParams{
+			AttemptID: newAttemptID, PackageID: newPackageID,
+			LeaseExpiresAt: current.Add(store.MaximumResultInboxLease).Unix(), Metadata: emptyMetadata(t, newPackageID),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	authority := store.ResultInboxAuthority{
+		ControllerID: testControllerID, TreeID: testTreeID,
+		RootAgentID: testRootAgentID, RootDeviceID: testDeviceID,
+	}
+	if _, err := fixture.state.GetResultInbox(context.Background(), authority, firstAvailable); !errors.Is(
+		err, store.ErrNotFound,
+	) {
+		t.Fatalf("oldest available inbox lookup error = %v", err)
+	}
+	for _, packageID := range []string{receivingID, newPackageID} {
+		inbox, err := fixture.state.GetResultInbox(context.Background(), authority, packageID)
+		if err != nil || inbox.State != store.ResultInboxReceiving {
+			t.Fatalf("protected receiving inbox %s = %#v, %v", packageID, inbox, err)
+		}
+	}
+}
+
+func TestInboxAdmissionRetriesLockedTombstoneBeforeChoosingAnotherVictim(t *testing.T) {
+	fixture := newManagerFixture(t)
+	defer fixture.close()
+	ctx := context.Background()
+	start := time.Unix(1_700_000_000, 0)
+	current := start
+	fixture.manager.now = func() time.Time { return current }
+	root := control.NewRootPrincipal(
+		testControllerID, testTreeID, testRootAgentID, testDeviceID,
+	).Identity()
+	for index := 0; index < store.MaximumPeerResultPackages; index++ {
+		packageID := testID(2300 + index)
+		attemptID := testID(2400 + index)
+		current = start.Add(time.Duration(index) * time.Second)
+		if _, err := fixture.manager.BeginResultPackage(ctx, BeginRequest{
+			TreeID: testTreeID, Source: root,
+			Params: protocol.BeginResultPackageParams{
+				AttemptID: attemptID, PackageID: packageID,
+				LeaseExpiresAt: current.Add(store.MaximumResultInboxLease).Unix(),
+				Metadata:       emptyMetadata(t, packageID),
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.manager.FinishResultPackage(ctx, FinishRequest{
+			TreeID: testTreeID, Source: root,
+			Params: protocol.FinishResultPackageParams{
+				AttemptID: attemptID, PackageID: packageID,
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	lockedPackageID := testID(2300)
+	incomingPackageID := testID(2500)
+	incomingAttemptID := testID(2501)
+	wantLockError := errors.New("result package is temporarily locked")
+	remove := fixture.manager.removePackage
+	fixture.manager.removePackage = func(root *os.Root, packageID string) error {
+		if packageID == lockedPackageID {
+			return wantLockError
+		}
+		return remove(root, packageID)
+	}
+	begin := BeginRequest{
+		TreeID: testTreeID, Source: root,
+		Params: protocol.BeginResultPackageParams{
+			AttemptID: incomingAttemptID, PackageID: incomingPackageID,
+			LeaseExpiresAt: current.Add(store.MaximumResultInboxLease).Unix(),
+			Metadata:       emptyMetadata(t, incomingPackageID),
+		},
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := fixture.manager.BeginResultPackage(ctx, begin); !errors.Is(err, wantLockError) {
+			t.Fatalf("locked admission attempt %d error = %v", attempt, err)
+		}
+		available, err := fixture.state.ListAvailableResultInboxes(
+			ctx, testControllerID, testDeviceID, store.MaximumPeerResultPackages,
+		)
+		if err != nil || len(available) != store.MaximumPeerResultPackages-1 {
+			t.Fatalf("available results after attempt %d = %d, %v", attempt, len(available), err)
+		}
+		tombstones, err := fixture.state.ListResultInboxEvictionTombstones(
+			ctx, testControllerID, testDeviceID, store.MaximumPeerResultPackages,
+		)
+		if err != nil || len(tombstones) != 1 || tombstones[0].PackageID != lockedPackageID {
+			t.Fatalf("eviction tombstones after attempt %d = %#v, %v", attempt, tombstones, err)
+		}
+	}
+
+	fixture.manager.removePackage = remove
+	if _, err := fixture.manager.BeginResultPackage(ctx, begin); err != nil {
+		t.Fatal(err)
+	}
+	status, err := fixture.state.ReadPeerStatusSnapshot(ctx, testControllerID, testDeviceID)
+	if err != nil || status.Results.InboxEvicted != 1 || status.Results.InboxReceiving != 1 ||
+		status.Results.InboxAvailable != store.MaximumPeerResultPackages-1 {
+		t.Fatalf("post-retry inbox status = %#v, %v", status.Results, err)
+	}
+}
+
 func TestReceivingRecoveryTruncatesUncommittedBytesAndCompletesPreparedRemoval(t *testing.T) {
 	fixture := newManagerFixture(t)
 	start := time.Now().Truncate(time.Second)
@@ -314,6 +671,21 @@ func TestStartupCompletesResultInboxEviction(t *testing.T) {
 	)
 	if err != nil || len(tombstones) != 0 {
 		t.Fatalf("remaining eviction tombstones = %#v, %v", tombstones, err)
+	}
+	status, err := fixture.state.ReadPeerStatusSnapshot(
+		context.Background(), testControllerID, testDeviceID,
+	)
+	if err != nil || status.Results.InboxEvicted != 1 {
+		t.Fatalf("inbox eviction lifetime count = %d, %v", status.Results.InboxEvicted, err)
+	}
+	if err := fixture.manager.CleanupResultPackages(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, err = fixture.state.ReadPeerStatusSnapshot(
+		context.Background(), testControllerID, testDeviceID,
+	)
+	if err != nil || status.Results.InboxEvicted != 1 {
+		t.Fatalf("replayed inbox eviction lifetime count = %d, %v", status.Results.InboxEvicted, err)
 	}
 	fixture.close()
 }

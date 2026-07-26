@@ -20,6 +20,8 @@ type managedResultPackageManager interface {
 	FinishResultPackage(context.Context, resultpackagefiles.FinishRequest) (protocol.FinishResultPackageResult, error)
 	CancelResultPackage(context.Context, resultpackagefiles.CancelRequest) (protocol.CancelResultPackageResult, error)
 	AcknowledgeResultPackage(context.Context, resultpackagefiles.AcknowledgeRequest) (protocol.AcknowledgeResultPackageResult, error)
+	ReleaseResultPackage(context.Context, resultpackagefiles.ReleaseRequest) (protocol.ReleaseResultPackageResult, error)
+	CleanupResultPackages(context.Context) error
 }
 
 type managedResultPackagePublisher interface {
@@ -269,4 +271,23 @@ func (s managedWorkerSpawner) AcknowledgeResultPackage(
 	return s.resultPackages.AcknowledgeResultPackage(ctx, resultpackagefiles.AcknowledgeRequest{
 		TreeID: request.TreeID, Source: request.Source, Params: request.Params,
 	})
+}
+
+func (s managedWorkerSpawner) ReleaseResultPackage(
+	ctx context.Context,
+	request connector.ResultPackageReleaseRequest,
+) (protocol.ReleaseResultPackageResult, error) {
+	if s.resultPackages == nil {
+		return protocol.ReleaseResultPackageResult{}, errors.New("result package runtime is unavailable")
+	}
+	return s.resultPackages.ReleaseResultPackage(ctx, resultpackagefiles.ReleaseRequest{
+		TreeID: request.TreeID, Source: request.Source, Params: request.Params,
+	})
+}
+
+func (s managedWorkerSpawner) CleanupResultPackages(ctx context.Context) error {
+	if s.resultPackages == nil {
+		return errors.New("result package runtime is unavailable")
+	}
+	return s.resultPackages.CleanupResultPackages(ctx)
 }

@@ -294,6 +294,15 @@ func (integrationWorkerController) AcknowledgeResultPackage(
 	return protocol.AcknowledgeResultPackageResult{}, errors.New("not used")
 }
 
+func (integrationWorkerController) ReleaseResultPackage(
+	context.Context,
+	connector.ResultPackageReleaseRequest,
+) (protocol.ReleaseResultPackageResult, error) {
+	return protocol.ReleaseResultPackageResult{}, errors.New("not used")
+}
+
+func (integrationWorkerController) CleanupResultPackages(context.Context) error { return nil }
+
 func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 	controllerID := newIntegrationID(t)
 	deviceID := newIntegrationID(t)

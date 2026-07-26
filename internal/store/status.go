@@ -48,6 +48,7 @@ type StatusResultCounts struct {
 	DeliveryPending    int
 	Delivered          int
 	SourceAcknowledged int
+	SourceReleased     int
 }
 
 type StatusLifetimeCounters struct {
@@ -90,10 +91,12 @@ type PeerStatusResultCounts struct {
 	OutboxPublishPending   int
 	OutboxDeliveryPending  int
 	OutboxDelivered        int
+	OutboxReleasePending   int
 	OutboxRetainedBytes    int64
 	InboxReceiving         int
 	InboxAvailable         int
 	InboxEvictionPending   int
+	InboxEvicted           uint64
 	InboxRetainedBytes     int64
 	RolloutCaptureFailed   int
 	WorkspaceCaptureFailed int
@@ -193,15 +196,17 @@ WHERE controller_id = ?
 	}
 	if err := transaction.QueryRowContext(ctx, `
 SELECT
-	COALESCE(sum(CASE WHEN state = 'deliveryPending' THEN 1 ELSE 0 END), 0),
-	COALESCE(sum(CASE WHEN state = 'delivered' THEN 1 ELSE 0 END), 0),
-	COALESCE(sum(CASE WHEN source_acknowledged_at > 0 THEN 1 ELSE 0 END), 0)
+		COALESCE(sum(CASE WHEN state = 'deliveryPending' THEN 1 ELSE 0 END), 0),
+		COALESCE(sum(CASE WHEN state = 'delivered' THEN 1 ELSE 0 END), 0),
+		COALESCE(sum(CASE WHEN source_acknowledged_at > 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(sum(CASE WHEN source_released_at > 0 THEN 1 ELSE 0 END), 0)
 FROM result_packages
 WHERE controller_id = ?
 `, controllerID).Scan(
 		&snapshot.Results.DeliveryPending,
 		&snapshot.Results.Delivered,
 		&snapshot.Results.SourceAcknowledged,
+		&snapshot.Results.SourceReleased,
 	); err != nil {
 		return StatusSnapshot{}, fmt.Errorf("read status result package counts: %w", err)
 	}
@@ -283,8 +288,8 @@ func (s *PeerStore) ReadPeerStatusSnapshot(
 
 	var snapshot PeerStatusSnapshot
 	if err := transaction.QueryRowContext(ctx, `
-SELECT worker_revision FROM peer_metadata WHERE singleton = 1
-`).Scan(&snapshot.WorkerRevision); err != nil {
+SELECT worker_revision, result_inbox_evicted FROM peer_metadata WHERE singleton = 1
+`).Scan(&snapshot.WorkerRevision, &snapshot.Results.InboxEvicted); err != nil {
 		return PeerStatusSnapshot{}, fmt.Errorf("read peer status worker revision: %w", err)
 	}
 	if err := transaction.QueryRowContext(ctx, `
@@ -345,6 +350,7 @@ SELECT
 	COALESCE(sum(CASE WHEN state = 'publishPending' THEN 1 ELSE 0 END), 0),
 	COALESCE(sum(CASE WHEN state = 'deliveryPending' THEN 1 ELSE 0 END), 0),
 	COALESCE(sum(CASE WHEN state = 'delivered' THEN 1 ELSE 0 END), 0),
+	COALESCE(sum(CASE WHEN state = 'releasePending' THEN 1 ELSE 0 END), 0),
 	COALESCE(sum(reserved_bytes), 0)
 FROM peer_result_outbox
 WHERE controller_id = ? AND source_device_id = ?
@@ -353,6 +359,7 @@ WHERE controller_id = ? AND source_device_id = ?
 		&snapshot.Results.OutboxPublishPending,
 		&snapshot.Results.OutboxDeliveryPending,
 		&snapshot.Results.OutboxDelivered,
+		&snapshot.Results.OutboxReleasePending,
 		&snapshot.Results.OutboxRetainedBytes,
 	); err != nil {
 		return PeerStatusSnapshot{}, fmt.Errorf("read peer status result outbox counts: %w", err)

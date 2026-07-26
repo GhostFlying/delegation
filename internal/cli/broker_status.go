@@ -113,6 +113,7 @@ func writeBrokerStatus(
 		fmt.Fprintf(&rendered, "  delivery pending: %d\n", status.Results.DeliveryPending)
 		fmt.Fprintf(&rendered, "  delivered: %d\n", status.Results.Delivered)
 		fmt.Fprintf(&rendered, "  source acknowledged: %d\n", status.Results.SourceAcknowledged)
+		fmt.Fprintf(&rendered, "  source released: %d\n", status.Results.SourceReleased)
 		output = rendered.Bytes()
 	}
 	if len(output) == 0 || len(output) > maximumStatusOutput {

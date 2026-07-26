@@ -1279,6 +1279,15 @@ func (testWorkerSpawner) AcknowledgeResultPackage(
 	return protocol.AcknowledgeResultPackageResult{}, errors.New("not used")
 }
 
+func (testWorkerSpawner) ReleaseResultPackage(
+	context.Context,
+	ResultPackageReleaseRequest,
+) (protocol.ReleaseResultPackageResult, error) {
+	return protocol.ReleaseResultPackageResult{}, errors.New("not used")
+}
+
+func (testWorkerSpawner) CleanupResultPackages(context.Context) error { return nil }
+
 func (nilChangesArtifactSource) ArtifactChanges() <-chan struct{} { return nil }
 
 func (nilChangesArtifactSource) ListPendingChangesPublications(
