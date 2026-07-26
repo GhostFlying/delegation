@@ -68,15 +68,16 @@ type AcknowledgeRequest struct {
 }
 
 type Manager struct {
-	controllerID string
-	deviceID     string
-	state        *store.PeerStore
-	workspace    *os.Root
-	outbox       *os.Root
-	inbox        *os.Root
-	locks        [packageLockCount]sync.Mutex
-	now          func() time.Time
-	syncRoot     func(*os.Root) error
+	controllerID  string
+	deviceID      string
+	state         *store.PeerStore
+	workspace     *os.Root
+	outbox        *os.Root
+	inbox         *os.Root
+	locks         [packageLockCount]sync.Mutex
+	outboxChanges chan struct{}
+	now           func() time.Time
+	syncRoot      func(*os.Root) error
 }
 
 func New(ctx context.Context, options Options) (*Manager, error) {
@@ -114,19 +115,33 @@ func New(ctx context.Context, options Options) (*Manager, error) {
 		)
 	}
 	manager := &Manager{
-		controllerID: options.ControllerID,
-		deviceID:     options.DeviceID,
-		state:        options.Store,
-		workspace:    workspace,
-		outbox:       outbox,
-		inbox:        inbox,
-		now:          time.Now,
-		syncRoot:     syncDirectory,
+		controllerID:  options.ControllerID,
+		deviceID:      options.DeviceID,
+		state:         options.Store,
+		workspace:     workspace,
+		outbox:        outbox,
+		inbox:         inbox,
+		outboxChanges: make(chan struct{}, 1),
+		now:           time.Now,
+		syncRoot:      syncDirectory,
 	}
 	if err := manager.recover(ctx); err != nil {
 		return nil, errors.Join(fmt.Errorf("recover result package files: %w", err), manager.Close())
 	}
 	return manager, nil
+}
+
+// ResultPackageChanges is a coalesced signal that durable outbox metadata may
+// contain work for the connector publisher.
+func (m *Manager) ResultPackageChanges() <-chan struct{} {
+	return m.outboxChanges
+}
+
+func (m *Manager) signalOutboxChange() {
+	select {
+	case m.outboxChanges <- struct{}{}:
+	default:
+	}
 }
 
 func (m *Manager) Close() error {

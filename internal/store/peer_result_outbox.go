@@ -208,9 +208,25 @@ func validateResultOutboxTurnIntentAuthority(
 func (s *PeerStore) AcknowledgeResultOutboxMetadata(
 	ctx context.Context,
 	key ResultOutboxKey,
+	metadata protocol.ResultPackageMetadata,
 	observedAt time.Time,
 ) (ResultOutbox, error) {
-	return s.transitionResultOutbox(ctx, key, observedAt, ResultOutboxPublishPending, ResultOutboxDeliveryPending, 0)
+	manifest, err := metadata.DecodeManifest()
+	if err != nil {
+		return ResultOutbox{}, err
+	}
+	if err := validateStoredResultMetadata(key, metadata, manifest); err != nil {
+		return ResultOutbox{}, err
+	}
+	return s.transitionResultOutbox(
+		ctx,
+		key,
+		observedAt,
+		ResultOutboxPublishPending,
+		ResultOutboxDeliveryPending,
+		0,
+		&metadata,
+	)
 }
 
 func (s *PeerStore) AcknowledgeResultOutboxDelivery(
@@ -223,7 +239,13 @@ func (s *PeerStore) AcknowledgeResultOutboxDelivery(
 		return ResultOutbox{}, errors.New("delivery sequence must be a positive signed 64-bit integer")
 	}
 	return s.transitionResultOutbox(
-		ctx, key, observedAt, ResultOutboxDeliveryPending, ResultOutboxDelivered, sequence,
+		ctx,
+		key,
+		observedAt,
+		ResultOutboxDeliveryPending,
+		ResultOutboxDelivered,
+		sequence,
+		nil,
 	)
 }
 
@@ -233,6 +255,7 @@ func (s *PeerStore) transitionResultOutbox(
 	observedAt time.Time,
 	from, to ResultOutboxState,
 	sequence uint64,
+	expectedMetadata *protocol.ResultPackageMetadata,
 ) (ResultOutbox, error) {
 	if err := key.Validate(); err != nil {
 		return ResultOutbox{}, err
@@ -246,6 +269,10 @@ func (s *PeerStore) transitionResultOutbox(
 		stored, err = queryResultOutbox(ctx, connection, key)
 		if err != nil {
 			return err
+		}
+		if expectedMetadata != nil &&
+			!protocol.SameResultPackageMetadata(stored.Metadata, *expectedMetadata) {
+			return ErrResultPackageConflict
 		}
 		if stored.State == to {
 			if stored.DeliverySequence == sequence {

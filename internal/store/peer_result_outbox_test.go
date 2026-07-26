@@ -68,11 +68,11 @@ func TestResultOutboxLifecycleIsIdempotentAndReleasesUnusedReservation(t *testin
 	if err != nil || len(publications) != 1 || publications[0].PackageID != key.PackageID {
 		t.Fatalf("pending publications = %#v, %v", publications, err)
 	}
-	delivery, err := state.AcknowledgeResultOutboxMetadata(ctx, key, now.Add(4*time.Second))
+	delivery, err := state.AcknowledgeResultOutboxMetadata(ctx, key, metadata, now.Add(4*time.Second))
 	if err != nil || delivery.State != ResultOutboxDeliveryPending {
 		t.Fatalf("metadata acknowledgement = %#v, %v", delivery, err)
 	}
-	if _, err := state.AcknowledgeResultOutboxMetadata(ctx, key, now.Add(5*time.Second)); err != nil {
+	if _, err := state.AcknowledgeResultOutboxMetadata(ctx, key, metadata, now.Add(5*time.Second)); err != nil {
 		t.Fatalf("metadata acknowledgement replay: %v", err)
 	}
 	if delivered, err := state.ListDeliveredResultOutboxes(ctx, key.ControllerID, key.SourceDeviceID, 10); err != nil || len(delivered) != 0 {
