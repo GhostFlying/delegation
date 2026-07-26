@@ -64,7 +64,9 @@ var (
 	ErrNotificationOverflow   = errors.New("app-server notification queue is full")
 	ErrCloseTimeout           = errors.New("timed out closing app-server")
 	ErrProcessExitUnconfirmed = errors.New("app-server process tree exit was not confirmed")
-	ErrRequestNotWritten      = errors.New("app-server request was not written")
+	// ErrRequestNotWritten marks failures for which the client can prove that
+	// the request wrote no bytes to app-server stdin.
+	ErrRequestNotWritten = errors.New("app-server request was not written")
 )
 
 // Options defines one isolated app-server child process.
@@ -127,6 +129,7 @@ type Client struct {
 	stderrDone    chan struct{}
 	stdoutDone    chan struct{}
 	processExited chan struct{}
+	writeTimeout  time.Duration
 
 	nextID  atomic.Uint64
 	closing atomic.Bool
@@ -188,8 +191,9 @@ func Start(ctx context.Context, options Options) (*Client, error) {
 		closeTimeout: validated.CloseTimeout,
 		maxPending:   validated.MaxPendingCalls, stderr: newTailBuffer(validated.StderrLimit),
 		stderrDone: make(chan struct{}), stdoutDone: make(chan struct{}),
-		processExited: make(chan struct{}), writeGate: make(chan struct{}, 1),
-		pending: map[uint64]pendingCall{}, abandoned: map[uint64]struct{}{},
+		processExited: make(chan struct{}), writeTimeout: defaultWriteTimeout,
+		writeGate: make(chan struct{}, 1),
+		pending:   map[uint64]pendingCall{}, abandoned: map[uint64]struct{}{},
 		notifications: make(chan Notification, validated.NotificationBuffer), fatal: make(chan error, 1),
 		done: make(chan struct{}),
 	}
@@ -295,24 +299,24 @@ func closeFiles(files ...*os.File) error {
 // Call sends one request and decodes its result. Concurrent calls are supported.
 func (c *Client) Call(ctx context.Context, method string, params, result any) error {
 	if method == "" {
-		return errors.New("app-server RPC method is empty")
+		return requestNotWritten(errors.New("app-server RPC method is empty"))
 	}
 	id := c.nextID.Add(1)
 	data, err := marshalRequest(id, method, params)
 	if err != nil {
-		return fmt.Errorf("encode app-server %s request: %w", method, err)
+		return requestNotWritten(fmt.Errorf("encode app-server %s request: %w", method, err))
 	}
 	if len(data) > MaxMessageBytes {
-		return ErrMessageTooLarge
+		return requestNotWritten(ErrMessageTooLarge)
 	}
 	release, err := c.acquireWriter(ctx)
 	if err != nil {
-		return err
+		return requestNotWritten(err)
 	}
 	pending := pendingCall{result: make(chan response, 1)}
 	if err := c.addPending(id, pending); err != nil {
 		release()
-		return err
+		return requestNotWritten(err)
 	}
 	if err := c.writeLocked(ctx, data); err != nil {
 		c.removePending(id, false)
@@ -646,12 +650,12 @@ func (c *Client) removePending(id uint64, abandon bool) bool {
 func (c *Client) acquireWriter(ctx context.Context) (func(), error) {
 	select {
 	case <-ctx.Done():
-		return nil, errors.Join(ErrRequestNotWritten, ctx.Err())
+		return nil, requestNotWritten(ctx.Err())
 	case <-c.done:
 		if err := c.Err(); err != nil {
-			return nil, err
+			return nil, requestNotWritten(err)
 		}
-		return nil, ErrClosed
+		return nil, requestNotWritten(ErrClosed)
 	case <-c.writeGate:
 		return func() { c.writeGate <- struct{}{} }, nil
 	}
@@ -669,28 +673,32 @@ func (c *Client) write(ctx context.Context, data []byte) error {
 
 func (c *Client) writeLocked(ctx context.Context, data []byte) error {
 	if len(data) > MaxMessageBytes {
-		return ErrMessageTooLarge
+		return requestNotWritten(ErrMessageTooLarge)
 	}
 	if err := ctx.Err(); err != nil {
-		return errors.Join(ErrRequestNotWritten, err)
+		return requestNotWritten(err)
 	}
 	line := make([]byte, len(data)+1)
 	copy(line, data)
 	line[len(data)] = '\n'
 
-	writeDone := make(chan error, 1)
+	writeDone := make(chan writeResult, 1)
 	go func() {
 		writeDone <- writeAll(c.stdin, line)
 	}()
-	writeCtx, cancel := context.WithTimeout(ctx, defaultWriteTimeout)
+	writeTimeout := c.writeTimeout
+	if writeTimeout == 0 {
+		writeTimeout = defaultWriteTimeout
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
 	select {
-	case err := <-writeDone:
-		return c.normalizeWriteResult(err)
+	case result := <-writeDone:
+		return c.normalizeWriteResult(result)
 	case <-writeCtx.Done():
 		select {
-		case err := <-writeDone:
-			return c.normalizeWriteResult(err)
+		case result := <-writeDone:
+			return c.normalizeWriteResult(result)
 		default:
 		}
 		// Anonymous child-process pipes do not reliably support write deadlines on
@@ -700,8 +708,8 @@ func (c *Client) writeLocked(ctx context.Context, data []byte) error {
 		return errors.Join(writeCtx.Err(), c.killProcess())
 	case <-c.done:
 		select {
-		case err := <-writeDone:
-			return c.normalizeWriteResult(err)
+		case result := <-writeDone:
+			return c.normalizeWriteResult(result)
 		default:
 		}
 		if err := c.Err(); err != nil {
@@ -711,33 +719,79 @@ func (c *Client) writeLocked(ctx context.Context, data []byte) error {
 	}
 }
 
-func (c *Client) normalizeWriteResult(err error) error {
-	if err == nil {
+func (c *Client) normalizeWriteResult(result writeResult) error {
+	if result.err == nil {
 		return nil
 	}
+	err := result.err
 	select {
 	case <-c.done:
 		if terminalErr := c.Err(); terminalErr != nil {
-			return terminalErr
+			err = terminalErr
+		} else {
+			err = ErrClosed
 		}
-		return ErrClosed
 	default:
-		return err
 	}
+	if result.receipt == writeReceiptNone {
+		return requestNotWritten(err)
+	}
+	return err
 }
 
-func writeAll(writer io.Writer, data []byte) error {
-	for len(data) > 0 {
-		written, err := writer.Write(data)
+type writeReceipt uint8
+
+const (
+	writeReceiptUnknown writeReceipt = iota
+	writeReceiptNone
+	writeReceiptPartial
+	writeReceiptComplete
+)
+
+type writeResult struct {
+	receipt writeReceipt
+	written int
+	err     error
+}
+
+func writeAll(writer io.Writer, data []byte) writeResult {
+	result := writeResult{receipt: writeReceiptNone}
+	remaining := data
+	for len(remaining) > 0 {
+		written, err := writer.Write(remaining)
+		if written < 0 || written > len(remaining) {
+			result.receipt = writeReceiptUnknown
+			result.err = fmt.Errorf(
+				"app-server stdin returned invalid write count %d for %d bytes",
+				written,
+				len(remaining),
+			)
+			return result
+		}
+		result.written += written
+		if result.written == len(data) {
+			result.receipt = writeReceiptComplete
+		} else if result.written > 0 {
+			result.receipt = writeReceiptPartial
+		}
 		if err != nil {
-			return err
+			result.err = err
+			return result
 		}
 		if written == 0 {
-			return io.ErrShortWrite
+			result.err = io.ErrShortWrite
+			return result
 		}
-		data = data[written:]
+		remaining = remaining[written:]
 	}
-	return nil
+	return result
+}
+
+func requestNotWritten(err error) error {
+	if errors.Is(err, ErrRequestNotWritten) {
+		return err
+	}
+	return errors.Join(ErrRequestNotWritten, err)
 }
 
 func (c *Client) drainStderr(stderr io.ReadCloser) {
