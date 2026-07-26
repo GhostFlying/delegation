@@ -1,6 +1,6 @@
 {
   "name": "delegation",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Delegate bounded Codex work across trusted peers with synchronized Git workspaces.",
   "author": {
     "name": "GhostFlying",
