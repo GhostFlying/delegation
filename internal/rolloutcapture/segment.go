@@ -38,6 +38,11 @@ type Segment struct {
 	SHA256   string
 }
 
+type segmentLimits struct {
+	rawBytes      int64
+	preStartBytes int64
+}
+
 // CaptureSegment copies the exact inclusive task_started-to-terminal JSONL
 // segment for turnID. The caller owns destination cleanup after any error.
 func CaptureSegment(
@@ -47,14 +52,36 @@ func CaptureSegment(
 	turnID string,
 	destination io.Writer,
 ) (Segment, error) {
+	return captureSegment(
+		ctx,
+		source,
+		offset,
+		turnID,
+		destination,
+		segmentLimits{rawBytes: MaximumRawBytes, preStartBytes: maximumPreStartBytes},
+	)
+}
+
+func captureSegment(
+	ctx context.Context,
+	source io.ReadSeeker,
+	offset int64,
+	turnID string,
+	destination io.Writer,
+	limits segmentLimits,
+) (Segment, error) {
 	if err := identity.ValidateID(turnID); err != nil {
 		return Segment{}, fmt.Errorf("turnId %w", err)
 	}
-	if source == nil || destination == nil {
-		return Segment{}, errors.New("rollout source and destination are required")
+	if ctx == nil || source == nil || destination == nil {
+		return Segment{}, errors.New("rollout context, source, and destination are required")
 	}
 	if offset < 0 {
 		return Segment{}, errors.New("rollout offset must not be negative")
+	}
+	if limits.rawBytes < 1 || limits.preStartBytes < 0 ||
+		limits.preStartBytes > int64(^uint64(0)>>1)-limits.rawBytes-1 {
+		return Segment{}, errors.New("rollout capture limits are invalid")
 	}
 	position, err := source.Seek(offset, io.SeekStart)
 	if err != nil {
@@ -64,7 +91,7 @@ func CaptureSegment(
 		return Segment{}, errors.New("managed rollout seek returned a mismatched offset")
 	}
 
-	limited := &io.LimitedReader{R: source, N: maximumPreStartBytes + MaximumRawBytes + 1}
+	limited := &io.LimitedReader{R: source, N: limits.preStartBytes + limits.rawBytes + 1}
 	reader := bufio.NewReaderSize(limited, 64*1024)
 	digest := sha256.New()
 	written := int64(0)
@@ -94,7 +121,7 @@ func CaptureSegment(
 		if !started {
 			if event.kind != "task_started" {
 				preStartBytes += int64(len(line))
-				if preStartBytes > maximumPreStartBytes {
+				if preStartBytes > limits.preStartBytes {
 					return Segment{}, errStartScan
 				}
 				continue
@@ -107,7 +134,7 @@ func CaptureSegment(
 			return Segment{}, ErrConflict
 		}
 		if started {
-			if written > MaximumRawBytes-int64(len(line)) {
+			if written > limits.rawBytes-int64(len(line)) {
 				return Segment{}, ErrTooLarge
 			}
 			if _, err := io.MultiWriter(destination, digest).Write(line); err != nil {
