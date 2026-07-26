@@ -54,10 +54,10 @@ func TestRootTreeBindingPersistsAndAuthorizesFromStore(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(authorized, principal) {
 		t.Fatalf("authorized principal = %#v, error %v", authorized, err)
 	}
-	if _, err := registry.AuthorizePrincipal(
+	if authorized, err := registry.AuthorizePrincipal(
 		ctx, principal.Identity(), control.CapabilityArtifactApply,
-	); !errors.Is(err, ErrAuthorizationDenied) {
-		t.Fatalf("deferred capability error = %v, want authorization denial", err)
+	); err != nil || !reflect.DeepEqual(authorized, principal) {
+		t.Fatalf("artifact apply principal = %#v, error %v", authorized, err)
 	}
 	forged := principal.Identity()
 	forged.DeviceID = deviceSecondID
@@ -240,7 +240,7 @@ INSERT INTO principals(
 	); !errors.Is(err, ErrAuthorizationDenied) {
 		t.Fatalf("non-canonical root error = %v, want authorization denial", err)
 	}
-	injectedCapabilities := append(control.RootCapabilities(), control.CapabilityArtifactApply)
+	injectedCapabilities := append(control.RootCapabilities(), control.CapabilityMessageSendParent)
 	slices.Sort(injectedCapabilities)
 	injected, err := json.Marshal(injectedCapabilities)
 	if err != nil {

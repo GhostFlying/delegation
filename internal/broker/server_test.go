@@ -145,7 +145,8 @@ func TestTokenConnectionHeartbeatUnknownMethodsAndDisconnect(t *testing.T) {
 	if result.Revision != 1 || result.HeartbeatIntervalMS != 1000 {
 		t.Fatalf("hello result = %#v", result)
 	}
-	if !slices.Contains(result.Features, protocol.FeatureResultPackage) {
+	if !slices.Contains(result.Features, protocol.FeatureResultPackage) ||
+		!slices.Contains(result.Features, protocol.FeatureResultApply) {
 		t.Fatalf("broker hello features = %v", result.Features)
 	}
 	record, err := harness.registry.DescribeDevice(
@@ -270,6 +271,17 @@ func TestResultPackageFeatureNegotiationFailsClosed(t *testing.T) {
 	}
 }
 
+func TestResultApplyFeatureNegotiationFailsClosed(t *testing.T) {
+	features := brokerProtocolFeatures()
+	legacyFeatures := slices.DeleteFunc(slices.Clone(features), func(feature string) bool {
+		return feature == protocol.FeatureResultApply
+	})
+	if err := validatePeerFeatures(legacyFeatures); err == nil ||
+		!strings.Contains(err.Error(), protocol.FeatureResultApply) {
+		t.Fatalf("legacy peer result apply feature validation error = %v", err)
+	}
+}
+
 func TestHelloRequiresEveryPeerFeatureBeforeRegistryMutation(t *testing.T) {
 	required := []string{
 		protocol.FeatureChangesArtifact,
@@ -278,6 +290,7 @@ func TestHelloRequiresEveryPeerFeatureBeforeRegistryMutation(t *testing.T) {
 		protocol.FeatureMailbox,
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
+		protocol.FeatureResultApply,
 		protocol.FeatureResultPackage,
 		protocol.FeatureWorkerLifecycle,
 		protocol.FeatureWorkspaceSync,
@@ -938,6 +951,7 @@ func hello() protocol.Hello {
 			protocol.FeatureMailbox,
 			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
+			protocol.FeatureResultApply,
 			protocol.FeatureResultPackage,
 			protocol.FeatureWorkerLifecycle,
 			protocol.FeatureWorkspaceSync,

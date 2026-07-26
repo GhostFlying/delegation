@@ -75,6 +75,7 @@ type Registry interface {
 	ListChangesArtifacts(context.Context, control.PrincipalIdentity, store.ChangesArtifactPageRequest) (store.ChangesArtifactPage, error)
 	PublishResultPackage(context.Context, string, control.PrincipalIdentity, protocol.PublishResultPackageParams, time.Time) (protocol.PublishResultPackageResult, error)
 	GetResultPackageRootRetentionHighwater(context.Context, string, string) (uint64, error)
+	AuthorizeResultApply(context.Context, string, control.PrincipalIdentity, protocol.AuthorizeResultApplyParams, time.Time) (protocol.AuthorizeResultApplyResult, error)
 	GetResultPackageForDelivery(context.Context, string, control.PrincipalIdentity, string) (store.ResultPackageRecord, error)
 	ListPendingResultPackageRelaysForPeer(context.Context, string, string, store.ResultPackageRelayPageRequest) (store.ResultPackageRelayPage, error)
 	MarkResultPackageDelivered(context.Context, string, control.PrincipalIdentity, string, uint64, time.Time) (store.ResultPackageRecord, error)
@@ -658,6 +659,7 @@ func brokerProtocolFeatures() []string {
 		protocol.FeatureMailbox,
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
+		protocol.FeatureResultApply,
 		protocol.FeatureResultPackage,
 		protocol.FeatureWorkerLifecycle,
 		protocol.FeatureWorkspaceSync,
@@ -932,6 +934,8 @@ func (s *session) handleEnvelope(
 		return false, s.handlePublishChangesArtifact(ctx, envelope)
 	case protocol.MethodPublishResultPackage:
 		return false, s.handlePublishResultPackage(ctx, envelope)
+	case protocol.MethodAuthorizeResultApply:
+		return false, s.handleAuthorizeResultApply(ctx, envelope)
 	case protocol.MethodWaitAgent:
 		return false, s.startAgentWait(ctx, sessionContext, envelope)
 	case protocol.MethodSyncWorkspace:

@@ -123,6 +123,7 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 			protocol.FeatureMailbox,
 			protocol.FeatureWorkerDispatch,
 			protocol.FeaturePeerRoot,
+			protocol.FeatureResultApply,
 			protocol.FeatureResultPackage,
 			protocol.FeatureWorkerLifecycle,
 			protocol.FeatureWorkspaceSync,
@@ -449,7 +450,8 @@ func TestNoneAuthPeerConnectorRegisters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(record.Device.Features, protocol.FeatureResultPackage) {
+	if !slices.Contains(record.Device.Features, protocol.FeatureResultPackage) ||
+		!slices.Contains(record.Device.Features, protocol.FeatureResultApply) {
 		t.Fatalf("registered connector features = %v", record.Device.Features)
 	}
 	cancel()
@@ -486,6 +488,25 @@ func TestResultPackageFeatureNegotiationFailsClosed(t *testing.T) {
 	}
 }
 
+func TestResultApplyFeatureNegotiationFailsClosed(t *testing.T) {
+	hello := protocol.Hello{
+		ControllerID: connectorTestControllerID, DeviceID: connectorTestDeviceID,
+		DeviceName: "builder", OS: "linux", Arch: "amd64",
+		RuntimeVersion: "0.1.0-alpha.0.m4", Features: connectorProtocolFeatures(),
+	}
+	legacyBrokerFeatures := slices.DeleteFunc(
+		slices.Clone(hello.Features),
+		func(feature string) bool { return feature == protocol.FeatureResultApply },
+	)
+	err := validateHelloResult(protocol.HelloResult{
+		ConnectionID: connectorTestConnectionID, Features: legacyBrokerFeatures,
+		HeartbeatIntervalMS: time.Second.Milliseconds(), Revision: 1,
+	}, hello)
+	if err == nil || !strings.Contains(err.Error(), protocol.FeatureResultApply) {
+		t.Fatalf("legacy broker result apply feature validation error = %v", err)
+	}
+}
+
 func TestConnectorRequiresEveryBrokerFeatureBeforePublishingReadiness(t *testing.T) {
 	required := []string{
 		protocol.FeatureChangesArtifact,
@@ -494,6 +515,7 @@ func TestConnectorRequiresEveryBrokerFeatureBeforePublishingReadiness(t *testing
 		protocol.FeatureMailbox,
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
+		protocol.FeatureResultApply,
 		protocol.FeatureResultPackage,
 		protocol.FeatureWorkerLifecycle,
 		protocol.FeatureWorkspaceSync,
@@ -1499,6 +1521,7 @@ func newFakeBroker(t *testing.T, afterHello func(*websocket.Conn)) *httptest.Ser
 		protocol.FeatureMailbox,
 		protocol.FeatureWorkerDispatch,
 		protocol.FeaturePeerRoot,
+		protocol.FeatureResultApply,
 		protocol.FeatureResultPackage,
 		protocol.FeatureWorkerLifecycle,
 		protocol.FeatureWorkspaceSync,

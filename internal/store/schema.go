@@ -322,6 +322,30 @@ CREATE INDEX result_packages_by_root_retention
 		source_released_at
 	);
 
+CREATE TABLE result_apply_authorizations (
+	controller_id TEXT NOT NULL,
+	tree_id TEXT NOT NULL,
+	root_agent_id TEXT NOT NULL CHECK (length(root_agent_id) = 36),
+	apply_id TEXT NOT NULL CHECK (length(apply_id) = 36),
+	package_id TEXT NOT NULL CHECK (length(package_id) = 36),
+	git_url TEXT NOT NULL CHECK (length(CAST(git_url AS BLOB)) BETWEEN 1 AND 4096),
+	source_path_digest BLOB NOT NULL CHECK (length(source_path_digest) = 32),
+	manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+	workspace_id TEXT NOT NULL CHECK (length(workspace_id) = 36),
+	base_manifest_hash TEXT NOT NULL CHECK (length(base_manifest_hash) = 64),
+	authorized_at INTEGER NOT NULL CHECK (authorized_at >= 0),
+	PRIMARY KEY (controller_id, tree_id, root_agent_id, apply_id),
+	FOREIGN KEY (controller_id, tree_id, root_agent_id)
+		REFERENCES principals(controller_id, tree_id, agent_id) ON DELETE CASCADE,
+	FOREIGN KEY (controller_id, tree_id, package_id)
+		REFERENCES result_packages(controller_id, tree_id, package_id) ON DELETE CASCADE,
+	FOREIGN KEY (controller_id, tree_id, workspace_id)
+		REFERENCES workspace_sync_receipts(controller_id, tree_id, sync_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX result_apply_authorizations_by_package
+	ON result_apply_authorizations(controller_id, tree_id, package_id, authorized_at, apply_id);
+
 CREATE TABLE changes_artifacts (
 	controller_id TEXT NOT NULL,
 	tree_id TEXT NOT NULL,
