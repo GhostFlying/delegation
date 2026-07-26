@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/GhostFlying/delegation/internal/connector"
+	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
 )
@@ -16,6 +17,40 @@ type managedResultPackageManager interface {
 	FinishResultPackage(context.Context, resultpackagefiles.FinishRequest) (protocol.FinishResultPackageResult, error)
 	CancelResultPackage(context.Context, resultpackagefiles.CancelRequest) (protocol.CancelResultPackageResult, error)
 	AcknowledgeResultPackage(context.Context, resultpackagefiles.AcknowledgeRequest) (protocol.AcknowledgeResultPackageResult, error)
+}
+
+type resultPackageAvailabilityLookup interface {
+	LookupResultPackageAvailability(
+		context.Context,
+		resultpackagefiles.LookupAvailabilityRequest,
+	) (resultpackagefiles.LookupAvailabilityResult, error)
+}
+
+type localResultPackageAvailabilityProvider struct {
+	manager resultPackageAvailabilityLookup
+}
+
+func (p localResultPackageAvailabilityProvider) LookupResultPackageAvailability(
+	ctx context.Context,
+	lookup localbridge.ResultPackageAvailabilityLookup,
+) (protocol.ResultPackageAvailability, error) {
+	result, err := p.manager.LookupResultPackageAvailability(
+		ctx,
+		resultpackagefiles.LookupAvailabilityRequest{
+			Root: lookup.Root, Manifest: lookup.Manifest,
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	switch result.Availability {
+	case resultpackagefiles.PackageAvailable:
+		return protocol.ResultPackageAvailable, nil
+	case resultpackagefiles.PackageEvicted:
+		return protocol.ResultPackageEvicted, nil
+	default:
+		return "", errors.New("unsupported local result package availability")
+	}
 }
 
 var _ connector.ResultPackageManager = managedWorkerSpawner{}
