@@ -206,7 +206,7 @@ func runConnectorServiceWithProviderEnvironment(
 	if err != nil {
 		return err
 	}
-	bridge, err := localbridge.ListenWithStatus(
+	bridge, err := localbridge.ListenWithResultPackages(
 		endpoint,
 		localbridge.ServiceIdentity{
 			ControllerID: cfg.ControllerID,
@@ -221,6 +221,7 @@ func runConnectorServiceWithProviderEnvironment(
 			controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 			deviceName: cfg.DeviceName, maxWorkerSlots: cfg.Peer.MaxWorkerSlots,
 		},
+		localResultPackageAvailabilityProvider{manager: resultPackages},
 	)
 	if err != nil {
 		return err
