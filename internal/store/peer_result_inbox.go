@@ -13,8 +13,6 @@ import (
 	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
-const MaximumResultInboxLease = 10 * time.Minute
-
 func (s *PeerStore) BeginResultInbox(
 	ctx context.Context,
 	authority ResultInboxAuthority,
