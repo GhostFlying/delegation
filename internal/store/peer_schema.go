@@ -8,7 +8,7 @@ import (
 
 const (
 	peerStoreApplicationID = 0x444c4750 // "DLGP"
-	peerSchemaVersion      = 12
+	peerSchemaVersion      = 13
 )
 
 var peerSchemaCurrent = fmt.Sprintf(`
@@ -73,6 +73,9 @@ CREATE TABLE worker_reservations (
     ),
 	retry_target TEXT NOT NULL DEFAULT '' CHECK (retry_target IN ('', 'pending', 'idle')),
     active_turn_id TEXT NOT NULL DEFAULT '',
+	last_bound_turn_id TEXT NOT NULL DEFAULT '' CHECK (
+		last_bound_turn_id = '' OR length(last_bound_turn_id) = 36
+	),
     failure_code TEXT NOT NULL DEFAULT '',
 	final_target_status TEXT NOT NULL DEFAULT '' CHECK (
 		final_target_status IN ('', 'idle', 'interrupted', 'failed')
@@ -88,6 +91,9 @@ CREATE TABLE worker_reservations (
 			(final_target_status = 'idle' AND final_failure_code = '') OR
 			(final_target_status IN ('interrupted', 'failed') AND final_failure_code <> '')
 		))
+	),
+	CHECK (
+		status NOT IN ('running', 'finalizing') OR active_turn_id = last_bound_turn_id
 	)
 ) STRICT;
 
@@ -126,6 +132,78 @@ CREATE TABLE worker_operation_receipts (
 
 CREATE INDEX worker_operation_receipts_by_worker
 	ON worker_operation_receipts(controller_id, tree_id, agent_id, created_at, operation_id);
+
+CREATE TABLE worker_turn_start_intents (
+	controller_id TEXT NOT NULL CHECK (length(controller_id) = 36),
+	tree_id TEXT NOT NULL CHECK (length(tree_id) = 36),
+	agent_id TEXT NOT NULL CHECK (length(agent_id) = 36),
+	intent_id TEXT NOT NULL UNIQUE CHECK (length(intent_id) = 36),
+	device_id TEXT NOT NULL CHECK (length(device_id) = 36),
+	managed_thread_id TEXT NOT NULL CHECK (length(managed_thread_id) = 36),
+	previous_turn_id TEXT NOT NULL DEFAULT '' CHECK (
+		previous_turn_id = '' OR length(previous_turn_id) = 36
+	),
+	package_id TEXT NOT NULL UNIQUE CHECK (length(package_id) = 36),
+	operation_id TEXT NOT NULL DEFAULT '' CHECK (
+		operation_id = '' OR length(operation_id) = 36
+	),
+	retry_target TEXT NOT NULL CHECK (retry_target IN ('pending', 'idle')),
+	locator_status TEXT NOT NULL CHECK (locator_status IN ('available', 'unavailable')),
+	codex_home TEXT NOT NULL DEFAULT '' CHECK (length(codex_home) <= %d),
+	rollout_path TEXT NOT NULL DEFAULT '' CHECK (length(rollout_path) <= %d),
+	rollout_offset INTEGER NOT NULL DEFAULT 0 CHECK (
+		rollout_offset BETWEEN 0 AND %d
+	),
+	locator_failure_code TEXT NOT NULL DEFAULT '' CHECK (length(locator_failure_code) <= %d),
+	reservation_limit_bytes INTEGER NOT NULL CHECK (
+		reservation_limit_bytes BETWEEN 1 AND %d
+	),
+	state TEXT NOT NULL CHECK (state IN ('prepared', 'bound', 'rejected')),
+	turn_id TEXT NOT NULL DEFAULT '' CHECK (turn_id = '' OR length(turn_id) = 36),
+	rejection_failure_code TEXT NOT NULL DEFAULT '' CHECK (
+		length(rejection_failure_code) <= %d
+	),
+	prepared_revision INTEGER NOT NULL CHECK (prepared_revision > 0),
+	resolution_revision INTEGER NOT NULL DEFAULT 0 CHECK (resolution_revision >= 0),
+	created_at INTEGER NOT NULL CHECK (created_at >= 0),
+	updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+	PRIMARY KEY (controller_id, tree_id, agent_id, intent_id),
+	FOREIGN KEY (controller_id, tree_id, agent_id)
+		REFERENCES worker_reservations(controller_id, tree_id, agent_id),
+	CHECK (
+		(retry_target = 'pending' AND operation_id = '') OR
+		(retry_target = 'idle' AND operation_id <> '')
+	),
+	CHECK (
+		(locator_status = 'available' AND codex_home <> '' AND rollout_path <> '' AND
+		 locator_failure_code = '') OR
+		(locator_status = 'unavailable' AND codex_home = '' AND rollout_path = '' AND
+		 rollout_offset = 0 AND locator_failure_code <> '')
+	),
+	CHECK (
+		(state = 'prepared' AND turn_id = '' AND rejection_failure_code = '' AND
+		 resolution_revision = 0) OR
+		(state = 'bound' AND turn_id <> '' AND rejection_failure_code = '' AND
+		 resolution_revision > prepared_revision) OR
+		(state = 'rejected' AND turn_id = '' AND rejection_failure_code <> '' AND
+		 resolution_revision > prepared_revision)
+	)
+) STRICT;
+
+CREATE UNIQUE INDEX worker_turn_start_intents_prepared_by_worker
+	ON worker_turn_start_intents(controller_id, tree_id, agent_id)
+	WHERE state = 'prepared';
+
+CREATE UNIQUE INDEX worker_turn_start_intents_by_operation
+	ON worker_turn_start_intents(controller_id, operation_id)
+	WHERE operation_id <> '';
+
+CREATE UNIQUE INDEX worker_turn_start_intents_by_turn
+	ON worker_turn_start_intents(controller_id, tree_id, agent_id, turn_id)
+	WHERE turn_id <> '';
+
+CREATE INDEX worker_turn_start_intents_by_recovery
+	ON worker_turn_start_intents(state, updated_at, controller_id, device_id, tree_id, agent_id);
 
 CREATE TABLE peer_changes_artifacts (
 	controller_id TEXT NOT NULL,
@@ -349,6 +427,12 @@ CREATE TABLE peer_changes_artifacts (
 	PRAGMA application_id = %d;
 	PRAGMA user_version = %d;
 	`,
+	maximumWorkspacePath,
+	maximumWorkspacePath,
+	maximumWorkerRolloutOffset,
+	maximumWorkerFailureCode,
+	protocol.MaximumResultPackageBytes,
+	maximumWorkerFailureCode,
 	protocol.MaximumResultManifestBytes,
 	protocol.MaximumResultPackageBytes,
 	protocol.MaximumResultPackageBytes,

@@ -40,6 +40,17 @@ func (s *PeerStore) RecoverWorkers(
 		rows, err := connection.QueryContext(ctx, workerSelect+`
 WHERE controller_id = ? AND device_id = ?
   AND status IN ('reserved', 'starting', 'preflight', 'ready', 'running')
+  AND NOT EXISTS (
+	SELECT 1 FROM worker_turn_start_intents AS intent
+	WHERE intent.controller_id = worker_reservations.controller_id
+	  AND intent.tree_id = worker_reservations.tree_id
+	  AND intent.agent_id = worker_reservations.agent_id
+	  AND (
+		(intent.state = 'prepared' AND worker_reservations.status = 'ready') OR
+		(intent.state = 'bound' AND worker_reservations.status = 'running'
+		 AND intent.turn_id = worker_reservations.active_turn_id)
+	  )
+  )
 ORDER BY created_at, tree_id, agent_id
 `, controllerID, deviceID)
 		if err != nil {

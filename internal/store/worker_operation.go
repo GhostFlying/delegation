@@ -157,40 +157,67 @@ func (s *PeerStore) CompleteWorkerOperation(
 	}
 	var receipt WorkerOperationReceipt
 	err = withImmediateTransaction(ctx, s.db, "peer", func(connection *sql.Conn) error {
-		receipt, err = queryWorkerOperation(ctx, connection, key.ControllerID, operationID)
-		if err != nil {
-			return err
+		receipt, err = completeWorkerOperationReceipt(
+			ctx, connection, key, operationID, outcome, failureCode, timestamp,
+		)
+		return err
+	})
+	return receipt, err
+}
+
+func completeWorkerOperationReceipt(
+	ctx context.Context,
+	connection *sql.Conn,
+	key WorkerKey,
+	operationID string,
+	outcome WorkerOperationOutcome,
+	failureCode string,
+	timestamp int64,
+) (WorkerOperationReceipt, error) {
+	receipt, err := queryWorkerOperation(ctx, connection, key.ControllerID, operationID)
+	if err != nil {
+		return WorkerOperationReceipt{}, err
+	}
+	if receipt.WorkerKey != key {
+		return WorkerOperationReceipt{}, ErrWorkerOperationConflict
+	}
+	status := WorkerOperationSucceeded
+	if outcome == WorkerOutcomeFailed {
+		status = WorkerOperationFailed
+	}
+	if receipt.Status != WorkerOperationPending {
+		if receipt.Status == status && receipt.Outcome == outcome && receipt.FailureCode == failureCode {
+			return receipt, nil
 		}
-		if receipt.WorkerKey != key {
-			return ErrWorkerOperationConflict
-		}
-		if receipt.Status != WorkerOperationPending {
-			if receipt.Status == status && receipt.Outcome == outcome && receipt.FailureCode == failureCode {
-				return nil
-			}
-			return ErrWorkerOperationConflict
-		}
-		receipt.Status = status
-		receipt.Outcome = outcome
-		receipt.FailureCode = failureCode
-		receipt.UpdatedAt = max(timestamp, receipt.UpdatedAt)
-		if _, execErr := connection.ExecContext(ctx, `
+		return WorkerOperationReceipt{}, ErrWorkerOperationConflict
+	}
+	receipt.Status = status
+	receipt.Outcome = outcome
+	receipt.FailureCode = failureCode
+	receipt.UpdatedAt = max(timestamp, receipt.UpdatedAt)
+	result, execErr := connection.ExecContext(ctx, `
 UPDATE worker_operation_receipts SET
 	status = ?, outcome = ?, failure_code = ?, updated_at = ?
 WHERE controller_id = ? AND operation_id = ?
 `,
-			receipt.Status,
-			receipt.Outcome,
-			receipt.FailureCode,
-			receipt.UpdatedAt,
-			receipt.ControllerID,
-			receipt.OperationID,
-		); execErr != nil {
-			return fmt.Errorf("complete worker operation receipt: %w", execErr)
-		}
-		return nil
-	})
-	return receipt, err
+		receipt.Status,
+		receipt.Outcome,
+		receipt.FailureCode,
+		receipt.UpdatedAt,
+		receipt.ControllerID,
+		receipt.OperationID,
+	)
+	if execErr != nil {
+		return WorkerOperationReceipt{}, fmt.Errorf("complete worker operation receipt: %w", execErr)
+	}
+	affected, execErr := result.RowsAffected()
+	if execErr != nil {
+		return WorkerOperationReceipt{}, fmt.Errorf("inspect completed worker operation receipt: %w", execErr)
+	}
+	if affected != 1 {
+		return WorkerOperationReceipt{}, ErrWorkerOperationConflict
+	}
+	return receipt, nil
 }
 
 func (s *PeerStore) GetWorkerOperation(
