@@ -884,6 +884,62 @@ func TestHostReadsThreadPathBeforePreparingInitialTurn(t *testing.T) {
 	}
 }
 
+func TestHostRefreshesThreadPathBeforeLoadedFollowupTurn(t *testing.T) {
+	application := newFakeApplication()
+	application.completeBeforeReturn = true
+	application.threadID = newTestID()
+	host, state, paths := newTestHost(t, 1, application)
+	started := spawnTestWorker(t, host, newTestID(), "refresh followup rollout path")
+	waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerIdle)
+
+	rolloutPath := filepath.Join(
+		paths.codexHome, "sessions", "2026", "07", "27",
+		"rollout-2026-07-27T00-00-00-"+application.threadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(rolloutPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rolloutPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	application.mu.Lock()
+	application.threadPath = rolloutPath
+	application.completeBeforeReturn = false
+	application.mu.Unlock()
+
+	followup, err := host.Followup(context.Background(), FollowupRequest{
+		OperationID: newTestID(), Key: started.Worker.WorkerKey,
+		Message: "capture the loaded follow-up rollout",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err := state.GetWorkerTurnStartIntentByTurn(
+		context.Background(), followup.Worker.WorkerKey, followup.Worker.ActiveTurnID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.Rollout.Status != store.WorkerRolloutAvailable ||
+		intent.Rollout.Path != rolloutPath || intent.Rollout.Offset != 3 {
+		t.Fatalf("loaded follow-up rollout locator = %#v", intent.Rollout)
+	}
+	record := application.snapshot()
+	if len(record.reads) != 2 || record.reads[1].ThreadID != application.threadID ||
+		record.reads[1].IncludeTurns {
+		t.Fatalf("thread/read calls before loaded follow-up = %#v", record.reads)
+	}
+	segment := testManagedRolloutLine("task_started", followup.Worker.ActiveTurnID) +
+		testManagedRolloutLine("task_complete", followup.Worker.ActiveTurnID)
+	if err := appendSyncedFile(rolloutPath, segment); err != nil {
+		t.Fatal(err)
+	}
+	application.notifyCompletion(
+		followup.Worker.CodexThreadID, followup.Worker.ActiveTurnID, "completed",
+	)
+	waitWorkerStatus(t, state, followup.Worker.WorkerKey, store.WorkerIdle)
+}
+
 func TestHostRestoresPendingWhenResultBacklogRejectsInitialTurn(t *testing.T) {
 	application := newFakeApplication()
 	host, state, _ := newTestHost(t, 1, application)

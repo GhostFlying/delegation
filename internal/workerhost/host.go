@@ -676,6 +676,9 @@ func (h *Host) followupLocked(
 		if err != nil {
 			return StartedTurn{Worker: worker}, h.retireClient(client, err), err
 		}
+		if err := h.refreshLoadedThreadPath(operationContext, client, worker); err != nil {
+			return StartedTurn{Worker: worker}, h.retireClient(client, err), err
+		}
 	} else {
 		worker, recovery, err := h.resumeThread(operationContext, client, worker, store.WorkerIdle)
 		if err != nil {
