@@ -72,6 +72,10 @@ type Registry interface {
 	ListAgentLifecycleActivity(context.Context, control.PrincipalIdentity, store.AgentLifecyclePageRequest) (store.AgentLifecyclePage, error)
 	PublishChangesArtifact(context.Context, string, control.PrincipalIdentity, protocol.PublishChangesArtifactParams, time.Time) (protocol.PublishChangesArtifactResult, error)
 	ListChangesArtifacts(context.Context, control.PrincipalIdentity, store.ChangesArtifactPageRequest) (store.ChangesArtifactPage, error)
+	PublishResultPackage(context.Context, string, control.PrincipalIdentity, protocol.PublishResultPackageParams, time.Time) (protocol.PublishResultPackageResult, error)
+	GetResultPackageForDelivery(context.Context, string, control.PrincipalIdentity, string) (store.ResultPackageRecord, error)
+	ListPendingResultPackageRelaysForPeer(context.Context, string, string, store.ResultPackageRelayPageRequest) (store.ResultPackageRelayPage, error)
+	MarkResultPackageDelivered(context.Context, string, control.PrincipalIdentity, string, time.Time) (store.ResultPackageRecord, error)
 	BeginWorkspaceSync(context.Context, store.WorkspaceSyncIntent, time.Time) (store.WorkspaceSyncReceipt, error)
 	PinWorkspaceSyncManifest(context.Context, store.WorkspaceSyncKey, protocol.WorkspaceManifest, time.Time) (store.WorkspaceSyncReceipt, error)
 	FinishWorkspaceSync(context.Context, store.WorkspaceSyncKey, protocol.WorkspaceSummary, time.Time) (store.WorkspaceSyncReceipt, error)
@@ -119,6 +123,7 @@ type Server struct {
 	artifactNotifier  *treeNotifier
 	agentOperations   *agentOperationQueue
 	workspaceSyncs    *workspaceSyncFlights
+	resultRelays      *resultPackageRelayCoordinator
 
 	retryMu              sync.Mutex
 	offlineRetries       map[string]uint64
@@ -258,6 +263,13 @@ func New(options Options) (*Server, error) {
 		startedAt:            now(),
 	}
 	server.context, server.cancel = context.WithCancel(context.Background())
+	server.resultRelays = newResultPackageRelayCoordinator(
+		server.context,
+		resultPackageRelayRequestTimeout,
+		server.relayResultPackage,
+		server.pendingResultPackageRelays,
+		reportError,
+	)
 	server.background.Add(1)
 	go server.retryOfflineLoop()
 	if options.MasterToken != nil {
@@ -302,6 +314,7 @@ func (s *Server) startShutdown() {
 		peers = append(peers, peer)
 	}
 	s.mu.Unlock()
+	s.resultRelays.stop()
 
 	go func() {
 		closeErrors := make(chan error, len(peers))
@@ -318,6 +331,7 @@ func (s *Server) startShutdown() {
 		forceClose.Wait()
 		close(closeErrors)
 		s.handlers.Wait()
+		s.resultRelays.waitForShutdown()
 		s.background.Wait()
 
 		var failures []error
@@ -477,6 +491,9 @@ func (s *Server) handleConnect(writer http.ResponseWriter, request *http.Request
 	}
 	if previous != nil {
 		_ = previous.connection.CloseNow()
+	}
+	if current.workerReady.Load() {
+		s.resultRelays.schedulePeerReconnect(current.deviceID)
 	}
 	defer s.deactivate(current)
 	if err := current.run(s.context); err != nil {
@@ -696,13 +713,18 @@ func (s *Server) deactivate(current *session) {
 
 func (s *Server) markWorkerReady(current *session) {
 	s.mu.Lock()
+	scheduleReconnect := false
 	if !current.workerReady.Load() {
 		current.workerReady.Store(true)
 		if s.currentConnectionLocked(current.deviceID) == current {
 			s.statusGeneration++
+			scheduleReconnect = true
 		}
 	}
 	s.mu.Unlock()
+	if scheduleReconnect {
+		s.resultRelays.schedulePeerReconnect(current.deviceID)
+	}
 }
 
 func (s *Server) currentConnectionLocked(deviceID string) *session {
@@ -886,6 +908,8 @@ func (s *session) handleEnvelope(
 		return false, s.handleSyncWorkerLifecycle(ctx, envelope)
 	case protocol.MethodPublishChangesArtifact:
 		return false, s.handlePublishChangesArtifact(ctx, envelope)
+	case protocol.MethodPublishResultPackage:
+		return false, s.handlePublishResultPackage(ctx, envelope)
 	case protocol.MethodWaitAgent:
 		return false, s.startAgentWait(ctx, sessionContext, envelope)
 	case protocol.MethodSyncWorkspace:

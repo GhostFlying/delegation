@@ -21,7 +21,10 @@ var (
 )
 
 // Root wait exposes one package and overfetches one record to report more work.
-const maximumResultPackageStorePage = 2
+const (
+	maximumResultPackageStorePage = 2
+	maximumPendingResultRelays    = 128
+)
 
 type ResultPackageDeliveryState string
 
@@ -31,13 +34,15 @@ const (
 )
 
 type ResultPackageRecord struct {
-	Metadata     protocol.ResultPackageMetadata
-	Manifest     protocol.ResultManifest
-	RootDeviceID string
-	State        ResultPackageDeliveryState
-	Sequence     uint64
-	PublishedAt  int64
-	DeliveredAt  int64
+	Metadata        protocol.ResultPackageMetadata
+	Manifest        protocol.ResultManifest
+	SourcePrincipal control.PrincipalIdentity
+	RootPrincipal   control.PrincipalIdentity
+	RootDeviceID    string
+	State           ResultPackageDeliveryState
+	Sequence        uint64
+	PublishedAt     int64
+	DeliveredAt     int64
 }
 
 type ResultPackagePageRequest struct {
@@ -49,6 +54,21 @@ type ResultPackagePage struct {
 	Packages     []ResultPackageRecord
 	NextSequence uint64
 	Highwater    uint64
+}
+
+type ResultPackageRelayCursor struct {
+	PublishedAt int64
+	PackageID   string
+}
+
+type ResultPackageRelayPageRequest struct {
+	After *ResultPackageRelayCursor
+	Limit int
+}
+
+type ResultPackageRelayPage struct {
+	Packages  []ResultPackageRecord
+	NextAfter *ResultPackageRelayCursor
 }
 
 func (s *Store) PublishResultPackage(
@@ -170,8 +190,7 @@ func (s *Store) GetResultPackageForDelivery(
 	if err != nil {
 		return ResultPackageRecord{}, err
 	}
-	if record.Manifest.SourceAgentID != source.AgentID ||
-		record.Manifest.SourceDeviceID != connectedDeviceID {
+	if record.SourcePrincipal != source || record.Manifest.SourceDeviceID != connectedDeviceID {
 		return ResultPackageRecord{}, ErrAuthorizationDenied
 	}
 	if err := transaction.Commit(); err != nil {
@@ -221,7 +240,7 @@ func (s *Store) MarkResultPackageDelivered(
 		if err != nil {
 			return err
 		}
-		if record.RootDeviceID != connectedDeviceID {
+		if record.RootPrincipal != root || record.RootDeviceID != connectedDeviceID {
 			return ErrAuthorizationDenied
 		}
 		if record.State == ResultPackageDelivered {
@@ -308,8 +327,8 @@ WHERE controller_id = ? AND tree_id = ?
 		Highwater: uint64(highwater),
 	}
 	rows, err := transaction.QueryContext(ctx, resultPackageSelect+`
-WHERE controller_id = ? AND tree_id = ? AND state = 'delivered' AND result_sequence > ?
-ORDER BY result_sequence
+WHERE r.controller_id = ? AND r.tree_id = ? AND r.state = 'delivered' AND r.result_sequence > ?
+ORDER BY r.result_sequence
 LIMIT ?
 `, root.ControllerID, root.TreeID, request.AfterSequence, request.Limit)
 	if err != nil {
@@ -321,7 +340,7 @@ LIMIT ?
 			rows.Close()
 			return ResultPackagePage{}, err
 		}
-		if record.RootDeviceID != principal.DeviceID {
+		if record.RootPrincipal != principal.Identity() || record.RootDeviceID != principal.DeviceID {
 			rows.Close()
 			return ResultPackagePage{}, errors.New("stored result package root differs from its tree")
 		}
@@ -337,6 +356,81 @@ LIMIT ?
 	}
 	if err := transaction.Commit(); err != nil {
 		return ResultPackagePage{}, fmt.Errorf("commit result package page: %w", err)
+	}
+	return page, nil
+}
+
+// ListPendingResultPackageRelaysForPeer returns bounded durable relay or source
+// acknowledgement work involving a peer. Delivery-pending packages match
+// either endpoint; delivered packages match only their source so a lost final
+// acknowledgement can be replayed. Principal identities are joined from
+// principals and trees rather than reconstructed from manifest fields.
+func (s *Store) ListPendingResultPackageRelaysForPeer(
+	ctx context.Context,
+	controllerID, deviceID string,
+	request ResultPackageRelayPageRequest,
+) (ResultPackageRelayPage, error) {
+	if err := identity.ValidateID(controllerID); err != nil {
+		return ResultPackageRelayPage{}, fmt.Errorf("controllerId %w", err)
+	}
+	if err := identity.ValidateID(deviceID); err != nil {
+		return ResultPackageRelayPage{}, fmt.Errorf("deviceId %w", err)
+	}
+	if request.Limit < 1 || request.Limit > maximumPendingResultRelays {
+		return ResultPackageRelayPage{}, fmt.Errorf(
+			"pending result package relay limit must be from 1 through %d",
+			maximumPendingResultRelays,
+		)
+	}
+	afterPublishedAt := int64(0)
+	afterPackageID := ""
+	hasAfter := 0
+	if request.After != nil {
+		if request.After.PublishedAt < 0 {
+			return ResultPackageRelayPage{}, errors.New(
+				"pending result package relay cursor publishedAt must be non-negative",
+			)
+		}
+		if err := identity.ValidateID(request.After.PackageID); err != nil {
+			return ResultPackageRelayPage{}, fmt.Errorf("pending result package relay cursor packageId %w", err)
+		}
+		afterPublishedAt = request.After.PublishedAt
+		afterPackageID = request.After.PackageID
+		hasAfter = 1
+	}
+	rows, err := s.db.QueryContext(ctx, resultPackageSelect+`
+WHERE r.controller_id = ? AND (
+  (r.state = 'deliveryPending' AND (r.source_device_id = ? OR r.root_device_id = ?)) OR
+  (r.state = 'delivered' AND r.source_device_id = ?)
+)
+AND (? = 0 OR r.published_at > ? OR (r.published_at = ? AND r.package_id > ?))
+ORDER BY r.published_at, r.package_id
+LIMIT ?
+`, controllerID, deviceID, deviceID, deviceID, hasAfter, afterPublishedAt, afterPublishedAt,
+		afterPackageID, request.Limit)
+	if err != nil {
+		return ResultPackageRelayPage{}, fmt.Errorf("list pending result package relays for peer: %w", err)
+	}
+	defer rows.Close()
+	page := ResultPackageRelayPage{
+		Packages: make([]ResultPackageRecord, 0, min(request.Limit, 16)),
+	}
+	for rows.Next() {
+		record, err := scanResultPackage(rows)
+		if err != nil {
+			return ResultPackageRelayPage{}, err
+		}
+		page.Packages = append(page.Packages, record)
+	}
+	if err := rows.Err(); err != nil {
+		return ResultPackageRelayPage{}, fmt.Errorf("list pending result package relays for peer: %w", err)
+	}
+	if len(page.Packages) == request.Limit {
+		last := page.Packages[len(page.Packages)-1]
+		page.NextAfter = &ResultPackageRelayCursor{
+			PublishedAt: last.PublishedAt,
+			PackageID:   last.Manifest.PackageID,
+		}
 	}
 	return page, nil
 }
@@ -491,7 +585,7 @@ func queryResultPackageByID(
 	controllerID, treeID, packageID string,
 ) (ResultPackageRecord, error) {
 	return scanResultPackage(queryer.QueryRowContext(ctx, resultPackageSelect+`
-WHERE controller_id = ? AND tree_id = ? AND package_id = ?
+WHERE r.controller_id = ? AND r.tree_id = ? AND r.package_id = ?
 `, controllerID, treeID, packageID))
 }
 
@@ -501,7 +595,7 @@ func queryResultPackageByTurn(
 	controllerID, treeID, sourceAgentID, turnID string,
 ) (ResultPackageRecord, error) {
 	return scanResultPackage(queryer.QueryRowContext(ctx, resultPackageSelect+`
-WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND turn_id = ?
+WHERE r.controller_id = ? AND r.tree_id = ? AND r.source_agent_id = ? AND r.turn_id = ?
 `, controllerID, treeID, sourceAgentID, turnID))
 }
 
@@ -509,7 +603,8 @@ func scanResultPackage(scanner rowScanner) (ResultPackageRecord, error) {
 	var record ResultPackageRecord
 	var (
 		controllerID, treeID, packageID, sourceAgentID, sourceDeviceID string
-		managedThreadID, turnID                                        string
+		managedThreadID, turnID, sourceParentAgentID, rootAgentID      string
+		principalSourceDeviceID, treeRootDeviceID                      string
 		lifecycleRevision, manifestSize                                uint64
 		manifestSHA256                                                 string
 	)
@@ -518,6 +613,7 @@ func scanResultPackage(scanner rowScanner) (ResultPackageRecord, error) {
 		&managedThreadID, &turnID, &lifecycleRevision, &record.RootDeviceID,
 		&record.Metadata.Manifest, &manifestSize, &manifestSHA256, &record.State,
 		&record.Sequence, &record.PublishedAt, &record.DeliveredAt,
+		&sourceParentAgentID, &principalSourceDeviceID, &rootAgentID, &treeRootDeviceID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ResultPackageRecord{}, ErrNotFound
@@ -533,6 +629,19 @@ func scanResultPackage(scanner rowScanner) (ResultPackageRecord, error) {
 		return ResultPackageRecord{}, fmt.Errorf("stored result package manifest is invalid: %w", err)
 	}
 	record.Manifest = manifest
+	record.SourcePrincipal = control.PrincipalIdentity{
+		ControllerID:  controllerID,
+		TreeID:        treeID,
+		AgentID:       sourceAgentID,
+		ParentAgentID: sourceParentAgentID,
+		DeviceID:      sourceDeviceID,
+	}
+	record.RootPrincipal = control.PrincipalIdentity{
+		ControllerID: controllerID,
+		TreeID:       treeID,
+		AgentID:      rootAgentID,
+		DeviceID:     treeRootDeviceID,
+	}
 	if manifest.ControllerID != controllerID || manifest.TreeID != treeID ||
 		manifest.PackageID != packageID || manifest.SourceAgentID != sourceAgentID ||
 		manifest.SourceDeviceID != sourceDeviceID || manifest.ManagedThreadID != managedThreadID ||
@@ -541,6 +650,15 @@ func scanResultPackage(scanner rowScanner) (ResultPackageRecord, error) {
 	}
 	if err := identity.ValidateID(record.RootDeviceID); err != nil {
 		return ResultPackageRecord{}, fmt.Errorf("stored result package rootDeviceId %w", err)
+	}
+	if principalSourceDeviceID != sourceDeviceID || treeRootDeviceID != record.RootDeviceID {
+		return ResultPackageRecord{}, errors.New("stored result package principals differ from its authority")
+	}
+	if err := record.SourcePrincipal.Validate(); err != nil || record.SourcePrincipal.ParentAgentID == "" {
+		return ResultPackageRecord{}, errors.New("stored result package source principal is invalid")
+	}
+	if err := record.RootPrincipal.Validate(); err != nil || record.RootPrincipal.ParentAgentID != "" {
+		return ResultPackageRecord{}, errors.New("stored result package root principal is invalid")
 	}
 	if record.PublishedAt < 0 {
 		return ResultPackageRecord{}, errors.New("stored result package publication time is invalid")
@@ -599,9 +717,17 @@ WHERE controller_id = ? AND tree_id = ? AND last_result_sequence = ?
 }
 
 const resultPackageSelect = `
-SELECT controller_id, tree_id, package_id, source_agent_id, source_device_id,
-	managed_thread_id, turn_id, lifecycle_revision, root_device_id,
-	manifest_bytes, manifest_size, manifest_sha256, state, result_sequence,
-	published_at, delivered_at
-FROM result_packages
+SELECT r.controller_id, r.tree_id, r.package_id, r.source_agent_id, r.source_device_id,
+	r.managed_thread_id, r.turn_id, r.lifecycle_revision, r.root_device_id,
+	r.manifest_bytes, r.manifest_size, r.manifest_sha256, r.state, r.result_sequence,
+	r.published_at, r.delivered_at, source.parent_agent_id, source.device_id,
+	tree.root_agent_id, tree.root_device_id
+FROM result_packages AS r
+JOIN principals AS source
+  ON source.controller_id = r.controller_id
+ AND source.tree_id = r.tree_id
+ AND source.agent_id = r.source_agent_id
+JOIN trees AS tree
+  ON tree.controller_id = r.controller_id
+ AND tree.tree_id = r.tree_id
 `

@@ -292,6 +292,9 @@ CREATE UNIQUE INDEX result_packages_by_tree_sequence
 CREATE INDEX result_packages_by_source_delivery
 	ON result_packages(controller_id, source_device_id, state, published_at, package_id);
 
+CREATE INDEX result_packages_by_root_delivery
+	ON result_packages(controller_id, root_device_id, state, published_at, package_id);
+
 CREATE TABLE changes_artifacts (
 	controller_id TEXT NOT NULL,
 	tree_id TEXT NOT NULL,
