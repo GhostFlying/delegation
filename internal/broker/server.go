@@ -551,21 +551,9 @@ func (s *Server) acceptHello(
 		_ = s.writeError(ctx, connection, envelope, protocol.ErrorInvalidParams, "invalid hello payload")
 		return nil, errors.New("invalid hello payload")
 	}
-	for _, feature := range []string{
-		protocol.FeatureChangesArtifact,
-		protocol.FeatureDeviceRegistry,
-		protocol.FeatureFullDuplexRPC,
-		protocol.FeatureMailbox,
-		protocol.FeatureWorkerDispatch,
-		protocol.FeaturePeerRoot,
-		protocol.FeatureWorkerLifecycle,
-		protocol.FeatureWorkspaceSync,
-		protocol.FeatureWorkspaceTransfer,
-	} {
-		if !slices.Contains(hello.Features, feature) {
-			_ = s.writeError(ctx, connection, envelope, protocol.ErrorInvalidParams, "peer does not support required protocol features")
-			return nil, errors.New("peer does not support required protocol features")
-		}
+	if err := validatePeerFeatures(hello.Features); err != nil {
+		_ = s.writeError(ctx, connection, envelope, protocol.ErrorInvalidParams, "peer does not support required protocol features")
+		return nil, err
 	}
 	connectionID, err := s.newID()
 	if err != nil {
@@ -632,18 +620,8 @@ func (s *Server) acceptHello(
 	current.workerApplied.Store(appliedRevision)
 	current.workerReady.Store(appliedRevision == hello.WorkerRevision)
 	result := protocol.HelloResult{
-		ConnectionID: connectionID,
-		Features: []string{
-			protocol.FeatureChangesArtifact,
-			protocol.FeatureDeviceRegistry,
-			protocol.FeatureFullDuplexRPC,
-			protocol.FeatureMailbox,
-			protocol.FeatureWorkerDispatch,
-			protocol.FeaturePeerRoot,
-			protocol.FeatureWorkerLifecycle,
-			protocol.FeatureWorkspaceSync,
-			protocol.FeatureWorkspaceTransfer,
-		},
+		ConnectionID:          connectionID,
+		Features:              brokerProtocolFeatures(),
 		HeartbeatIntervalMS:   s.heartbeatInterval.Milliseconds(),
 		Revision:              device.Revision,
 		WorkerAppliedRevision: appliedRevision,
@@ -653,6 +631,30 @@ func (s *Server) acceptHello(
 		return nil, err
 	}
 	return current, nil
+}
+
+func brokerProtocolFeatures() []string {
+	return []string{
+		protocol.FeatureChangesArtifact,
+		protocol.FeatureDeviceRegistry,
+		protocol.FeatureFullDuplexRPC,
+		protocol.FeatureMailbox,
+		protocol.FeatureWorkerDispatch,
+		protocol.FeaturePeerRoot,
+		protocol.FeatureResultPackage,
+		protocol.FeatureWorkerLifecycle,
+		protocol.FeatureWorkspaceSync,
+		protocol.FeatureWorkspaceTransfer,
+	}
+}
+
+func validatePeerFeatures(features []string) error {
+	for _, feature := range brokerProtocolFeatures() {
+		if !slices.Contains(features, feature) {
+			return fmt.Errorf("peer does not support required protocol feature %q", feature)
+		}
+	}
+	return nil
 }
 
 func (s *Server) registerDevice(
