@@ -39,6 +39,15 @@ type brokerHarness struct {
 	reported    chan error
 }
 
+// Tests may replace the registry to inject failures. Stop the background
+// result relay first so the otherwise immutable production dependency is not
+// swapped while a reconnect scan is using it.
+func (h *brokerHarness) replaceRegistry(registry Registry) {
+	h.server.resultRelays.stop()
+	h.server.resultRelays.waitForShutdown()
+	h.server.registry = registry
+}
+
 type faultRegistry struct {
 	*store.Store
 	authenticateErr      error
@@ -379,7 +388,7 @@ func TestOfflineRetryCannotReleaseReplacementLease(t *testing.T) {
 		Store: harness.registry, attempts: make(chan uint64, 4), failure: failure,
 	}
 	retrying.failures.Store(1)
-	harness.server.registry = retrying
+	harness.replaceRegistry(retrying)
 	harness.server.offlineRetryInterval = 500 * time.Millisecond
 
 	first, _, err := dialBroker(harness, nil)
@@ -631,11 +640,11 @@ func TestAuthenticationStopsWhenHTTPClientCancels(t *testing.T) {
 	harness := newBrokerHarness(t, config.AuthModeToken, time.Second)
 	started := make(chan struct{})
 	canceled := make(chan struct{})
-	harness.server.registry = &faultRegistry{
+	harness.replaceRegistry(&faultRegistry{
 		Store:                harness.registry,
 		authenticateStarted:  started,
 		authenticateCanceled: canceled,
-	}
+	})
 	dialContext, cancelDial := context.WithCancel(context.Background())
 	dialDone := make(chan error, 1)
 	go func() {
@@ -671,11 +680,11 @@ func TestBrokerCloseCancelsAuthenticationAndWaitsForHandler(t *testing.T) {
 	harness := newBrokerHarness(t, config.AuthModeToken, time.Second)
 	started := make(chan struct{})
 	canceled := make(chan struct{})
-	harness.server.registry = &faultRegistry{
+	harness.replaceRegistry(&faultRegistry{
 		Store:                harness.registry,
 		authenticateStarted:  started,
 		authenticateCanceled: canceled,
-	}
+	})
 	dialDone := make(chan error, 1)
 	go func() {
 		header := http.Header{}
@@ -719,7 +728,7 @@ func TestUnexpectedRegistryFailuresAreUnavailableAndReported(t *testing.T) {
 	t.Run("authentication", func(t *testing.T) {
 		harness := newBrokerHarness(t, config.AuthModeToken, time.Second)
 		failure := errors.New("authentication database failed")
-		harness.server.registry = &faultRegistry{Store: harness.registry, authenticateErr: failure}
+		harness.replaceRegistry(&faultRegistry{Store: harness.registry, authenticateErr: failure})
 		connection, response, err := dialBroker(harness, &harness.deviceToken)
 		if err == nil {
 			connection.CloseNow()
@@ -739,7 +748,7 @@ func TestUnexpectedRegistryFailuresAreUnavailableAndReported(t *testing.T) {
 		}
 		sendHello(t, connection)
 		failure := errors.New("session authentication database failed")
-		harness.server.registry = &faultRegistry{Store: harness.registry, authenticateErr: failure}
+		harness.replaceRegistry(&faultRegistry{Store: harness.registry, authenticateErr: failure})
 		response := writeAndRead(t, connection, request(t, protocol.MethodHeartbeat, protocol.Heartbeat{}))
 		if response.Error == nil || response.Error.Code != protocol.ErrorUnavailable {
 			t.Fatalf("session authentication failure response = %#v", response)
@@ -750,7 +759,7 @@ func TestUnexpectedRegistryFailuresAreUnavailableAndReported(t *testing.T) {
 	t.Run("registration", func(t *testing.T) {
 		harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
 		failure := errors.New("registration database failed")
-		harness.server.registry = &faultRegistry{Store: harness.registry, registerTrustedErr: failure}
+		harness.replaceRegistry(&faultRegistry{Store: harness.registry, registerTrustedErr: failure})
 		connection, _, err := dialBroker(harness, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -765,7 +774,7 @@ func TestUnexpectedRegistryFailuresAreUnavailableAndReported(t *testing.T) {
 	t.Run("heartbeat", func(t *testing.T) {
 		harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
 		failure := errors.New("heartbeat database failed")
-		harness.server.registry = &faultRegistry{Store: harness.registry, heartbeatErr: failure}
+		harness.replaceRegistry(&faultRegistry{Store: harness.registry, heartbeatErr: failure})
 		connection, _, err := dialBroker(harness, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -782,7 +791,7 @@ func TestUnexpectedRegistryFailuresAreUnavailableAndReported(t *testing.T) {
 	t.Run("offline cleanup", func(t *testing.T) {
 		harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
 		failure := errors.New("offline database failed")
-		harness.server.registry = &faultRegistry{Store: harness.registry, markOfflineErr: failure}
+		harness.replaceRegistry(&faultRegistry{Store: harness.registry, markOfflineErr: failure})
 		connection, _, err := dialBroker(harness, nil)
 		if err != nil {
 			t.Fatal(err)

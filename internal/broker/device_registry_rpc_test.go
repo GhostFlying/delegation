@@ -195,7 +195,7 @@ func TestDeviceRegistryRPCRejectsAuthorizationBypass(t *testing.T) {
 	sendHello(t, connection)
 	principal := ensureRootPrincipal(t, connection)
 	wrapped := &deviceRPCFaultRegistry{Registry: harness.registry}
-	harness.server.registry = wrapped
+	harness.replaceRegistry(wrapped)
 
 	missingSource := writeAndRead(t, connection, request(
 		t, protocol.MethodListDevices, protocol.ListDevicesParams{Limit: 10},
@@ -285,7 +285,7 @@ func TestDeviceRegistryRPCReportsUnexpectedStoreFailures(t *testing.T) {
 			failure := errors.New(test.name + " database failed")
 			wrapped := &deviceRPCFaultRegistry{Registry: harness.registry}
 			test.fault(wrapped, failure)
-			harness.server.registry = wrapped
+			harness.replaceRegistry(wrapped)
 			payload := any(protocol.ListDevicesParams{Limit: 10})
 			if test.method == protocol.MethodDescribeDevice {
 				payload = protocol.DescribeDeviceParams{DeviceID: brokerTestDeviceID}
