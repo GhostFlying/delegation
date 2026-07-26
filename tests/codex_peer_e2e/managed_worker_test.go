@@ -25,6 +25,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/codexcommand"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
 	"github.com/GhostFlying/delegation/internal/serviceenv"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/workerhost"
@@ -177,8 +178,8 @@ command = "delegation-workspace-config-must-not-start"
 			t.Errorf("close managed peer state: %v", err)
 		}
 	})
-	hosts := make([]*workerhost.Host, 0, 3)
-	newHost := func() *workerhost.Host {
+	hosts := make([]*managedTestHost, 0, 3)
+	newHost := func() *managedTestHost {
 		host := openManagedTestHost(
 			t,
 			configPath,
@@ -200,7 +201,7 @@ command = "delegation-workspace-config-must-not-start"
 			}
 		}
 	})
-	closeHost := func(host *workerhost.Host) {
+	closeHost := func(host *managedTestHost) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := host.Close(ctx); err != nil {
@@ -217,7 +218,9 @@ command = "delegation-workspace-config-must-not-start"
 		closeHost(host)
 		t.Fatal(err)
 	}
-	waitForWorkerState(t, state, started.Worker.WorkerKey, store.WorkerIdle, mock.diagnostics)
+	waitForWorkerStateWithResultAck(
+		t, host, state, started.Worker.WorkerKey, store.WorkerIdle, mock.diagnostics,
+	)
 	closeHost(host)
 
 	host = newHost()
@@ -233,7 +236,9 @@ command = "delegation-workspace-config-must-not-start"
 		closeHost(host)
 		t.Fatalf("resumed thread = %q, want %q", resumed.Worker.CodexThreadID, started.Worker.CodexThreadID)
 	}
-	waitForWorkerState(t, state, resumed.Worker.WorkerKey, store.WorkerIdle, mock.diagnostics)
+	waitForWorkerStateWithResultAck(
+		t, host, state, resumed.Worker.WorkerKey, store.WorkerIdle, mock.diagnostics,
+	)
 	closeHost(host)
 
 	crashReadyPath := filepath.Join(root, "managed-crash-ready.json")
@@ -259,8 +264,11 @@ command = "delegation-workspace-config-must-not-start"
 		TreeID:       managedTreeID,
 		AgentID:      managedCrashID,
 	}
-	interrupted := waitForWorkerState(t, state, crashedKey, store.WorkerInterrupted, mock.diagnostics)
-	if interrupted.CodexThreadID != ready.ThreadID || interrupted.ActiveTurnID != ready.TurnID ||
+	interrupted := waitForWorkerStateWithResultAck(
+		t, host, state, crashedKey, store.WorkerInterrupted, mock.diagnostics,
+	)
+	if interrupted.CodexThreadID != ready.ThreadID || interrupted.ActiveTurnID != "" ||
+		interrupted.LastBoundTurnID != ready.TurnID ||
 		interrupted.FailureCode != "turn_interrupted" {
 		closeHost(host)
 		t.Fatalf("recovered running worker = %#v, ready = %#v", interrupted, ready)
@@ -277,7 +285,9 @@ command = "delegation-workspace-config-must-not-start"
 		closeHost(host)
 		t.Fatalf("restart thread = %q, want %q", restarted.Worker.CodexThreadID, ready.ThreadID)
 	}
-	waitForWorkerState(t, state, crashedKey, store.WorkerIdle, mock.diagnostics)
+	waitForWorkerStateWithResultAck(
+		t, host, state, crashedKey, store.WorkerIdle, mock.diagnostics,
+	)
 	closeHost(host)
 	if _, err := os.Stat(filepath.Join(codexHome, "config.toml")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("managed CODEX_HOME contains config.toml: %v", err)
@@ -336,7 +346,7 @@ func openManagedTestHost(
 	t *testing.T,
 	configPath, delegationBinary, codexBinary, providerEnvironmentFile string,
 	state *store.PeerStore,
-) *workerhost.Host {
+) *managedTestHost {
 	t.Helper()
 	cfg, err := delegationconfig.Read(configPath)
 	if err != nil {
@@ -357,6 +367,13 @@ func openManagedTestHost(
 	for name, value := range provider.Environment {
 		codexEnvironment[name] = value
 	}
+	resultPackages, err := resultpackagefiles.New(context.Background(), resultpackagefiles.Options{
+		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
+		WorkspaceRoot: cfg.Peer.WorkspaceRoot, Store: state,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	host, err := workerhost.New(context.Background(), workerhost.Options{
 		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
 		PeerConfigPath: configPath, DelegationBinary: delegationBinary,
@@ -367,11 +384,19 @@ func openManagedTestHost(
 		ProviderEnvironmentFile: providerEnvironmentFile,
 		WorkspaceRoot:           cfg.Peer.WorkspaceRoot, MaxWorkerSlots: cfg.Peer.MaxWorkerSlots,
 		CodexConfig: provider.Config, Store: state,
+		ResultPackages: resultPackages,
 	})
 	if err != nil {
+		if closeErr := resultPackages.Close(); closeErr != nil {
+			t.Errorf("close result package runtime after worker host failure: %v", closeErr)
+		}
 		t.Fatal(err)
 	}
-	return host
+	return &managedTestHost{
+		Host: host, resultPackages: resultPackages, state: state,
+		controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
+		workspaceRoot: cfg.Peer.WorkspaceRoot,
+	}
 }
 
 type managedCrashHelperOptions struct {
@@ -535,6 +560,42 @@ func waitForWorkerState(
 		detail = diagnostics[0]()
 	}
 	t.Fatalf("worker state = %#v, %v; want %s; diagnostics: %s", worker, err, status, detail)
+	return store.WorkerReservation{}
+}
+
+func waitForWorkerStateWithResultAck(
+	t *testing.T,
+	host *managedTestHost,
+	state *store.PeerStore,
+	key store.WorkerKey,
+	want store.WorkerStatus,
+	diagnostics func() string,
+) store.WorkerReservation {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		worker, err := state.GetWorker(context.Background(), key)
+		if err == nil && worker.Status == want {
+			return worker
+		}
+		pending, listErr := host.resultPackages.ListPendingResultPublications(context.Background())
+		if listErr != nil {
+			t.Fatal(listErr)
+		}
+		for _, outbox := range pending {
+			if outbox.WorkerKey != key {
+				continue
+			}
+			if _, err := host.resultPackages.AcknowledgeResultPackageMetadata(
+				context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
+			); err != nil {
+				t.Fatalf("acknowledge standalone managed result package: %v", err)
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	worker, err := state.GetWorker(context.Background(), key)
+	t.Fatalf("worker state = %#v, %v; want %s; diagnostics: %s", worker, err, want, diagnostics())
 	return store.WorkerReservation{}
 }
 
