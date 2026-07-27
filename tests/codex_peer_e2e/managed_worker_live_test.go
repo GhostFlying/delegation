@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/protocol"
+	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/workerhost"
 )
@@ -75,6 +78,30 @@ func TestManagedWorkerLiveProviderSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer state.Close()
+	resultPackages, err := resultpackagefiles.New(context.Background(), resultpackagefiles.Options{
+		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
+		WorkspaceRoot: cfg.Peer.WorkspaceRoot, Store: state,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := resultPackages.Close(); err != nil {
+			t.Errorf("close result package runtime: %v", err)
+		}
+	}()
+	var reportMu sync.Mutex
+	var reportedErrors []error
+	reportError := func(err error) {
+		reportMu.Lock()
+		reportedErrors = append(reportedErrors, err)
+		reportMu.Unlock()
+	}
+	loadReportedErrors := func() error {
+		reportMu.Lock()
+		defer reportMu.Unlock()
+		return errors.Join(reportedErrors...)
+	}
 	host, err := workerhost.New(context.Background(), workerhost.Options{
 		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
 		PeerConfigPath: configPath, DelegationBinary: delegationBinary,
@@ -83,7 +110,8 @@ func TestManagedWorkerLiveProviderSmoke(t *testing.T) {
 		CodexEnvironment:      codexLaunch.Environment,
 		CodexUnsetEnvironment: codexLaunch.UnsetEnvironment,
 		WorkspaceRoot:         cfg.Peer.WorkspaceRoot, MaxWorkerSlots: cfg.Peer.MaxWorkerSlots,
-		CodexConfig: codexOverrides, Store: state,
+		CodexConfig: codexOverrides, Store: state, ResultPackages: resultPackages,
+		ReportError: reportError,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +132,9 @@ func TestManagedWorkerLiveProviderSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForSuccessfulLiveTurn(t, state, started.Worker.WorkerKey)
+	waitForSuccessfulLiveTurn(
+		t, state, resultPackages, started.Worker.WorkerKey, loadReportedErrors,
+	)
 	if _, err := os.Stat(filepath.Join(codexHome, "config.toml")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("managed CODEX_HOME contains config.toml: %v", err)
 	}
@@ -119,7 +149,13 @@ func newIdentity(t *testing.T) string {
 	return value
 }
 
-func waitForSuccessfulLiveTurn(t *testing.T, state *store.PeerStore, key store.WorkerKey) {
+func waitForSuccessfulLiveTurn(
+	t *testing.T,
+	state *store.PeerStore,
+	resultPackages *resultpackagefiles.Manager,
+	key store.WorkerKey,
+	reportedErrors func() error,
+) {
 	t.Helper()
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
@@ -129,11 +165,45 @@ func waitForSuccessfulLiveTurn(t *testing.T, state *store.PeerStore, key store.W
 			case store.WorkerIdle:
 				return
 			case store.WorkerFailed:
-				t.Fatalf("managed live turn failed with %s", worker.FailureCode)
+				t.Fatalf(
+					"managed live turn failed with %s: %v", worker.FailureCode, reportedErrors(),
+				)
+			}
+		}
+		pending, err := resultPackages.ListPendingResultPublications(context.Background())
+		if err != nil {
+			t.Fatal(errors.Join(err, reportedErrors()))
+		}
+		for _, outbox := range pending {
+			if outbox.WorkerKey != key {
+				continue
+			}
+			finalization, err := resultPackages.AcknowledgeResultPackageMetadata(
+				context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
+			)
+			if err != nil {
+				t.Fatalf(
+					"acknowledge standalone live result package: %v",
+					errors.Join(err, reportedErrors()),
+				)
+			}
+			if finalization.Outbox.State != store.ResultOutboxDeliveryPending ||
+				finalization.Outbox.Manifest.Terminal.Outcome != protocol.ResultTerminalCompleted ||
+				finalization.Outbox.Manifest.Rollout.Status != protocol.ResultRolloutAvailable {
+				t.Fatalf(
+					"standalone live result package = %#v; background errors: %v",
+					finalization.Outbox,
+					reportedErrors(),
+				)
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	worker, err := state.GetWorker(context.Background(), key)
-	t.Fatalf("managed live turn did not complete: %#v, %v", worker, err)
+	t.Fatalf(
+		"managed live turn did not complete: %#v, %v; background errors: %v",
+		worker,
+		err,
+		reportedErrors(),
+	)
 }

@@ -35,6 +35,23 @@ const (
 	testParentID     = "123e4567-e89b-42d3-a456-426614174403"
 )
 
+type testErrorRecorder struct {
+	mu     sync.Mutex
+	errors []error
+}
+
+func (r *testErrorRecorder) report(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.errors = append(r.errors, err)
+}
+
+func (r *testErrorRecorder) snapshot() []error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.errors)
+}
+
 func TestHostUsesOneAppServerAndEnforcesWorkerSlots(t *testing.T) {
 	application := newFakeApplication()
 	host, state, paths := newTestHost(t, 2, application)
@@ -884,6 +901,193 @@ func TestHostReadsThreadPathBeforePreparingInitialTurn(t *testing.T) {
 	}
 }
 
+func TestHostBindsInitialRolloutAfterFirstTurnMaterializesPath(t *testing.T) {
+	application := newFakeApplication()
+	application.threadID = newTestID()
+	host, state, paths := newTestHost(t, 1, application)
+	rolloutPath := filepath.Join(
+		paths.codexHome,
+		"sessions",
+		"2026",
+		"07",
+		"27",
+		"rollout-2026-07-27T00-00-00-"+application.threadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(rolloutPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rolloutPath, []byte("thread metadata\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	application.threadReadHook = func(_ threadReadParams, result *threadResult) {
+		if len(application.snapshot().turns) != 0 {
+			result.Thread.Path = &rolloutPath
+		}
+	}
+	host.initialRolloutWait = 100 * time.Millisecond
+
+	started := spawnTestWorker(t, host, newTestID(), "materialize initial rollout")
+	intent, err := state.GetWorkerTurnStartIntentByTurn(
+		context.Background(), started.Worker.WorkerKey, started.Worker.ActiveTurnID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := store.WorkerRolloutLocator{
+		Status: store.WorkerRolloutAvailable, CodexHome: paths.codexHome,
+		Path: rolloutPath, Offset: 0,
+	}
+	if intent.Rollout != want {
+		t.Fatalf("materialized initial rollout = %#v, want %#v", intent.Rollout, want)
+	}
+	record := application.snapshot()
+	if len(record.reads) != 2 || record.reads[0].IncludeTurns || record.reads[1].IncludeTurns {
+		t.Fatalf("initial rollout thread/read calls = %#v", record.reads)
+	}
+}
+
+func TestHostBoundsBlockedInitialRolloutReadWithoutRetiringClient(t *testing.T) {
+	application := newFakeApplication()
+	application.readAfterTurnGate = make(chan struct{})
+	host, state, _ := newTestHost(t, 1, application)
+	host.initialRolloutWait = 50 * time.Millisecond
+
+	startedAt := time.Now()
+	started := spawnTestWorker(t, host, newTestID(), "bound initial rollout read")
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("blocked initial rollout read took %s", elapsed)
+	}
+	if started.Worker.Status != store.WorkerRunning || application.closeCount() != 0 {
+		t.Fatalf("blocked initial rollout read = %#v, closes=%d", started, application.closeCount())
+	}
+	intent, err := state.GetWorkerTurnStartIntentByTurn(
+		context.Background(), started.Worker.WorkerKey, started.Worker.ActiveTurnID,
+	)
+	if err != nil || intent.Rollout.Status != store.WorkerRolloutUnavailable {
+		t.Fatalf("blocked initial rollout intent = %#v, %v", intent, err)
+	}
+}
+
+func TestHostPreservesLearnedInitialRolloutPathAtWaitDeadline(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		path            func(testHostPaths, string) string
+		create          bool
+		wantDiagnostics int
+	}{
+		{
+			name: "lazy file",
+			path: func(paths testHostPaths, threadID string) string {
+				return filepath.Join(
+					paths.codexHome,
+					"sessions",
+					"rollout-2026-07-27T00-00-00-"+threadID+".jsonl",
+				)
+			},
+		},
+		{
+			name: "invalid outside path",
+			path: func(_ testHostPaths, threadID string) string {
+				return filepath.Join(
+					t.TempDir(), "rollout-2026-07-27T00-00-00-"+threadID+".jsonl",
+				)
+			},
+			create: true, wantDiagnostics: 1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			application := newFakeApplication()
+			application.threadID = newTestID()
+			host, state, paths := newTestHost(t, 1, application)
+			rolloutPath := test.path(paths, application.threadID)
+			if test.create {
+				if err := os.WriteFile(rolloutPath, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			application.threadReadHook = func(_ threadReadParams, result *threadResult) {
+				if len(application.snapshot().turns) != 0 {
+					result.Thread.Path = &rolloutPath
+				}
+			}
+			host.initialRolloutWait = 30 * time.Millisecond
+			reported := &testErrorRecorder{}
+			host.reportError = reported.report
+
+			started := spawnTestWorker(t, host, newTestID(), "preserve initial rollout path")
+			host.clientMu.Lock()
+			loaded := host.loaded[started.Worker.WorkerKey]
+			host.clientMu.Unlock()
+			diagnostics := reported.snapshot()
+			if loaded.Path != rolloutPath || len(diagnostics) != test.wantDiagnostics {
+				t.Fatalf("loaded initial rollout = %#v, reported=%#v", loaded, diagnostics)
+			}
+			intent, err := state.GetWorkerTurnStartIntentByTurn(
+				context.Background(), started.Worker.WorkerKey, started.Worker.ActiveTurnID,
+			)
+			if err != nil || intent.Rollout.Status != store.WorkerRolloutUnavailable {
+				t.Fatalf("deadline initial rollout intent = %#v, %v", intent, err)
+			}
+		})
+	}
+}
+
+func TestHostDegradesNonRetirableInitialRolloutReadError(t *testing.T) {
+	application := newFakeApplication()
+	application.readAfterTurnErr = &appserver.RPCError{Code: -32601, Message: "thread/read unavailable"}
+	host, state, _ := newTestHost(t, 1, application)
+	host.initialRolloutWait = 100 * time.Millisecond
+	reported := &testErrorRecorder{}
+	host.reportError = reported.report
+
+	started := spawnTestWorker(t, host, newTestID(), "degraded initial rollout read")
+	if started.Worker.Status != store.WorkerRunning || application.closeCount() != 0 {
+		t.Fatalf("degraded initial rollout read = %#v, closes=%d", started, application.closeCount())
+	}
+	intent, err := state.GetWorkerTurnStartIntentByTurn(
+		context.Background(), started.Worker.WorkerKey, started.Worker.ActiveTurnID,
+	)
+	if err != nil || intent.Rollout.Status != store.WorkerRolloutUnavailable {
+		t.Fatalf("degraded initial rollout intent = %#v, %v", intent, err)
+	}
+	diagnostics := reported.snapshot()
+	if len(diagnostics) != 1 || !strings.Contains(diagnostics[0].Error(), "thread/read unavailable") {
+		t.Fatalf("reported initial rollout errors = %#v", diagnostics)
+	}
+}
+
+func TestHostReportsMissingManagedHomeButNotLazyInitialRollout(t *testing.T) {
+	application := newFakeApplication()
+	host, _, paths := newTestHost(t, 1, application)
+	reported := &testErrorRecorder{}
+	host.reportError = reported.report
+	client, err := host.ensureClient(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := store.WorkerReservation{
+		WorkerKey: store.WorkerKey{
+			ControllerID: testControllerID, TreeID: testTreeID, AgentID: newTestID(),
+		},
+		CodexThreadID: newTestID(),
+	}
+	rolloutPath := filepath.Join(
+		paths.codexHome,
+		"sessions",
+		"rollout-2026-07-27T00-00-00-"+worker.CodexThreadID+".jsonl",
+	)
+	host.markLoaded(client, worker.WorkerKey, worker.CodexThreadID, &rolloutPath)
+	if rollout := host.rolloutLocator(client, worker); rollout.Status != store.WorkerRolloutUnavailable || len(reported.snapshot()) != 0 {
+		t.Fatalf("lazy initial rollout = %#v, reported=%#v", rollout, reported.snapshot())
+	}
+	if err := os.Remove(paths.codexHome); err != nil {
+		t.Fatal(err)
+	}
+	if rollout := host.rolloutLocator(client, worker); rollout.Status != store.WorkerRolloutUnavailable || len(reported.snapshot()) != 1 {
+		t.Fatalf("missing managed home rollout = %#v, reported=%#v", rollout, reported.snapshot())
+	}
+}
+
 func TestHostRefreshesThreadPathBeforeLoadedFollowupTurn(t *testing.T) {
 	application := newFakeApplication()
 	application.completeBeforeReturn = true
@@ -1152,11 +1356,30 @@ func TestAmbiguousFollowupMissingPreviousBoundaryFailsHost(t *testing.T) {
 
 func TestAmbiguousTurnStartBindsObservedTurnWithoutRedispatch(t *testing.T) {
 	firstApplication := newFakeApplication()
+	firstApplication.threadID = newTestID()
 	firstApplication.turnStartErr = context.DeadlineExceeded
 	firstApplication.turnStartResponseLost = true
 	secondApplication := newFakeApplication()
-	secondApplication.threadReadHook = mirrorFakeThreadTurns(firstApplication, nil)
-	host, state, _ := newTestHost(t, 1, firstApplication, secondApplication)
+	host, state, paths := newTestHost(t, 1, firstApplication, secondApplication)
+	rolloutPath := filepath.Join(
+		paths.codexHome,
+		"sessions",
+		"2026",
+		"07",
+		"27",
+		"rollout-2026-07-27T00-00-00-"+firstApplication.threadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(rolloutPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rolloutPath, []byte("thread metadata\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mirrorTurns := mirrorFakeThreadTurns(firstApplication, nil)
+	secondApplication.threadReadHook = func(params threadReadParams, result *threadResult) {
+		mirrorTurns(params, result)
+		result.Thread.Path = &rolloutPath
+	}
 	request := SpawnRequest{
 		TreeID: testTreeID, AgentID: newTestID(), ParentAgentID: testParentID,
 		TaskName: "lost response", Prompt: "execute exactly once",
@@ -1184,6 +1407,13 @@ func TestAmbiguousTurnStartBindsObservedTurnWithoutRedispatch(t *testing.T) {
 	if err != nil || intent.State != store.WorkerTurnStartBound {
 		t.Fatalf("reconciled intent = %#v, %v", intent, err)
 	}
+	wantRollout := store.WorkerRolloutLocator{
+		Status: store.WorkerRolloutAvailable, CodexHome: paths.codexHome,
+		Path: rolloutPath, Offset: 0,
+	}
+	if intent.Rollout != wantRollout {
+		t.Fatalf("reconciled initial rollout = %#v, want %#v", intent.Rollout, wantRollout)
+	}
 	sent, err := host.Send(context.Background(), SendRequest{
 		Key: reconciled.WorkerKey, MessageID: newTestID(), Message: "after nil-path recovery",
 	})
@@ -1199,6 +1429,46 @@ func TestAmbiguousTurnStartBindsObservedTurnWithoutRedispatch(t *testing.T) {
 	record := secondApplication.snapshot()
 	if len(record.steers) != 1 || len(record.interrupts) != 1 {
 		t.Fatalf("nil-path recovery operations = %#v", record)
+	}
+}
+
+func TestCompletionBeforeLostInitialTurnResponseFinalizesWithoutRecovery(t *testing.T) {
+	firstApplication := newFakeApplication()
+	firstApplication.threadID = newTestID()
+	firstApplication.turnStartErr = context.DeadlineExceeded
+	firstApplication.turnStartResponseLost = true
+	firstApplication.completeThenLose = true
+	secondApplication := newFakeApplication()
+	host, state, _ := newTestHost(t, 1, firstApplication, secondApplication)
+	request := SpawnRequest{
+		TreeID: testTreeID, AgentID: newTestID(), ParentAgentID: testParentID,
+		TaskName: "completed response loss", Prompt: "complete exactly once",
+	}
+	started, err := host.Spawn(context.Background(), request)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("response-loss Spawn() error = %v", err)
+	}
+	outbox := waitResultPublication(t, state, started.Worker.WorkerKey)
+	if outbox.Manifest.Terminal.Outcome != protocol.ResultTerminalCompleted ||
+		outbox.Manifest.Rollout.Status != protocol.ResultRolloutCaptureFailed ||
+		outbox.Manifest.Rollout.FailureCode != rolloutLocatorFailureCode {
+		t.Fatalf("durable initial result = %#v", outbox.Manifest)
+	}
+	intent, err := state.GetWorkerTurnStartIntentByTurn(
+		context.Background(), started.Worker.WorkerKey, outbox.Manifest.TurnID,
+	)
+	if err != nil || intent.Rollout.Status != store.WorkerRolloutUnavailable ||
+		intent.Rollout.FailureCode != rolloutLocatorFailureCode {
+		t.Fatalf("durable initial intent = %#v, %v", intent, err)
+	}
+	if got := secondApplication.snapshot(); len(got.starts) != 0 || len(got.resumes) != 0 ||
+		len(got.reads) != 0 || len(got.turns) != 0 {
+		t.Fatalf("completion fallback started replacement app-server: %#v", got)
+	}
+	if _, err := resultManager(host).AcknowledgeResultPackageMetadata(
+		context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -2049,6 +2319,7 @@ func newTestHostWithStateSetupAndResultPublisher(
 		state.Close()
 		t.Fatal(err)
 	}
+	host.initialRolloutWait = 0
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := host.Close(ctx); err != nil && !paths.allowCloseError.Load() {
@@ -2349,11 +2620,14 @@ type fakeApplication struct {
 	threadReadHook        func(threadReadParams, *threadResult)
 	threadPath            string
 	threadTurns           map[string][]turn
+	readAfterTurnErr      error
+	readAfterTurnGate     chan struct{}
 	resumeErr             error
 	resumeResultHook      func(*threadResult)
 	mcpStatusErr          error
 	turnStartErr          error
 	turnStartResponseLost bool
+	completeThenLose      bool
 	turnSteerErr          error
 	turnInterruptErr      error
 	turnSteerHook         func(turnSteerParams)
@@ -2446,7 +2720,10 @@ func (a *fakeApplication) ThreadResume(_ context.Context, params, result any) er
 	return nil
 }
 
-func (a *fakeApplication) ThreadRead(_ context.Context, params, result any) error {
+func (a *fakeApplication) ThreadRead(ctx context.Context, params, result any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	read := params.(threadReadParams)
 	a.mu.Lock()
 	a.record.reads = append(a.record.reads, read)
@@ -2454,9 +2731,21 @@ func (a *fakeApplication) ThreadRead(_ context.Context, params, result any) erro
 	readHook := a.threadReadHook
 	path := a.threadPath
 	turns := append([]turn(nil), a.threadTurns[read.ThreadID]...)
+	readAfterTurnErr := a.readAfterTurnErr
+	readAfterTurnGate := a.readAfterTurnGate
 	a.mu.Unlock()
 	if readErr != nil {
 		return readErr
+	}
+	if len(turns) != 0 && readAfterTurnGate != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-readAfterTurnGate:
+		}
+	}
+	if len(turns) != 0 && readAfterTurnErr != nil {
+		return readAfterTurnErr
 	}
 	response := result.(*threadResult)
 	response.Thread.ID = read.ThreadID
@@ -2533,6 +2822,7 @@ func (a *fakeApplication) TurnStart(ctx context.Context, params, result any) err
 	a.mu.Lock()
 	a.record.turns = append(a.record.turns, turnParams)
 	complete := a.completeBeforeReturn
+	completeThenLose := a.completeThenLose
 	completionStatus := a.completionStatus
 	crashAfterComplete := a.crashAfterComplete
 	turnStartErr := a.turnStartErr
@@ -2540,6 +2830,7 @@ func (a *fakeApplication) TurnStart(ctx context.Context, params, result any) err
 	turnStartGate := a.turnStartGate
 	turnStartStarted := a.turnStartStarted
 	a.mu.Unlock()
+	complete = complete || turnStartResponseLost && completeThenLose
 	if turnStartStarted != nil {
 		a.turnStartStartedOnce.Do(func() { close(turnStartStarted) })
 	}
@@ -2558,7 +2849,7 @@ func (a *fakeApplication) TurnStart(ctx context.Context, params, result any) err
 	a.mu.Lock()
 	a.threadTurns[turnParams.ThreadID] = append(a.threadTurns[turnParams.ThreadID], started)
 	a.mu.Unlock()
-	if turnStartResponseLost {
+	if turnStartResponseLost && !completeThenLose {
 		return turnStartErr
 	}
 	if complete {
@@ -2576,6 +2867,9 @@ func (a *fakeApplication) TurnStart(ctx context.Context, params, result any) err
 		if crashAfterComplete {
 			a.crash(errors.New("test crash after buffered completion"))
 		}
+	}
+	if turnStartResponseLost {
+		return turnStartErr
 	}
 	return nil
 }

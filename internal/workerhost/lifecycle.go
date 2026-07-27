@@ -173,8 +173,13 @@ func (h *Host) startTurn(
 		protocolErr := fmt.Errorf("app-server returned invalid turnId: %w", err)
 		return StartedTurn{Worker: worker}, h.retireClient(client, protocolErr), protocolErr
 	}
-	resolution, err := h.state.BindWorkerTurnStartIntent(
-		ctx, worker.WorkerKey, intent.IntentID, result.Turn.ID, time.Now(),
+	if intent.PreviousTurnID == "" && intent.Rollout.Status == store.WorkerRolloutUnavailable {
+		if err := h.refreshInitialRolloutPathAfterTurnStart(ctx, client, worker); err != nil {
+			return StartedTurn{Worker: worker}, h.retireClient(client, err), err
+		}
+	}
+	resolution, err := h.bindWorkerTurnStartIntent(
+		ctx, client, worker, intent, result.Turn.ID,
 	)
 	worker, err = h.recordWorkerChange(resolution.Worker, err)
 	if err != nil {

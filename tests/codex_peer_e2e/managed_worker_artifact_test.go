@@ -402,13 +402,23 @@ func testManagedWorkerPublishesResultPackage(t *testing.T, scenario artifactE2ES
 	if err != nil {
 		t.Fatal(err)
 	}
+	initialTurnID := started.Worker.ActiveTurnID
 	worker := waitForWorkerState(
 		t, workerPeer.state, started.Worker.WorkerKey, store.WorkerIdle,
 		mock.diagnostics,
 	)
-	if worker.ActiveTurnID != "" || worker.FailureCode != "" {
-		t.Fatalf("acknowledged worker = %#v", worker)
+	if initialTurnID == "" || worker.LastBoundTurnID != initialTurnID ||
+		worker.ActiveTurnID != "" || worker.FailureCode != "" {
+		t.Fatalf("acknowledged initial worker = %#v; turnId = %q", worker, initialTurnID)
 	}
+	initialResultHandle := waitForArtifactE2EResult(
+		t, rootConnector, rootPeer.host, rootPrincipal.Identity(), initialTurnID, scenario,
+	)
+	assertArtifactE2EResultPackage(
+		t, runner, sourceRoot, worker.WorkspacePath, rootPeer.host.workspaceRoot,
+		repository.Manifest, initialResultHandle, rootPrincipal.TreeID,
+		worker.CodexThreadID, initialTurnID, scenario,
+	)
 	followup, err := workerPeer.host.Followup(context.Background(), workerhost.FollowupRequest{
 		OperationID: artifactE2EFollowupID,
 		Key:         started.Worker.WorkerKey,
