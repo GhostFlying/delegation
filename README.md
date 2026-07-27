@@ -4,11 +4,15 @@ Delegation is a Codex plugin for assigning bounded work across trusted peers wit
 systems, toolchains, or local capabilities. Every participating device can host user-created root
 tasks and managed workers.
 
-The project is delivered in reviewed milestones. The current M3 checkpoint includes the plugin and
+The project is delivered in reviewed milestones. The current M4 checkpoint includes the plugin and
 runtime bootstrap, a broker-backed equal-peer registry, isolated managed Codex workers with durable
-lifecycle and messaging controls, and Git workspace synchronization. It synchronizes an exact Git
-HEAD plus the root task's dirty index and worktree state, then captures descendant commits and dirty
-worker results as target-retained changes artifacts whose metadata is visible to the root.
+lifecycle and messaging controls, Git workspace synchronization, and operational status surfaces.
+It synchronizes an exact Git HEAD plus the root task's dirty index and worktree state, then reliably
+returns each terminal rollout and Git result package to the originating root peer. The root agent can
+explicitly apply a selected package without moving HEAD: descendant commits become staged changes,
+dirty state is preserved, and conflicts stop before mutation. Result relay, replay, deduplication,
+garbage collection, safe apply recovery, and the signed release-candidate workflow are covered by
+the M4 contracts.
 
 ## Install The Plugin
 

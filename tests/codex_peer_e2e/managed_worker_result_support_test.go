@@ -27,8 +27,21 @@ type managedTestHost struct {
 	controllerID   string
 	deviceID       string
 	workspaceRoot  string
+	reported       chan error
 	closeOnce      sync.Once
 	closeErr       error
+}
+
+func (h *managedTestHost) drainReportedErrors() []error {
+	var reported []error
+	for {
+		select {
+		case err := <-h.reported:
+			reported = append(reported, err)
+		default:
+			return reported
+		}
+	}
 }
 
 func (h *managedTestHost) Close(ctx context.Context) error {
@@ -44,6 +57,53 @@ func (h *managedTestHost) ResultPackageChanges() <-chan struct{} {
 
 func (h *managedTestHost) WorkerLifecycleChanges() <-chan struct{} {
 	return h.Host.Changes()
+}
+
+func (h *managedTestHost) ManagedWorkerThread(
+	ctx context.Context,
+	controllerID, externalThreadID string,
+) (bool, error) {
+	if h.state == nil || controllerID != h.controllerID {
+		return false, errors.New("root thread does not belong to this test peer network")
+	}
+	_, err := h.state.WorkerForThread(ctx, controllerID, externalThreadID)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+func (h *managedTestHost) AuthorizeWorker(
+	ctx context.Context,
+	principal control.PrincipalIdentity,
+) error {
+	if h.state == nil || principal.ControllerID != h.controllerID ||
+		principal.ParentAgentID == "" || principal.DeviceID != h.deviceID {
+		return errors.New("worker principal does not belong to this test peer")
+	}
+	worker, err := h.state.GetWorker(ctx, store.WorkerKey{
+		ControllerID: principal.ControllerID,
+		TreeID:       principal.TreeID,
+		AgentID:      principal.AgentID,
+	})
+	if err != nil {
+		return err
+	}
+	if worker.ParentAgentID != principal.ParentAgentID || worker.DeviceID != principal.DeviceID {
+		return errors.New("worker principal does not match its test reservation")
+	}
+	switch worker.Status {
+	case store.WorkerPreflight, store.WorkerReady, store.WorkerRunning, store.WorkerIdle:
+		return nil
+	case store.WorkerReserved, store.WorkerPending, store.WorkerStarting,
+		store.WorkerFinalizing, store.WorkerInterrupted, store.WorkerFailed:
+		return errors.New("worker test reservation is not active")
+	default:
+		return errors.New("worker test reservation has an unsupported status")
+	}
 }
 
 func (h *managedTestHost) ListWorkerLifecycles(
@@ -309,5 +369,6 @@ var (
 	_ connector.WorkerLifecycleSource               = (*managedTestHost)(nil)
 	_ connector.ResultPackageSource                 = (*managedTestHost)(nil)
 	_ connector.ResultPackageManager                = (*managedTestHost)(nil)
+	_ localbridge.Authorizer                        = (*managedTestHost)(nil)
 	_ localbridge.ResultPackageAvailabilityProvider = (*managedTestHost)(nil)
 )

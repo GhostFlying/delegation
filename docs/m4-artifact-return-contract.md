@@ -375,7 +375,9 @@ The runnable checkpoint must cover:
 - concurrent remote and self-target delivery without read-loop deadlock;
 - digest, offset, traversal, symlink, size, count, and byte-budget rejection;
 - worker-slot release after metadata acknowledgement while payload delivery remains pending;
-- root cursor ordering based only on durable availability; and
+- root cursor ordering based only on durable availability;
+- the complete `wait_agent` to `apply_agent_changes` path through the local bridge, broker
+  authorization, and mutation of the originating root workspace;
 - safe local apply for normal and linked worktrees with exact staged, unstaged, untracked, binary,
   rename, deletion, and commit-flattening fidelity;
 - root config and ignored-file preservation, no HEAD/ref movement, exact replay, and zero-write

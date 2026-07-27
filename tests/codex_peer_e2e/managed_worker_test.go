@@ -367,6 +367,7 @@ func openManagedTestHost(
 	for name, value := range provider.Environment {
 		codexEnvironment[name] = value
 	}
+	reported := make(chan error, 64)
 	resultPackages, err := resultpackagefiles.New(context.Background(), resultpackagefiles.Options{
 		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
 		WorkspaceRoot: cfg.Peer.WorkspaceRoot, Store: state,
@@ -385,6 +386,12 @@ func openManagedTestHost(
 		WorkspaceRoot:           cfg.Peer.WorkspaceRoot, MaxWorkerSlots: cfg.Peer.MaxWorkerSlots,
 		CodexConfig: provider.Config, Store: state,
 		ResultPackages: resultPackages,
+		ReportError: func(err error) {
+			select {
+			case reported <- err:
+			default:
+			}
+		},
 	})
 	if err != nil {
 		if closeErr := resultPackages.Close(); closeErr != nil {
@@ -395,7 +402,7 @@ func openManagedTestHost(
 	return &managedTestHost{
 		Host: host, resultPackages: resultPackages, state: state,
 		controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
-		workspaceRoot: cfg.Peer.WorkspaceRoot,
+		workspaceRoot: cfg.Peer.WorkspaceRoot, reported: reported,
 	}
 }
 
