@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -36,6 +37,34 @@ func TestOpenPeerCreatesDistinctPersistentSchema(t *testing.T) {
 		}
 		if got != want {
 			t.Fatalf("PRAGMA %s = %d, want %d", pragma, got, want)
+		}
+	}
+}
+
+func TestConcurrentOpenPeerSerializesSchemaInitialization(t *testing.T) {
+	const openers = 8
+	path := filepath.Join(t.TempDir(), "state", "peer.sqlite3")
+	start := make(chan struct{})
+	results := make(chan error, openers)
+	var workers sync.WaitGroup
+	for range openers {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			state, err := OpenPeer(context.Background(), path)
+			if err == nil {
+				err = state.Close()
+			}
+			results <- err
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent OpenPeer: %v", err)
 		}
 	}
 }
