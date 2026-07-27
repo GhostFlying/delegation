@@ -49,12 +49,20 @@ func TestResultInboxBeginBoundsLeaseAndRequiresExplicitExpiredReclaim(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if started.Outcome != protocol.ResultPackageReceiving || len(started.Offsets) != 1 {
+	if started.Outcome != protocol.ResultPackageReceiving || started.RetentionOrdinal != 1 ||
+		len(started.Offsets) != 1 {
 		t.Fatalf("begin result = %#v", started)
 	}
 	replayed, err := state.BeginResultInbox(ctx, authority, params, now.Add(time.Second))
 	if err != nil || !reflect.DeepEqual(replayed, started) {
 		t.Fatalf("begin replay = %#v, %v; want %#v", replayed, err, started)
+	}
+	higherFloor := params
+	higherFloor.RetentionFloor = 100
+	if replayed, err := state.BeginResultInbox(
+		ctx, authority, higherFloor, now.Add(time.Second),
+	); err != nil || !reflect.DeepEqual(replayed, started) {
+		t.Fatalf("begin replay above a new floor = %#v, %v; want %#v", replayed, err, started)
 	}
 	replayed, err = state.BeginResultInbox(ctx, authority, params, now.Add(2*time.Minute))
 	if err != nil || !reflect.DeepEqual(replayed, started) {
@@ -113,6 +121,36 @@ func TestResultInboxBeginBoundsLeaseAndRequiresExplicitExpiredReclaim(t *testing
 		ctx, authority, differentAttempt, now.Add(MaximumResultInboxLease+time.Second),
 	); err != nil {
 		t.Fatalf("begin after explicit reclaim: %v", err)
+	}
+}
+
+func TestResultInboxFreshStateAdvancesAboveBrokerRetentionFloor(t *testing.T) {
+	ctx := context.Background()
+	state := openResultPeer(t)
+	defer state.Close()
+	authority := resultInboxAuthority()
+	now := time.Unix(1_700_020_000, 0)
+
+	begin := func(index int, floor uint64) protocol.BeginResultPackageResult {
+		key := resultInboxSourceKey(changesTestID(6500 + index))
+		result, err := state.BeginResultInbox(ctx, authority, protocol.BeginResultPackageParams{
+			AttemptID:      changesTestID(6600 + index),
+			PackageID:      key.PackageID,
+			RetentionFloor: floor,
+			LeaseExpiresAt: now.Add(time.Minute).Unix(),
+			Metadata:       resultMetadata(t, key, changesTestID(6700+index), changesTestID(6800+index), 4),
+		}, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	if got := begin(1, 100).RetentionOrdinal; got != 101 {
+		t.Fatalf("first retention ordinal = %d, want 101", got)
+	}
+	if got := begin(2, 0).RetentionOrdinal; got != 102 {
+		t.Fatalf("second retention ordinal = %d, want 102", got)
 	}
 }
 

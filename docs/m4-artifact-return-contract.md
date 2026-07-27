@@ -107,6 +107,24 @@ the source-agent/turn identity. Repeating an identical publish, begin, write, fi
 acknowledgement returns the recorded result. Reusing an identity with different metadata, bounds, or
 bytes is a conflict and fences the affected transfer.
 
+At the first successful begin, the root peer transactionally assigns a positive monotonic retention
+ordinal. Receiving and already-available replays return that same ordinal. The broker supplies its
+largest retained ordinal for that root as a floor, so a peer that rebuilt local state continues
+above broker metadata that still exists. After root finish, the broker stores the ordinal with the
+delivery sequence. The broker serializes that floor lookup, root transfer, and delivery mark per
+root peer. This closes the cold-state window in which two concurrent relays could otherwise reuse
+one ordinal between a root database rebuild and the first broker mark; relays to different roots
+remain concurrent.
+
+After source release, the broker may compact old manifest detail while preserving the tree sequence
+high-water and controller lifetime counters. It ranks every delivered package per root peer by the
+root retention ordinal, including unreleased packages, and retains the newest 64. The root uses that
+same total order for admission eviction, so the broker window remains a superset even when relays
+finish out of publication order. Only released packages outside that window are eligible. There is
+no age-based expiry: compaction runs in bounded batches after broker startup and delivery progress,
+and a compaction failure never changes the relay result. This avoids deleting metadata for a payload
+that the root still retains without keeping the only remaining source copy indefinitely.
+
 ## Authority
 
 Metadata publication is accepted only when the authenticated connection device equals the source
@@ -248,8 +266,11 @@ admission, and expired partial state is reclaimed before a backlog error is retu
 Before accepting a new managed turn, the peer reserves enough package capacity for the configured
 component bounds. If it cannot reserve safely, admission fails with a bounded backlog error; it does
 not start a turn and later evict an undelivered result. Root `available` packages may be pruned
-oldest-first only when admission needs capacity. A `receiving` package is never evicted, and target
-outbox packages are never pruned by local admission.
+oldest-first only when admission needs capacity. Admission orders `receiving` and `available` rows
+together by their durable retention ordinal. If the oldest row is still `receiving`, the root
+returns retryable backpressure instead of evicting a newer available result; a later retry proceeds
+after that row finishes or its lease is reclaimed. Target outbox packages are never pruned by local
+admission.
 
 `maxWorkerSlots` limits app-server concurrency; result-store capacity is an independent admission
 resource. A peer can therefore admit more no-workspace turns than worst-case workspace turns. When
@@ -272,7 +293,9 @@ authoritative after GC without sending root filesystem state to the broker.
 
 ## Root Visibility
 
-`wait_agent` returns delivered package handles in tree sequence order. A handle includes package and
+`wait_agent` returns retained delivered package handles in tree sequence order. Compacted sequences
+remain monotonic holes and are never renumbered; a later package still advances past those holes.
+A handle includes package and
 turn IDs, source agent/peer identity, terminal/component status, bounded Git metadata and warnings,
 part kinds/sizes/digests, and locally decorated availability. It never contains a local path or raw
 payload.

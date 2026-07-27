@@ -55,9 +55,11 @@ type ArtifactCounts struct {
 // ResultCounts summarizes broker-side result package delivery progress.
 type ResultCounts struct {
 	DeliveryPending    uint64 `json:"deliveryPending"`
+	DetailsRetained    uint64 `json:"detailsRetained"`
 	Delivered          uint64 `json:"delivered"`
 	SourceAcknowledged uint64 `json:"sourceAcknowledged"`
 	SourceReleased     uint64 `json:"sourceReleased"`
+	DetailsCompacted   uint64 `json:"detailsCompacted"`
 }
 
 // Validate checks that a snapshot is safe for bounded status presentation.
@@ -77,7 +79,9 @@ func (s Snapshot) Validate() error {
 		return errors.New("worker counts are inconsistent")
 	}
 	if s.Results.SourceAcknowledged > s.Results.Delivered ||
-		s.Results.SourceReleased > s.Results.SourceAcknowledged {
+		s.Results.SourceReleased > s.Results.SourceAcknowledged ||
+		s.Results.DetailsCompacted > s.Results.SourceReleased ||
+		s.Results.DeliveryPending > s.Results.DetailsRetained {
 		return errors.New("result package counts are inconsistent")
 	}
 	return nil

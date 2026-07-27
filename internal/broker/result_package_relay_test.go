@@ -84,6 +84,7 @@ type fakeResultPackageDeliveryRegistry struct {
 		string,
 		control.PrincipalIdentity,
 		string,
+		uint64,
 		time.Time,
 	) (store.ResultPackageRecord, error)
 }
@@ -121,9 +122,10 @@ func (r *fakeResultPackageDeliveryRegistry) MarkResultPackageDelivered(
 	connectedDeviceID string,
 	root control.PrincipalIdentity,
 	packageID string,
+	rootRetentionOrdinal uint64,
 	deliveredAt time.Time,
 ) (store.ResultPackageRecord, error) {
-	return r.handler(connectedDeviceID, root, packageID, deliveredAt)
+	return r.handler(connectedDeviceID, root, packageID, rootRetentionOrdinal, deliveredAt)
 }
 
 func (p *fakeResultPackagePeer) callPeer(
@@ -193,9 +195,9 @@ func TestTransferResultPackageResumesAndUsesFixedChunks(t *testing.T) {
 		switch params := call.params.(type) {
 		case protocol.BeginResultPackageParams:
 			return protocol.BeginResultPackageResult{
-				AttemptID: params.AttemptID,
-				PackageID: params.PackageID,
-				Outcome:   protocol.ResultPackageReceiving,
+				AttemptID: params.AttemptID, PackageID: params.PackageID,
+				RetentionOrdinal: params.RetentionFloor + 1,
+				Outcome:          protocol.ResultPackageReceiving,
 				Offsets: []protocol.ResultPackagePartOffset{{
 					Kind: protocol.ResultPackagePartRollout, NextOffset: resumedOffset,
 				}},
@@ -218,7 +220,7 @@ func TestTransferResultPackageResumesAndUsesFixedChunks(t *testing.T) {
 		}
 	}
 
-	began, err := transferResultPackage(
+	transfer, err := transferResultPackage(
 		context.Background(),
 		source,
 		rootPeer,
@@ -226,10 +228,11 @@ func TestTransferResultPackageResumesAndUsesFixedChunks(t *testing.T) {
 		root,
 		record,
 		resultRelayAttemptID,
+		40,
 		1_700_000_000,
 	)
-	if err != nil || !began {
-		t.Fatalf("transfer result = began %t, error %v", began, err)
+	if err != nil || !transfer.began || transfer.rootRetentionOrdinal != 41 {
+		t.Fatalf("transfer result = %#v, error %v", transfer, err)
 	}
 	if got, want := source.methods(), []string{
 		protocol.MethodReadResultPackagePart,
@@ -276,17 +279,16 @@ func TestTransferResultPackageAcceptsAlreadyAvailableWithoutReadingSource(t *tes
 	rootPeer := &fakeResultPackagePeer{handler: func(call resultPackagePeerCall) (any, error) {
 		params := call.params.(protocol.BeginResultPackageParams)
 		return protocol.BeginResultPackageResult{
-			AttemptID: params.AttemptID,
-			PackageID: params.PackageID,
-			Outcome:   protocol.ResultPackageAlreadyAvailable,
-			Offsets:   []protocol.ResultPackagePartOffset{},
+			AttemptID: params.AttemptID, PackageID: params.PackageID,
+			RetentionOrdinal: 7, Outcome: protocol.ResultPackageAlreadyAvailable,
+			Offsets: []protocol.ResultPackagePartOffset{},
 		}, nil
 	}}
-	began, err := transferResultPackage(
-		context.Background(), source, rootPeer, worker, root, record, resultRelayAttemptID, 1,
+	transfer, err := transferResultPackage(
+		context.Background(), source, rootPeer, worker, root, record, resultRelayAttemptID, 6, 1,
 	)
-	if err != nil || began {
-		t.Fatalf("already available result = began %t, error %v", began, err)
+	if err != nil || transfer.began || transfer.rootRetentionOrdinal != 7 {
+		t.Fatalf("already available result = %#v, error %v", transfer, err)
 	}
 	if len(source.methods()) != 0 {
 		t.Fatalf("already available package read source: %v", source.methods())
@@ -302,20 +304,19 @@ func TestTransferResultPackageRejectsRootOffsetOutsideManifest(t *testing.T) {
 	rootPeer := &fakeResultPackagePeer{handler: func(call resultPackagePeerCall) (any, error) {
 		params := call.params.(protocol.BeginResultPackageParams)
 		return protocol.BeginResultPackageResult{
-			AttemptID: params.AttemptID,
-			PackageID: params.PackageID,
-			Outcome:   protocol.ResultPackageReceiving,
+			AttemptID: params.AttemptID, PackageID: params.PackageID,
+			RetentionOrdinal: 7, Outcome: protocol.ResultPackageReceiving,
 			Offsets: []protocol.ResultPackagePartOffset{{
 				Kind:       record.Manifest.Parts[0].Kind,
 				NextOffset: record.Manifest.Parts[0].Size + 1,
 			}},
 		}, nil
 	}}
-	began, err := transferResultPackage(
-		context.Background(), source, rootPeer, worker, root, record, resultRelayAttemptID, 1,
+	transfer, err := transferResultPackage(
+		context.Background(), source, rootPeer, worker, root, record, resultRelayAttemptID, 6, 1,
 	)
-	if !began || err == nil {
-		t.Fatalf("out-of-range root offset = began %t, error %v", began, err)
+	if !transfer.began || err == nil {
+		t.Fatalf("out-of-range root offset = %#v, error %v", transfer, err)
 	}
 	if len(source.methods()) != 0 {
 		t.Fatalf("out-of-range root offset read source: %v", source.methods())
@@ -482,7 +483,8 @@ func TestFinalizeDeliveredResultPackageAcknowledgesThenReleases(t *testing.T) {
 			return record, nil
 		},
 	}
-	if err := finalizeDeliveredResultPackage(
+	server := &Server{resultPackageGCWake: make(chan struct{}, 1)}
+	if err := server.finalizeDeliveredResultPackage(
 		context.Background(), source, registry, worker, record, time.Unix(60, 0),
 	); err != nil {
 		t.Fatal(err)
@@ -495,6 +497,9 @@ func TestFinalizeDeliveredResultPackageAcknowledgesThenReleases(t *testing.T) {
 	}
 	if registry.calls != 1 || registry.releaseCalls != 1 {
 		t.Fatalf("broker finalization marks = acknowledge %d, release %d", registry.calls, registry.releaseCalls)
+	}
+	if len(server.resultPackageGCWake) != 1 {
+		t.Fatalf("successful source release queued %d GC wakes, want 1", len(server.resultPackageGCWake))
 	}
 }
 
@@ -568,6 +573,7 @@ func TestMarkResultPackageDeliveredWakesTreeWaiters(t *testing.T) {
 	record := resultPackageRelayRecord(t, []byte("payload"))
 	record.State = store.ResultPackageDelivered
 	record.Sequence = 1
+	record.RootRetentionOrdinal = 9
 	record.DeliveredAt = 50
 	_, root := resultPackageRelayPrincipals()
 	registry := &fakeResultPackageDeliveryRegistry{
@@ -575,10 +581,12 @@ func TestMarkResultPackageDeliveredWakesTreeWaiters(t *testing.T) {
 			connectedDeviceID string,
 			principal control.PrincipalIdentity,
 			packageID string,
+			rootRetentionOrdinal uint64,
 			deliveredAt time.Time,
 		) (store.ResultPackageRecord, error) {
 			if connectedDeviceID != root.DeviceID || principal != root ||
-				packageID != resultRelayPackageID || deliveredAt.Unix() != 50 {
+				packageID != resultRelayPackageID || rootRetentionOrdinal != 9 ||
+				deliveredAt.Unix() != 50 {
 				return store.ResultPackageRecord{}, errors.New("unexpected delivery mark")
 			}
 			return record, nil
@@ -596,7 +604,7 @@ func TestMarkResultPackageDeliveredWakesTreeWaiters(t *testing.T) {
 	subscription := server.resultNotifier.subscribe(key)
 	defer subscription.release()
 	if _, err := server.markResultPackageDelivered(
-		context.Background(), root, resultRelayPackageID,
+		context.Background(), root, resultRelayPackageID, 9,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -615,6 +623,7 @@ func TestMarkResultPackageDeliveredWakesTreeWaiters(t *testing.T) {
 				string,
 				control.PrincipalIdentity,
 				string,
+				uint64,
 				time.Time,
 			) (store.ResultPackageRecord, error) {
 				return store.ResultPackageRecord{}, errors.New("broker commit failed")
@@ -624,7 +633,7 @@ func TestMarkResultPackageDeliveredWakesTreeWaiters(t *testing.T) {
 		now:            func() time.Time { return time.Unix(50, 0) },
 	}
 	if _, err := server.markResultPackageDelivered(
-		context.Background(), root, resultRelayPackageID,
+		context.Background(), root, resultRelayPackageID, 9,
 	); !errors.Is(err, errResultPackageRelayDeferred) {
 		t.Fatalf("failed delivery mark error = %v, want deferred relay", err)
 	}
@@ -798,6 +807,7 @@ func TestResultPackageRelayRetriesTransientStoreFailures(t *testing.T) {
 				string,
 				control.PrincipalIdentity,
 				string,
+				uint64,
 				time.Time,
 			) (store.ResultPackageRecord, error) {
 				if attempts.Add(1) == 1 {
@@ -812,7 +822,7 @@ func TestResultPackageRelayRetriesTransientStoreFailures(t *testing.T) {
 			now:            func() time.Time { return time.Unix(50, 0) },
 		}
 		assertResultPackageRelayRetries(t, func(ctx context.Context) error {
-			_, err := server.markResultPackageDelivered(ctx, root, resultRelayPackageID)
+			_, err := server.markResultPackageDelivered(ctx, root, resultRelayPackageID, 9)
 			return err
 		})
 	})

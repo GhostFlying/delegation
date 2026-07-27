@@ -44,8 +44,11 @@ func TestStatusCombinesDurableStateWithLiveSynchronizedConnections(t *testing.T)
 		Dispatches: store.StatusDispatchCounts{Pending: 5, Started: 6, Failed: 7},
 		Workers:    store.StatusWorkerCounts{Running: 8, Occupied: 9},
 		Artifacts:  store.StatusArtifactCounts{Available: 10, Unchanged: 11, CaptureFailed: 12},
-		Results:    store.StatusResultCounts{DeliveryPending: 13, Delivered: 14, SourceAcknowledged: 12},
-		Lifetime:   store.StatusLifetimeCounters{DispatchesStarted: 16, TurnsStarted: 17},
+		Results: store.StatusResultCounts{
+			DeliveryPending: 13, DetailsRetained: 15, Delivered: 14,
+			SourceAcknowledged: 12, SourceReleased: 11, DetailsCompacted: 2,
+		},
+		Lifetime: store.StatusLifetimeCounters{DispatchesStarted: 16, TurnsStarted: 17},
 	}}
 	ready := &session{deviceID: readyDevice}
 	ready.revision.Store(2)
@@ -74,7 +77,10 @@ func TestStatusCombinesDurableStateWithLiveSynchronizedConnections(t *testing.T)
 		Dispatch:     statuspage.DispatchCounts{Pending: 5, Started: 6, Failed: 7, LifetimeStarted: 16},
 		RunningTurns: 8, OccupiedSlots: 9, LifetimeTurns: 17, Trees: 4,
 		Artifacts: statuspage.ArtifactCounts{Available: 10, Unchanged: 11, CaptureFailed: 12},
-		Results:   statuspage.ResultCounts{DeliveryPending: 13, Delivered: 14, SourceAcknowledged: 12},
+		Results: statuspage.ResultCounts{
+			DeliveryPending: 13, DetailsRetained: 15, Delivered: 14,
+			SourceAcknowledged: 12, SourceReleased: 11, DetailsCompacted: 2,
+		},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("status = %#v, want %#v", got, want)

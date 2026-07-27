@@ -600,6 +600,7 @@ func (r PublishResultPackageResult) Validate() error {
 type BeginResultPackageParams struct {
 	AttemptID      string                `json:"attemptId"`
 	PackageID      string                `json:"packageId"`
+	RetentionFloor uint64                `json:"retentionFloor"`
 	LeaseExpiresAt int64                 `json:"leaseExpiresAt"`
 	Metadata       ResultPackageMetadata `json:"metadata"`
 }
@@ -616,6 +617,9 @@ func (p BeginResultPackageParams) Validate() error {
 	if p.LeaseExpiresAt < 1 {
 		return errors.New("result package leaseExpiresAt must be positive")
 	}
+	if p.RetentionFloor > math.MaxInt64 {
+		return errors.New("result package retentionFloor is out of range")
+	}
 	manifest, err := p.Metadata.DecodeManifest()
 	if err != nil {
 		return err
@@ -628,7 +632,8 @@ func (p BeginResultPackageParams) Validate() error {
 
 func SameBeginResultPackageParams(left, right BeginResultPackageParams) bool {
 	return left.AttemptID == right.AttemptID && left.PackageID == right.PackageID &&
-		left.LeaseExpiresAt == right.LeaseExpiresAt && SameResultPackageMetadata(left.Metadata, right.Metadata)
+		left.RetentionFloor == right.RetentionFloor && left.LeaseExpiresAt == right.LeaseExpiresAt &&
+		SameResultPackageMetadata(left.Metadata, right.Metadata)
 }
 
 type ResultPackageBeginOutcome string
@@ -655,10 +660,11 @@ func (o ResultPackagePartOffset) Validate() error {
 }
 
 type BeginResultPackageResult struct {
-	AttemptID string                    `json:"attemptId"`
-	PackageID string                    `json:"packageId"`
-	Outcome   ResultPackageBeginOutcome `json:"outcome"`
-	Offsets   []ResultPackagePartOffset `json:"offsets"`
+	AttemptID        string                    `json:"attemptId"`
+	PackageID        string                    `json:"packageId"`
+	RetentionOrdinal uint64                    `json:"retentionOrdinal"`
+	Outcome          ResultPackageBeginOutcome `json:"outcome"`
+	Offsets          []ResultPackagePartOffset `json:"offsets"`
 }
 
 func (r BeginResultPackageResult) Validate() error {
@@ -672,6 +678,9 @@ func (r BeginResultPackageResult) Validate() error {
 	}
 	if r.Offsets == nil {
 		return errors.New("result package offsets must be present")
+	}
+	if r.RetentionOrdinal == 0 || r.RetentionOrdinal > math.MaxInt64 {
+		return errors.New("result package retentionOrdinal is out of range")
 	}
 	switch r.Outcome {
 	case ResultPackageReceiving:

@@ -25,14 +25,18 @@ func TestReadBrokerStatusUsesBoundedLoopbackJSON(t *testing.T) {
 		Dispatch:     statuspage.DispatchCounts{Pending: 1, Started: 2, Failed: 3, LifetimeStarted: 4},
 		RunningTurns: 1, OccupiedSlots: 2, LifetimeTurns: 5, Trees: 6,
 		Artifacts: statuspage.ArtifactCounts{Available: 7, Unchanged: 8, CaptureFailed: 9},
-		Results:   statuspage.ResultCounts{DeliveryPending: 10, Delivered: 12, SourceAcknowledged: 11, SourceReleased: 9},
+		Results: statuspage.ResultCounts{
+			DeliveryPending: 10, DetailsRetained: 13, Delivered: 12,
+			SourceAcknowledged: 11, SourceReleased: 9, DetailsCompacted: 3,
+		},
 	}
 	body := `{"version":"0.2.0-test","uptimeSeconds":0,"controllerId":"` + statusTestControllerID +
 		`","devices":{"registered":3,"online":2,"connected":2,"syncReady":1},` +
 		`"dispatch":{"pending":1,"started":2,"failed":3,"lifetimeStarted":4},` +
 		`"runningTurns":1,"occupiedSlots":2,"lifetimeTurns":5,"trees":6,` +
 		`"artifacts":{"available":7,"unchanged":8,"captureFailed":9},` +
-		`"results":{"deliveryPending":10,"delivered":12,"sourceAcknowledged":11,"sourceReleased":9}}`
+		`"results":{"deliveryPending":10,"detailsRetained":13,"delivered":12,` +
+		`"sourceAcknowledged":11,"sourceReleased":9,"detailsCompacted":3}}`
 	client := statusHTTPDoerFunc(func(request *http.Request) (*http.Response, error) {
 		if request.Method != http.MethodGet || request.URL.String() != "http://127.0.0.1:8788/v1/status" ||
 			request.Header.Get("Authorization") != "" {
@@ -88,7 +92,10 @@ func TestStatusCommandRendersBrokerSnapshot(t *testing.T) {
 		Dispatch:     statuspage.DispatchCounts{Pending: 1, Started: 2, Failed: 3, LifetimeStarted: 4},
 		RunningTurns: 1, OccupiedSlots: 2, LifetimeTurns: 5, Trees: 6,
 		Artifacts: statuspage.ArtifactCounts{Available: 7, Unchanged: 8, CaptureFailed: 9},
-		Results:   statuspage.ResultCounts{DeliveryPending: 10, Delivered: 12, SourceAcknowledged: 11, SourceReleased: 9},
+		Results: statuspage.ResultCounts{
+			DeliveryPending: 10, DetailsRetained: 13, Delivered: 12,
+			SourceAcknowledged: 11, SourceReleased: 9, DetailsCompacted: 3,
+		},
 	}
 	readBroker := func(_ context.Context, address string) (statuspage.Snapshot, error) {
 		if address != cfg.Broker.StatusListen {
@@ -115,7 +122,8 @@ func TestStatusCommandRendersBrokerSnapshot(t *testing.T) {
 			for _, text := range []string{
 				"delegation broker status\n", "lifetime started: 4\n",
 				"running turns: 1\n", "capture failed: 9\n",
-				"delivery pending: 10\n", "source acknowledged: 11\n",
+				"delivery pending: 10\n", "details retained: 13\n",
+				"lifetime source acknowledged: 11\n", "lifetime details compacted: 3\n",
 			} {
 				if !strings.Contains(stdout.String(), text) {
 					t.Fatalf("broker human status missing %q: %q", text, stdout.String())

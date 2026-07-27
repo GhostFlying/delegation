@@ -21,6 +21,10 @@ implementation contract, not a compatibility promise for the pre-release wire fo
 - Peer result counts distinguish active outbox/inbox states from `inboxEvicted`, a monotonic
   lifetime counter. The latter makes capacity-driven loss of an available result visible after its
   deletion tombstone has been compacted.
+- Broker result counts distinguish current `deliveryPending` and `detailsRetained` rows from the
+  lifetime `delivered`, `sourceAcknowledged`, `sourceReleased`, and `detailsCompacted` counters.
+  Replays do not increment lifetime counters, and detail compaction must not make historical task
+  totals decrease.
 
 The product must not label an idle worker as completed or infer a lifecycle history from the
 latest-state table.

@@ -23,10 +23,11 @@ const (
 )
 
 var (
-	ErrResultPackageAuthority  = errors.New("result package is outside the peer authority")
-	ErrResultPackageConflict   = errors.New("result package conflicts with existing state")
-	ErrResultPackageQuota      = errors.New("result package retention quota exceeded")
-	ErrResultPackageTransition = errors.New("invalid result package transition")
+	ErrResultPackageAuthority        = errors.New("result package is outside the peer authority")
+	ErrResultPackageConflict         = errors.New("result package conflicts with existing state")
+	ErrResultPackageQuota            = errors.New("result package retention quota exceeded")
+	ErrResultPackageTransition       = errors.New("invalid result package transition")
+	ErrResultInboxRetentionExhausted = errors.New("result inbox retention ordinal is exhausted")
 )
 
 type ResultOutboxState string
@@ -200,17 +201,18 @@ func (r ResultOutbox) Validate() error {
 }
 
 type ResultInbox struct {
-	Authority      ResultInboxAuthority
-	PackageID      string
-	State          ResultInboxState
-	AttemptID      string
-	LeaseExpiresAt int64
-	Metadata       protocol.ResultPackageMetadata
-	Manifest       protocol.ResultManifest
-	Offsets        []protocol.ResultPackagePartOffset
-	PackageBytes   int64
-	CreatedAt      int64
-	UpdatedAt      int64
+	Authority        ResultInboxAuthority
+	PackageID        string
+	State            ResultInboxState
+	AttemptID        string
+	RetentionOrdinal uint64
+	LeaseExpiresAt   int64
+	Metadata         protocol.ResultPackageMetadata
+	Manifest         protocol.ResultManifest
+	Offsets          []protocol.ResultPackagePartOffset
+	PackageBytes     int64
+	CreatedAt        int64
+	UpdatedAt        int64
 }
 
 func (r ResultInbox) Validate() error {
@@ -222,6 +224,9 @@ func (r ResultInbox) Validate() error {
 	}
 	if err := identity.ValidateID(r.AttemptID); err != nil {
 		return fmt.Errorf("attemptId %w", err)
+	}
+	if r.RetentionOrdinal == 0 || r.RetentionOrdinal > math.MaxInt64 {
+		return errors.New("result inbox retention ordinal is out of range")
 	}
 	if r.LeaseExpiresAt < 1 {
 		return errors.New("result inbox lease must be positive")
@@ -442,7 +447,8 @@ func scanResultInbox(scanner rowScanner) (ResultInbox, error) {
 		&result.Authority.ControllerID, &result.Authority.TreeID,
 		&result.Authority.RootAgentID, &result.Authority.RootDeviceID,
 		&sourceAgentID, &sourceDeviceID, &managedThreadID, &turnID,
-		&result.PackageID, &result.State, &result.AttemptID, &result.LeaseExpiresAt, &lifecycleRevision,
+		&result.PackageID, &result.State, &result.AttemptID, &result.RetentionOrdinal,
+		&result.LeaseExpiresAt, &lifecycleRevision,
 		&manifestBytes, &manifestSize, &manifestSHA256, &partsJSON, &result.PackageBytes,
 		&result.CreatedAt, &result.UpdatedAt,
 	); errors.Is(err, sql.ErrNoRows) {
@@ -520,7 +526,7 @@ FROM peer_result_outbox
 const resultInboxSelect = `
 SELECT controller_id, tree_id, root_agent_id, root_device_id,
 	source_agent_id, source_device_id, managed_thread_id, turn_id,
-	package_id, state, attempt_id, lease_expires_at, lifecycle_revision,
+		package_id, state, attempt_id, retention_ordinal, lease_expires_at, lifecycle_revision,
 	manifest_bytes, manifest_size_bytes, manifest_sha256, parts_json,
 	package_bytes, created_at, updated_at
 FROM peer_result_inbox

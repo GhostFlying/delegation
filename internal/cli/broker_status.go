@@ -111,9 +111,11 @@ func writeBrokerStatus(
 		fmt.Fprintf(&rendered, "  capture failed: %d\n", status.Artifacts.CaptureFailed)
 		fmt.Fprintln(&rendered, "results:")
 		fmt.Fprintf(&rendered, "  delivery pending: %d\n", status.Results.DeliveryPending)
-		fmt.Fprintf(&rendered, "  delivered: %d\n", status.Results.Delivered)
-		fmt.Fprintf(&rendered, "  source acknowledged: %d\n", status.Results.SourceAcknowledged)
-		fmt.Fprintf(&rendered, "  source released: %d\n", status.Results.SourceReleased)
+		fmt.Fprintf(&rendered, "  details retained: %d\n", status.Results.DetailsRetained)
+		fmt.Fprintf(&rendered, "  lifetime delivered: %d\n", status.Results.Delivered)
+		fmt.Fprintf(&rendered, "  lifetime source acknowledged: %d\n", status.Results.SourceAcknowledged)
+		fmt.Fprintf(&rendered, "  lifetime source released: %d\n", status.Results.SourceReleased)
+		fmt.Fprintf(&rendered, "  lifetime details compacted: %d\n", status.Results.DetailsCompacted)
 		output = rendered.Bytes()
 	}
 	if len(output) == 0 || len(output) > maximumStatusOutput {

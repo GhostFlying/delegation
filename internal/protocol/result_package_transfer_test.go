@@ -16,7 +16,7 @@ func TestResultPackagePublishAndBeginValidateManifestIdentity(t *testing.T) {
 	}
 	begin := BeginResultPackageParams{
 		AttemptID: testResultAttemptID, PackageID: testResultPackageID,
-		LeaseExpiresAt: 1_700_000_060, Metadata: metadata,
+		RetentionFloor: 7, LeaseExpiresAt: 1_700_000_060, Metadata: metadata,
 	}
 	if err := begin.Validate(); err != nil {
 		t.Fatal(err)
@@ -26,6 +26,11 @@ func TestResultPackagePublishAndBeginValidateManifestIdentity(t *testing.T) {
 	invalid.PackageID = testResultWorkspaceID
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("begin accepted a package ID outside its manifest")
+	}
+	invalid = begin
+	invalid.RetentionFloor = math.MaxInt64 + 1
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("begin accepted an out-of-range retention floor")
 	}
 	invalid = begin
 	invalid.LeaseExpiresAt = 0
@@ -48,7 +53,7 @@ func TestResultPackagePublishAndBeginValidateManifestIdentity(t *testing.T) {
 func TestBeginResultPackageResultValidatesOutcomeAndOffsets(t *testing.T) {
 	receiving := BeginResultPackageResult{
 		AttemptID: testResultAttemptID, PackageID: testResultPackageID,
-		Outcome: ResultPackageReceiving,
+		RetentionOrdinal: 8, Outcome: ResultPackageReceiving,
 		Offsets: []ResultPackagePartOffset{
 			{Kind: ResultPackagePartChangesBundle, NextOffset: 0},
 			{Kind: ResultPackagePartRollout, NextOffset: 21},
@@ -65,6 +70,11 @@ func TestBeginResultPackageResultValidatesOutcomeAndOffsets(t *testing.T) {
 	}
 
 	invalid := receiving
+	invalid.RetentionOrdinal = 0
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("begin result accepted a zero retention ordinal")
+	}
+	invalid = receiving
 	invalid.Offsets = append([]ResultPackagePartOffset{}, receiving.Offsets...)
 	invalid.Offsets[0].Kind = ResultPackagePartManifest
 	if err := invalid.Validate(); err == nil {

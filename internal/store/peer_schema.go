@@ -8,19 +8,24 @@ import (
 
 const (
 	peerStoreApplicationID = 0x444c4750 // "DLGP"
-	peerSchemaVersion      = 14
+	peerSchemaVersion      = 15
 )
 
 var peerSchemaCurrent = fmt.Sprintf(`
 CREATE TABLE peer_metadata (
 	singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
 	worker_revision INTEGER NOT NULL CHECK (worker_revision >= 0),
+	last_result_inbox_retention_ordinal INTEGER NOT NULL DEFAULT 0 CHECK (
+		last_result_inbox_retention_ordinal BETWEEN 0 AND 9223372036854775807
+	),
 	result_inbox_evicted INTEGER NOT NULL DEFAULT 0 CHECK (
 		result_inbox_evicted BETWEEN 0 AND 9223372036854775807
 	)
 ) STRICT;
 
-INSERT INTO peer_metadata(singleton, worker_revision, result_inbox_evicted) VALUES (1, 0, 0);
+INSERT INTO peer_metadata(
+	singleton, worker_revision, last_result_inbox_retention_ordinal, result_inbox_evicted
+) VALUES (1, 0, 0, 0);
 
 CREATE TABLE prepared_workspaces (
 	controller_id TEXT NOT NULL,
@@ -370,6 +375,9 @@ CREATE TABLE peer_changes_artifacts (
 		package_id TEXT NOT NULL UNIQUE CHECK (length(package_id) = 36),
 		state TEXT NOT NULL CHECK (state IN ('receiving', 'available', 'evictionTombstone')),
 		attempt_id TEXT NOT NULL CHECK (length(attempt_id) = 36),
+		retention_ordinal INTEGER NOT NULL CHECK (
+			retention_ordinal BETWEEN 1 AND 9223372036854775807
+		),
 		lease_expires_at INTEGER NOT NULL CHECK (lease_expires_at > 0),
 		lifecycle_revision INTEGER NOT NULL CHECK (lifecycle_revision > 0),
 		manifest_bytes BLOB NOT NULL,
@@ -386,7 +394,12 @@ CREATE TABLE peer_changes_artifacts (
 	) STRICT;
 
 	CREATE INDEX peer_result_inbox_by_state
-		ON peer_result_inbox(state, updated_at, created_at, controller_id, tree_id, root_agent_id);
+		ON peer_result_inbox(
+			controller_id, root_device_id, state, retention_ordinal, package_id
+		);
+
+	CREATE UNIQUE INDEX peer_result_inbox_by_retention_ordinal
+		ON peer_result_inbox(controller_id, root_device_id, retention_ordinal);
 
 	CREATE TABLE peer_result_inbox_parts (
 		package_id TEXT NOT NULL,
