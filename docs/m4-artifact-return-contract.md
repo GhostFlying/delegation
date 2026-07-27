@@ -320,6 +320,12 @@ commands requires hooks. System and global Git configuration are disabled for al
 and mutation commands. Normal and linked worktrees are supported; a thread copied to a different
 peer remains outside this authority.
 
+`remote_git_full_history_fallback` is transfer-only metadata, so root inspection removes only that
+warning before comparing the current repository's source warnings. The LFS and submodule warnings
+remain exact-match inputs, and the retained base manifest hash and workspace snapshot must still
+match. This allows a full-fallback result to return without treating its transport decision as root
+workspace drift.
+
 The root peer materializes only `changes.bundle` and `changes-overlay.tar.zst` into a private,
 journaled staging directory. It never materializes `rollout.jsonl.zst` into the apply path. Worker
 commits are flattened against the retained root HEAD, so their content becomes staged changes while

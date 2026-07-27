@@ -5,7 +5,6 @@ package codex_peer_e2e
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -18,6 +17,8 @@ import (
 	"time"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
@@ -138,8 +139,10 @@ func createTopologyGitRepositories(
 			run(t, os.Environ(), "git", "-C", scenario.sourceRoot, "push", "origin", "HEAD:refs/heads/main")
 			run(t, os.Environ(), "git", "--git-dir="+remote, "update-server-info")
 			scenario.gitURL = server.URL + "/" + filepath.Base(remote)
+			run(t, os.Environ(), "git", "-C", scenario.sourceRoot, "remote", "set-url", "origin", scenario.gitURL)
 		} else {
 			scenario.gitURL = server.URL + "/unavailable-full-remote.git"
+			run(t, os.Environ(), "git", "-C", scenario.sourceRoot, "remote", "add", "origin", scenario.gitURL)
 		}
 
 		if scenario.strategy == protocol.WorkspaceStrategyThin {
@@ -285,8 +288,9 @@ func testWorkspaceDelegation(
 	}
 	assertSourceWorkspaceUnchanged(t, scenario, sourceHead, sourceStatus, sourceData)
 
-	artifact := waitForWorkspaceArtifact(t, ctx, root, agent, scenario, resultHead, manifestHash, sourceSnapshotHash)
-	assertPeerChangesArtifact(t, database, artifact)
+	resultPackage := waitForWorkspaceResultPackage(
+		t, ctx, root, agent, scenario, resultHead, manifestHash, sourceSnapshotHash,
+	)
 
 	broker := openDatabase(t, brokerStatePath)
 	defer broker.Close()
@@ -315,7 +319,12 @@ WHERE controller_id = ? AND sync_id = ?
 			brokerSourceClean, brokerSnapshotHash, brokerManifestHash, sourceSnapshotHash, manifestHash,
 		)
 	}
-	assertBrokerChangesArtifact(t, broker, brokerStatePath, workspacePath, scenario, artifact)
+	assertBrokerResultPackageContainsNoPeerPayload(
+		t, brokerStatePath, workspacePath, scenario,
+	)
+	applyCtx, cancelApply := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelApply()
+	applyWorkspaceResultPackage(t, applyCtx, root, resultPackage, scenario, sourceHead)
 }
 
 func assertWorkspaceStrategyAndWarnings(
@@ -375,14 +384,14 @@ func assertSourceWorkspaceUnchanged(
 	}
 }
 
-func waitForWorkspaceArtifact(
+func waitForWorkspaceResultPackage(
 	t *testing.T,
 	ctx context.Context,
 	root managedDispatchRoot,
 	agent protocol.AgentSummary,
 	scenario workspaceE2EScenario,
 	resultHead, manifestHash, sourceSnapshotHash string,
-) protocol.ChangesArtifactMetadata {
+) protocol.ResultPackageHandle {
 	t.Helper()
 	rootSource := root.root.Principal.Identity()
 	var result protocol.WaitAgentResult
@@ -397,180 +406,122 @@ func waitForWorkspaceArtifact(
 		},
 		&result,
 	); err != nil {
-		t.Fatalf("wait for workspace artifact: %v", err)
+		t.Fatalf("wait for workspace result package: %v", err)
 	}
-	if len(result.Artifacts) != 1 || result.MoreArtifacts || result.NextArtifactCursor == 0 {
-		t.Fatalf("workspace artifact wait = %#v", result)
+	if len(result.Artifacts) != 0 || len(result.Results) != 1 || result.MoreResults ||
+		result.NextResultCursor == 0 {
+		t.Fatalf("workspace result package wait = %#v", result)
 	}
-	artifact := result.Artifacts[0]
-	if artifact.Sequence != result.NextArtifactCursor || artifact.TreeID != agent.Principal.TreeID ||
-		artifact.SourceAgentID != agent.Principal.AgentID ||
-		artifact.SourceDeviceID != agent.Principal.DeviceID ||
-		artifact.WorkspaceSourceDeviceID != rootSource.DeviceID ||
-		artifact.WorkspaceTargetDeviceID != agent.Principal.DeviceID ||
-		artifact.WorkspaceID != scenario.syncID || artifact.Status != protocol.ChangesArtifactAvailable ||
-		artifact.ObjectFormat != "sha1" || artifact.BaseHeadOID != scenario.head || artifact.BaseClean ||
-		artifact.BaseManifestHash != manifestHash || artifact.BaseSnapshotHash != sourceSnapshotHash ||
-		artifact.ResultHeadOID != resultHead || artifact.ResultClean ||
-		len(artifact.ResultSnapshotHash) != 64 || artifact.FailureCode != "" ||
-		!slices.Equal(artifact.BaseWarnings, scenario.baseWarnings) ||
-		len(artifact.ResultWarnings) != 0 {
-		t.Fatalf("workspace artifact metadata = %#v", artifact)
+	handle := result.Results[0]
+	manifest := handle.Manifest
+	if err := handle.Validate(); err != nil {
+		t.Fatalf("workspace result package handle: %v", err)
 	}
-	if len(artifact.Parts) != 2 || artifact.Parts[0].Kind != protocol.WorkspaceArtifactBundle ||
-		artifact.Parts[1].Kind != protocol.WorkspaceArtifactOverlay {
-		t.Fatalf("workspace artifact parts = %#v", artifact.Parts)
+	if handle.Availability != protocol.ResultPackageAvailable ||
+		handle.Sequence != result.NextResultCursor ||
+		manifest.TreeID != agent.Principal.TreeID ||
+		manifest.SourceAgentID != agent.Principal.AgentID ||
+		manifest.SourceDeviceID != agent.Principal.DeviceID ||
+		manifest.Terminal.Outcome != protocol.ResultTerminalCompleted ||
+		manifest.Workspace.Status != protocol.ResultWorkspaceChanged ||
+		manifest.Workspace.SourceDeviceID != rootSource.DeviceID ||
+		manifest.Workspace.TargetDeviceID != agent.Principal.DeviceID ||
+		manifest.Workspace.WorkspaceID != scenario.syncID ||
+		manifest.Workspace.ObjectFormat != "sha1" ||
+		manifest.Workspace.BaseHeadOID != scenario.head || manifest.Workspace.BaseClean ||
+		manifest.Workspace.BaseManifestHash != manifestHash ||
+		manifest.Workspace.BaseSnapshotHash != sourceSnapshotHash ||
+		manifest.Workspace.ResultHeadOID != resultHead || manifest.Workspace.ResultClean ||
+		len(manifest.Workspace.ResultSnapshotHash) != 64 ||
+		!slices.Equal(manifest.Workspace.BaseWarnings, scenario.baseWarnings) ||
+		len(manifest.Workspace.ResultWarnings) != 0 {
+		t.Fatalf("workspace result package = %#v", handle)
 	}
-	for _, part := range artifact.Parts {
+	wantKinds := []protocol.ResultPackagePartKind{
+		protocol.ResultPackagePartChangesBundle,
+		protocol.ResultPackagePartChangesOverlay,
+	}
+	gotKinds := make([]protocol.ResultPackagePartKind, 0, len(manifest.Parts))
+	for _, part := range manifest.Parts {
+		if part.Kind == protocol.ResultPackagePartRollout {
+			continue
+		}
+		gotKinds = append(gotKinds, part.Kind)
 		if part.Size < 1 || len(part.SHA256) != 64 {
-			t.Fatalf("workspace artifact part = %#v", part)
+			t.Fatalf("workspace result package part = %#v", part)
 		}
 	}
-	return artifact
+	if !slices.Equal(gotKinds, wantKinds) {
+		t.Fatalf("workspace result package Git parts = %#v, want %#v", gotKinds, wantKinds)
+	}
+	return handle
 }
 
-func assertPeerChangesArtifact(
+func applyWorkspaceResultPackage(
 	t *testing.T,
-	database *sql.DB,
-	artifact protocol.ChangesArtifactMetadata,
-) {
-	t.Helper()
-	var (
-		state, status, baseHead, baseManifest, baseSnapshot   string
-		workspaceSourceDeviceID, workspaceTargetDeviceID      string
-		resultHead, resultSnapshot, bundleName, bundleSHA     string
-		overlayName, overlaySHA, baseWarningsJSON             string
-		resultWarningsJSON                                    string
-		resultClean, baseClean                                bool
-		bundleSize, overlaySize, payloadBytes, brokerSequence int64
-	)
-	if err := database.QueryRow(`
-SELECT state, capture_status, workspace_source_device_id, workspace_target_device_id,
-       base_head_oid, base_manifest_hash, base_snapshot_hash,
-       base_clean, result_head_oid, result_snapshot_hash, result_clean,
-       bundle_part_name, bundle_size_bytes, bundle_sha256,
-       overlay_part_name, overlay_size_bytes, overlay_sha256,
-       base_warnings_json, result_warnings_json, payload_bytes, broker_sequence
-FROM peer_changes_artifacts
-WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND artifact_id = ?
-`, networkID, artifact.TreeID, artifact.SourceAgentID, artifact.ArtifactID).Scan(
-		&state, &status, &workspaceSourceDeviceID, &workspaceTargetDeviceID,
-		&baseHead, &baseManifest, &baseSnapshot, &baseClean,
-		&resultHead, &resultSnapshot, &resultClean,
-		&bundleName, &bundleSize, &bundleSHA, &overlayName, &overlaySize, &overlaySHA,
-		&baseWarningsJSON, &resultWarningsJSON, &payloadBytes, &brokerSequence,
-	); err != nil {
-		t.Fatal(err)
-	}
-	var baseWarnings, resultWarnings []string
-	if err := json.Unmarshal([]byte(baseWarningsJSON), &baseWarnings); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(resultWarningsJSON), &resultWarnings); err != nil {
-		t.Fatal(err)
-	}
-	if state != "published" || status != string(artifact.Status) ||
-		workspaceSourceDeviceID != artifact.WorkspaceSourceDeviceID ||
-		workspaceTargetDeviceID != artifact.WorkspaceTargetDeviceID ||
-		baseHead != artifact.BaseHeadOID || baseManifest != artifact.BaseManifestHash ||
-		baseSnapshot != artifact.BaseSnapshotHash || baseClean != artifact.BaseClean ||
-		resultHead != artifact.ResultHeadOID || resultSnapshot != artifact.ResultSnapshotHash ||
-		resultClean != artifact.ResultClean || bundleName != "changes.bundle" ||
-		bundleSize != artifact.Parts[0].Size || bundleSHA != artifact.Parts[0].SHA256 ||
-		overlayName != "changes-overlay.tar.zst" || overlaySize != artifact.Parts[1].Size ||
-		overlaySHA != artifact.Parts[1].SHA256 || payloadBytes != bundleSize+overlaySize ||
-		uint64(brokerSequence) != artifact.Sequence ||
-		!slices.Equal(baseWarnings, artifact.BaseWarnings) ||
-		!slices.Equal(resultWarnings, artifact.ResultWarnings) {
-		t.Fatalf("peer changes artifact does not match root metadata")
-	}
-}
-
-func assertBrokerChangesArtifact(
-	t *testing.T,
-	database *sql.DB,
-	statePath, workspacePath string,
+	ctx context.Context,
+	root managedDispatchRoot,
+	handle protocol.ResultPackageHandle,
 	scenario workspaceE2EScenario,
-	artifact protocol.ChangesArtifactMetadata,
+	rootHead string,
 ) {
 	t.Helper()
-	var (
-		status, workspaceID, sourceAgentID, sourceDeviceID, baseHead string
-		workspaceSourceDeviceID, workspaceTargetDeviceID             string
-		baseManifest, baseSnapshot, resultHead, resultSnapshot       string
-		partsJSON, baseWarningsJSON, resultWarningsJSON              string
-		failureCode                                                  string
-		baseClean, resultClean                                       bool
-		sequence                                                     uint64
-	)
-	if err := database.QueryRow(`
-SELECT status, workspace_id, source_agent_id, source_device_id,
-       workspace_source_device_id, workspace_target_device_id, base_head_oid,
-       base_manifest_hash, base_snapshot_hash, base_clean, result_head_oid,
-       result_snapshot_hash, result_clean, parts_json, base_warnings_json,
-       result_warnings_json, failure_code, artifact_sequence
-FROM changes_artifacts
-WHERE controller_id = ? AND tree_id = ? AND artifact_id = ?
-`, networkID, artifact.TreeID, artifact.ArtifactID).Scan(
-		&status, &workspaceID, &sourceAgentID, &sourceDeviceID,
-		&workspaceSourceDeviceID, &workspaceTargetDeviceID, &baseHead,
-		&baseManifest, &baseSnapshot, &baseClean, &resultHead, &resultSnapshot,
-		&resultClean, &partsJSON, &baseWarningsJSON, &resultWarningsJSON,
-		&failureCode, &sequence,
-	); err != nil {
-		t.Fatal(err)
-	}
-	var parts []protocol.WorkspaceArtifactDescriptor
-	var baseWarnings, resultWarnings []string
-	if err := json.Unmarshal([]byte(partsJSON), &parts); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(baseWarningsJSON), &baseWarnings); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(resultWarningsJSON), &resultWarnings); err != nil {
-		t.Fatal(err)
-	}
-	if status != string(artifact.Status) || workspaceID != artifact.WorkspaceID ||
-		sourceAgentID != artifact.SourceAgentID || sourceDeviceID != artifact.SourceDeviceID ||
-		workspaceSourceDeviceID != artifact.WorkspaceSourceDeviceID ||
-		workspaceTargetDeviceID != artifact.WorkspaceTargetDeviceID ||
-		baseHead != artifact.BaseHeadOID || baseManifest != artifact.BaseManifestHash ||
-		baseSnapshot != artifact.BaseSnapshotHash || baseClean != artifact.BaseClean ||
-		resultHead != artifact.ResultHeadOID || resultSnapshot != artifact.ResultSnapshotHash ||
-		resultClean != artifact.ResultClean || !slices.Equal(parts, artifact.Parts) ||
-		!slices.Equal(baseWarnings, artifact.BaseWarnings) ||
-		!slices.Equal(resultWarnings, artifact.ResultWarnings) ||
-		failureCode != artifact.FailureCode ||
-		sequence != artifact.Sequence {
-		t.Fatalf("broker changes artifact does not match root metadata")
-	}
-	if strings.Contains(partsJSON, "changes.bundle") || strings.Contains(partsJSON, "changes-overlay.tar.zst") {
-		t.Fatalf("broker parts contain peer-local names: %s", partsJSON)
-	}
-
-	rows, err := database.Query(`PRAGMA table_info('changes_artifacts')`)
+	rootSource := root.root.Principal.Identity()
+	applyID, err := identity.NewID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid, notNull, primaryKey int
-		var name, columnType string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			t.Fatal(err)
-		}
-		lowerName := strings.ToLower(name)
-		if strings.Contains(lowerName, "path") || strings.Contains(lowerName, "payload") ||
-			strings.EqualFold(columnType, "blob") {
-			t.Fatalf("broker changes artifact contains payload-bearing column %q %q", name, columnType)
+	params := localbridge.ApplyAgentChangesParams{
+		ApplyID: applyID, PackageID: handle.Manifest.PackageID,
+		SourcePath: scenario.nestedCWD,
+	}
+	var result localbridge.ApplyAgentChangesResult
+	if err := root.client.Call(
+		ctx,
+		localbridge.MethodApplyAgentChanges,
+		root.root.Tree.TreeID,
+		&rootSource,
+		params,
+		&result,
+	); err != nil {
+		t.Fatalf("apply workspace result package: %v", err)
+	}
+	if result.ApplyID != params.ApplyID || result.PackageID != params.PackageID ||
+		result.Outcome != localbridge.ApplyAgentChangesApplied || result.FailureCode != "" {
+		t.Fatalf("workspace result apply = %#v", result)
+	}
+	currentHead, _ := run(
+		t, os.Environ(), "git", "-C", scenario.sourceRoot, "rev-parse", "HEAD^{commit}",
+	)
+	if strings.TrimSpace(currentHead) != strings.TrimSpace(rootHead) {
+		t.Fatalf("root HEAD moved after apply: %q, want %q", currentHead, rootHead)
+	}
+	for name, want := range map[string]string{
+		"source.txt":        scenario.workerCommitMarker,
+		"dirty-source.txt":  scenario.dirtyMarker,
+		"worker-change.txt": scenario.workerMarker,
+	} {
+		data, err := os.ReadFile(filepath.Join(scenario.nestedCWD, name))
+		if err != nil || strings.TrimSpace(string(data)) != want {
+			t.Fatalf("applied root file %s = %q, %v", name, data, err)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
+	status, _ := run(
+		t, os.Environ(), "git", "-C", scenario.sourceRoot,
+		"status", "--porcelain=v1", "--untracked-files=all",
+	)
+	wantStatus := "M  nested/source.txt\n?? nested/dirty-source.txt\n?? nested/worker-change.txt"
+	if strings.TrimSpace(strings.ReplaceAll(status, "\r\n", "\n")) != wantStatus {
+		t.Fatalf("applied root status = %q, want %q", status, wantStatus)
 	}
+}
 
+func assertBrokerResultPackageContainsNoPeerPayload(
+	t *testing.T,
+	statePath, workspacePath string,
+	scenario workspaceE2EScenario,
+) {
+	t.Helper()
 	for _, path := range []string{statePath, statePath + "-wal"} {
 		data, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
