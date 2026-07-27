@@ -1426,8 +1426,7 @@ func (f *managerFixture) publishOutbox(
 
 func openTestStore(t *testing.T) *store.PeerStore {
 	t.Helper()
-	directory := t.TempDir()
-	state, err := store.OpenPeer(context.Background(), filepath.Join(directory, "peer.sqlite3"))
+	state, err := store.OpenPeer(context.Background(), filepath.Join(t.TempDir(), "state", "peer.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
 	}
