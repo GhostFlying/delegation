@@ -38,6 +38,12 @@ func OpenCurrent(ctx context.Context, path string) (*Store, error) {
 }
 
 func open(ctx context.Context, path string, initialize bool) (*Store, error) {
+	unlock, err := lockStateFileLifecycle(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("wait to open broker state: %w", err)
+	}
+	defer unlock()
+
 	resolved, err := preparePath(path)
 	if err != nil {
 		return nil, err
@@ -106,7 +112,16 @@ func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	return s.db.Close()
+	return closeStateDatabase(s.db)
+}
+
+func closeStateDatabase(db *sql.DB) error {
+	unlock, err := lockStateFileLifecycle(context.Background())
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return db.Close()
 }
 
 func dataSourceName(path string) string {

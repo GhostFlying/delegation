@@ -21,6 +21,12 @@ type PeerStore struct {
 }
 
 func OpenPeer(ctx context.Context, path string) (*PeerStore, error) {
+	unlock, err := lockStateFileLifecycle(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("wait to open peer state: %w", err)
+	}
+	defer unlock()
+
 	resolved, err := preparePath(path)
 	if err != nil {
 		return nil, err
@@ -83,7 +89,7 @@ func (s *PeerStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	return s.db.Close()
+	return closeStateDatabase(s.db)
 }
 
 func (s *PeerStore) initializeSchema(ctx context.Context) error {
