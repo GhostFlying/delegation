@@ -644,7 +644,7 @@ func TestApplyAgentChangesRejectsMutationBoundaryDriftWithoutDelegationWrites(t 
 				gitApplyRun(t, git, root, "add", "worker.txt")
 			}, applyTestPeerDeviceID)
 			workerOID := gitApplyOutput(t, fixture.runner.Binary, fixture.workerPath, "rev-parse", ":worker.txt")
-			if gitApplyObjectExists(fixture.runner.Binary, fixture.rootPath, workerOID) {
+			if gitApplyObjectExists(t, fixture.runner.Binary, fixture.rootPath, workerOID) {
 				t.Fatal("worker index object unexpectedly existed in root before apply")
 			}
 			fixture.prepare(t)
@@ -683,7 +683,7 @@ func TestApplyAgentChangesRejectsMutationBoundaryDriftWithoutDelegationWrites(t 
 				gotHead != wantHead || gotRefOID != wantRefOID {
 				t.Fatal("Delegation mutated root state after mutation-boundary drift")
 			}
-			if gitApplyObjectExists(fixture.runner.Binary, fixture.rootPath, workerOID) {
+			if gitApplyObjectExists(t, fixture.runner.Binary, fixture.rootPath, workerOID) {
 				t.Fatal("conflicting apply wrote the worker index object into the root repository")
 			}
 		})
@@ -1095,7 +1095,10 @@ func newRootApplyFixtureMode(
 	t.Helper()
 	runner := rootApplyTestRunner(t)
 	rootPath := privateApplyDirectory(t, filepath.Join(t.TempDir(), "root"))
-	gitApplyRun(t, runner.Binary, rootPath, "init", "--object-format=sha1")
+	gitApplyRun(t, runner.Binary, rootPath, "init", "--template=", "--object-format=sha1")
+	gitApplyRun(t, runner.Binary, rootPath, "config", "--local", "core.autocrlf", "false")
+	gitApplyRun(t, runner.Binary, rootPath, "config", "--local", "core.attributesFile", "")
+	gitApplyRun(t, runner.Binary, rootPath, "config", "--local", "core.excludesFile", "")
 	writeApplyFile(t, filepath.Join(rootPath, ".gitignore"), "*.cache\n")
 	writeApplyFile(t, filepath.Join(rootPath, "nested", "hello.txt"), "hello\n")
 	gitApplyRun(t, runner.Binary, rootPath, "add", ".gitignore", "nested/hello.txt")
@@ -1394,7 +1397,7 @@ func gitApplyRun(t *testing.T, binary, root string, args ...string) {
 	t.Helper()
 	command := exec.Command(binary, args...)
 	command.Dir = root
-	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	command.Env = gitApplyEnvironment()
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, output)
 	}
@@ -1404,7 +1407,7 @@ func gitApplyOutput(t *testing.T, binary, root string, args ...string) string {
 	t.Helper()
 	command := exec.Command(binary, args...)
 	command.Dir = root
-	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	command.Env = gitApplyEnvironment()
 	output, err := command.Output()
 	if err != nil {
 		t.Fatalf("git %v: %v", args, err)
@@ -1412,11 +1415,44 @@ func gitApplyOutput(t *testing.T, binary, root string, args ...string) string {
 	return strings.TrimSpace(string(output))
 }
 
-func gitApplyObjectExists(binary, root, objectID string) bool {
-	command := exec.Command(binary, "cat-file", "-e", objectID+"^{blob}")
+func gitApplyObjectExists(t *testing.T, binary, root, objectID string) bool {
+	t.Helper()
+	expression := objectID + "^{blob}"
+	command := exec.Command(binary, "cat-file", "--batch-check=%(objectname) %(objecttype)")
 	command.Dir = root
-	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	return command.Run() == nil
+	command.Env = gitApplyEnvironment()
+	command.Stdin = strings.NewReader(expression + "\n")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("inspect Git object %s: %v", objectID, err)
+	}
+	switch strings.TrimSpace(string(output)) {
+	case objectID + " blob":
+		return true
+	case expression + " missing":
+		return false
+	default:
+		t.Fatalf("unexpected Git object inspection for %s: %q", objectID, output)
+		return false
+	}
+}
+
+func gitApplyEnvironment() []string {
+	environment := make([]string, 0, len(os.Environ())+4)
+	for _, variable := range os.Environ() {
+		name, _, _ := strings.Cut(variable, "=")
+		if strings.HasPrefix(strings.ToUpper(name), "GIT_") {
+			continue
+		}
+		environment = append(environment, variable)
+	}
+	return append(
+		environment,
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_ATTR_NOSYSTEM=1",
+	)
 }
 
 func gitApplyCommit(t *testing.T, binary, root, message string) {
