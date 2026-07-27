@@ -618,7 +618,8 @@ func TestWorkspaceRPCDirtyBundleOverlayReconnectsAtArtifactBoundaries(t *testing
 }
 
 func TestWorkspaceRPCSuccessfulTransferSurvivesSourceCleanupFailure(t *testing.T) {
-	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	// Git-heavy native suites can briefly delay connector heartbeats on shared runners.
+	harness := newBrokerHarness(t, config.AuthModeNone, 5*time.Second)
 	gitURL := "ssh://git@example.invalid/repository.git"
 	manifest := workspaceRPCManifest(gitURL, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	sourceManager := &transferWorkspacePeer{

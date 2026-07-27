@@ -34,7 +34,7 @@ jobs:
       - name: Verify Go toolchain
         run: go env GOVERSION
       - name: Test
-        run: go test ./...
+        run: go test -timeout 20m ./...
       - name: Vet
         run: go vet ./...
       - name: Prepare Linux sandbox
@@ -68,7 +68,7 @@ jobs:
           fi
           DELEGATION_E2E_BINARY="$RUNNER_TEMP/delegation" \
             CODEX_BINARY="$(command -v codex)" \
-            go test -tags=integration \
+            go test -timeout 20m -tags=integration \
               -run "$test_pattern" \
               -count=1 -v ./tests/codex_peer_e2e
       - name: Test managed worker mock E2E
@@ -84,7 +84,7 @@ jobs:
           go build -trimpath -buildvcs=false -o $delegation ./cmd/delegation
           $env:DELEGATION_E2E_BINARY = $delegation
           $env:CODEX_BINARY = $codex
-          go test -tags=integration -run '^TestManagedWorker(UsesEnvOnlyProviderAndColdResume|ReturnsResultPackageCrossPlatform)$' `
+          go test -timeout 20m -tags=integration -run '^TestManagedWorker(UsesEnvOnlyProviderAndColdResume|ReturnsResultPackageCrossPlatform)$' `
             -count=1 -v ./tests/codex_peer_e2e
       - name: Test macOS LaunchAgent round trip
         if: runner.os == 'macOS'
@@ -124,7 +124,7 @@ jobs:
           go-version: 1.26.5
           check-latest: false
           cache: true
-      - run: go test -race ./...
+      - run: go test -race -timeout 20m ./...
 
   cross-compile:
     name: Cross compile (${{ matrix.goos }}-${{ matrix.goarch }})
@@ -287,7 +287,7 @@ jobs:
           go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/delegation" ./cmd/delegation
           DELEGATION_E2E_BINARY="$RUNNER_TEMP/delegation" \
             CODEX_BINARY="$(command -v codex)" \
-            go test -tags=integration -count=1 -v ./tests/codex_peer_e2e
+            go test -timeout 20m -tags=integration -count=1 -v ./tests/codex_peer_e2e
 
   release-package:
     name: Deterministic release package

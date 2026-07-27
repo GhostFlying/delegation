@@ -394,22 +394,33 @@ func waitForWorkspaceResultPackage(
 ) protocol.ResultPackageHandle {
 	t.Helper()
 	rootSource := root.root.Principal.Identity()
-	var result protocol.WaitAgentResult
-	if err := root.client.Call(
-		ctx, protocol.MethodWaitAgent, root.root.Tree.TreeID, &rootSource,
-		protocol.WaitAgentParams{
-			TimeoutMillis: 10_000,
-			MessageLimit:  protocol.MaximumAgentWaitMessages,
-			ActivityLimit: protocol.MaximumAgentWaitActivities,
-			ArtifactLimit: protocol.MaximumAgentWaitArtifacts,
-			ResultLimit:   protocol.MaximumAgentWaitResults,
-		},
-		&result,
-	); err != nil {
-		t.Fatalf("wait for workspace result package: %v", err)
+	params := protocol.WaitAgentParams{
+		TimeoutMillis: 10_000,
+		MessageLimit:  protocol.MaximumAgentWaitMessages,
+		ActivityLimit: protocol.MaximumAgentWaitActivities,
+		ArtifactLimit: protocol.MaximumAgentWaitArtifacts,
+		ResultLimit:   protocol.MaximumAgentWaitResults,
 	}
-	if len(result.Artifacts) != 0 || len(result.Results) != 1 || result.MoreResults ||
-		result.NextResultCursor == 0 {
+	var result protocol.WaitAgentResult
+	for {
+		result = protocol.WaitAgentResult{}
+		if err := root.client.Call(
+			ctx, protocol.MethodWaitAgent, root.root.Tree.TreeID, &rootSource, params, &result,
+		); err != nil {
+			t.Fatalf("wait for workspace result package: %v", err)
+		}
+		if len(result.Artifacts) != 0 {
+			t.Fatalf("workspace result package wait returned legacy artifacts: %#v", result)
+		}
+		if len(result.Results) != 0 {
+			break
+		}
+		params.MailboxCursor = result.NextMailboxCursor
+		params.LifecycleCursor = result.NextLifecycleCursor
+		params.ArtifactCursor = result.NextArtifactCursor
+		params.ResultCursor = result.NextResultCursor
+	}
+	if len(result.Results) != 1 || result.MoreResults || result.NextResultCursor == 0 {
 		t.Fatalf("workspace result package wait = %#v", result)
 	}
 	handle := result.Results[0]

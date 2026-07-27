@@ -178,9 +178,14 @@ func TestConnectorTreatsClosedResultPackageNotificationChannelAsSessionFailure(t
 	source := newResultPackageTestSource()
 	close(source.changes)
 	holdConnection := make(chan struct{})
+	connectionStarted := make(chan struct{}, 1)
 	var connections atomic.Int64
 	server := newFakeBroker(t, func(*websocket.Conn) {
 		connections.Add(1)
+		select {
+		case connectionStarted <- struct{}{}:
+		default:
+		}
 		<-holdConnection
 	})
 	defer server.Close()
@@ -193,6 +198,7 @@ func TestConnectorTreatsClosedResultPackageNotificationChannelAsSessionFailure(t
 	if !errors.Is(err, errResultPackageNotificationsClosed) {
 		t.Fatalf("connector run error = %v", err)
 	}
+	waitSignal(t, connectionStarted, "result package connector session")
 	if client.Status().Connected || connections.Load() != 1 {
 		t.Fatalf("closed result channel status=%#v connections=%d", client.Status(), connections.Load())
 	}
@@ -204,9 +210,14 @@ func TestConnectorFailsClosedOnPermanentLocalResultPackageError(t *testing.T) {
 	source.listErr = permanentResultPackageError(errors.New("durable outbox invariant failed"))
 	holdConnection := make(chan struct{})
 	defer close(holdConnection)
+	connectionStarted := make(chan struct{}, 1)
 	var connections atomic.Int64
 	server := newFakeBroker(t, func(*websocket.Conn) {
 		connections.Add(1)
+		select {
+		case connectionStarted <- struct{}{}:
+		default:
+		}
 		<-holdConnection
 	})
 	defer server.Close()
@@ -217,6 +228,7 @@ func TestConnectorFailsClosedOnPermanentLocalResultPackageError(t *testing.T) {
 	if !errors.Is(err, ErrPermanentResultPackagePublication) {
 		t.Fatalf("connector run error = %v", err)
 	}
+	waitSignal(t, connectionStarted, "result package connector session")
 	if client.Status().Connected || connections.Load() != 1 || source.listCalls.Load() != 1 {
 		t.Fatalf(
 			"permanent local error status=%#v connections=%d listCalls=%d",

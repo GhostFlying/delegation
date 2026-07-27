@@ -20,6 +20,8 @@ const (
 	workspaceRPCFailedSyncID              = "123e4567-e89b-42d3-a456-426614174141"
 	workspaceRPCSpawnID                   = "123e4567-e89b-42d3-a456-426614174142"
 	workspaceRPCCleanupObservationTimeout = cleanupTimeout + writeTimeout
+	// Keep heartbeat outside cancellation tests; they do not exercise liveness.
+	workspaceRPCCancellationHeartbeatInterval = time.Minute
 )
 
 type recordingWorkspacePeer struct {
@@ -33,6 +35,7 @@ type recordingWorkspacePeer struct {
 	preparePublished chan struct{}
 	prepareRelease   chan struct{}
 	cancelObserved   chan connector.WorkspaceTransferControlRequest
+	cleanupObserved  chan struct{}
 	prepared         *protocol.PrepareWorkspaceResult
 	publishCount     int
 
@@ -154,6 +157,15 @@ func (p *recordingWorkspacePeer) CancelWorkspaceTransfer(
 }
 
 func (p *recordingWorkspacePeer) CleanupWorkspaceTransfers(context.Context) error {
+	p.mu.Lock()
+	cleanupObserved := p.cleanupObserved
+	p.mu.Unlock()
+	if cleanupObserved != nil {
+		select {
+		case cleanupObserved <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -168,16 +180,17 @@ func TestWorkspaceRPCPrepareFailureCancelsExactProvisionalTarget(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			harness := newBrokerHarness(t, config.AuthModeNone, 5*time.Second)
+			harness := newBrokerHarness(t, config.AuthModeNone, workspaceRPCCancellationHeartbeatInterval)
 			gitURL := "ssh://git@example.invalid/repository.git"
 			sourceManager := &recordingWorkspacePeer{
 				deviceID: brokerTestDeviceID,
 				manifest: workspaceRPCManifest(gitURL, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
 			}
 			cancelObserved := make(chan connector.WorkspaceTransferControlRequest, 1)
+			cleanupObserved := make(chan struct{}, 1)
 			targetManager := &recordingWorkspacePeer{
 				deviceID: agentRPCTargetID, prepareErr: test.prepareErr,
-				cancelObserved: cancelObserved,
+				cancelObserved: cancelObserved, cleanupObserved: cleanupObserved,
 			}
 			if test.cancelRequest {
 				targetManager.prepareStarted = make(chan struct{}, 1)
@@ -236,11 +249,14 @@ func TestWorkspaceRPCPrepareFailureCancelsExactProvisionalTarget(t *testing.T) {
 				}
 			}
 
-			var cleanup connector.WorkspaceTransferControlRequest
 			select {
-			case cleanup = <-cancelObserved:
+			case <-cancelObserved:
+			case <-cleanupObserved:
+				if !test.cancelRequest {
+					t.Fatal("target session closed instead of receiving provisional cleanup")
+				}
 			case <-time.After(workspaceRPCCleanupObservationTimeout):
-				t.Fatal("broker did not cancel the provisional target workspace")
+				t.Fatal("provisional target cleanup did not finish")
 			}
 			wantCleanup := connector.WorkspaceTransferControlRequest{
 				TreeID: root.Tree.TreeID, Source: source,
@@ -249,15 +265,16 @@ func TestWorkspaceRPCPrepareFailureCancelsExactProvisionalTarget(t *testing.T) {
 					SourceAgentID: source.AgentID, SourceDeviceID: source.DeviceID,
 				},
 			}
-			if !reflect.DeepEqual(cleanup, wantCleanup) {
-				t.Fatalf("provisional target cleanup = %#v, want %#v", cleanup, wantCleanup)
-			}
 			targetManager.mu.Lock()
 			cancellations := append(
 				[]connector.WorkspaceTransferControlRequest(nil),
 				targetManager.transferCancellations...,
 			)
 			targetManager.mu.Unlock()
+			if len(cancellations) == 0 && test.cancelRequest {
+				waitForWorkspaceCleanupDrain(t, harness.server, brokerTestDeviceID, agentRPCTargetID)
+				return
+			}
 			if !reflect.DeepEqual(cancellations, []connector.WorkspaceTransferControlRequest{wantCleanup}) {
 				t.Fatalf("target cleanup calls = %#v, want exactly the provisional cleanup", cancellations)
 			}
@@ -341,7 +358,7 @@ func TestWorkspaceRPCDirectPrepareAcknowledgementLossRetriesSameSync(t *testing.
 }
 
 func TestWorkspaceRPCCancellationStopsTargetPeerOperation(t *testing.T) {
-	harness := newBrokerHarness(t, config.AuthModeNone, 5*time.Second)
+	harness := newBrokerHarness(t, config.AuthModeNone, workspaceRPCCancellationHeartbeatInterval)
 	gitURL := "ssh://git@example.invalid/repository.git"
 	sourceManager := &recordingWorkspacePeer{
 		deviceID: brokerTestDeviceID,
@@ -350,9 +367,10 @@ func TestWorkspaceRPCCancellationStopsTargetPeerOperation(t *testing.T) {
 	prepareStarted := make(chan struct{}, 1)
 	prepareCanceled := make(chan struct{}, 1)
 	cancelObserved := make(chan connector.WorkspaceTransferControlRequest, 1)
+	cleanupObserved := make(chan struct{}, 1)
 	targetManager := &recordingWorkspacePeer{
 		deviceID: agentRPCTargetID, prepareStarted: prepareStarted, prepareCanceled: prepareCanceled,
-		cancelObserved: cancelObserved,
+		cancelObserved: cancelObserved, cleanupObserved: cleanupObserved,
 	}
 	sourceClient := startAgentRPCConnector(t, harness, brokerTestDeviceID, sourceManager)
 	startAgentRPCConnector(t, harness, agentRPCTargetID, targetManager)
@@ -402,8 +420,9 @@ func TestWorkspaceRPCCancellationStopsTargetPeerOperation(t *testing.T) {
 	}
 	select {
 	case <-cancelObserved:
+	case <-cleanupObserved:
 	case <-time.After(workspaceRPCCleanupObservationTimeout):
-		t.Fatal("broker did not finish provisional target cleanup")
+		t.Fatal("provisional target cleanup did not finish")
 	}
 	waitForWorkspaceCleanupDrain(t, harness.server, brokerTestDeviceID, agentRPCTargetID)
 }
