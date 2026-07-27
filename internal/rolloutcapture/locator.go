@@ -47,17 +47,25 @@ func OpenValidated(codexHome, threadID, path string) (*os.File, Locator, error) 
 	if err != nil {
 		return nil, Locator{}, fmt.Errorf("resolve managed Codex home: %w", err)
 	}
+	homeInfo, err := os.Stat(resolvedHome)
+	if err != nil {
+		return nil, Locator{}, fmt.Errorf("inspect managed Codex home: %w", err)
+	}
+	if !homeInfo.IsDir() {
+		return nil, Locator{}, errors.New("managed Codex home must be a directory")
+	}
 	resolvedPath, err := filepath.EvalSymlinks(cleanPath)
 	if err != nil {
 		return nil, Locator{}, fmt.Errorf("resolve managed rollout path: %w", err)
 	}
-	if !samePath(cleanPath, resolvedPath) {
-		return nil, Locator{}, errors.New("managed rollout path must not contain symbolic links")
-	}
-	relative, err := filepath.Rel(resolvedHome, resolvedPath)
-	if err != nil || relative == "." || filepath.IsAbs(relative) || relative == ".." ||
-		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+	resolvedRelative, err := filepath.Rel(resolvedHome, resolvedPath)
+	if err != nil || resolvedRelative == "." || filepath.IsAbs(resolvedRelative) || resolvedRelative == ".." ||
+		strings.HasPrefix(resolvedRelative, ".."+string(filepath.Separator)) {
 		return nil, Locator{}, errors.New("managed rollout path is outside Codex home")
+	}
+	relative, err := relativeToHomeAlias(homeInfo, cleanPath)
+	if err != nil {
+		return nil, Locator{}, err
 	}
 	components := splitPath(relative)
 	if len(components) < 2 || !sameComponent(components[0], "sessions") {
@@ -68,18 +76,15 @@ func OpenValidated(codexHome, threadID, path string) (*os.File, Locator, error) 
 		!strings.HasSuffix(components[len(components)-1], expectedSuffix) {
 		return nil, Locator{}, errors.New("managed rollout path does not name the expected thread")
 	}
-	before, err := os.Lstat(resolvedPath)
-	if err != nil {
-		return nil, Locator{}, fmt.Errorf("inspect managed rollout: %w", err)
-	}
-	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
-		return nil, Locator{}, errors.New("managed rollout must be a regular file")
-	}
 	root, err := os.OpenRoot(resolvedHome)
 	if err != nil {
 		return nil, Locator{}, fmt.Errorf("open managed Codex home: %w", err)
 	}
 	defer root.Close()
+	before, err := inspectNoSymlink(root, components)
+	if err != nil {
+		return nil, Locator{}, err
+	}
 	file, err := root.Open(relative)
 	if err != nil {
 		return nil, Locator{}, fmt.Errorf("open managed rollout: %w", err)
@@ -96,11 +101,50 @@ func OpenValidated(codexHome, threadID, path string) (*os.File, Locator, error) 
 	return file, Locator{Path: resolvedPath, Offset: opened.Size()}, nil
 }
 
-func samePath(left, right string) bool {
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(left, right)
+func relativeToHomeAlias(homeInfo os.FileInfo, path string) (string, error) {
+	current := filepath.Dir(path)
+	components := []string{filepath.Base(path)}
+	for {
+		info, err := os.Stat(current)
+		if err != nil {
+			return "", fmt.Errorf("inspect managed rollout parent: %w", err)
+		}
+		if os.SameFile(homeInfo, info) {
+			for left, right := 0, len(components)-1; left < right; left, right = left+1, right-1 {
+				components[left], components[right] = components[right], components[left]
+			}
+			return filepath.Join(components...), nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", errors.New("managed rollout path is outside Codex home")
+		}
+		components = append(components, filepath.Base(current))
+		current = parent
 	}
-	return left == right
+}
+
+func inspectNoSymlink(root *os.Root, components []string) (os.FileInfo, error) {
+	current := ""
+	var info os.FileInfo
+	for index, component := range components {
+		current = filepath.Join(current, component)
+		var err error
+		info, err = root.Lstat(current)
+		if err != nil {
+			return nil, fmt.Errorf("inspect managed rollout component: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("managed rollout path must not contain symbolic links")
+		}
+		if index < len(components)-1 && !info.IsDir() {
+			return nil, errors.New("managed rollout parent must be a directory")
+		}
+	}
+	if info == nil || !info.Mode().IsRegular() {
+		return nil, errors.New("managed rollout must be a regular file")
+	}
+	return info, nil
 }
 
 func sameComponent(left, right string) bool {

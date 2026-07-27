@@ -933,9 +933,13 @@ func TestHostBindsInitialRolloutAfterFirstTurnMaterializesPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	resolvedRolloutPath, err := filepath.EvalSymlinks(rolloutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := store.WorkerRolloutLocator{
-		Status: store.WorkerRolloutAvailable, CodexHome: paths.codexHome,
-		Path: rolloutPath, Offset: 0,
+		Status: store.WorkerRolloutAvailable, CodexHome: host.codexHome,
+		Path: resolvedRolloutPath, Offset: 0,
 	}
 	if intent.Rollout != want {
 		t.Fatalf("materialized initial rollout = %#v, want %#v", intent.Rollout, want)
@@ -1056,6 +1060,45 @@ func TestHostDegradesNonRetirableInitialRolloutReadError(t *testing.T) {
 	}
 }
 
+func TestHostRetriesTransientInitialRolloutReadError(t *testing.T) {
+	application := newFakeApplication()
+	application.threadID = newTestID()
+	application.readAfterTurnErrors = []error{
+		&appserver.RPCError{Code: -32603, Message: "rollout is temporarily empty"},
+	}
+	host, state, paths := newTestHost(t, 1, application)
+	rolloutPath := filepath.Join(
+		paths.codexHome,
+		"sessions",
+		"rollout-2026-07-27T00-00-00-"+application.threadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(rolloutPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rolloutPath, []byte("thread metadata\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	application.threadReadHook = func(_ threadReadParams, result *threadResult) {
+		if len(application.snapshot().turns) != 0 {
+			result.Thread.Path = &rolloutPath
+		}
+	}
+	host.initialRolloutWait = 200 * time.Millisecond
+	reported := &testErrorRecorder{}
+	host.reportError = reported.report
+
+	started := spawnTestWorker(t, host, newTestID(), "retry transient initial rollout read")
+	intent, err := state.GetWorkerTurnStartIntentByTurn(
+		context.Background(), started.Worker.WorkerKey, started.Worker.ActiveTurnID,
+	)
+	if err != nil || intent.Rollout.Status != store.WorkerRolloutAvailable {
+		t.Fatalf("retried initial rollout intent = %#v, %v", intent, err)
+	}
+	if diagnostics := reported.snapshot(); len(diagnostics) != 0 {
+		t.Fatalf("transient initial rollout diagnostics = %#v", diagnostics)
+	}
+}
+
 func TestHostReportsMissingManagedHomeButNotLazyInitialRollout(t *testing.T) {
 	application := newFakeApplication()
 	host, _, paths := newTestHost(t, 1, application)
@@ -1124,8 +1167,12 @@ func TestHostRefreshesThreadPathBeforeLoadedFollowupTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	resolvedRolloutPath, err := filepath.EvalSymlinks(rolloutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if intent.Rollout.Status != store.WorkerRolloutAvailable ||
-		intent.Rollout.Path != rolloutPath || intent.Rollout.Offset != 3 {
+		intent.Rollout.Path != resolvedRolloutPath || intent.Rollout.Offset != 3 {
 		t.Fatalf("loaded follow-up rollout locator = %#v", intent.Rollout)
 	}
 	record := application.snapshot()
@@ -1407,9 +1454,13 @@ func TestAmbiguousTurnStartBindsObservedTurnWithoutRedispatch(t *testing.T) {
 	if err != nil || intent.State != store.WorkerTurnStartBound {
 		t.Fatalf("reconciled intent = %#v, %v", intent, err)
 	}
+	resolvedRolloutPath, err := filepath.EvalSymlinks(rolloutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	wantRollout := store.WorkerRolloutLocator{
-		Status: store.WorkerRolloutAvailable, CodexHome: paths.codexHome,
-		Path: rolloutPath, Offset: 0,
+		Status: store.WorkerRolloutAvailable, CodexHome: host.codexHome,
+		Path: resolvedRolloutPath, Offset: 0,
 	}
 	if intent.Rollout != wantRollout {
 		t.Fatalf("reconciled initial rollout = %#v, want %#v", intent.Rollout, wantRollout)
@@ -2621,6 +2672,7 @@ type fakeApplication struct {
 	threadPath            string
 	threadTurns           map[string][]turn
 	readAfterTurnErr      error
+	readAfterTurnErrors   []error
 	readAfterTurnGate     chan struct{}
 	resumeErr             error
 	resumeResultHook      func(*threadResult)
@@ -2732,6 +2784,10 @@ func (a *fakeApplication) ThreadRead(ctx context.Context, params, result any) er
 	path := a.threadPath
 	turns := append([]turn(nil), a.threadTurns[read.ThreadID]...)
 	readAfterTurnErr := a.readAfterTurnErr
+	if len(turns) != 0 && len(a.readAfterTurnErrors) != 0 {
+		readAfterTurnErr = a.readAfterTurnErrors[0]
+		a.readAfterTurnErrors = a.readAfterTurnErrors[1:]
+	}
 	readAfterTurnGate := a.readAfterTurnGate
 	a.mu.Unlock()
 	if readErr != nil {
