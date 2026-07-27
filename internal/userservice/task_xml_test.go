@@ -54,6 +54,9 @@ func TestTaskDefinitionDetectsBehaviorDrift(t *testing.T) {
 		"changed setting": func(document string) string {
 			return strings.Replace(document, "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>", "<MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>", 1)
 		},
+		"changed restart count": func(document string) string {
+			return strings.Replace(document, "<Count>255</Count>", "<Count>10</Count>", 1)
+		},
 		"enabled task": func(document string) string {
 			return strings.Replace(document, "<Enabled>false</Enabled>", "<Enabled>true</Enabled>", 1)
 		},
@@ -126,6 +129,12 @@ func TestTaskDefinitionsEquivalentNormalizesSchedulerRepresentation(t *testing.T
 		document,
 		"      <StopOnIdleEnd>false</StopOnIdleEnd>\n      <RestartOnIdle>false</RestartOnIdle>",
 		"      <RestartOnIdle>false</RestartOnIdle>\n      <StopOnIdleEnd>false</StopOnIdleEnd>",
+	)
+	document = replaceTaskFixture(
+		t,
+		document,
+		"      <Interval>PT1M</Interval>\n      <Count>255</Count>",
+		"      <Count>255</Count>\n      <Interval>PT1M</Interval>",
 	)
 	document = replaceTaskFixture(
 		t,

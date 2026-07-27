@@ -98,7 +98,10 @@ func (s *session) bootstrap(ctx context.Context, hello protocol.Hello) (protocol
 		return protocol.HelloResult{}, errors.New("broker returned an invalid hello response")
 	}
 	if response.Error != nil {
-		return protocol.HelloResult{}, &RPCError{Code: response.Error.Code, Message: response.Error.Message}
+		return protocol.HelloResult{}, &RPCError{
+			Code: response.Error.Code, Message: response.Error.Message, Data: response.Error.Data,
+			helloWorkerBaselineRevision: hello.WorkerBaselineRevision, helloResponse: true,
+		}
 	}
 	var result protocol.HelloResult
 	if err := decodeResult(response.Payload, &result); err != nil {
@@ -312,7 +315,9 @@ func (s *session) complete(response protocol.Envelope) error {
 	s.pendingMu.Unlock()
 	result := callResult{payload: response.Payload}
 	if response.Error != nil {
-		result.err = &RPCError{Code: response.Error.Code, Message: response.Error.Message}
+		result.err = &RPCError{
+			Code: response.Error.Code, Message: response.Error.Message, Data: response.Error.Data,
+		}
 	}
 	pending.result <- result
 	return nil

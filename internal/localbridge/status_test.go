@@ -4,6 +4,8 @@ import (
 	"context"
 	"reflect"
 	"testing"
+
+	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
 type staticStatusProvider struct {
@@ -19,7 +21,8 @@ func TestReadStatusReturnsValidatedLocalSnapshot(t *testing.T) {
 	identity := ServiceIdentity{ControllerID: bridgeTestControllerID, DeviceID: bridgeTestDeviceID}
 	want := StatusSnapshot{
 		Version: "0.1.0-test", ControllerID: identity.ControllerID, DeviceID: identity.DeviceID,
-		DeviceName: "test-peer", Connected: true, RegistryRevision: 7, WorkerRevision: 5,
+		DeviceName: "test-peer", ServiceRunning: true, ConnectionState: ConnectionReady,
+		Connected: true, RegistryRevision: 7, WorkerRevision: 5,
 		BrokerWorkerRevision: 5, WorkerSyncReady: true,
 		MaxWorkerSlots: 8,
 		Workers: WorkerCounts{
@@ -67,7 +70,8 @@ func TestReadStatusReturnsValidatedLocalSnapshot(t *testing.T) {
 func TestStatusSnapshotRejectsInconsistentCountsAndSynchronization(t *testing.T) {
 	valid := StatusSnapshot{
 		Version: "0.1.0-test", ControllerID: bridgeTestControllerID, DeviceID: bridgeTestDeviceID,
-		DeviceName: "test-peer", Connected: true, WorkerRevision: 8,
+		DeviceName: "test-peer", ServiceRunning: true, ConnectionState: ConnectionReady,
+		Connected: true, WorkerRevision: 8,
 		BrokerWorkerRevision: 8, WorkerSyncReady: true, MaxWorkerSlots: 4,
 		Workers: WorkerCounts{Total: 2, Ready: 1, Idle: 1, Occupied: 1},
 	}
@@ -136,6 +140,54 @@ func TestStatusSnapshotRejectsInconsistentCountsAndSynchronization(t *testing.T)
 			test.mutate(&status)
 			if err := status.Validate(); err == nil {
 				t.Fatal("Validate() accepted inconsistent status")
+			}
+		})
+	}
+}
+
+func TestStatusSnapshotAcceptsConnectionStates(t *testing.T) {
+	base := StatusSnapshot{
+		Version: "0.1.0-test", ControllerID: bridgeTestControllerID, DeviceID: bridgeTestDeviceID,
+		DeviceName: "test-peer", ServiceRunning: true, MaxWorkerSlots: 4,
+	}
+	tests := map[string]StatusSnapshot{
+		"connecting": func() StatusSnapshot {
+			status := base
+			status.ConnectionState = ConnectionConnecting
+			status.ConnectionErrorCode = "broker_unavailable"
+			return status
+		}(),
+		"synchronizing": func() StatusSnapshot {
+			status := base
+			status.ConnectionState = ConnectionSynchronizing
+			status.Connected = true
+			status.WorkerRevision = 2
+			status.BrokerWorkerRevision = 1
+			return status
+		}(),
+		"ready": func() StatusSnapshot {
+			status := base
+			status.ConnectionState = ConnectionReady
+			status.Connected = true
+			status.WorkerRevision = 2
+			status.BrokerWorkerRevision = 2
+			status.WorkerSyncReady = true
+			return status
+		}(),
+		"state recovery required": func() StatusSnapshot {
+			status := base
+			status.ConnectionState = ConnectionStateRecoveryRequired
+			status.ConnectionErrorCode = protocol.PeerStateRollbackCode
+			status.WorkerRevision = 2
+			status.RecoveryPeerWorkerRevision = 2
+			status.BrokerWorkerRevision = 3
+			return status
+		}(),
+	}
+	for name, status := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := status.Validate(); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

@@ -224,7 +224,7 @@ func runConnectorServiceWithProviderEnvironment(
 		WorkspaceManager:      workerManager,
 		ResultPackageManager:  workerManager,
 		ReportError: func(err error) {
-			_ = writeStderr("delegation: connector reconnecting: %v\n", err)
+			_ = reportConnectorError(writeStderr, err)
 		},
 	})
 	if err != nil {
@@ -305,6 +305,13 @@ func runConnectorServiceWithProviderEnvironment(
 		firstErr = errors.New("stopped unexpectedly")
 	}
 	return errors.Join(fmt.Errorf("%s stopped: %w", firstName, firstErr), closeErr, connectorErr, bridgeErr)
+}
+
+func reportConnectorError(writeStderr func(string, ...any) error, err error) error {
+	if errors.Is(err, connector.ErrStateRecoveryRequired) {
+		return writeStderr("delegation: connector halted; state recovery required: %v\n", err)
+	}
+	return writeStderr("delegation: connector reconnecting: %v\n", err)
 }
 
 type workerHostCloser interface {

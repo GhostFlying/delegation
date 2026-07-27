@@ -446,11 +446,13 @@ func TestHostStartupRecoveryEmitsWorkerChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(workers) != 1 || workers[0].Status != store.WorkerInterrupted ||
-		workers[0].Revision <= revisionBeforeRecovery || workers[0].Revision != host.WorkerRevision() {
+		workers[0].Revision <= revisionBeforeRecovery || workers[0].Revision != host.WorkerRevision() ||
+		host.StartupWorkerRevision() != revisionBeforeRecovery {
 		t.Fatalf(
-			"startup recovery snapshot = %#v, previous revision = %d, high watermark = %d",
+			"startup recovery snapshot = %#v, previous revision = %d, startup revision = %d, high watermark = %d",
 			workers,
 			revisionBeforeRecovery,
+			host.StartupWorkerRevision(),
 			host.WorkerRevision(),
 		)
 	}

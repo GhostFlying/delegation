@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	Version        = 2
+	Version        = 3
 	MaxMessageSize = 256 * 1024
 )
 
@@ -302,15 +302,16 @@ func validateRequestID(value string) error {
 }
 
 type Hello struct {
-	ControllerID   string   `json:"controllerId"`
-	DeviceID       string   `json:"deviceId"`
-	DeviceName     string   `json:"deviceName"`
-	OS             string   `json:"os"`
-	Arch           string   `json:"arch"`
-	RuntimeVersion string   `json:"runtimeVersion"`
-	Features       []string `json:"features"`
-	Cursor         uint64   `json:"cursor"`
-	WorkerRevision uint64   `json:"workerRevision"`
+	ControllerID           string   `json:"controllerId"`
+	DeviceID               string   `json:"deviceId"`
+	DeviceName             string   `json:"deviceName"`
+	OS                     string   `json:"os"`
+	Arch                   string   `json:"arch"`
+	RuntimeVersion         string   `json:"runtimeVersion"`
+	Features               []string `json:"features"`
+	Cursor                 uint64   `json:"cursor"`
+	WorkerBaselineRevision uint64   `json:"workerBaselineRevision"`
+	WorkerRevision         uint64   `json:"workerRevision"`
 }
 
 func (h Hello) Descriptor() control.DeviceDescriptor {
@@ -329,6 +330,9 @@ func (h Hello) Descriptor() control.DeviceDescriptor {
 func (h Hello) Validate() error {
 	if err := h.Descriptor().Validate(); err != nil {
 		return err
+	}
+	if h.WorkerBaselineRevision > h.WorkerRevision {
+		return errors.New("workerBaselineRevision exceeds workerRevision")
 	}
 	if h.WorkerRevision > math.MaxInt64 {
 		return errors.New("workerRevision exceeds the supported range")

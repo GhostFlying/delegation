@@ -879,7 +879,7 @@ func TestClientRejectsLegacyLocalBridgeResponse(t *testing.T) {
 		context.Background(), protocol.MethodEnsureRootTree, "", nil,
 		protocol.EnsureRootTreeParams{ExternalThreadID: bridgeTestTreeID}, nil,
 	)
-	if err == nil || !strings.Contains(err.Error(), "unsupported local bridge version 1") {
+	if err == nil || !strings.Contains(err.Error(), "unsupported local bridge version 2") {
 		t.Fatalf("legacy response error = %v", err)
 	}
 	select {

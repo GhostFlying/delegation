@@ -33,7 +33,15 @@ foreign definitions and managed definitions whose executable or configuration pa
 do not overwrite or delete the definition automatically.
 
 Linux requires a working systemd user manager. macOS needs the current user's GUI launchd domain.
-Windows needs an interactive login. Runtime-path changes require explicit native service
-replacement. Restart the peer service after rotating its provider credential or replacing the
-environment file. Changing the environment file path changes the managed service identity and
+Windows needs an interactive login. A nonzero Windows service exit is retried once per minute for
+up to 255 attempts; a clean exit is not restarted. Runtime-path changes require explicit native
+service replacement. Restart the peer service after rotating its provider credential or replacing
+the environment file. Changing the environment file path changes the managed service identity and
 requires explicit replacement.
+
+`status --config <peer.json>` distinguishes the local process from broker readiness. A successful
+status call with `connectionState=connecting` means the service is alive but not synchronized.
+`stateRecoveryRequired` plus `peer_worker_revision_rollback` means the configured peer database is
+behind the broker cursor, commonly after replacing or losing `peer.sqlite3`. Stop the peer service
+and restore the original database before restarting it. Automated reset semantics are intentionally
+not defined yet because managed worker state must not be silently discarded or terminalized.

@@ -176,6 +176,7 @@ type Host struct {
 	artifactChanges          chan struct{}
 	artifactCancel           context.CancelFunc
 	changesMu                sync.Mutex
+	startupWorkerRevision    uint64
 	workerRevision           uint64
 	completionDrains         map[application]chan struct{}
 	deferredCompletions      map[application][]turnCompletedNotification

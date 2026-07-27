@@ -16,6 +16,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/localbridge"
+	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -110,6 +111,8 @@ func TestPeerLocalStatusProviderCombinesLiveAndDurableState(t *testing.T) {
 		ControllerID:         statusTestControllerID,
 		DeviceID:             statusTestDeviceID,
 		DeviceName:           "status-peer",
+		ServiceRunning:       true,
+		ConnectionState:      localbridge.ConnectionReady,
 		Connected:            true,
 		RegistryRevision:     42,
 		WorkerRevision:       77,
@@ -146,8 +149,40 @@ func TestPeerLocalStatusProviderCombinesLiveAndDurableState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.WorkerSyncReady || got.BrokerWorkerRevision != 76 || got.WorkerRevision != 77 {
+	if got.ConnectionState != localbridge.ConnectionSynchronizing || got.WorkerSyncReady ||
+		got.BrokerWorkerRevision != 76 || got.WorkerRevision != 77 {
 		t.Fatalf("unsynchronized status = %#v", got)
+	}
+
+	provider.client = staticConnectorStatus{status: connector.Status{
+		ConnectionErrorCode:   protocol.PeerStateRollbackCode,
+		StateRecoveryRequired: true, RecoveryPeerWorkerRevision: 9,
+		RecoveryBrokerWorkerRevision: 91,
+	}}
+	provider.state = staticPeerStatusStore{status: store.PeerStatusSnapshot{WorkerRevision: 100}}
+	got, err = provider.LocalStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ConnectionState != localbridge.ConnectionStateRecoveryRequired ||
+		got.ConnectionErrorCode != protocol.PeerStateRollbackCode || got.ServiceRunning != true ||
+		got.Connected || got.WorkerSyncReady || got.WorkerRevision != 100 ||
+		got.RecoveryPeerWorkerRevision != 9 || got.BrokerWorkerRevision != 91 {
+		t.Fatalf("worker revision rollback status = %#v", got)
+	}
+	var human bytes.Buffer
+	var humanError bytes.Buffer
+	if code := writePeerStatus(&human, &humanError, got, false); code != 0 {
+		t.Fatalf("writePeerStatus() code = %d, stderr = %q", code, humanError.String())
+	}
+	for _, want := range []string{
+		"worker revision: 100\n",
+		"broker worker revision: 91\n",
+		"rejected peer worker revision: 9\n",
+	} {
+		if !strings.Contains(human.String(), want) {
+			t.Fatalf("rollback status output %q does not contain %q", human.String(), want)
+		}
 	}
 }
 
@@ -176,6 +211,8 @@ func TestStatusCommandRendersStablePeerOutput(t *testing.T) {
 			want: `delegation peer status
 version: 0.2.0-test
 device: status-peer
+service running: true
+broker connection: ready
 connected: true
 worker sync ready: true
 registry revision: 42
@@ -218,7 +255,7 @@ results:
 		{
 			name: "JSON",
 			args: []string{"status", "--config", configPath, "--json"},
-			want: `{"version":"0.2.0-test","controllerId":"123e4567-e89b-42d3-a456-426614174800","deviceId":"123e4567-e89b-42d3-a456-426614174801","deviceName":"status-peer","connected":true,"registryRevision":42,"workerRevision":77,"brokerWorkerRevision":77,"workerSyncReady":true,"maxWorkerSlots":8,"workers":{"total":10,"reserved":1,"pending":1,"starting":1,"preflight":1,"ready":1,"running":1,"finalizing":1,"idle":1,"interrupted":1,"failed":1,"occupied":6},"artifacts":{"capturePending":2,"publishPending":3,"retained":4,"retainedBytes":8192},"results":{"outboxCapturePending":1,"outboxPublishPending":2,"outboxDeliveryPending":3,"outboxDelivered":4,"outboxReleasePending":5,"outboxRetainedBytes":16384,"inboxReceiving":5,"inboxAvailable":6,"inboxEvictionPending":7,"inboxEvicted":8,"inboxRetainedBytes":32768,"rolloutCaptureFailed":2,"workspaceCaptureFailed":1}}` + "\n",
+			want: `{"version":"0.2.0-test","controllerId":"123e4567-e89b-42d3-a456-426614174800","deviceId":"123e4567-e89b-42d3-a456-426614174801","deviceName":"status-peer","serviceRunning":true,"connectionState":"ready","connectionErrorCode":"","connected":true,"registryRevision":42,"workerRevision":77,"brokerWorkerRevision":77,"recoveryPeerWorkerRevision":0,"workerSyncReady":true,"maxWorkerSlots":8,"workers":{"total":10,"reserved":1,"pending":1,"starting":1,"preflight":1,"ready":1,"running":1,"finalizing":1,"idle":1,"interrupted":1,"failed":1,"occupied":6},"artifacts":{"capturePending":2,"publishPending":3,"retained":4,"retainedBytes":8192},"results":{"outboxCapturePending":1,"outboxPublishPending":2,"outboxDeliveryPending":3,"outboxDelivered":4,"outboxReleasePending":5,"outboxRetainedBytes":16384,"inboxReceiving":5,"inboxAvailable":6,"inboxEvictionPending":7,"inboxEvicted":8,"inboxRetainedBytes":32768,"rolloutCaptureFailed":2,"workspaceCaptureFailed":1}}` + "\n",
 		},
 	}
 	for _, test := range tests {
@@ -372,6 +409,8 @@ func statusTestSnapshot(cfg delegationconfig.Config) localbridge.StatusSnapshot 
 		ControllerID:         cfg.ControllerID,
 		DeviceID:             cfg.DeviceID,
 		DeviceName:           cfg.DeviceName,
+		ServiceRunning:       true,
+		ConnectionState:      localbridge.ConnectionReady,
 		Connected:            true,
 		RegistryRevision:     42,
 		WorkerRevision:       77,

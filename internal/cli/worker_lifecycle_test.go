@@ -23,6 +23,8 @@ func (h lifecycleHostStub) ListWorkers(context.Context) ([]store.WorkerReservati
 
 func (h lifecycleHostStub) WorkerRevision() uint64 { return h.revision }
 
+func (h lifecycleHostStub) StartupWorkerRevision() uint64 { return h.revision }
+
 func TestManagedWorkerLifecycleSourceMapsPersistedState(t *testing.T) {
 	statuses := []store.WorkerStatus{
 		store.WorkerReserved,
