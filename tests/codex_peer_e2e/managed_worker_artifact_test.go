@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,9 +31,12 @@ import (
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/rolloutcapture"
+	"github.com/GhostFlying/delegation/internal/rootapply"
+	"github.com/GhostFlying/delegation/internal/rootmcp"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/workerhost"
 	"github.com/klauspost/compress/zstd"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const (
@@ -43,6 +48,7 @@ const (
 	artifactE2EAgentID        = "123e4567-e89b-42d3-a456-426614174965"
 	artifactE2EFollowupID     = "123e4567-e89b-42d3-a456-426614174966"
 	artifactE2EWorkerDeviceID = "123e4567-e89b-42d3-a456-426614174967"
+	artifactE2EApplyID        = "123e4567-e89b-42d3-a456-426614174968"
 	artifactEEDirtyCase       = "artifact-dirty-commit"
 	artifactEECleanCase       = "artifact-clean-commit"
 	artifactEESuccessMarker   = "CROSS_PLATFORM_ARTIFACT_OK"
@@ -311,7 +317,7 @@ func testManagedWorkerPublishesResultPackage(t *testing.T, scenario artifactE2ES
 	if err != nil {
 		t.Fatal(err)
 	}
-	sourcePathHash := sha256.Sum256([]byte(sourceRoot))
+	sourcePathHash := sha256.Sum256([]byte(sourceCWD))
 	syncReceipt, err := brokerState.BeginWorkspaceSync(
 		context.Background(),
 		store.WorkspaceSyncIntent{
@@ -415,7 +421,7 @@ func testManagedWorkerPublishesResultPackage(t *testing.T, scenario artifactE2ES
 		t, rootConnector, rootPeer.host, rootPrincipal.Identity(), initialTurnID, scenario,
 	)
 	assertArtifactE2EResultPackage(
-		t, runner, sourceRoot, worker.WorkspacePath, rootPeer.host.workspaceRoot,
+		t, workerPeer.host, runner, sourceRoot, worker.WorkspacePath, rootPeer.host.workspaceRoot,
 		repository.Manifest, initialResultHandle, rootPrincipal.TreeID,
 		worker.CodexThreadID, initialTurnID, scenario,
 	)
@@ -441,7 +447,7 @@ func testManagedWorkerPublishesResultPackage(t *testing.T, scenario artifactE2ES
 		t, rootConnector, rootPeer.host, rootPrincipal.Identity(), resultTurnID, scenario,
 	)
 	assertArtifactE2EResultPackage(
-		t, runner, sourceRoot, worker.WorkspacePath, rootPeer.host.workspaceRoot,
+		t, workerPeer.host, runner, sourceRoot, worker.WorkspacePath, rootPeer.host.workspaceRoot,
 		repository.Manifest, resultHandle, rootPrincipal.TreeID,
 		worker.CodexThreadID, resultTurnID, scenario,
 	)
@@ -450,6 +456,12 @@ func testManagedWorkerPublishesResultPackage(t *testing.T, scenario artifactE2ES
 		repository.Manifest.HeadOID, resultHandle.Manifest.Workspace.ResultHeadOID,
 		scenario.leaveDirty,
 	)
+	if scenario.leaveDirty {
+		applyArtifactE2EResultThroughRootMCP(
+			t, rootConnector, rootPeer.host, runner, sourceRoot, sourceCWD,
+			repository.Manifest.HeadOID, resultTurnID, resultHandle.Manifest.PackageID,
+		)
+	}
 	mock.verify(t)
 	if reported := drainArtifactE2EErrors(rootConnectorErrors); len(reported) != 0 {
 		t.Fatalf("root connector errors: %v", reported)
@@ -457,6 +469,238 @@ func testManagedWorkerPublishesResultPackage(t *testing.T, scenario artifactE2ES
 	if reported := drainArtifactE2EErrors(workerConnectorErrors); len(reported) != 0 {
 		t.Fatalf("worker connector errors: %v", reported)
 	}
+}
+
+func applyArtifactE2EResultThroughRootMCP(
+	t *testing.T,
+	rootConnector *connector.Client,
+	rootHost *managedTestHost,
+	runner gitworkspace.Runner,
+	sourceRoot, sourceCWD, baseHead, turnID, packageID string,
+) {
+	t.Helper()
+	resultApplies, err := rootapply.New(rootapply.Options{
+		WorkspaceRoot: rootHost.workspaceRoot,
+		Runner:        runner,
+		Packages:      rootHost.resultPackages,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := resultApplies.Close(); err != nil {
+			t.Errorf("close root apply manager: %v", err)
+		}
+	}()
+
+	endpoint, err := localbridge.Endpoint(artifactE2EControllerID, artifactE2ERootDeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge, err := localbridge.ListenWithResultApply(
+		endpoint,
+		localbridge.ServiceIdentity{
+			ControllerID: artifactE2EControllerID,
+			DeviceID:     artifactE2ERootDeviceID,
+		},
+		rootConnector,
+		rootHost,
+		nil,
+		rootHost,
+		resultApplies,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridgeContext, cancelBridge := context.WithCancel(context.Background())
+	bridgeDone := make(chan error, 1)
+	go func() { bridgeDone <- bridge.Serve(bridgeContext) }()
+	defer func() {
+		cancelBridge()
+		if err := bridge.Close(); err != nil {
+			t.Errorf("close result-apply local bridge: %v", err)
+		}
+		if err := <-bridgeDone; err != nil {
+			t.Errorf("serve result-apply local bridge: %v", err)
+		}
+	}()
+
+	backend, err := localbridge.NewClient(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := rootmcp.NewServer(backend, artifactE2EControllerID, artifactE2ERootDeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	mcpContext, cancelMCP := context.WithCancel(context.Background())
+	serverSession, err := server.Connect(mcpContext, serverTransport, nil)
+	if err != nil {
+		cancelMCP()
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "artifact-e2e", Version: "1"}, nil)
+	clientSession, err := client.Connect(mcpContext, clientTransport, nil)
+	if err != nil {
+		_ = serverSession.Close()
+		cancelMCP()
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := clientSession.Close(); err != nil {
+			t.Errorf("close root MCP client: %v", err)
+		}
+		if err := serverSession.Close(); err != nil {
+			t.Errorf("close root MCP server: %v", err)
+		}
+		cancelMCP()
+	}()
+
+	waitContext, cancelWait := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelWait()
+	for {
+		result, err := clientSession.CallTool(waitContext, &mcp.CallToolParams{
+			Meta: mcp.Meta{"threadId": artifactE2EThreadID},
+			Name: rootmcp.ToolWaitAgent,
+			Arguments: map[string]any{
+				"timeout_seconds": 2,
+			},
+		})
+		if err != nil {
+			t.Fatalf("root MCP wait_agent: %v", err)
+		}
+		if result.IsError {
+			t.Fatalf("root MCP wait_agent: %s", artifactE2EToolText(result))
+		}
+		var output rootmcp.WaitAgentOutput
+		decodeArtifactE2EStructured(t, result.StructuredContent, &output)
+		found := false
+		for _, delivered := range output.Results {
+			if delivered.SourceAgentID != artifactE2EAgentID || delivered.TurnID != turnID {
+				continue
+			}
+			if delivered.PackageID != packageID ||
+				delivered.Availability != protocol.ResultPackageAvailable ||
+				delivered.Workspace.Status != protocol.ResultWorkspaceChanged {
+				t.Fatalf("root MCP wait_agent result = %#v", delivered)
+			}
+			found = true
+			break
+		}
+		if found {
+			break
+		}
+		if err := waitContext.Err(); err != nil {
+			t.Fatalf("root MCP wait_agent did not replay result package: %v", err)
+		}
+	}
+
+	applyContext, cancelApply := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancelApply()
+	result, err := clientSession.CallTool(applyContext, &mcp.CallToolParams{
+		Meta: mcp.Meta{
+			"threadId": artifactE2EThreadID,
+			"codex/sandbox-state-meta": map[string]any{
+				"sandboxCwd": artifactE2ELocalFileURI(sourceCWD),
+			},
+		},
+		Name: rootmcp.ToolApplyAgentChanges,
+		Arguments: map[string]any{
+			"apply_id": artifactE2EApplyID, "package_id": packageID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("root MCP apply_agent_changes: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("root MCP apply_agent_changes: %s", artifactE2EToolText(result))
+	}
+	var output rootmcp.ApplyAgentChangesOutput
+	decodeArtifactE2EStructured(t, result.StructuredContent, &output)
+	if output.ApplyID != artifactE2EApplyID || output.PackageID != packageID ||
+		output.Outcome != "applied" || output.FailureCode != "" {
+		t.Fatalf("root MCP apply_agent_changes result = %#v", output)
+	}
+	assertArtifactE2ERootApply(t, runner.Binary, sourceRoot, baseHead)
+}
+
+func assertArtifactE2ERootApply(t *testing.T, gitBinary, sourceRoot, baseHead string) {
+	t.Helper()
+	head, _ := runManagedCommand(
+		t, os.Environ(), gitBinary, "-C", sourceRoot, "rev-parse", "HEAD^{commit}",
+	)
+	if strings.TrimSpace(head) != baseHead {
+		t.Fatalf("root apply moved HEAD to %q, want %q", strings.TrimSpace(head), baseHead)
+	}
+	tracked, err := os.ReadFile(filepath.Join(sourceRoot, "nested", "tracked.txt"))
+	if err != nil || strings.TrimSpace(string(tracked)) != "tracked-worker" {
+		t.Fatalf("root applied tracked file = %q, %v", tracked, err)
+	}
+	renamed, err := os.ReadFile(filepath.Join(sourceRoot, "nested", "renamed-worker.txt"))
+	if err != nil || strings.TrimSpace(string(renamed)) != "rename-base" {
+		t.Fatalf("root applied renamed file = %q, %v", renamed, err)
+	}
+	if _, err := os.Stat(filepath.Join(sourceRoot, "nested", "rename-source.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("root apply retained pre-rename path: %v", err)
+	}
+	dirty, err := os.ReadFile(filepath.Join(sourceRoot, "nested", "dirty-worker.txt"))
+	if err != nil || strings.TrimSpace(string(dirty)) != "dirty-worker" {
+		t.Fatalf("root applied dirty file = %q, %v", dirty, err)
+	}
+	staged, _ := runManagedCommand(
+		t, os.Environ(), gitBinary, "-C", sourceRoot, "diff", "--cached", "--name-status", "-M",
+	)
+	for _, expected := range []string{
+		"M\tnested/tracked.txt",
+		"R100\tnested/rename-source.txt\tnested/renamed-worker.txt",
+	} {
+		if !strings.Contains(strings.ReplaceAll(staged, "\r\n", "\n"), expected) {
+			t.Fatalf("root staged diff = %q, missing %q", staged, expected)
+		}
+	}
+	unstaged, _ := runManagedCommand(
+		t, os.Environ(), gitBinary, "-C", sourceRoot, "diff", "--name-status",
+	)
+	if strings.TrimSpace(unstaged) != "" {
+		t.Fatalf("root apply left tracked unstaged changes: %q", unstaged)
+	}
+	untracked, _ := runManagedCommand(
+		t, os.Environ(), gitBinary, "-C", sourceRoot,
+		"ls-files", "--others", "--exclude-standard", "--", "nested/dirty-worker.txt",
+	)
+	if strings.TrimSpace(strings.ReplaceAll(untracked, "\r\n", "\n")) != "nested/dirty-worker.txt" {
+		t.Fatalf("root apply untracked result = %q", untracked)
+	}
+}
+
+func decodeArtifactE2EStructured(t *testing.T, value, target any) {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func artifactE2EToolText(result *mcp.CallToolResult) string {
+	var parts []string
+	for _, content := range result.Content {
+		if text, ok := content.(*mcp.TextContent); ok {
+			parts = append(parts, text.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func artifactE2ELocalFileURI(path string) string {
+	slashPath := filepath.ToSlash(path)
+	if runtime.GOOS == "windows" && !strings.HasPrefix(slashPath, "/") {
+		slashPath = "/" + slashPath
+	}
+	return (&url.URL{Scheme: "file", Path: slashPath}).String()
 }
 
 func waitForArtifactE2EResult(
@@ -548,6 +792,7 @@ func waitForArtifactE2EResult(
 
 func assertArtifactE2EResultPackage(
 	t *testing.T,
+	workerHost *managedTestHost,
 	runner gitworkspace.Runner,
 	sourceRoot, workerRoot, workspaceRoot string,
 	base protocol.WorkspaceManifest,
@@ -579,7 +824,11 @@ func assertArtifactE2EResultPackage(
 		manifest.Workspace.BaseClean != base.Clean ||
 		manifest.Workspace.ResultHeadOID == base.HeadOID ||
 		manifest.Workspace.ResultClean != !scenario.leaveDirty {
-		t.Fatalf("root result package manifest = %#v", manifest)
+		t.Fatalf(
+			"root result package manifest = %#v; worker errors: %v",
+			manifest,
+			workerHost.drainReportedErrors(),
+		)
 	}
 	wantKinds := []protocol.ResultPackagePartKind{protocol.ResultPackagePartChangesBundle}
 	if scenario.leaveDirty {
@@ -738,7 +987,9 @@ func createArtifactE2EGitRepository(
 	runManagedCommand(t, os.Environ(), gitBinary, "--git-dir="+remoteRoot, "symbolic-ref", "HEAD", "refs/heads/main")
 	runManagedCommand(t, os.Environ(), gitBinary, "--git-dir="+remoteRoot, "update-server-info")
 	server := httptest.NewTLSServer(http.FileServer(http.Dir(gitRoot)))
-	return sourceRoot, sourceCWD, server.URL + "/remote.git", server
+	gitURL := server.URL + "/remote.git"
+	runManagedCommand(t, os.Environ(), gitBinary, "-C", sourceRoot, "remote", "add", "origin", gitURL)
+	return sourceRoot, sourceCWD, gitURL, server
 }
 
 func assertArtifactE2EGitResult(
