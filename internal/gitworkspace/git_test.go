@@ -481,12 +481,13 @@ func TestIsolatedTargetEnvironmentDisablesAmbientGitConfiguration(t *testing.T) 
 		t.Setenv(name, value)
 	}
 	want := map[string]string{
-		"GIT_TERMINAL_PROMPT": "0",
-		"GIT_LFS_SKIP_SMUDGE": "1",
-		"GIT_SSH_COMMAND":     "ssh -o BatchMode=yes",
-		"GIT_CONFIG_NOSYSTEM": "1",
-		"GIT_CONFIG_GLOBAL":   os.DevNull,
-		"GIT_ATTR_NOSYSTEM":   "1",
+		"GIT_TERMINAL_PROMPT":    "0",
+		"GIT_LFS_SKIP_SMUDGE":    "1",
+		"GIT_SSH_COMMAND":        "ssh -o BatchMode=yes",
+		"GIT_CONFIG_NOSYSTEM":    "1",
+		"GIT_CONFIG_GLOBAL":      os.DevNull,
+		"GIT_ATTR_NOSYSTEM":      "1",
+		"GIT_NO_REPLACE_OBJECTS": "1",
 	}
 	got := make(map[string]string)
 	for _, variable := range runner.forIsolatedTarget().commandEnvironment() {
@@ -497,6 +498,35 @@ func TestIsolatedTargetEnvironmentDisablesAmbientGitConfiguration(t *testing.T) 
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("isolated target Git environment = %#v, want %#v", got, want)
+	}
+}
+
+func TestInspectApplySourceRejectsPackedReplacementRef(t *testing.T) {
+	runner := testRunner(t)
+	_, root, oldOID := createRemoteRepository(t, runner.Binary)
+	if err := os.WriteFile(filepath.Join(root, "second.txt"), []byte("second\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, runner.Binary, root, "add", "second.txt")
+	gitRun(
+		t, runner.Binary, root,
+		"-c", "user.name=Delegation Test", "-c", "user.email=test@example.invalid",
+		"commit", "-m", "second",
+	)
+	newOID := gitOutput(t, runner.Binary, root, "rev-parse", "HEAD^{commit}")
+	gitRun(t, runner.Binary, root, "replace", oldOID, newOID)
+	gitRun(t, runner.Binary, root, "pack-refs", "--all", "--prune")
+	looseRef := filepath.Join(root, ".git", "refs", "replace", oldOID)
+	if _, err := os.Lstat(looseRef); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement ref was not packed: %v", err)
+	}
+	packedRefs, err := os.ReadFile(filepath.Join(root, ".git", "packed-refs"))
+	if err != nil || !strings.Contains(string(packedRefs), "refs/replace/"+oldOID) {
+		t.Fatalf("packed replacement ref missing: %v\n%s", err, packedRefs)
+	}
+	if _, err := runner.InspectApplySource(context.Background(), root); err == nil ||
+		!strings.Contains(err.Error(), "refs/replace") {
+		t.Fatalf("InspectApplySource() error = %v", err)
 	}
 }
 

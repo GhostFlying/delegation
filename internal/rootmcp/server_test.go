@@ -53,6 +53,7 @@ type fakeRootBackend struct {
 	waitResults     []protocol.WaitAgentResult
 	workspaceResult *protocol.SyncWorkspaceResult
 	workspaceErr    error
+	applyResult     *localbridge.ApplyAgentChangesResult
 }
 
 type cancelRootBackend struct {
@@ -96,6 +97,7 @@ func (b *fakeRootBackend) Call(
 	operationResult := b.operationResult
 	workspaceResult := b.workspaceResult
 	workspaceErr := b.workspaceErr
+	applyResult := b.applyResult
 	var waitResult *protocol.WaitAgentResult
 	if method == protocol.MethodWaitAgent && len(b.waitResults) != 0 {
 		copy := b.waitResults[0]
@@ -150,6 +152,11 @@ func (b *fakeRootBackend) Call(
 			return errors.New("unexpected workspace sync")
 		}
 		*result.(*protocol.SyncWorkspaceResult) = *workspaceResult
+	case localbridge.MethodApplyAgentChanges:
+		if applyResult == nil {
+			return errors.New("unexpected result apply")
+		}
+		*result.(*localbridge.ApplyAgentChangesResult) = *applyResult
 	case protocol.MethodSpawnAgent:
 		if spawnResult != nil {
 			*result.(*protocol.SpawnAgentResult) = *spawnResult
@@ -233,26 +240,28 @@ func TestRootMCPListsStaticToolsAndBindsThread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 9 ||
-		tools.Tools[0].Name != ToolDescribeDevice || tools.Tools[1].Name != ToolFollowupTask ||
-		tools.Tools[2].Name != ToolInterruptAgent || tools.Tools[3].Name != ToolListAgents ||
-		tools.Tools[4].Name != ToolListDevices || tools.Tools[5].Name != ToolSendMessage ||
-		tools.Tools[6].Name != ToolSpawnAgent || tools.Tools[7].Name != ToolSyncWorkspace ||
-		tools.Tools[8].Name != ToolWaitAgent {
+	if len(tools.Tools) != 10 ||
+		tools.Tools[0].Name != ToolApplyAgentChanges || tools.Tools[1].Name != ToolDescribeDevice ||
+		tools.Tools[2].Name != ToolFollowupTask || tools.Tools[3].Name != ToolInterruptAgent ||
+		tools.Tools[4].Name != ToolListAgents || tools.Tools[5].Name != ToolListDevices ||
+		tools.Tools[6].Name != ToolSendMessage || tools.Tools[7].Name != ToolSpawnAgent ||
+		tools.Tools[8].Name != ToolSyncWorkspace || tools.Tools[9].Name != ToolWaitAgent {
 		t.Fatalf("root tools = %#v", tools.Tools)
 	}
 	for _, tool := range tools.Tools {
+		destructive := tool.Name == ToolApplyAgentChanges
 		mutating := tool.Name == ToolSpawnAgent || tool.Name == ToolSendMessage ||
 			tool.Name == ToolFollowupTask || tool.Name == ToolInterruptAgent ||
 			tool.Name == ToolSyncWorkspace
 		consuming := tool.Name == ToolWaitAgent
 		if tool.Annotations == nil ||
 			tool.Annotations.IdempotentHint != !consuming ||
-			tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint ||
+			tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint != destructive ||
 			tool.Annotations.OpenWorldHint == nil ||
+			(destructive && (tool.Annotations.ReadOnlyHint || *tool.Annotations.OpenWorldHint)) ||
 			(mutating && (tool.Annotations.ReadOnlyHint || !*tool.Annotations.OpenWorldHint)) ||
 			(consuming && (tool.Annotations.ReadOnlyHint || *tool.Annotations.OpenWorldHint)) ||
-			(!mutating && !consuming &&
+			(!destructive && !mutating && !consuming &&
 				(!tool.Annotations.ReadOnlyHint || *tool.Annotations.OpenWorldHint)) {
 			t.Fatalf("tool annotations for %s = %#v", tool.Name, tool.Annotations)
 		}
@@ -762,6 +771,17 @@ func assertToolSchema(t *testing.T, tool *mcp.Tool) {
 		t.Fatal(err)
 	}
 	switch tool.Name {
+	case ToolApplyAgentChanges:
+		for _, name := range []string{"apply_id", "package_id"} {
+			property := schema.Properties[name]
+			if property.MinLength == nil || *property.MinLength != 36 ||
+				property.MaxLength == nil || *property.MaxLength != 36 || property.Pattern != uuidPattern {
+				t.Fatalf("apply_agent_changes input schema = %s", data)
+			}
+		}
+		if len(schema.Properties) != 2 {
+			t.Fatalf("apply_agent_changes exposed unexpected input: %s", data)
+		}
 	case ToolListDevices:
 		limit := schema.Properties["limit"]
 		cursor := schema.Properties["cursor"]

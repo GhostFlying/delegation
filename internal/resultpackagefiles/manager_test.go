@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -511,6 +512,157 @@ func TestInboxAdmissionRetriesLockedTombstoneBeforeChoosingAnotherVictim(t *test
 	if err != nil || status.Results.InboxEvicted != 1 || status.Results.InboxReceiving != 1 ||
 		status.Results.InboxAvailable != store.MaximumPeerResultPackages-1 {
 		t.Fatalf("post-retry inbox status = %#v, %v", status.Results, err)
+	}
+}
+
+func TestApplyMaterializationExcludesRolloutAndRejectsTamperedPart(t *testing.T) {
+	fixture := newManagerFixture(t)
+	defer fixture.close()
+	start := time.Unix(1_700_000_500, 0)
+	fixture.manager.now = func() time.Time { return start }
+	packageID := testID(120)
+	attemptID := testID(121)
+	bundle := []byte("verified changes bundle")
+	rolloutRaw := fmt.Sprintf(
+		"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":%q}}\n"+
+			"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":%q}}\n",
+		testTurnID, testTurnID,
+	)
+	var rollout bytes.Buffer
+	rolloutDescriptor, err := rolloutcapture.CaptureCompressedSegment(
+		context.Background(), strings.NewReader(rolloutRaw), 0, testTurnID, &rollout,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := protocol.ResultManifest{
+		Version: protocol.ResultManifestVersion, PackageID: packageID,
+		ControllerID: testControllerID, TreeID: testTreeID,
+		SourceAgentID: testWorkerID, SourceDeviceID: testDeviceID,
+		ManagedThreadID: testThreadID, TurnID: testTurnID, LifecycleRevision: 1,
+		Terminal:   protocol.ResultTerminal{Outcome: protocol.ResultTerminalCompleted},
+		CapturedAt: start.Unix(),
+		Rollout: protocol.ResultRolloutComponent{
+			Status: protocol.ResultRolloutAvailable, RawSize: rolloutDescriptor.RawBytes,
+			RawSHA256: rolloutDescriptor.RawSHA256,
+		},
+		Workspace: protocol.ResultWorkspaceComponent{
+			Status: protocol.ResultWorkspaceChanged, WorkspaceID: testWorkspaceID,
+			SourceDeviceID: testDeviceID, TargetDeviceID: testDeviceID,
+			ObjectFormat: "sha1", BaseHeadOID: strings.Repeat("a", 40),
+			BaseManifestHash: strings.Repeat("b", 64), BaseSnapshotHash: strings.Repeat("c", 64),
+			BaseClean: true, ResultHeadOID: strings.Repeat("d", 40),
+			ResultSnapshotHash: strings.Repeat("e", 64), ResultClean: true,
+			BaseWarnings: []string{}, ResultWarnings: []string{},
+		},
+		Parts: []protocol.ResultPackagePartDescriptor{
+			{Kind: protocol.ResultPackagePartChangesBundle, Size: int64(len(bundle)), SHA256: sha256Hex(bundle)},
+			{
+				Kind: protocol.ResultPackagePartRollout, Size: rolloutDescriptor.CompressedBytes,
+				SHA256: rolloutDescriptor.CompressedSHA256,
+			},
+		},
+	}
+	metadata := encodeMetadata(t, manifest)
+	root := control.NewRootPrincipal(testControllerID, testTreeID, testRootAgentID, testDeviceID).Identity()
+	begin := protocol.BeginResultPackageParams{
+		AttemptID: attemptID, PackageID: packageID,
+		LeaseExpiresAt: start.Add(5 * time.Minute).Unix(), Metadata: metadata,
+	}
+	if _, err := fixture.manager.BeginResultPackage(context.Background(), BeginRequest{
+		TreeID: testTreeID, Source: root, Params: begin,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, part := range []struct {
+		kind protocol.ResultPackagePartKind
+		data []byte
+	}{
+		{kind: protocol.ResultPackagePartChangesBundle, data: bundle},
+		{kind: protocol.ResultPackagePartRollout, data: rollout.Bytes()},
+	} {
+		if _, err := fixture.manager.WriteResultPackagePart(context.Background(), WriteRequest{
+			TreeID: testTreeID, Source: root,
+			Params: protocol.WriteResultPackagePartParams{
+				AttemptID: attemptID, PackageID: packageID, Kind: part.kind, Data: part.data,
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := fixture.manager.FinishResultPackage(context.Background(), FinishRequest{
+		TreeID: testTreeID, Source: root,
+		Params: protocol.FinishResultPackageParams{AttemptID: attemptID, PackageID: packageID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := fixture.manager.LookupApplyManifest(context.Background(), ApplyPackageRequest{
+		Root: root, PackageID: packageID,
+	})
+	if err != nil || !reflect.DeepEqual(got, manifest) {
+		t.Fatalf("apply manifest = %#v, %v", got, err)
+	}
+	destinationPath := t.TempDir()
+	destination, err := os.OpenRoot(destinationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization := protocol.AuthorizeResultApplyResult{
+		ApplyID: testID(122), PackageID: packageID,
+		ManifestSHA256: metadata.ManifestDescriptor.SHA256, WorkspaceID: testWorkspaceID,
+		BaseManifestHash: manifest.Workspace.BaseManifestHash,
+	}
+	materialized, materializeErr := fixture.manager.MaterializeApplyWorkspace(
+		context.Background(),
+		MaterializeApplyPackageRequest{
+			ApplyPackageRequest: ApplyPackageRequest{Root: root, PackageID: packageID},
+			Authorization:       authorization,
+		},
+		destination,
+	)
+	closeErr := destination.Close()
+	if materializeErr != nil || closeErr != nil || !reflect.DeepEqual(materialized, manifest) {
+		t.Fatalf("materialized apply package = %#v, %v", materialized, errors.Join(materializeErr, closeErr))
+	}
+	entries, err := os.ReadDir(destinationPath)
+	if err != nil || len(entries) != 1 || entries[0].Name() != protocol.ResultChangesBundleFileName {
+		t.Fatalf("materialized apply entries = %#v, %v", entries, err)
+	}
+	gotBundle, err := os.ReadFile(filepath.Join(destinationPath, protocol.ResultChangesBundleFileName))
+	if err != nil || !bytes.Equal(gotBundle, bundle) {
+		t.Fatalf("materialized bundle = %q, %v", gotBundle, err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	bundlePath := filepath.Join(
+		fixture.workspace, inboxDirectoryName, packageID, protocol.ResultChangesBundleFileName,
+	)
+	if err := os.Remove(bundlePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "outside"), bundlePath); err != nil {
+		t.Fatal(err)
+	}
+	tamperedPath := t.TempDir()
+	tampered, err := os.OpenRoot(tamperedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, materializeErr = fixture.manager.MaterializeApplyWorkspace(
+		context.Background(),
+		MaterializeApplyPackageRequest{
+			ApplyPackageRequest: ApplyPackageRequest{Root: root, PackageID: packageID},
+			Authorization:       authorization,
+		},
+		tampered,
+	)
+	closeErr = tampered.Close()
+	if materializeErr == nil || closeErr != nil {
+		t.Fatalf("tampered materialization error = %v, close = %v", materializeErr, closeErr)
+	}
+	if entries, err := os.ReadDir(tamperedPath); err != nil || len(entries) != 0 {
+		t.Fatalf("tampered materialization wrote entries = %#v, %v", entries, err)
 	}
 }
 

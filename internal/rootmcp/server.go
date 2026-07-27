@@ -19,23 +19,24 @@ import (
 )
 
 const (
-	ToolListDevices    = "list_devices"
-	ToolDescribeDevice = "describe_device"
-	ToolSpawnAgent     = "spawn_agent"
-	ToolListAgents     = "list_agents"
-	ToolSendMessage    = "send_message"
-	ToolFollowupTask   = "followup_task"
-	ToolInterruptAgent = "interrupt_agent"
-	ToolWaitAgent      = "wait_agent"
-	ToolSyncWorkspace  = "sync_workspace"
-	maximumDevicePage  = 4
-	listFeatureLimit   = 0
-	maximumListBytes   = 4 * 1024
-	maximumDetailBytes = 8 * 1024
-	bridgeCallTimeout  = 15 * time.Second
-	agentCallTimeout   = 135 * time.Second
-	uuidPattern        = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
-	serverInstructions = "Before dispatch, use list_devices and describe_device; isCurrentDevice permits self-targeting. For repository work, call sync_workspace with a fresh sync_id, an explicit Git URL, and the target, then give its workspace_id to spawn_agent. remote_git_full_history_fallback means HEAD-reachable history may contain deleted content; disclose it. Spawn with a fresh spawn_id and a self-contained task. busy means no worker slot or result-store capacity; inspect peer status and retry with the same ID and arguments. indeterminate means the target outcome is unknown and the worker may have started; retry with the same ID and arguments. list_agents gives durable receipts. wait_agent gives lifecycle activity, worker messages, legacy changes artifacts, and verified result-package handles; repeat while has_more. available means bytes are durable in this root peer's inbox; evicted means only metadata remains after local GC. Raw rollout bytes stay local and are not model context. Artifact base_warnings and result_warnings are independent. Legacy payloads are best-effort, up to 64 within 2 GiB; broker metadata may outlive them and does not prove byte availability. This version cannot download or apply payloads. Targets accept an agent UUID, task_name, or /root/task_name. Use fresh message_id and operation_id values; retry uncertainty with the same ID and arguments. send_message queues delivery, followup_task starts an idle agent, and interrupt_agent stops an active turn."
+	ToolListDevices       = "list_devices"
+	ToolDescribeDevice    = "describe_device"
+	ToolSpawnAgent        = "spawn_agent"
+	ToolListAgents        = "list_agents"
+	ToolSendMessage       = "send_message"
+	ToolFollowupTask      = "followup_task"
+	ToolInterruptAgent    = "interrupt_agent"
+	ToolWaitAgent         = "wait_agent"
+	ToolSyncWorkspace     = "sync_workspace"
+	ToolApplyAgentChanges = "apply_agent_changes"
+	maximumDevicePage     = 4
+	listFeatureLimit      = 0
+	maximumListBytes      = 4 * 1024
+	maximumDetailBytes    = 8 * 1024
+	bridgeCallTimeout     = 15 * time.Second
+	agentCallTimeout      = 135 * time.Second
+	uuidPattern           = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`
+	serverInstructions    = "Use list_devices and describe_device before dispatch; isCurrentDevice allows self-target. For Git work, call sync_workspace with a fresh sync_id, explicit Git URL and target, then spawn_agent with its workspace_id, a fresh spawn_id and a self-contained task. remote_git_full_history_fallback means HEAD-reachable history may contain deleted content; disclose it. busy means no worker slot or result-store capacity; inspect peer status and retry identical ID/arguments. indeterminate means outcome unknown and the worker may have started; retry identically. list_agents returns durable receipts. wait_agent returns activity, messages, legacy artifacts and verified result-package handles; repeat while has_more. available means bytes are durable locally; evicted means metadata only after GC. Raw rollout bytes stay local and outside model context. base_warnings and result_warnings are independent. Legacy payloads are best-effort, up to 64 within 2 GiB; metadata may outlive them. apply_agent_changes takes a fresh apply_id and available package_id. It mutates the trusted root workspace only if its retained base matches; needs_resolution does not mutate. Root HEAD stays fixed; worker commits become staged changes. Targets accept an agent UUID, task_name or /root/task_name. Use fresh message_id/operation_id; retry uncertainty identically. send_message queues; followup_task starts idle agents; interrupt_agent stops active turns."
 )
 
 type Backend interface {
@@ -115,6 +116,10 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 	if err != nil {
 		return nil, err
 	}
+	resultApplySchema, err := resultApplyInputSchema()
+	if err != nil {
+		return nil, err
+	}
 	root := &Root{
 		backend: backend, controllerID: controllerID, deviceID: deviceID,
 		waitStates: make(map[string]*agentWaitState),
@@ -130,6 +135,13 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 			}},
 		},
 	)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        ToolApplyAgentChanges,
+		Title:       "Apply delegation agent changes",
+		Description: "Safely apply one delivered result package to the current trusted Git workspace without moving root HEAD.",
+		Annotations: destructiveAnnotations(),
+		InputSchema: resultApplySchema,
+	}, root.applyAgentChanges)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        ToolSyncWorkspace,
 		Title:       "Synchronize Git workspace",
@@ -493,6 +505,17 @@ func consumingAnnotations() *mcp.ToolAnnotations {
 		ReadOnlyHint:    false,
 		IdempotentHint:  false,
 		DestructiveHint: &no,
+		OpenWorldHint:   &no,
+	}
+}
+
+func destructiveAnnotations() *mcp.ToolAnnotations {
+	yes := true
+	no := false
+	return &mcp.ToolAnnotations{
+		ReadOnlyHint:    false,
+		IdempotentHint:  true,
+		DestructiveHint: &yes,
 		OpenWorldHint:   &no,
 	}
 }

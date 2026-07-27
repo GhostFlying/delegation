@@ -50,15 +50,14 @@ installed checkpoint boundary instead of pretending unavailable workspace tools 
 
 Use `send_message` to steer a running worker or queue a message for an idle worker. Use
 `followup_task` to start a new turn only when the worker is idle, and `interrupt_agent` to stop an
-active turn. `wait_agent` consumes bounded lifecycle and worker-message pages; call it again
-immediately while `has_more` is true before concluding that no unread result remains. For a
-workspace-backed turn it also reports bounded changes-artifact metadata after the target captures
-the descendant Git bundle and dirty overlay. Read `base_warnings` as conditions inherited from the
-prepared workspace and `result_warnings` as conditions observed while capturing the worker result;
-neither list supersedes the other. Target payload retention is best-effort: up to the latest 64
-published artifacts within a 2 GiB peer-wide payload budget, with oldest payloads removed first.
-Broker metadata can outlive a target payload and does not prove current payload availability. Reuse
-the same operation ID only when retrying the exact same logical action.
+active turn. `wait_agent` consumes bounded lifecycle, worker-message, and result-package pages; call
+it again immediately while `has_more` is true before concluding that no unread result remains. For
+a workspace-backed turn it reports verified Git metadata and a locally decorated availability.
+Read `base_warnings` as conditions inherited from the prepared workspace and `result_warnings` as
+conditions observed while capturing the worker result; neither list supersedes the other.
+`available` means the root peer still has the bytes; `evicted` cannot be applied. Raw rollout bytes
+remain local and never enter model context. Reuse the same operation ID only when retrying the exact
+same logical action.
 
 Remote workers do not receive the peer roster and cannot recursively delegate in v0. A managed
 worker thread permanently remains a worker; opening its history does not promote it to a root. Start
@@ -68,9 +67,16 @@ environment question from the root or change the target from the root tools.
 ## Review Results
 
 Treat worker output as evidence from a different environment, not as an automatically accepted
-change. Check the reported commands, platform, workspace revision, both warning lists, and artifact
-metadata. The v0 flow does not expose artifact payload download or apply and does not write worker
-changes back into the root workspace automatically.
+change. Check the reported commands, platform, workspace revision, both warning lists, and result
+package metadata. When the user wants the verified Git result, call `apply_agent_changes` with a
+fresh `apply_id` and an `available` `package_id`. Do not supply a path: the runtime derives the root
+task's trusted cwd. `applied` leaves root HEAD/ref unchanged and presents worker commits as staged
+changes while preserving final staged, unstaged, and untracked states. `unchanged` requires no
+workspace action. `needs_resolution` means the runtime deliberately did not apply a conflicting or
+unsafe result; inspect the reported failure code and let the root agent or user resolve it. For
+`root_workspace_recovery_required`, inspect the current Git state and restore the recorded base or
+finish the intended result before retrying. Retrying uncertainty or a resolved recovery must use the
+same `apply_id` and package ID.
 
 Summarize the delegated task, target peer, result, verification evidence, and any artifact that
 still requires an explicit root-side apply decision.

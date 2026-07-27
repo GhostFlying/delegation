@@ -1,8 +1,7 @@
 # M4 Result Package Return Contract
 
-This document fixes the behavior of the first M4 reverse-artifact checkpoint. It is an
-implementation contract for the pre-release protocol, not a compatibility promise. Applying a
-returned package to the root workspace is a later checkpoint.
+This document fixes the behavior of the M4 reverse-artifact and safe root-apply checkpoints. It is
+an implementation contract for the pre-release protocol, not a compatibility promise.
 
 ## Scope
 
@@ -11,9 +10,9 @@ workspace. The package always contains a canonical `result-manifest.json` and at
 the exact worker rollout segment for that turn. Git result payloads are optional and are present
 only when the managed workspace changed.
 
-The checkpoint ends when the package is durably available in the original root peer's local inbox.
-It does not mutate the root workspace, expose raw rollout contents to the model, or add an apply
-tool.
+Package return ends when the package is durably available in the original root peer's local inbox.
+It does not mutate the root workspace or expose raw rollout contents to the model. A separate,
+explicit `apply_agent_changes` call may consume the verified Git parts of an available package.
 
 `resultPackageV3` is a required hello feature and replaces the pre-release `changesArtifactV1`
 flow. A peer or broker missing the feature fails closed instead of silently publishing metadata
@@ -306,9 +305,53 @@ reuse the existing limits of 16 workspace warnings, 64 bytes per warning or fail
 IDs and digests, and at most four part descriptors. Manifest bytes and component payloads are never
 embedded in the response.
 
-No root MCP method can download or apply a package in this checkpoint. The following M4 apply
-checkpoint will consume the root-local handle, compare the current root workspace with the retained
-base, apply only when safe, and otherwise return `needs_resolution` without mutating the workspace.
+`apply_agent_changes` accepts only a fresh `apply_id` and an `available` `package_id`. The root MCP
+derives the source path from Codex's trusted sandbox metadata; a model cannot supply or redirect a
+filesystem path. The same-user local bridge keeps that path local. Broker authorization receives
+only its SHA-256 digest, the explicit Git URL, package identity, and retained workspace identity.
+
+Before authorization and again immediately before mutation, the root peer verifies the current Git
+HEAD, index, non-ignored worktree state, explicit origin, object format, working directory, and
+warnings against the package's retained base manifest. It rejects active Git operations, shallow
+repositories, replacement refs, includes, worktree redirection, fsmonitor, and executable clean,
+smudge, or process filters. Repository hooks and `core.hooksPath` are accepted because every Git
+command in the apply path overrides hooks to a private disabled path and none of the chosen plumbing
+commands requires hooks. System and global Git configuration are disabled for all apply inspection
+and mutation commands. Normal and linked worktrees are supported; a thread copied to a different
+peer remains outside this authority.
+
+The root peer materializes only `changes.bundle` and `changes-overlay.tar.zst` into a private,
+journaled staging directory. It never materializes `rollout.jsonl.zst` into the apply path. Worker
+commits are flattened against the retained root HEAD, so their content becomes staged changes while
+the worker's final staged, unstaged, deletion, rename, binary, intent-to-add, and non-ignored
+untracked states remain distinct. Root HEAD, its symbolic ref, and the branch OID never move.
+Repository-local configuration and ignored files are preserved.
+
+Ignored root paths are enumerated with the repository's own exclude rules under the same isolated
+Git profile. If an ignored file or directory has an exact, ancestor, descendant, or portable
+case-folded collision with any path changed by the result, apply returns
+`root_workspace_conflict` before the first destructive root write. Delegation never deletes an
+ignored cache or build output to make room for a worker path.
+
+Terminal apply state is first atomically reduced to a replay receipt and fsynced; only then are the
+materialized package, bundle, staging checkout, and desired overlay removed. A crash in between is
+completed by startup or exact replay. New apply admission is blocked when the peer already has 64
+active apply journals or 4 GiB of persisted active journal data. At most 1,024 terminal receipts or
+64 MiB are retained. Authorizing, building, or prepared journals that have not begun a root mutation
+expire after 24 hours into a compact `root_workspace_recovery_required` receipt. A journal that may
+have begun mutation instead retains its verified base, desired snapshot, and reconstruction payload
+as active recovery data; it counts against the active count and byte ceilings until resolved rather
+than being discarded by age. Terminal receipts expire after 30 days and are otherwise pruned
+oldest-first for count or bytes; a new apply is rejected with a bounded backlog error rather than
+deleting active recovery data. An exact completed replay returns the durable prior outcome while
+that terminal receipt remains retained. Reusing a retained `apply_id` with different arguments is a
+conflict. Base drift, unsafe repository state, or mutation-boundary drift returns
+`needs_resolution` with `root_workspace_conflict` before Delegation writes the workspace or its Git
+object database. An ambiguous crash or integrity failure returns `needs_resolution` with
+`root_workspace_recovery_required` and preserves recovery data. After the root agent or user restores
+the workspace to the recorded base or completes the desired snapshot, retrying the same `apply_id`
+either resumes the apply or verifies and records success; it never reports success based on an
+unverified partial state.
 
 ## Acceptance
 
@@ -327,4 +370,10 @@ The runnable checkpoint must cover:
 - digest, offset, traversal, symlink, size, count, and byte-budget rejection;
 - worker-slot release after metadata acknowledgement while payload delivery remains pending;
 - root cursor ordering based only on durable availability; and
+- safe local apply for normal and linked worktrees with exact staged, unstaged, untracked, binary,
+  rename, deletion, and commit-flattening fidelity;
+- root config and ignored-file preservation, no HEAD/ref movement, exact replay, and zero-write
+  conflicts for tracked, untracked, index, and ref drift at the mutation boundary;
+- isolated Git configuration with executable local/worktree filters rejected, global filters unable
+  to execute, and ordinary repository hooks accepted but disabled for apply commands; and
 - connector, broker, and app-server restart recovery with no partial package exposed.

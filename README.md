@@ -257,13 +257,20 @@ another spawn.
 
 Use `send_message` to steer a running worker or queue a message for an idle worker,
 `followup_task` to start a new turn for an idle worker, and `interrupt_agent` to stop an active turn.
-`wait_agent` returns bounded lifecycle, worker-message, and changes-artifact metadata pages; call it
-again immediately while `has_more` is true before concluding that the result is complete. Artifact
-bundle and overlay payloads remain on the target peer on a best-effort basis: up to the latest 64
-published artifacts within a 2 GiB peer-wide payload budget, with oldest payloads removed first.
-Broker metadata can outlive a target payload and does not prove that the payload is still available.
-M3 exposes neither payload download nor apply, and never writes worker changes back automatically;
-explicit root-side apply is deferred to M4.
+`wait_agent` returns bounded lifecycle, worker-message, legacy artifact metadata, and verified result
+package handles; call it again immediately while `has_more` is true before concluding that the
+result is complete. `available` means the package bytes are currently durable in the root peer;
+`evicted` means only broker metadata remains after local retention. Raw rollouts remain local and
+never enter model context. To accept a workspace-backed result, call `apply_agent_changes` with a
+fresh `apply_id` and the available `package_id`. The runtime derives the trusted root cwd locally,
+applies only after the retained base still matches, never moves root HEAD or its ref, and returns
+`needs_resolution` without Delegation writes when the workspace has drifted. Worker commits become
+staged changes for root review; the worker's staged, unstaged, and untracked distinctions remain
+visible. Ignored cache/build paths are never overwritten when they collide with result paths.
+After an ambiguous mid-apply interruption, recovery material remains local and the root agent can
+restore the recorded base or finish the desired state before retrying the same `apply_id`.
+Completed apply journals retain a bounded replay receipt, not the materialized result payload.
+Apply is explicit and is never performed merely because a worker completed.
 
 ## License
 

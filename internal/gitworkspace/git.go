@@ -623,6 +623,7 @@ func (r Runner) commandEnvironment() []string {
 	environment = setEnvironment(environment, "GIT_CONFIG_NOSYSTEM", "1")
 	environment = setEnvironment(environment, "GIT_CONFIG_GLOBAL", os.DevNull)
 	environment = setEnvironment(environment, "GIT_ATTR_NOSYSTEM", "1")
+	environment = setEnvironment(environment, "GIT_NO_REPLACE_OBJECTS", "1")
 	return environment
 }
 
@@ -758,6 +759,22 @@ func validateWorkingDirectory(repositoryPath, workingDirectory string) error {
 		}
 	}
 	return nil
+}
+
+func ensureWorkingDirectory(repositoryPath, workingDirectory string) error {
+	if workingDirectory == "" {
+		return nil
+	}
+	root, err := os.OpenRoot(repositoryPath)
+	if err != nil {
+		return fmt.Errorf("open target repository: %w", err)
+	}
+	mkdirErr := root.MkdirAll(filepath.FromSlash(workingDirectory), 0o700)
+	closeErr := root.Close()
+	if mkdirErr != nil || closeErr != nil {
+		return errors.Join(mkdirErr, closeErr)
+	}
+	return validateWorkingDirectory(repositoryPath, workingDirectory)
 }
 
 func isContextError(err error) bool {

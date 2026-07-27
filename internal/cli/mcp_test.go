@@ -48,15 +48,16 @@ func TestRootMCPInitializesOfflineWithoutReadingDeviceToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 9 || tools.Tools[0].Name != rootmcp.ToolDescribeDevice ||
-		tools.Tools[1].Name != rootmcp.ToolFollowupTask ||
-		tools.Tools[2].Name != rootmcp.ToolInterruptAgent ||
-		tools.Tools[3].Name != rootmcp.ToolListAgents ||
-		tools.Tools[4].Name != rootmcp.ToolListDevices ||
-		tools.Tools[5].Name != rootmcp.ToolSendMessage ||
-		tools.Tools[6].Name != rootmcp.ToolSpawnAgent ||
-		tools.Tools[7].Name != rootmcp.ToolSyncWorkspace ||
-		tools.Tools[8].Name != rootmcp.ToolWaitAgent {
+	if len(tools.Tools) != 10 || tools.Tools[0].Name != rootmcp.ToolApplyAgentChanges ||
+		tools.Tools[1].Name != rootmcp.ToolDescribeDevice ||
+		tools.Tools[2].Name != rootmcp.ToolFollowupTask ||
+		tools.Tools[3].Name != rootmcp.ToolInterruptAgent ||
+		tools.Tools[4].Name != rootmcp.ToolListAgents ||
+		tools.Tools[5].Name != rootmcp.ToolListDevices ||
+		tools.Tools[6].Name != rootmcp.ToolSendMessage ||
+		tools.Tools[7].Name != rootmcp.ToolSpawnAgent ||
+		tools.Tools[8].Name != rootmcp.ToolSyncWorkspace ||
+		tools.Tools[9].Name != rootmcp.ToolWaitAgent {
 		t.Fatalf("root MCP tools = %#v", tools.Tools)
 	}
 	if err := session.Close(); err != nil {
@@ -161,7 +162,7 @@ func TestRootMCPStdioProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list root MCP process tools: %v; stderr = %q", err, stderr.String())
 	}
-	if len(tools.Tools) != 9 {
+	if len(tools.Tools) != 10 {
 		t.Fatalf("root MCP process tools = %#v", tools.Tools)
 	}
 	if err := session.Close(); err != nil {
