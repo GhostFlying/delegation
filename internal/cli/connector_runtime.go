@@ -15,9 +15,11 @@ import (
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/gitworkspace"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
+	"github.com/GhostFlying/delegation/internal/rootapply"
 	"github.com/GhostFlying/delegation/internal/serviceenv"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
@@ -179,6 +181,26 @@ func runConnectorServiceWithProviderEnvironment(
 		host: workers, state: peerState,
 		controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 	}
+	excludedGitEnvironment := []string{"CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY"}
+	excludedGitEnvironment = append(
+		excludedGitEnvironment,
+		codexconfig.CredentialEnvironmentVariables(providerEnvironment.Config)...,
+	)
+	applyRunner, err := gitworkspace.NewRunner(cfg.Peer.GitBinary, excludedGitEnvironment...)
+	if err != nil {
+		return fmt.Errorf("create root apply Git runner: %w", err)
+	}
+	resultApplies, err := rootapply.New(rootapply.Options{
+		WorkspaceRoot: cfg.Peer.WorkspaceRoot,
+		Runner:        applyRunner,
+		Packages:      resultPackages,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, resultApplies.Close())
+	}()
 	workerManager.resultPackages = resultPackages
 	resultSource := managedResultPackageSource{
 		packages: resultPackages, state: peerState,
@@ -212,7 +234,7 @@ func runConnectorServiceWithProviderEnvironment(
 	if err != nil {
 		return err
 	}
-	bridge, err := localbridge.ListenWithResultPackages(
+	bridge, err := localbridge.ListenWithResultApply(
 		endpoint,
 		localbridge.ServiceIdentity{
 			ControllerID: cfg.ControllerID,
@@ -228,6 +250,7 @@ func runConnectorServiceWithProviderEnvironment(
 			deviceName: cfg.DeviceName, maxWorkerSlots: cfg.Peer.MaxWorkerSlots,
 		},
 		localResultPackageAvailabilityProvider{manager: resultPackages},
+		resultApplies,
 	)
 	if err != nil {
 		return err

@@ -18,6 +18,13 @@ const maximumBundleBasisCandidates = 32
 
 var errWorkspaceArtifactTooLarge = errors.New("source Git bundle exceeded its byte limit")
 
+type bundleWorkingDirectoryMode uint8
+
+const (
+	bundleRequireWorkingDirectory bundleWorkingDirectoryMode = iota
+	bundlePreserveWorkingDirectory
+)
+
 func (r Runner) bundleBasisOIDs(ctx context.Context, repositoryPath string) ([]string, error) {
 	output, err := r.output(
 		ctx,
@@ -262,6 +269,17 @@ func (r Runner) ApplyBundle(
 	repositoryPath, bundlePath string,
 	manifest protocol.WorkspaceManifest,
 ) error {
+	return r.applyBundle(
+		ctx, repositoryPath, bundlePath, manifest, bundleRequireWorkingDirectory,
+	)
+}
+
+func (r Runner) applyBundle(
+	ctx context.Context,
+	repositoryPath, bundlePath string,
+	manifest protocol.WorkspaceManifest,
+	workingDirectoryMode bundleWorkingDirectoryMode,
+) error {
 	r = r.forIsolatedTarget()
 	if err := manifest.Validate(); err != nil {
 		return err
@@ -330,7 +348,11 @@ func (r Runner) ApplyBundle(
 		return err
 	}
 	if err := validateWorkingDirectory(repositoryPath, manifest.WorkingDirectory); errors.Is(err, os.ErrNotExist) {
-		if manifest.Clean {
+		if workingDirectoryMode == bundlePreserveWorkingDirectory {
+			if err := ensureWorkingDirectory(repositoryPath, manifest.WorkingDirectory); err != nil {
+				return err
+			}
+		} else if manifest.Clean {
 			return errors.New("target working directory is absent from the exact source HEAD")
 		}
 	} else if err != nil {

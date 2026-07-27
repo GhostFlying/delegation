@@ -60,6 +60,7 @@ type Server struct {
 	authorizer    Authorizer
 	status        StatusProvider
 	results       ResultPackageAvailabilityProvider
+	apply         ResultApplyProvider
 	connectionSem chan struct{}
 	waitSem       chan struct{}
 	controlSem    chan struct{}
@@ -104,6 +105,18 @@ func ListenWithResultPackages(
 	status StatusProvider,
 	results ResultPackageAvailabilityProvider,
 ) (*Server, error) {
+	return ListenWithResultApply(endpoint, identity, backend, authorizer, status, results, nil)
+}
+
+func ListenWithResultApply(
+	endpoint string,
+	identity ServiceIdentity,
+	backend Backend,
+	authorizer Authorizer,
+	status StatusProvider,
+	results ResultPackageAvailabilityProvider,
+	apply ResultApplyProvider,
+) (*Server, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
@@ -117,6 +130,7 @@ func ListenWithResultPackages(
 	return &Server{
 		listener: listener, identity: identity, backend: backend, authorizer: authorizer, status: status,
 		results:       results,
+		apply:         apply,
 		connectionSem: make(chan struct{}, maximumConcurrentCalls),
 		waitSem:       make(chan struct{}, maximumConcurrentWaitCalls),
 		controlSem:    make(chan struct{}, maximumConcurrentControlCalls),
@@ -229,7 +243,7 @@ func (s *Server) handle(serverContext context.Context, connection net.Conn) {
 		return
 	}
 	callTimeout := localCallTimeout
-	if request.Method == protocol.MethodSyncWorkspace {
+	if request.Method == protocol.MethodSyncWorkspace || request.Method == MethodApplyAgentChanges {
 		callTimeout = localWorkspaceCallTimeout
 	}
 	ctx, cancel := context.WithTimeout(serverContext, callTimeout)
@@ -310,6 +324,9 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		}
 		return result, nil
 	}
+	if request.Method == MethodApplyAgentChanges {
+		return s.applyAgentChanges(ctx, request)
+	}
 	switch request.Method {
 	case protocol.MethodEnsureRootTree:
 		if request.TreeID != "" || request.Source != nil {
@@ -372,6 +389,97 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "delegation service unavailable"}
 	}
 	return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "delegation service failed"}
+}
+
+func (s *Server) applyAgentChanges(
+	ctx context.Context,
+	request request,
+) (json.RawMessage, *protocol.Error) {
+	if request.TreeID == "" || request.Source == nil || request.Source.ParentAgentID != "" ||
+		request.Source.ControllerID != s.identity.ControllerID ||
+		request.Source.DeviceID != s.identity.DeviceID || request.Source.TreeID != request.TreeID {
+		return nil, &protocol.Error{Code: protocol.ErrorForbidden, Message: "result apply requires a local root principal"}
+	}
+	params, err := protocol.DecodePayload[ApplyAgentChangesParams](request.Payload)
+	if err != nil || params.Validate() != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorInvalidParams, Message: "invalid result apply request"}
+	}
+	if s.apply == nil {
+		return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "root result apply unavailable"}
+	}
+	localRequest := ResultApplyRequest{Root: *request.Source, Params: params}
+	preparation, err := s.apply.PrepareResultApply(ctx, localRequest)
+	if err != nil {
+		return nil, mapLocalResultApplyError(err)
+	}
+	if err := preparation.Validate(localRequest); err != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "invalid root result apply preparation"}
+	}
+	if preparation.Completed != nil {
+		return encodeLocalResultApply(*preparation.Completed)
+	}
+	var authorization protocol.AuthorizeResultApplyResult
+	err = s.backend.Call(
+		ctx,
+		protocol.MethodAuthorizeResultApply,
+		request.TreeID,
+		request.Source,
+		*preparation.Authorization,
+		&authorization,
+	)
+	if err != nil {
+		var brokerError *connector.RPCError
+		switch {
+		case errors.As(err, &brokerError) && brokerError.Code == protocol.ErrorConflict:
+			return nil, &protocol.Error{Code: protocol.ErrorConflict, Message: "result apply authorization conflicts with broker state"}
+		case errors.As(err, &brokerError) && brokerError.Code == protocol.ErrorForbidden:
+			return nil, &protocol.Error{Code: protocol.ErrorForbidden, Message: "result apply authorization denied"}
+		case errors.Is(err, connector.ErrUnavailable), errors.Is(err, connector.ErrBusy), isContextError(err):
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "delegation service unavailable"}
+		default:
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "result apply authorization failed"}
+		}
+	}
+	if err := authorization.Validate(); err != nil ||
+		authorization.ApplyID != params.ApplyID || authorization.PackageID != params.PackageID {
+		return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "invalid result apply authorization"}
+	}
+	result, err := s.apply.ApplyAuthorizedResult(ctx, localRequest, authorization)
+	if err != nil {
+		return nil, mapLocalResultApplyError(err)
+	}
+	if err := result.Validate(); err != nil || result.ApplyID != params.ApplyID ||
+		result.PackageID != params.PackageID {
+		return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "invalid root result apply result"}
+	}
+	return encodeLocalResultApply(result)
+}
+
+func encodeLocalResultApply(result ApplyAgentChangesResult) (json.RawMessage, *protocol.Error) {
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode root result apply result"}
+	}
+	return payload, nil
+}
+
+func mapLocalResultApplyError(err error) *protocol.Error {
+	switch {
+	case errors.Is(err, ErrApplyPackageEvicted):
+		return &protocol.Error{Code: protocol.ErrorConflict, Message: "result package is no longer available"}
+	case errors.Is(err, ErrApplyPackageUnavailable):
+		return &protocol.Error{Code: protocol.ErrorUnavailable, Message: "result package is not locally available"}
+	case errors.Is(err, ErrApplyRequestConflict):
+		return &protocol.Error{Code: protocol.ErrorConflict, Message: "apply_id already identifies another local request"}
+	case errors.Is(err, ErrApplyRecoveryRequired):
+		return &protocol.Error{Code: protocol.ErrorConflict, Message: "root workspace requires apply recovery"}
+	case errors.Is(err, ErrApplyBacklog):
+		return &protocol.Error{Code: protocol.ErrorUnavailable, Message: "root result apply backlog is full"}
+	case isContextError(err):
+		return &protocol.Error{Code: protocol.ErrorUnavailable, Message: "root result apply interrupted"}
+	default:
+		return &protocol.Error{Code: protocol.ErrorInternal, Message: "root result apply failed"}
+	}
 }
 
 func (s *Server) decorateAgentWait(

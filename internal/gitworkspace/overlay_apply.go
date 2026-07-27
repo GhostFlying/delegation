@@ -28,6 +28,31 @@ func (r Runner) ApplyOverlay(
 	repositoryPath, archivePath string,
 	manifest protocol.WorkspaceManifest,
 ) error {
+	return r.applyOverlay(ctx, repositoryPath, archivePath, manifest, true, nil, nil)
+}
+
+// ApplyOverlayPreservingConfig applies a fully verified overlay without
+// rewriting repository-local configuration. It invokes beforeMutation after
+// all preparation and immediately before the first destructive worktree write.
+func (r Runner) ApplyOverlayPreservingConfig(
+	ctx context.Context,
+	repositoryPath, archivePath string,
+	base, desired protocol.WorkspaceManifest,
+	beforeMutation func() error,
+) error {
+	return r.applyOverlay(
+		ctx, repositoryPath, archivePath, desired, false, &base, beforeMutation,
+	)
+}
+
+func (r Runner) applyOverlay(
+	ctx context.Context,
+	repositoryPath, archivePath string,
+	manifest protocol.WorkspaceManifest,
+	configureTarget bool,
+	base *protocol.WorkspaceManifest,
+	beforeMutation func() error,
+) error {
 	r = r.forIsolatedTarget()
 	if err := manifest.Validate(); err != nil {
 		return err
@@ -78,10 +103,29 @@ func (r Runner) ApplyOverlay(
 	if err := r.preflightOverlay(ctx, repositoryPath, extractRoot, extracted); err != nil {
 		return err
 	}
-	if err := r.materializeOverlayIndexObjects(ctx, repositoryPath, extractRoot, extracted); err != nil {
+	var rootPlan *rootApplyPlan
+	mutationGuard := beforeMutation
+	if !configureTarget {
+		if base == nil || beforeMutation == nil {
+			return errors.New("root overlay apply requires a base snapshot and mutation guard")
+		}
+		plan, err := r.prepareRootApplyPlan(ctx, repositoryPath, *base, extracted.Manifest.Entries)
+		if err != nil {
+			return err
+		}
+		rootPlan = &plan
+		mutationGuard = func() error {
+			if err := beforeMutation(); err != nil {
+				return err
+			}
+			return r.materializeOverlayIndexObjects(ctx, repositoryPath, extractRoot, extracted)
+		}
+	} else if err := r.materializeOverlayIndexObjects(ctx, repositoryPath, extractRoot, extracted); err != nil {
 		return err
 	}
-	if err := r.resetOverlayBase(ctx, repositoryPath, manifest); err != nil {
+	if err := r.resetOverlayBase(
+		ctx, repositoryPath, manifest, configureTarget, rootPlan, mutationGuard,
+	); err != nil {
 		return err
 	}
 	if err := r.replaceOverlayIndex(ctx, repositoryPath, extracted.Manifest); err != nil {
@@ -99,16 +143,8 @@ func (r Runner) ApplyOverlay(
 	if err := applyOverlayWorktree(ctx, repositoryPath, extractRoot, extracted); err != nil {
 		return err
 	}
-	if extracted.Manifest.WorkingDirectory != "" {
-		root, err := os.OpenRoot(repositoryPath)
-		if err != nil {
-			return err
-		}
-		mkdirErr := root.MkdirAll(filepath.FromSlash(extracted.Manifest.WorkingDirectory), 0o700)
-		closeErr := root.Close()
-		if mkdirErr != nil || closeErr != nil {
-			return errors.Join(mkdirErr, closeErr)
-		}
+	if err := ensureWorkingDirectory(repositoryPath, extracted.Manifest.WorkingDirectory); err != nil {
+		return err
 	}
 	if _, err := r.outputWithLimit(
 		ctx, repositoryPath, maximumGitPathOutput,
@@ -313,15 +349,56 @@ func (r Runner) resetOverlayBase(
 	ctx context.Context,
 	repositoryPath string,
 	manifest protocol.WorkspaceManifest,
+	configureTarget bool,
+	rootPlan *rootApplyPlan,
+	beforeMutation func() error,
 ) error {
-	if err := r.configureTargetCheckout(ctx, repositoryPath); err != nil {
-		return err
+	if configureTarget {
+		if err := r.configureTargetCheckout(ctx, repositoryPath); err != nil {
+			return err
+		}
+	} else if rootPlan == nil || beforeMutation == nil {
+		return errors.New("root overlay reset requires a prepared plan and mutation guard")
 	}
-	if err := r.run(ctx, repositoryPath, "reset", "--hard", "--quiet", manifest.HeadOID); err != nil {
+	resetArgs := []string{"reset", "--hard", "--quiet", manifest.HeadOID}
+	if !configureTarget {
+		// A user-owned root worktree must never move HEAD or its current ref.
+		// read-tree updates only the index and worktree for the explicit tree.
+		resetArgs = []string{"--no-replace-objects", "read-tree", "--reset", "-u", manifest.HeadOID}
+		if err := r.rejectIgnoredRootApplyCollisions(
+			ctx, repositoryPath, rootPlan.transitionPaths,
+		); err != nil {
+			return err
+		}
+		if err := beforeMutation(); err != nil {
+			return err
+		}
+	}
+	if err := r.run(ctx, repositoryPath, resetArgs...); err != nil {
 		return preserveContextError(err, errors.New("reset target workspace before overlay application"))
 	}
-	if err := r.run(ctx, repositoryPath, "clean", "-ffdx"); err != nil {
-		return preserveContextError(err, errors.New("clean target workspace before overlay application"))
+	if configureTarget {
+		if err := r.run(ctx, repositoryPath, "clean", "-ffdx"); err != nil {
+			return preserveContextError(err, errors.New("clean target workspace before overlay application"))
+		}
+	} else {
+		currentUntracked, err := r.rootApplyUntrackedPaths(ctx, repositoryPath)
+		if err != nil {
+			return err
+		}
+		currentSet := make(map[string]struct{}, len(currentUntracked))
+		for _, path := range currentUntracked {
+			currentSet[path] = struct{}{}
+		}
+		remaining := make([]string, 0, len(rootPlan.untrackedPaths))
+		for _, path := range rootPlan.untrackedPaths {
+			if _, stillUntracked := currentSet[path]; stillUntracked {
+				remaining = append(remaining, path)
+			}
+		}
+		if err := removeRootApplyUntracked(repositoryPath, remaining); err != nil {
+			return err
+		}
 	}
 	return r.VerifyDirect(ctx, repositoryPath, manifest.HeadOID, manifest.ObjectFormat)
 }

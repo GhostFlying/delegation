@@ -85,3 +85,25 @@ func explainWorkspaceError(err error) error {
 	}
 	return errors.New("the local delegation connector is unavailable; run delegation doctor and ensure its service is running")
 }
+
+func explainResultApplyError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var rpcError *localbridge.RPCError
+	if errors.As(err, &rpcError) {
+		switch rpcError.Code {
+		case protocol.ErrorConflict:
+			return errors.New("the local result apply conflicts with retained state or requires recovery; retry only with the same apply_id and package_id")
+		case protocol.ErrorNotFound:
+			return errors.New("the requested result package was not found")
+		case protocol.ErrorForbidden, protocol.ErrorUnauthenticated:
+			return errors.New("this Codex task is not authorized to apply that result package")
+		case protocol.ErrorUnavailable:
+			return errors.New("the local result package or delegation connector is temporarily unavailable")
+		default:
+			return fmt.Errorf("delegation service rejected the result apply with code %d", rpcError.Code)
+		}
+	}
+	return errors.New("the local delegation connector is unavailable; run delegation doctor and ensure its service is running")
+}
