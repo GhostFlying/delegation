@@ -346,16 +346,29 @@ func TestRecoveryToleratesOnePendingDeletionAndMaintenanceRetriesIt(t *testing.T
 func TestInboxAdmissionEvictsAvailableButNeverReceiving(t *testing.T) {
 	fixture := newManagerFixture(t)
 	defer fixture.close()
+	ctx := context.Background()
 	start := time.Unix(1_700_000_000, 0)
 	current := start
 	fixture.manager.now = func() time.Time { return current }
 	root := control.NewRootPrincipal(testControllerID, testTreeID, testRootAgentID, testDeviceID).Identity()
+	receivingID := testID(2200)
+	receivingAttempt := testID(2201)
+	if began, err := fixture.manager.BeginResultPackage(ctx, BeginRequest{
+		TreeID: testTreeID, Source: root,
+		Params: protocol.BeginResultPackageParams{
+			AttemptID: receivingAttempt, PackageID: receivingID,
+			LeaseExpiresAt: current.Add(store.MaximumResultInboxLease).Unix(), Metadata: emptyMetadata(t, receivingID),
+		},
+	}); err != nil || began.RetentionOrdinal != 1 {
+		t.Fatalf("oldest receiving begin = %#v, %v", began, err)
+	}
+
 	firstAvailable := testID(2000)
 	for index := 0; index < store.MaximumPeerResultPackages-1; index++ {
 		packageID := testID(2000 + index)
 		attemptID := testID(2100 + index)
-		current = start.Add(time.Duration(index) * time.Second)
-		if _, err := fixture.manager.BeginResultPackage(context.Background(), BeginRequest{
+		current = start.Add(time.Duration(index+1) * time.Second)
+		if _, err := fixture.manager.BeginResultPackage(ctx, BeginRequest{
 			TreeID: testTreeID, Source: root,
 			Params: protocol.BeginResultPackageParams{
 				AttemptID: attemptID, PackageID: packageID,
@@ -364,51 +377,58 @@ func TestInboxAdmissionEvictsAvailableButNeverReceiving(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := fixture.manager.FinishResultPackage(context.Background(), FinishRequest{
+		if _, err := fixture.manager.FinishResultPackage(ctx, FinishRequest{
 			TreeID: testTreeID, Source: root,
 			Params: protocol.FinishResultPackageParams{AttemptID: attemptID, PackageID: packageID},
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	receivingID := testID(2200)
-	receivingAttempt := testID(2201)
-	current = start.Add(10 * time.Minute)
-	if _, err := fixture.manager.BeginResultPackage(context.Background(), BeginRequest{
-		TreeID: testTreeID, Source: root,
-		Params: protocol.BeginResultPackageParams{
-			AttemptID: receivingAttempt, PackageID: receivingID,
-			LeaseExpiresAt: current.Add(store.MaximumResultInboxLease).Unix(), Metadata: emptyMetadata(t, receivingID),
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
 	newPackageID := testID(2202)
 	newAttemptID := testID(2203)
 	current = current.Add(time.Second)
-	if _, err := fixture.manager.BeginResultPackage(context.Background(), BeginRequest{
+	begin := BeginRequest{
 		TreeID: testTreeID, Source: root,
 		Params: protocol.BeginResultPackageParams{
 			AttemptID: newAttemptID, PackageID: newPackageID,
 			LeaseExpiresAt: current.Add(store.MaximumResultInboxLease).Unix(), Metadata: emptyMetadata(t, newPackageID),
 		},
-	}); err != nil {
-		t.Fatal(err)
+	}
+	if _, err := fixture.manager.BeginResultPackage(ctx, begin); !errors.Is(err, store.ErrResultPackageQuota) {
+		t.Fatalf("admission over oldest receiving error = %v, want quota", err)
 	}
 	authority := store.ResultInboxAuthority{
 		ControllerID: testControllerID, TreeID: testTreeID,
 		RootAgentID: testRootAgentID, RootDeviceID: testDeviceID,
 	}
-	if _, err := fixture.state.GetResultInbox(context.Background(), authority, firstAvailable); !errors.Is(
-		err, store.ErrNotFound,
-	) {
-		t.Fatalf("oldest available inbox lookup error = %v", err)
+	if first, err := fixture.state.GetResultInbox(ctx, authority, firstAvailable); err != nil ||
+		first.State != store.ResultInboxAvailable || first.RetentionOrdinal != 2 {
+		t.Fatalf("newer available inbox changed during backpressure = %#v, %v", first, err)
 	}
-	for _, packageID := range []string{receivingID, newPackageID} {
-		inbox, err := fixture.state.GetResultInbox(context.Background(), authority, packageID)
-		if err != nil || inbox.State != store.ResultInboxReceiving {
-			t.Fatalf("protected receiving inbox %s = %#v, %v", packageID, inbox, err)
-		}
+	if oldest, err := fixture.state.GetResultInbox(ctx, authority, receivingID); err != nil ||
+		oldest.State != store.ResultInboxReceiving || oldest.RetentionOrdinal != 1 {
+		t.Fatalf("oldest receiving inbox changed during backpressure = %#v, %v", oldest, err)
+	}
+	if _, err := fixture.state.GetResultInbox(ctx, authority, newPackageID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("backpressured inbox lookup error = %v, want not found", err)
+	}
+
+	if _, err := fixture.manager.FinishResultPackage(ctx, FinishRequest{
+		TreeID: testTreeID, Source: root,
+		Params: protocol.FinishResultPackageParams{AttemptID: receivingAttempt, PackageID: receivingID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if admitted, err := fixture.manager.BeginResultPackage(ctx, begin); err != nil ||
+		admitted.RetentionOrdinal != store.MaximumPeerResultPackages+1 {
+		t.Fatalf("admission after oldest completed = %#v, %v", admitted, err)
+	}
+	if _, err := fixture.state.GetResultInbox(ctx, authority, receivingID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("oldest completed inbox lookup error = %v, want evicted", err)
+	}
+	if incoming, err := fixture.state.GetResultInbox(ctx, authority, newPackageID); err != nil ||
+		incoming.State != store.ResultInboxReceiving {
+		t.Fatalf("admitted inbox = %#v, %v", incoming, err)
 	}
 }
 

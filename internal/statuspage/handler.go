@@ -76,9 +76,11 @@ const statusDocument = `<!doctype html>
 <tbody>
 <tr class="group"><th colspan="2" scope="rowgroup">Results</th></tr>
 <tr><th scope="row">Delivery pending</th><td>{{.Results.DeliveryPending}}</td></tr>
-<tr><th scope="row">Delivered</th><td>{{.Results.Delivered}}</td></tr>
-<tr><th scope="row">Source acknowledged</th><td>{{.Results.SourceAcknowledged}}</td></tr>
-<tr><th scope="row">Source released</th><td>{{.Results.SourceReleased}}</td></tr>
+<tr><th scope="row">Details retained</th><td>{{.Results.DetailsRetained}}</td></tr>
+<tr><th scope="row">Delivered (lifetime)</th><td>{{.Results.Delivered}}</td></tr>
+<tr><th scope="row">Source acknowledged (lifetime)</th><td>{{.Results.SourceAcknowledged}}</td></tr>
+<tr><th scope="row">Source released (lifetime)</th><td>{{.Results.SourceReleased}}</td></tr>
+<tr><th scope="row">Details compacted (lifetime)</th><td>{{.Results.DetailsCompacted}}</td></tr>
 </tbody>
 </table>
 </main>

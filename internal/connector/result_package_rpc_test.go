@@ -332,7 +332,7 @@ func resultPackageManagerForFixture(fixture resultPackageRPCFixture) *resultPack
 		},
 		beginResult: protocol.BeginResultPackageResult{
 			AttemptID: fixture.begin.AttemptID, PackageID: fixture.begin.PackageID,
-			Outcome: protocol.ResultPackageReceiving,
+			RetentionOrdinal: 1, Outcome: protocol.ResultPackageReceiving,
 			Offsets: []protocol.ResultPackagePartOffset{{Kind: protocol.ResultPackagePartRollout}},
 		},
 		writeResult: protocol.WriteResultPackagePartResult{

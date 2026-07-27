@@ -81,9 +81,11 @@ func (s *Server) buildStatusSnapshot(
 		},
 		Results: statuspage.ResultCounts{
 			DeliveryPending:    uint64(durable.Results.DeliveryPending),
-			Delivered:          uint64(durable.Results.Delivered),
-			SourceAcknowledged: uint64(durable.Results.SourceAcknowledged),
-			SourceReleased:     uint64(durable.Results.SourceReleased),
+			DetailsRetained:    uint64(durable.Results.DetailsRetained),
+			Delivered:          durable.Results.Delivered,
+			SourceAcknowledged: durable.Results.SourceAcknowledged,
+			SourceReleased:     durable.Results.SourceReleased,
+			DetailsCompacted:   durable.Results.DetailsCompacted,
 		},
 	}
 }

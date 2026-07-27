@@ -289,6 +289,7 @@ func TestAgentWaitPaginatesDeliveredResultsWithIndependentCursor(t *testing.T) {
 		}
 		delivered, err := harness.registry.MarkResultPackageDelivered(
 			context.Background(), root.DeviceID, root.Identity(), worker.packageID,
+			uint64(index+1),
 			time.Unix(50+int64(worker.revision), 0),
 		)
 		if err != nil || delivered.Sequence != uint64(index+1) {

@@ -81,8 +81,10 @@ func TestHTMLStatusIsAccessibleEscapedAndOmitsControllerID(t *testing.T) {
 		`<tr><th scope="row">Capture failed</th><td>13</td></tr>`,
 		`<th colspan="2" scope="rowgroup">Results</th>`,
 		`<tr><th scope="row">Delivery pending</th><td>14</td></tr>`,
-		`<tr><th scope="row">Delivered</th><td>16</td></tr>`,
-		`<tr><th scope="row">Source acknowledged</th><td>15</td></tr>`,
+		`<tr><th scope="row">Details retained</th><td>17</td></tr>`,
+		`<tr><th scope="row">Delivered (lifetime)</th><td>16</td></tr>`,
+		`<tr><th scope="row">Source acknowledged (lifetime)</th><td>15</td></tr>`,
+		`<tr><th scope="row">Details compacted (lifetime)</th><td>2</td></tr>`,
 	} {
 		if !strings.Contains(body, required) {
 			t.Errorf("body missing %q", required)
@@ -286,6 +288,22 @@ func TestStatusProviderFailuresReturnBoundedError(t *testing.T) {
 				return snapshot, nil
 			},
 		},
+		{
+			name: "compacted result count exceeds release",
+			provider: func(context.Context) (Snapshot, error) {
+				snapshot := testSnapshot()
+				snapshot.Results.DetailsCompacted = snapshot.Results.SourceReleased + 1
+				return snapshot, nil
+			},
+		},
+		{
+			name: "delivery pending exceeds retained details",
+			provider: func(context.Context) (Snapshot, error) {
+				snapshot := testSnapshot()
+				snapshot.Results.DeliveryPending = snapshot.Results.DetailsRetained + 1
+				return snapshot, nil
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -331,7 +349,8 @@ func testSnapshot() Snapshot {
 			CaptureFailed: 13,
 		},
 		Results: ResultCounts{
-			DeliveryPending: 14, Delivered: 16, SourceAcknowledged: 15, SourceReleased: 14,
+			DeliveryPending: 14, DetailsRetained: 17, Delivered: 16,
+			SourceAcknowledged: 15, SourceReleased: 14, DetailsCompacted: 2,
 		},
 	}
 }

@@ -31,6 +31,14 @@ CREATE TABLE controller_lifetime_counters (
 		CHECK (dispatches_started BETWEEN 0 AND 9223372036854775807),
 	turns_started INTEGER NOT NULL DEFAULT 0
 		CHECK (turns_started BETWEEN 0 AND 9223372036854775807),
+	result_packages_delivered INTEGER NOT NULL DEFAULT 0
+		CHECK (result_packages_delivered BETWEEN 0 AND 9223372036854775807),
+	result_packages_source_acknowledged INTEGER NOT NULL DEFAULT 0
+		CHECK (result_packages_source_acknowledged BETWEEN 0 AND 9223372036854775807),
+	result_packages_source_released INTEGER NOT NULL DEFAULT 0
+		CHECK (result_packages_source_released BETWEEN 0 AND 9223372036854775807),
+	result_package_details_compacted INTEGER NOT NULL DEFAULT 0
+		CHECK (result_package_details_compacted BETWEEN 0 AND 9223372036854775807),
 	FOREIGN KEY (controller_id)
 		REFERENCES controller_registries(controller_id) ON DELETE CASCADE
 ) STRICT;
@@ -267,6 +275,7 @@ CREATE TABLE result_packages (
 	manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
 	state TEXT NOT NULL CHECK (state IN ('deliveryPending', 'delivered')),
 	result_sequence INTEGER NOT NULL DEFAULT 0 CHECK (result_sequence >= 0),
+	root_retention_ordinal INTEGER NOT NULL DEFAULT 0 CHECK (root_retention_ordinal >= 0),
 	published_at INTEGER NOT NULL CHECK (published_at >= 0),
 	delivered_at INTEGER NOT NULL DEFAULT 0 CHECK (delivered_at >= 0),
 	source_acknowledged_at INTEGER NOT NULL DEFAULT 0 CHECK (source_acknowledged_at >= 0),
@@ -282,9 +291,9 @@ CREATE TABLE result_packages (
 	FOREIGN KEY (controller_id, root_device_id)
 		REFERENCES devices(controller_id, device_id),
 	CHECK (
-		(state = 'deliveryPending' AND result_sequence = 0 AND delivered_at = 0 AND
+		(state = 'deliveryPending' AND result_sequence = 0 AND root_retention_ordinal = 0 AND delivered_at = 0 AND
 			source_acknowledged_at = 0 AND source_released_at = 0) OR
-		(state = 'delivered' AND result_sequence > 0 AND delivered_at >= published_at AND
+		(state = 'delivered' AND result_sequence > 0 AND root_retention_ordinal > 0 AND delivered_at >= published_at AND
 			(source_acknowledged_at = 0 OR source_acknowledged_at >= delivered_at) AND
 			(source_released_at = 0 OR
 			 (source_acknowledged_at > 0 AND source_released_at >= source_acknowledged_at)))
@@ -295,6 +304,10 @@ CREATE UNIQUE INDEX result_packages_by_tree_sequence
 	ON result_packages(controller_id, tree_id, result_sequence)
 	WHERE result_sequence > 0;
 
+CREATE UNIQUE INDEX result_packages_by_root_retention_ordinal
+	ON result_packages(controller_id, root_device_id, root_retention_ordinal)
+	WHERE root_retention_ordinal > 0;
+
 CREATE INDEX result_packages_by_source_delivery
 	ON result_packages(
 		controller_id, source_device_id, state, source_released_at, published_at, package_id
@@ -302,6 +315,12 @@ CREATE INDEX result_packages_by_source_delivery
 
 CREATE INDEX result_packages_by_root_delivery
 	ON result_packages(controller_id, root_device_id, state, published_at, package_id);
+
+CREATE INDEX result_packages_by_root_retention
+	ON result_packages(
+		controller_id, root_device_id, state, root_retention_ordinal DESC,
+		source_released_at
+	);
 
 CREATE TABLE changes_artifacts (
 	controller_id TEXT NOT NULL,

@@ -143,10 +143,11 @@ func (m *Manager) BeginResultPackage(
 	}
 	if published {
 		return protocol.BeginResultPackageResult{
-			AttemptID: request.Params.AttemptID,
-			PackageID: request.Params.PackageID,
-			Outcome:   protocol.ResultPackageAlreadyAvailable,
-			Offsets:   []protocol.ResultPackagePartOffset{},
+			AttemptID:        request.Params.AttemptID,
+			PackageID:        request.Params.PackageID,
+			RetentionOrdinal: inbox.RetentionOrdinal,
+			Outcome:          protocol.ResultPackageAlreadyAvailable,
+			Offsets:          []protocol.ResultPackagePartOffset{},
 		}, nil
 	}
 	return result, nil
@@ -172,16 +173,22 @@ func (m *Manager) evictOldestAvailable(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 
-	available, err := m.state.ListAvailableResultInboxes(
+	retained, err := m.state.ListRetainedResultInboxes(
 		ctx, m.controllerID, m.deviceID, 1,
 	)
 	if err != nil {
 		return false, err
 	}
-	if len(available) == 0 {
+	if len(retained) == 0 {
 		return false, nil
 	}
-	inbox := available[0]
+	inbox := retained[0]
+	if inbox.State == store.ResultInboxReceiving {
+		return false, nil
+	}
+	if inbox.State != store.ResultInboxAvailable {
+		return false, store.ErrResultPackageTransition
+	}
 	lock := m.lock(inbox.PackageID)
 	lock.Lock()
 	defer lock.Unlock()

@@ -26,24 +26,25 @@ import (
 )
 
 const (
-	ConnectPath                  = "/v1/connect"
-	HealthServiceHeader          = "X-Delegation-Service"
-	HealthControllerHeader       = "X-Delegation-Controller-Id"
-	defaultHeartbeatInterval     = 15 * time.Second
-	writeTimeout                 = 10 * time.Second
-	cleanupTimeout               = 5 * time.Second
-	maximumPendingHellos         = 64
-	maximumDeviceHellos          = 2
-	defaultOfflineRetry          = time.Second
-	rootMailboxWaitHeadroom      = 16
-	maximumAsyncMailboxWaits     = config.MaximumWorkerSlots + rootMailboxWaitHeadroom
-	mailboxRequestTimeout        = 30 * time.Second
-	agentWaitRequestTimeout      = 30 * time.Second
-	agentSpawnRequestTimeout     = 125 * time.Second
-	agentOperationRequestTimeout = 125 * time.Second
-	workspaceSyncRequestTimeout  = 30 * time.Minute
-	maximumPendingPeerCalls      = 128
-	maximumActiveWorkspaceSyncs  = 128
+	ConnectPath                    = "/v1/connect"
+	HealthServiceHeader            = "X-Delegation-Service"
+	HealthControllerHeader         = "X-Delegation-Controller-Id"
+	defaultHeartbeatInterval       = 15 * time.Second
+	writeTimeout                   = 10 * time.Second
+	cleanupTimeout                 = 5 * time.Second
+	maximumPendingHellos           = 64
+	maximumDeviceHellos            = 2
+	defaultOfflineRetry            = time.Second
+	defaultResultPackageGCInterval = 15 * time.Minute
+	rootMailboxWaitHeadroom        = 16
+	maximumAsyncMailboxWaits       = config.MaximumWorkerSlots + rootMailboxWaitHeadroom
+	mailboxRequestTimeout          = 30 * time.Second
+	agentWaitRequestTimeout        = 30 * time.Second
+	agentSpawnRequestTimeout       = 125 * time.Second
+	agentOperationRequestTimeout   = 125 * time.Second
+	workspaceSyncRequestTimeout    = 30 * time.Minute
+	maximumPendingPeerCalls        = 128
+	maximumActiveWorkspaceSyncs    = 128
 )
 
 type Registry interface {
@@ -73,12 +74,14 @@ type Registry interface {
 	PublishChangesArtifact(context.Context, string, control.PrincipalIdentity, protocol.PublishChangesArtifactParams, time.Time) (protocol.PublishChangesArtifactResult, error)
 	ListChangesArtifacts(context.Context, control.PrincipalIdentity, store.ChangesArtifactPageRequest) (store.ChangesArtifactPage, error)
 	PublishResultPackage(context.Context, string, control.PrincipalIdentity, protocol.PublishResultPackageParams, time.Time) (protocol.PublishResultPackageResult, error)
+	GetResultPackageRootRetentionHighwater(context.Context, string, string) (uint64, error)
 	GetResultPackageForDelivery(context.Context, string, control.PrincipalIdentity, string) (store.ResultPackageRecord, error)
 	ListPendingResultPackageRelaysForPeer(context.Context, string, string, store.ResultPackageRelayPageRequest) (store.ResultPackageRelayPage, error)
-	MarkResultPackageDelivered(context.Context, string, control.PrincipalIdentity, string, time.Time) (store.ResultPackageRecord, error)
+	MarkResultPackageDelivered(context.Context, string, control.PrincipalIdentity, string, uint64, time.Time) (store.ResultPackageRecord, error)
 	MarkResultPackageSourceAcknowledged(context.Context, string, control.PrincipalIdentity, string, time.Time) (store.ResultPackageRecord, error)
 	MarkResultPackageSourceReleased(context.Context, string, control.PrincipalIdentity, string, time.Time) (store.ResultPackageRecord, error)
 	ListDeliveredResultPackages(context.Context, control.PrincipalIdentity, store.ResultPackagePageRequest) (store.ResultPackagePage, error)
+	CompactReleasedResultPackageDetails(context.Context, string, int) (store.ResultPackageDetailCompaction, error)
 	BeginWorkspaceSync(context.Context, store.WorkspaceSyncIntent, time.Time) (store.WorkspaceSyncReceipt, error)
 	PinWorkspaceSyncManifest(context.Context, store.WorkspaceSyncKey, protocol.WorkspaceManifest, time.Time) (store.WorkspaceSyncReceipt, error)
 	FinishWorkspaceSync(context.Context, store.WorkspaceSyncKey, protocol.WorkspaceSummary, time.Time) (store.WorkspaceSyncReceipt, error)
@@ -109,25 +112,29 @@ type Server struct {
 	context           context.Context
 	cancel            context.CancelFunc
 
-	mu                sync.Mutex
-	connections       map[string]*session
-	latestRevisions   map[string]uint64
-	statusGeneration  uint64
-	peers             map[*websocket.Conn]struct{}
-	pendingHellos     int
-	deviceHellos      map[string]int
-	helloLimit        int
-	deviceHelloLimit  int
-	closed            bool
-	handlers          sync.WaitGroup
-	background        sync.WaitGroup
-	mailboxNotifier   *mailboxNotifier
-	lifecycleNotifier *treeNotifier
-	artifactNotifier  *treeNotifier
-	resultNotifier    *treeNotifier
-	agentOperations   *agentOperationQueue
-	workspaceSyncs    *workspaceSyncFlights
-	resultRelays      *resultPackageRelayCoordinator
+	mu                      sync.Mutex
+	connections             map[string]*session
+	latestRevisions         map[string]uint64
+	statusGeneration        uint64
+	peers                   map[*websocket.Conn]struct{}
+	pendingHellos           int
+	deviceHellos            map[string]int
+	helloLimit              int
+	deviceHelloLimit        int
+	closed                  bool
+	handlers                sync.WaitGroup
+	background              sync.WaitGroup
+	mailboxNotifier         *mailboxNotifier
+	lifecycleNotifier       *treeNotifier
+	artifactNotifier        *treeNotifier
+	resultNotifier          *treeNotifier
+	agentOperations         *agentOperationQueue
+	workspaceSyncs          *workspaceSyncFlights
+	resultRelays            *resultPackageRelayCoordinator
+	resultRelayRoots        resultPackageRootRelayLocks
+	resultPackageGCRegistry resultPackageDetailCompactor
+	resultPackageGCWake     chan struct{}
+	resultPackageGCInterval time.Duration
 
 	retryMu              sync.Mutex
 	offlineRetries       map[string]uint64
@@ -241,31 +248,34 @@ func New(options Options) (*Server, error) {
 		}
 	}
 	server := &Server{
-		controllerID:         options.ControllerID,
-		authMode:             options.AuthMode,
-		registry:             options.Registry,
-		statusReader:         options.StatusReader,
-		heartbeatInterval:    heartbeatInterval,
-		newID:                newID,
-		now:                  now,
-		reportError:          reportError,
-		connections:          map[string]*session{},
-		latestRevisions:      map[string]uint64{},
-		peers:                map[*websocket.Conn]struct{}{},
-		deviceHellos:         map[string]int{},
-		helloLimit:           maximumPendingHellos,
-		deviceHelloLimit:     maximumDeviceHellos,
-		mailboxNotifier:      newMailboxNotifier(),
-		lifecycleNotifier:    newTreeNotifier(),
-		artifactNotifier:     newTreeNotifier(),
-		resultNotifier:       newTreeNotifier(),
-		agentOperations:      newAgentOperationQueue(),
-		workspaceSyncs:       newWorkspaceSyncFlights(maximumActiveWorkspaceSyncs),
-		offlineRetries:       map[string]uint64{},
-		offlineRetryWake:     make(chan struct{}, 1),
-		offlineRetryInterval: defaultOfflineRetry,
-		shutdownDone:         make(chan struct{}),
-		startedAt:            now(),
+		controllerID:            options.ControllerID,
+		authMode:                options.AuthMode,
+		registry:                options.Registry,
+		statusReader:            options.StatusReader,
+		heartbeatInterval:       heartbeatInterval,
+		newID:                   newID,
+		now:                     now,
+		reportError:             reportError,
+		connections:             map[string]*session{},
+		latestRevisions:         map[string]uint64{},
+		peers:                   map[*websocket.Conn]struct{}{},
+		deviceHellos:            map[string]int{},
+		helloLimit:              maximumPendingHellos,
+		deviceHelloLimit:        maximumDeviceHellos,
+		mailboxNotifier:         newMailboxNotifier(),
+		lifecycleNotifier:       newTreeNotifier(),
+		artifactNotifier:        newTreeNotifier(),
+		resultNotifier:          newTreeNotifier(),
+		agentOperations:         newAgentOperationQueue(),
+		workspaceSyncs:          newWorkspaceSyncFlights(maximumActiveWorkspaceSyncs),
+		offlineRetries:          map[string]uint64{},
+		offlineRetryWake:        make(chan struct{}, 1),
+		offlineRetryInterval:    defaultOfflineRetry,
+		resultPackageGCWake:     make(chan struct{}, 1),
+		resultPackageGCRegistry: options.Registry,
+		resultPackageGCInterval: defaultResultPackageGCInterval,
+		shutdownDone:            make(chan struct{}),
+		startedAt:               now(),
 	}
 	server.context, server.cancel = context.WithCancel(context.Background())
 	server.resultRelays = newResultPackageRelayCoordinator(
@@ -276,6 +286,8 @@ func New(options Options) (*Server, error) {
 	)
 	server.background.Add(1)
 	go server.retryOfflineLoop()
+	server.background.Add(1)
+	go server.resultPackageGCLoop()
 	if options.MasterToken != nil {
 		server.masterToken = *options.MasterToken
 	}
@@ -283,7 +295,11 @@ func New(options Options) (*Server, error) {
 }
 
 func (s *Server) Prepare(ctx context.Context) (store.PresenceTransition, error) {
-	return s.registry.BeginBrokerEpoch(ctx, s.controllerID)
+	transition, err := s.registry.BeginBrokerEpoch(ctx, s.controllerID)
+	if err == nil {
+		s.wakeResultPackageGC()
+	}
+	return transition, err
 }
 
 func (s *Server) Handler() http.Handler {

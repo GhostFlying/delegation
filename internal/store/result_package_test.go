@@ -146,7 +146,7 @@ func TestPendingResultPackageRelaysAreBoundedAndPeerScoped(t *testing.T) {
 	}
 
 	if _, err := fixture.Registry.MarkResultPackageDelivered(
-		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageOne, time.Unix(50, 0),
+		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageOne, 1, time.Unix(50, 0),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestResultPackageSourceAcknowledgementAndReleaseAreAuthorizedDurableAndIdem
 		t.Fatalf("pending source release error = %v, want ErrConflict", err)
 	}
 	if _, err := fixture.Registry.MarkResultPackageDelivered(
-		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageOne, time.Unix(50, 0),
+		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageOne, 1, time.Unix(50, 0),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -281,6 +281,16 @@ func TestResultPackageSourceAcknowledgementAndReleaseAreAuthorizedDurableAndIdem
 		rootPage.Packages[0].SourceAcknowledgedAt != 50 ||
 		rootPage.Packages[0].SourceReleasedAt != 50 {
 		t.Fatalf("root delivered package after source release = %#v, error %v", rootPage, err)
+	}
+	status, err := fixture.Registry.ReadStatusSnapshot(ctx, fixture.Root.ControllerID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantResults := StatusResultCounts{
+		DetailsRetained: 1, Delivered: 1, SourceAcknowledged: 1, SourceReleased: 1,
+	}
+	if status.Results != wantResults {
+		t.Fatalf("idempotent result lifetime counts = %#v, want %#v", status.Results, wantResults)
 	}
 }
 
@@ -593,22 +603,34 @@ func TestResultPackageDeliveryAllocatesAvailabilityOrderAndIsRootScoped(t *testi
 	publishResultManifest(t, fixture, second, 41)
 
 	secondDelivered, err := fixture.Registry.MarkResultPackageDelivered(
-		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageTwo, time.Unix(50, 0),
+		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageTwo, 2, time.Unix(50, 0),
 	)
-	if err != nil || secondDelivered.Sequence != 1 || secondDelivered.State != ResultPackageDelivered {
+	if err != nil || secondDelivered.Sequence != 1 || secondDelivered.RootRetentionOrdinal != 2 ||
+		secondDelivered.State != ResultPackageDelivered {
 		t.Fatalf("second package delivery = %#v, error %v", secondDelivered, err)
 	}
 	firstDelivered, err := fixture.Registry.MarkResultPackageDelivered(
-		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageOne, time.Unix(51, 0),
+		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageOne, 1, time.Unix(51, 0),
 	)
-	if err != nil || firstDelivered.Sequence != 2 {
+	if err != nil || firstDelivered.Sequence != 2 || firstDelivered.RootRetentionOrdinal != 1 {
 		t.Fatalf("first package delivery = %#v, error %v", firstDelivered, err)
 	}
 	replay, err := fixture.Registry.MarkResultPackageDelivered(
-		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageOne, time.Unix(80, 0),
+		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageOne, 1, time.Unix(80, 0),
 	)
 	if err != nil || replay.Sequence != 2 || replay.DeliveredAt != 51 {
 		t.Fatalf("delivery replay = %#v, error %v", replay, err)
+	}
+	if _, err := fixture.Registry.MarkResultPackageDelivered(
+		ctx, fixture.Root.DeviceID, fixture.Root.Identity(), resultPackageOne, 3, time.Unix(80, 0),
+	); !errors.Is(err, ErrConflict) {
+		t.Fatalf("delivery replay with a different retention ordinal error = %v, want conflict", err)
+	}
+	highwater, err := fixture.Registry.GetResultPackageRootRetentionHighwater(
+		ctx, fixture.Root.ControllerID, fixture.Root.DeviceID,
+	)
+	if err != nil || highwater != 2 {
+		t.Fatalf("root retention highwater = %d, %v; want 2", highwater, err)
 	}
 
 	page, err := fixture.Registry.ListDeliveredResultPackages(
@@ -633,12 +655,12 @@ func TestResultPackageDeliveryAllocatesAvailabilityOrderAndIsRootScoped(t *testi
 		t.Fatalf("other tree result page = %#v, error %v", otherPage, err)
 	}
 	if _, err := fixture.Registry.MarkResultPackageDelivered(
-		ctx, otherRoot.DeviceID, otherRoot.Identity(), resultPackageOne, time.Unix(90, 0),
+		ctx, otherRoot.DeviceID, otherRoot.Identity(), resultPackageOne, 1, time.Unix(90, 0),
 	); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("other tree delivery error = %v, want ErrNotFound", err)
 	}
 	if _, err := fixture.Registry.MarkResultPackageDelivered(
-		ctx, fixture.Worker.DeviceID, fixture.Root.Identity(), resultPackageOne, time.Unix(90, 0),
+		ctx, fixture.Worker.DeviceID, fixture.Root.Identity(), resultPackageOne, 1, time.Unix(90, 0),
 	); !errors.Is(err, ErrAuthorizationDenied) {
 		t.Fatalf("wrong root connection error = %v", err)
 	}

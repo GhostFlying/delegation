@@ -206,22 +206,37 @@ INSERT INTO result_packages(
 	controller_id, tree_id, package_id, source_agent_id, source_device_id,
 	managed_thread_id, turn_id, lifecycle_revision, root_device_id,
 	manifest_bytes, manifest_size, manifest_sha256, state, result_sequence,
-		published_at, delivered_at, source_acknowledged_at, source_released_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 10, ?, ?, ?)
+	root_retention_ordinal, published_at, delivered_at, source_acknowledged_at, source_released_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 10, ?, ?, ?)
 `, root.ControllerID, root.TreeID, packageID, worker.AgentID, worker.DeviceID,
 			threadID, turnID, root.DeviceID, metadata.Manifest,
 			metadata.ManifestDescriptor.Size, metadata.ManifestDescriptor.SHA256,
-			resultState.state, resultState.sequence, resultState.deliveredAt,
+			resultState.state, resultState.sequence, resultState.sequence, resultState.deliveredAt,
 			resultState.sourceAcknowledgedAt, resultState.sourceReleasedAt); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if _, err := registry.db.ExecContext(ctx, `
+INSERT INTO controller_lifetime_counters(
+	controller_id, result_packages_delivered,
+	result_packages_source_acknowledged, result_packages_source_released
+) VALUES (?, 3, 2, 1)
+ON CONFLICT(controller_id) DO UPDATE SET
+	result_packages_delivered = 3,
+	result_packages_source_acknowledged = 2,
+	result_packages_source_released = 1
+`, root.ControllerID); err != nil {
+		t.Fatal(err)
 	}
 
 	got, err := registry.ReadStatusSnapshot(ctx, root.ControllerID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := StatusResultCounts{DeliveryPending: 1, Delivered: 3, SourceAcknowledged: 2, SourceReleased: 1}
+	want := StatusResultCounts{
+		DeliveryPending: 1, DetailsRetained: 4, Delivered: 3,
+		SourceAcknowledged: 2, SourceReleased: 1,
+	}
 	if got.Results != want {
 		t.Fatalf("result package status = %#v, want %#v", got.Results, want)
 	}

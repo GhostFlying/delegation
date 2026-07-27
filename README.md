@@ -176,8 +176,9 @@ Peer status is read from the same-user local connector bridge and distinguishes 
 from the revision acknowledged by the broker. Broker status combines durable network counters with
 the current synchronized connection set. It includes registered/online/connected/sync-ready device
 counts, current and lifetime dispatch/turn counts, occupied worker slots, and bounded artifact
-counts. Neither surface includes prompts, messages, Git URLs, workspaces, rollout contents,
-credentials, or provider configuration.
+counts. Broker result status separates current delivery/detail retention from lifetime delivered,
+source-acknowledged, source-released, and compacted-detail totals. Neither surface includes prompts,
+messages, Git URLs, workspaces, rollout contents, credentials, or provider configuration.
 
 `setup broker` configures the Web status listener as `127.0.0.1:8788` by default. It serves HTML at
 `/status` and the same snapshot as JSON at `/v1/status`. The listener is separate from the broker

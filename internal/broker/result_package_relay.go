@@ -47,6 +47,11 @@ type resultPackageRelayRequest struct {
 	packageID string
 }
 
+type resultPackageTransferResult struct {
+	began                bool
+	rootRetentionOrdinal uint64
+}
+
 type resultPackageRelayKey struct {
 	controllerID string
 	treeID       string
@@ -464,47 +469,25 @@ func (s *Server) relayResultPackage(
 		s.notifyResultPackageDelivered(record)
 	}
 	if record.SourceReleasedAt != 0 {
+		s.wakeResultPackageGC()
 		return nil
+	}
+	if record.State == store.ResultPackageDelivered {
+		source := s.connection(record.SourcePrincipal.DeviceID)
+		if source == nil {
+			return fmt.Errorf("%w: source peer is offline", errResultPackageRelayDeferred)
+		}
+		return s.finalizeDeliveredResultPackage(
+			ctx, source, s.registry, record.SourcePrincipal, record, s.now(),
+		)
+	}
+	delivered, err := s.deliverPendingResultPackage(ctx, record)
+	if err != nil {
+		return err
 	}
 	source := s.connection(record.SourcePrincipal.DeviceID)
 	if source == nil {
 		return fmt.Errorf("%w: source peer is offline", errResultPackageRelayDeferred)
-	}
-	if record.State == store.ResultPackageDelivered {
-		return finalizeDeliveredResultPackage(
-			ctx, source, s.registry, record.SourcePrincipal, record, s.now(),
-		)
-	}
-	root := s.connection(record.RootPrincipal.DeviceID)
-	if root == nil {
-		return fmt.Errorf("%w: root peer is offline", errResultPackageRelayDeferred)
-	}
-	attemptID, err := s.newID()
-	if err != nil {
-		return fmt.Errorf("create result package transfer attempt: %w", err)
-	}
-	began, err := transferResultPackage(
-		ctx,
-		source,
-		root,
-		record.SourcePrincipal,
-		record.RootPrincipal,
-		record,
-		attemptID,
-		resultPackageReceivingLeaseExpiresAt(s.now()),
-	)
-	if err != nil {
-		if began {
-			if !s.cancelResultPackageTransfer(root, record.RootPrincipal, record, attemptID) &&
-				errors.Is(err, errResultPackageRelayDeferred) {
-				return retryResultPackageRelayAfter(err, store.MaximumResultInboxLease)
-			}
-		}
-		return err
-	}
-	delivered, err := s.markResultPackageDelivered(ctx, record.RootPrincipal, request.packageID)
-	if err != nil {
-		return err
 	}
 	acknowledged, err := acknowledgeAndMarkResultPackage(
 		ctx, source, s.registry, record.SourcePrincipal, delivered, s.now(),
@@ -512,9 +495,105 @@ func (s *Server) relayResultPackage(
 	if err != nil {
 		return err
 	}
-	return releaseAndMarkResultPackage(
+	err = s.releaseAndMarkResultPackage(
 		ctx, source, s.registry, record.SourcePrincipal, acknowledged, s.now(),
 	)
+	return err
+}
+
+func (s *Server) deliverPendingResultPackage(
+	ctx context.Context,
+	record store.ResultPackageRecord,
+) (store.ResultPackageRecord, error) {
+	release, err := s.resultRelayRoots.acquire(ctx, resultPackageRootRelayKey{
+		controllerID: record.RootPrincipal.ControllerID,
+		deviceID:     record.RootPrincipal.DeviceID,
+	})
+	if err != nil {
+		return store.ResultPackageRecord{}, err
+	}
+	defer release()
+
+	source := s.connection(record.SourcePrincipal.DeviceID)
+	if source == nil {
+		return store.ResultPackageRecord{}, fmt.Errorf(
+			"%w: source peer is offline",
+			errResultPackageRelayDeferred,
+		)
+	}
+	root := s.connection(record.RootPrincipal.DeviceID)
+	if root == nil {
+		return store.ResultPackageRecord{}, fmt.Errorf(
+			"%w: root peer is offline",
+			errResultPackageRelayDeferred,
+		)
+	}
+	retentionFloor, err := s.registry.GetResultPackageRootRetentionHighwater(
+		ctx,
+		record.RootPrincipal.ControllerID,
+		record.RootPrincipal.DeviceID,
+	)
+	if err != nil {
+		return store.ResultPackageRecord{}, resultPackageStoreRelayError(
+			"load root result retention highwater",
+			err,
+		)
+	}
+	attemptID, err := s.newID()
+	if err != nil {
+		return store.ResultPackageRecord{}, fmt.Errorf(
+			"create result package transfer attempt: %w",
+			err,
+		)
+	}
+	transfer, err := transferResultPackage(
+		ctx,
+		source,
+		root,
+		record.SourcePrincipal,
+		record.RootPrincipal,
+		record,
+		attemptID,
+		retentionFloor,
+		resultPackageReceivingLeaseExpiresAt(s.now()),
+	)
+	if err != nil {
+		if transfer.began {
+			if !s.cancelResultPackageTransfer(root, record.RootPrincipal, record, attemptID) &&
+				errors.Is(err, errResultPackageRelayDeferred) {
+				return store.ResultPackageRecord{}, retryResultPackageRelayAfter(
+					err,
+					store.MaximumResultInboxLease,
+				)
+			}
+		}
+		return store.ResultPackageRecord{}, err
+	}
+	delivered, err := s.markResultPackageDelivered(
+		ctx,
+		record.RootPrincipal,
+		record.Manifest.PackageID,
+		transfer.rootRetentionOrdinal,
+	)
+	if err != nil {
+		return store.ResultPackageRecord{}, err
+	}
+	return delivered, nil
+}
+
+func (s *Server) finalizeDeliveredResultPackage(
+	ctx context.Context,
+	source resultPackagePeer,
+	registry resultPackageSourceAcknowledger,
+	workerPrincipal control.PrincipalIdentity,
+	record store.ResultPackageRecord,
+	now time.Time,
+) error {
+	err := finalizeDeliveredResultPackage(ctx, source, registry, workerPrincipal, record, now)
+	if err == nil {
+		s.wakeResultPackageGC()
+	}
+	return err
 }
 
 func finalizeDeliveredResultPackage(
@@ -543,9 +622,10 @@ func (s *Server) markResultPackageDelivered(
 	ctx context.Context,
 	root control.PrincipalIdentity,
 	packageID string,
+	rootRetentionOrdinal uint64,
 ) (store.ResultPackageRecord, error) {
 	delivered, err := s.registry.MarkResultPackageDelivered(
-		ctx, root.DeviceID, root, packageID, s.now(),
+		ctx, root.DeviceID, root, packageID, rootRetentionOrdinal, s.now(),
 	)
 	if err != nil {
 		return store.ResultPackageRecord{}, resultPackageStoreRelayError(
@@ -554,6 +634,7 @@ func (s *Server) markResultPackageDelivered(
 		)
 	}
 	s.notifyResultPackageDelivered(delivered)
+	s.wakeResultPackageGC()
 	return delivered, nil
 }
 
@@ -617,11 +698,13 @@ func transferResultPackage(
 	rootPrincipal control.PrincipalIdentity,
 	record store.ResultPackageRecord,
 	attemptID string,
+	retentionFloor uint64,
 	leaseExpiresAt int64,
-) (bool, error) {
+) (resultPackageTransferResult, error) {
 	beginParams := protocol.BeginResultPackageParams{
 		AttemptID:      attemptID,
 		PackageID:      record.Manifest.PackageID,
+		RetentionFloor: retentionFloor,
 		LeaseExpiresAt: leaseExpiresAt,
 		Metadata:       record.Metadata,
 	}
@@ -641,21 +724,26 @@ func transferResultPackage(
 				"%w: root still owns another receiving attempt",
 				errResultPackageRelayDeferred,
 			)
-			return false, retryResultPackageRelayAfter(deferred, store.MaximumResultInboxLease)
+			return resultPackageTransferResult{}, retryResultPackageRelayAfter(
+				deferred,
+				store.MaximumResultInboxLease,
+			)
 		}
-		return false, deferResultPackagePeerError("begin root result package", err)
+		return resultPackageTransferResult{}, deferResultPackagePeerError("begin root result package", err)
 	}
 	begin, err := protocol.DecodePayload[protocol.BeginResultPackageResult](payload)
 	if err != nil || begin.Validate() != nil || begin.AttemptID != attemptID ||
 		begin.PackageID != record.Manifest.PackageID {
-		return false, errors.New("root returned invalid result package begin metadata")
+		return resultPackageTransferResult{}, errors.New("root returned invalid result package begin metadata")
 	}
+	result := resultPackageTransferResult{rootRetentionOrdinal: begin.RetentionOrdinal}
 	if begin.Outcome == protocol.ResultPackageAlreadyAvailable {
-		return false, nil
+		return result, nil
 	}
+	result.began = true
 	offsets, err := validateResultPackageOffsets(record.Manifest.Parts, begin.Offsets)
 	if err != nil {
-		return true, err
+		return result, err
 	}
 	for index, part := range record.Manifest.Parts {
 		if err := relayResultPackagePart(
@@ -669,7 +757,7 @@ func transferResultPackage(
 			part,
 			offsets[index],
 		); err != nil {
-			return true, err
+			return result, err
 		}
 	}
 	finishParams := protocol.FinishResultPackageParams{
@@ -686,14 +774,14 @@ func transferResultPackage(
 		finishParams,
 	)
 	if err != nil {
-		return true, deferResultPackagePeerError("finish root result package", err)
+		return result, deferResultPackagePeerError("finish root result package", err)
 	}
 	finished, err := protocol.DecodePayload[protocol.FinishResultPackageResult](payload)
 	if err != nil || finished.Validate() != nil ||
 		finished != protocol.FinishResultPackageResult(finishParams) {
-		return true, errors.New("root returned invalid result package finish metadata")
+		return result, errors.New("root returned invalid result package finish metadata")
 	}
-	return true, nil
+	return result, nil
 }
 
 func validateResultPackageOffsets(
@@ -890,6 +978,21 @@ func releaseAndMarkResultPackage(
 		return resultPackageStoreRelayError("record source result package release", err)
 	}
 	return nil
+}
+
+func (s *Server) releaseAndMarkResultPackage(
+	ctx context.Context,
+	source resultPackagePeer,
+	registry resultPackageSourceAcknowledger,
+	workerPrincipal control.PrincipalIdentity,
+	record store.ResultPackageRecord,
+	releasedAt time.Time,
+) error {
+	err := releaseAndMarkResultPackage(ctx, source, registry, workerPrincipal, record, releasedAt)
+	if err == nil {
+		s.wakeResultPackageGC()
+	}
+	return err
 }
 
 func resultPackageStoreRelayError(operation string, err error) error {

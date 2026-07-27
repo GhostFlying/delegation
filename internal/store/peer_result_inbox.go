@@ -73,7 +73,8 @@ func (s *PeerStore) BeginResultInbox(
 			case ResultInboxAvailable:
 				result = protocol.BeginResultPackageResult{
 					AttemptID: params.AttemptID, PackageID: params.PackageID,
-					Outcome: protocol.ResultPackageAlreadyAvailable, Offsets: []protocol.ResultPackagePartOffset{},
+					RetentionOrdinal: existing.RetentionOrdinal,
+					Outcome:          protocol.ResultPackageAlreadyAvailable, Offsets: []protocol.ResultPackagePartOffset{},
 				}
 				return nil
 			case ResultInboxReceiving:
@@ -82,7 +83,8 @@ func (s *PeerStore) BeginResultInbox(
 				}
 				result = protocol.BeginResultPackageResult{
 					AttemptID: params.AttemptID, PackageID: params.PackageID,
-					Outcome: protocol.ResultPackageReceiving, Offsets: slices.Clone(existing.Offsets),
+					RetentionOrdinal: existing.RetentionOrdinal,
+					Outcome:          protocol.ResultPackageReceiving, Offsets: slices.Clone(existing.Offsets),
 				}
 				return nil
 			case ResultInboxEvictionTombstone:
@@ -111,17 +113,25 @@ func (s *PeerStore) BeginResultInbox(
 		if err := requireResultStoreCapacity(ctx, connection, "peer_result_inbox", packageBytes); err != nil {
 			return err
 		}
+		retentionOrdinal, err := nextResultInboxRetentionOrdinal(
+			ctx,
+			connection,
+			params.RetentionFloor,
+		)
+		if err != nil {
+			return err
+		}
 		if _, execErr := connection.ExecContext(ctx, `
-INSERT INTO peer_result_inbox(
-	controller_id, tree_id, root_agent_id, root_device_id,
-	source_agent_id, source_device_id, managed_thread_id, turn_id,
-	package_id, state, attempt_id, lease_expires_at, lifecycle_revision,
-	manifest_bytes, manifest_size_bytes, manifest_sha256, parts_json,
-	package_bytes, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO peer_result_inbox(
+			controller_id, tree_id, root_agent_id, root_device_id,
+			source_agent_id, source_device_id, managed_thread_id, turn_id,
+			package_id, state, attempt_id, retention_ordinal, lease_expires_at, lifecycle_revision,
+			manifest_bytes, manifest_size_bytes, manifest_sha256, parts_json,
+			package_bytes, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, authority.ControllerID, authority.TreeID, authority.RootAgentID, authority.RootDeviceID,
 			manifest.SourceAgentID, manifest.SourceDeviceID, manifest.ManagedThreadID, manifest.TurnID,
-			params.PackageID, ResultInboxReceiving, params.AttemptID, localLeaseExpiresAt,
+			params.PackageID, ResultInboxReceiving, params.AttemptID, retentionOrdinal, localLeaseExpiresAt,
 			manifest.LifecycleRevision, params.Metadata.Manifest, params.Metadata.ManifestDescriptor.Size,
 			params.Metadata.ManifestDescriptor.SHA256, partsJSON, packageBytes, timestamp, timestamp); execErr != nil {
 			return fmt.Errorf("begin result inbox: %w", execErr)
@@ -138,7 +148,8 @@ VALUES (?, ?, ?, ?, 0)
 		}
 		result = protocol.BeginResultPackageResult{
 			AttemptID: params.AttemptID, PackageID: params.PackageID,
-			Outcome: protocol.ResultPackageReceiving, Offsets: offsets,
+			RetentionOrdinal: retentionOrdinal,
+			Outcome:          protocol.ResultPackageReceiving, Offsets: offsets,
 		}
 		return nil
 	})
@@ -704,6 +715,27 @@ WHERE package_id = ? AND attempt_id = ? AND phase = 'completed'
 	})
 }
 
+// ListRetainedResultInboxes returns the durable retention order across both
+// receiving and available payloads. Admission must not skip an older receiving
+// payload to evict a newer available one.
+func (s *PeerStore) ListRetainedResultInboxes(
+	ctx context.Context,
+	controllerID, deviceID string,
+	limit int,
+) ([]ResultInbox, error) {
+	if err := validateChangesArtifactDevice(controllerID, deviceID); err != nil {
+		return nil, err
+	}
+	if err := validateResultPage(limit); err != nil {
+		return nil, err
+	}
+	return s.listResultInboxes(ctx, `
+WHERE controller_id = ? AND root_device_id = ? AND state IN ('receiving', 'available')
+ORDER BY retention_ordinal, package_id
+LIMIT ?
+`, controllerID, deviceID, limit)
+}
+
 // ListAvailableResultInboxes returns only ordinary-GC-eligible records oldest
 // first. Receiving rows and eviction tombstones never appear.
 func (s *PeerStore) ListAvailableResultInboxes(
@@ -719,7 +751,7 @@ func (s *PeerStore) ListAvailableResultInboxes(
 	}
 	return s.listResultInboxes(ctx, `
 WHERE controller_id = ? AND root_device_id = ? AND state = 'available'
-ORDER BY updated_at, created_at, tree_id, root_agent_id, package_id
+ORDER BY retention_ordinal, package_id
 LIMIT ?
 `, controllerID, deviceID, limit)
 }
@@ -917,6 +949,27 @@ func validateResultPackageAttempt(attemptID, packageID string) error {
 		return fmt.Errorf("packageId %w", err)
 	}
 	return nil
+}
+
+func nextResultInboxRetentionOrdinal(
+	ctx context.Context,
+	connection *sql.Conn,
+	retentionFloor uint64,
+) (uint64, error) {
+	var next uint64
+	err := connection.QueryRowContext(ctx, `
+UPDATE peer_metadata
+SET last_result_inbox_retention_ordinal = max(last_result_inbox_retention_ordinal, ?) + 1
+WHERE singleton = 1 AND max(last_result_inbox_retention_ordinal, ?) < 9223372036854775807
+RETURNING last_result_inbox_retention_ordinal
+`, int64(retentionFloor), int64(retentionFloor)).Scan(&next)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrResultInboxRetentionExhausted
+	}
+	if err != nil {
+		return 0, fmt.Errorf("advance result inbox retention ordinal: %w", err)
+	}
+	return next, nil
 }
 
 func queryResultInboxRemoval(

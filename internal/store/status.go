@@ -46,9 +46,11 @@ type StatusArtifactCounts struct {
 
 type StatusResultCounts struct {
 	DeliveryPending    int
-	Delivered          int
-	SourceAcknowledged int
-	SourceReleased     int
+	DetailsRetained    int
+	Delivered          uint64
+	SourceAcknowledged uint64
+	SourceReleased     uint64
+	DetailsCompacted   uint64
 }
 
 type StatusLifetimeCounters struct {
@@ -103,8 +105,12 @@ type PeerStatusResultCounts struct {
 }
 
 type statusLifetimeCounterIncrement struct {
-	DispatchesStarted int
-	TurnsStarted      int
+	DispatchesStarted                int
+	TurnsStarted                     int
+	ResultPackagesDelivered          int
+	ResultPackagesSourceAcknowledged int
+	ResultPackagesSourceReleased     int
+	ResultPackageDetailsCompacted    int
 }
 
 func incrementStatusLifetimeCounters(
@@ -114,12 +120,28 @@ func incrementStatusLifetimeCounters(
 	increment statusLifetimeCounterIncrement,
 ) error {
 	_, err := connection.ExecContext(ctx, `
-INSERT INTO controller_lifetime_counters(controller_id, dispatches_started, turns_started)
-VALUES (?, ?, ?)
+INSERT INTO controller_lifetime_counters(
+	controller_id, dispatches_started, turns_started,
+	result_packages_delivered,
+	result_packages_source_acknowledged, result_packages_source_released,
+	result_package_details_compacted
+)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(controller_id) DO UPDATE SET
 	dispatches_started = dispatches_started + excluded.dispatches_started,
-	turns_started = turns_started + excluded.turns_started
-`, controllerID, increment.DispatchesStarted, increment.TurnsStarted)
+	turns_started = turns_started + excluded.turns_started,
+	result_packages_delivered = result_packages_delivered + excluded.result_packages_delivered,
+	result_packages_source_acknowledged = result_packages_source_acknowledged +
+		excluded.result_packages_source_acknowledged,
+	result_packages_source_released = result_packages_source_released +
+		excluded.result_packages_source_released,
+	result_package_details_compacted = result_package_details_compacted +
+		excluded.result_package_details_compacted
+`, controllerID, increment.DispatchesStarted, increment.TurnsStarted,
+		increment.ResultPackagesDelivered,
+		increment.ResultPackagesSourceAcknowledged,
+		increment.ResultPackagesSourceReleased,
+		increment.ResultPackageDetailsCompacted)
 	if err != nil {
 		return fmt.Errorf("increment status lifetime counters: %w", err)
 	}
@@ -196,29 +218,33 @@ WHERE controller_id = ?
 	}
 	if err := transaction.QueryRowContext(ctx, `
 SELECT
-		COALESCE(sum(CASE WHEN state = 'deliveryPending' THEN 1 ELSE 0 END), 0),
-		COALESCE(sum(CASE WHEN state = 'delivered' THEN 1 ELSE 0 END), 0),
-		COALESCE(sum(CASE WHEN source_acknowledged_at > 0 THEN 1 ELSE 0 END), 0),
-		COALESCE(sum(CASE WHEN source_released_at > 0 THEN 1 ELSE 0 END), 0)
+	COALESCE(sum(CASE WHEN state = 'deliveryPending' THEN 1 ELSE 0 END), 0),
+	count(*)
 FROM result_packages
 WHERE controller_id = ?
 `, controllerID).Scan(
 		&snapshot.Results.DeliveryPending,
-		&snapshot.Results.Delivered,
-		&snapshot.Results.SourceAcknowledged,
-		&snapshot.Results.SourceReleased,
+		&snapshot.Results.DetailsRetained,
 	); err != nil {
 		return StatusSnapshot{}, fmt.Errorf("read status result package counts: %w", err)
 	}
 	if err := transaction.QueryRowContext(ctx, `
 SELECT
 	COALESCE(max(dispatches_started), 0),
-	COALESCE(max(turns_started), 0)
+	COALESCE(max(turns_started), 0),
+	COALESCE(max(result_packages_delivered), 0),
+	COALESCE(max(result_packages_source_acknowledged), 0),
+	COALESCE(max(result_packages_source_released), 0),
+	COALESCE(max(result_package_details_compacted), 0)
 FROM controller_lifetime_counters
 WHERE controller_id = ?
 `, controllerID).Scan(
 		&snapshot.Lifetime.DispatchesStarted,
 		&snapshot.Lifetime.TurnsStarted,
+		&snapshot.Results.Delivered,
+		&snapshot.Results.SourceAcknowledged,
+		&snapshot.Results.SourceReleased,
+		&snapshot.Results.DetailsCompacted,
 	); err != nil {
 		return StatusSnapshot{}, fmt.Errorf("read status lifetime counters: %w", err)
 	}

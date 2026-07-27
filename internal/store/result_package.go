@@ -42,6 +42,7 @@ type ResultPackageRecord struct {
 	RootDeviceID         string
 	State                ResultPackageDeliveryState
 	Sequence             uint64
+	RootRetentionOrdinal uint64
 	PublishedAt          int64
 	DeliveredAt          int64
 	SourceAcknowledgedAt int64
@@ -72,6 +73,28 @@ type ResultPackageRelayPageRequest struct {
 type ResultPackageRelayPage struct {
 	Packages  []ResultPackageRecord
 	NextAfter *ResultPackageRelayCursor
+}
+
+// GetResultPackageRootRetentionHighwater returns the largest root-assigned
+// retention ordinal still known to the broker. GC always retains the newest
+// detail window, so this also lets a peer that rebuilt local state continue
+// above ordinals that the broker can still reference.
+func (s *Store) GetResultPackageRootRetentionHighwater(
+	ctx context.Context,
+	controllerID, rootDeviceID string,
+) (uint64, error) {
+	if err := validateChangesArtifactDevice(controllerID, rootDeviceID); err != nil {
+		return 0, err
+	}
+	var highwater uint64
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COALESCE(max(root_retention_ordinal), 0)
+FROM result_packages
+WHERE controller_id = ? AND root_device_id = ?
+`, controllerID, rootDeviceID).Scan(&highwater); err != nil {
+		return 0, fmt.Errorf("load result package root retention highwater: %w", err)
+	}
+	return highwater, nil
 }
 
 func (s *Store) PublishResultPackage(
@@ -211,6 +234,7 @@ func (s *Store) MarkResultPackageDelivered(
 	connectedDeviceID string,
 	root control.PrincipalIdentity,
 	packageID string,
+	rootRetentionOrdinal uint64,
 	deliveredAt time.Time,
 ) (ResultPackageRecord, error) {
 	if err := identity.ValidateID(connectedDeviceID); err != nil {
@@ -221,6 +245,9 @@ func (s *Store) MarkResultPackageDelivered(
 	}
 	if err := identity.ValidateID(packageID); err != nil {
 		return ResultPackageRecord{}, fmt.Errorf("packageId %w", err)
+	}
+	if rootRetentionOrdinal == 0 || rootRetentionOrdinal > math.MaxInt64 {
+		return ResultPackageRecord{}, errors.New("rootRetentionOrdinal is out of range")
 	}
 	timestamp, err := unixTime(deliveredAt, "deliveredAt")
 	if err != nil {
@@ -248,6 +275,9 @@ func (s *Store) MarkResultPackageDelivered(
 			return ErrAuthorizationDenied
 		}
 		if record.State == ResultPackageDelivered {
+			if record.RootRetentionOrdinal != rootRetentionOrdinal {
+				return fmt.Errorf("%w: result package root retention ordinal differs", ErrConflict)
+			}
 			return nil
 		}
 		if timestamp < record.PublishedAt {
@@ -261,10 +291,10 @@ func (s *Store) MarkResultPackageDelivered(
 		}
 		result, err := connection.ExecContext(ctx, `
 UPDATE result_packages
-SET state = 'delivered', result_sequence = ?, delivered_at = ?
+SET state = 'delivered', result_sequence = ?, root_retention_ordinal = ?, delivered_at = ?
 WHERE controller_id = ? AND tree_id = ? AND package_id = ?
-  AND state = 'deliveryPending' AND result_sequence = 0 AND delivered_at = 0
-`, sequence, timestamp, root.ControllerID, root.TreeID, packageID)
+  AND state = 'deliveryPending' AND result_sequence = 0 AND root_retention_ordinal = 0 AND delivered_at = 0
+`, sequence, rootRetentionOrdinal, timestamp, root.ControllerID, root.TreeID, packageID)
 		if err != nil {
 			return fmt.Errorf("mark result package delivered: %w", err)
 		}
@@ -275,8 +305,17 @@ WHERE controller_id = ? AND tree_id = ? AND package_id = ?
 		if affected != 1 {
 			return errors.New("result package state changed during delivery")
 		}
+		if err := incrementStatusLifetimeCounters(
+			ctx,
+			connection,
+			root.ControllerID,
+			statusLifetimeCounterIncrement{ResultPackagesDelivered: 1},
+		); err != nil {
+			return err
+		}
 		record.State = ResultPackageDelivered
 		record.Sequence = sequence
+		record.RootRetentionOrdinal = rootRetentionOrdinal
 		record.DeliveredAt = timestamp
 		return nil
 	})
@@ -351,6 +390,12 @@ WHERE controller_id = ? AND tree_id = ? AND package_id = ?
 		if affected != 1 {
 			return errors.New("result package state changed during source acknowledgement")
 		}
+		if err := incrementStatusLifetimeCounters(
+			ctx, connection, source.ControllerID,
+			statusLifetimeCounterIncrement{ResultPackagesSourceAcknowledged: 1},
+		); err != nil {
+			return err
+		}
 		record.SourceAcknowledgedAt = timestamp
 		return nil
 	})
@@ -421,6 +466,12 @@ WHERE controller_id = ? AND tree_id = ? AND package_id = ?
 		}
 		if affected != 1 {
 			return errors.New("result package state changed during source release")
+		}
+		if err := incrementStatusLifetimeCounters(
+			ctx, connection, source.ControllerID,
+			statusLifetimeCounterIncrement{ResultPackagesSourceReleased: 1},
+		); err != nil {
+			return err
 		}
 		record.SourceReleasedAt = timestamp
 		return nil
@@ -761,7 +812,7 @@ func scanResultPackage(scanner rowScanner) (ResultPackageRecord, error) {
 		&controllerID, &treeID, &packageID, &sourceAgentID, &sourceDeviceID,
 		&managedThreadID, &turnID, &lifecycleRevision, &record.RootDeviceID,
 		&record.Metadata.Manifest, &manifestSize, &manifestSHA256, &record.State,
-		&record.Sequence, &record.PublishedAt, &record.DeliveredAt,
+		&record.Sequence, &record.RootRetentionOrdinal, &record.PublishedAt, &record.DeliveredAt,
 		&record.SourceAcknowledgedAt, &record.SourceReleasedAt,
 		&sourceParentAgentID, &principalSourceDeviceID, &rootAgentID, &treeRootDeviceID,
 	)
@@ -829,14 +880,16 @@ func scanResultPackage(scanner rowScanner) (ResultPackageRecord, error) {
 	}
 	switch record.State {
 	case ResultPackageDeliveryPending:
-		if record.Sequence != 0 || record.DeliveredAt != 0 || record.SourceAcknowledgedAt != 0 ||
+		if record.Sequence != 0 || record.RootRetentionOrdinal != 0 || record.DeliveredAt != 0 ||
+			record.SourceAcknowledgedAt != 0 ||
 			record.SourceReleasedAt != 0 {
 			return ResultPackageRecord{}, corruptResultPackage(
 				errors.New("stored pending result package contains delivery state"),
 			)
 		}
 	case ResultPackageDelivered:
-		if record.Sequence == 0 || record.Sequence > math.MaxInt64 ||
+		if record.Sequence == 0 || record.Sequence > math.MaxInt64 || record.RootRetentionOrdinal == 0 ||
+			record.RootRetentionOrdinal > math.MaxInt64 ||
 			record.DeliveredAt < record.PublishedAt ||
 			(record.SourceAcknowledgedAt != 0 && record.SourceAcknowledgedAt < record.DeliveredAt) ||
 			(record.SourceReleasedAt != 0 && (record.SourceAcknowledgedAt == 0 ||
@@ -898,6 +951,7 @@ const resultPackageSelect = `
 SELECT r.controller_id, r.tree_id, r.package_id, r.source_agent_id, r.source_device_id,
 	r.managed_thread_id, r.turn_id, r.lifecycle_revision, r.root_device_id,
 	r.manifest_bytes, r.manifest_size, r.manifest_sha256, r.state, r.result_sequence,
+	r.root_retention_ordinal,
 	r.published_at, r.delivered_at, r.source_acknowledged_at, r.source_released_at,
 	source.parent_agent_id, source.device_id,
 	tree.root_agent_id, tree.root_device_id
