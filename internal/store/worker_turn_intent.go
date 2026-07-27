@@ -209,6 +209,30 @@ func (s *PeerStore) BindWorkerTurnStartIntent(
 	intentID, turnID string,
 	observedAt time.Time,
 ) (resolution WorkerTurnStartResolution, err error) {
+	return s.bindWorkerTurnStartIntent(ctx, key, intentID, turnID, nil, observedAt)
+}
+
+// BindInitialWorkerTurnStartIntent binds an initial turn whose rollout did not
+// exist when the intent was prepared. The available locator is persisted in
+// the same transaction as the turn binding so recovery can never observe a
+// partially upgraded intent.
+func (s *PeerStore) BindInitialWorkerTurnStartIntent(
+	ctx context.Context,
+	key WorkerKey,
+	intentID, turnID string,
+	rollout WorkerRolloutLocator,
+	observedAt time.Time,
+) (resolution WorkerTurnStartResolution, err error) {
+	return s.bindWorkerTurnStartIntent(ctx, key, intentID, turnID, &rollout, observedAt)
+}
+
+func (s *PeerStore) bindWorkerTurnStartIntent(
+	ctx context.Context,
+	key WorkerKey,
+	intentID, turnID string,
+	initialRollout *WorkerRolloutLocator,
+	observedAt time.Time,
+) (resolution WorkerTurnStartResolution, err error) {
 	if err := validateWorkerTurnStartResolutionIdentity(key, intentID); err != nil {
 		return WorkerTurnStartResolution{}, err
 	}
@@ -224,6 +248,11 @@ func (s *PeerStore) BindWorkerTurnStartIntent(
 		if queryErr != nil {
 			return queryErr
 		}
+		if initialRollout != nil {
+			if err := validateInitialRolloutBinding(intent, *initialRollout); err != nil {
+				return err
+			}
+		}
 		if turnID == intent.PreviousTurnID {
 			return ErrWorkerTurnStartIntentConflict
 		}
@@ -236,6 +265,9 @@ func (s *PeerStore) BindWorkerTurnStartIntent(
 		}
 		if intent.State != WorkerTurnStartPrepared {
 			return ErrWorkerTurnStartIntentConflict
+		}
+		if initialRollout != nil {
+			intent.Rollout = *initialRollout
 		}
 		worker, queryErr := queryWorker(ctx, connection, key)
 		if queryErr != nil {
@@ -308,10 +340,15 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 		}
 		intentUpdate, execErr := connection.ExecContext(ctx, `
 UPDATE worker_turn_start_intents SET
-	state = 'bound', turn_id = ?, resolution_revision = ?, updated_at = ?
+	state = 'bound', turn_id = ?, resolution_revision = ?,
+	locator_status = ?, codex_home = ?, rollout_path = ?, rollout_offset = ?,
+	locator_failure_code = ?, updated_at = ?
 WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND intent_id = ?
 	AND state = 'prepared' AND prepared_revision = ?
-`, turnID, revision, updatedAt, key.ControllerID, key.TreeID, key.AgentID, intentID,
+`, turnID, revision,
+			intent.Rollout.Status, intent.Rollout.CodexHome, intent.Rollout.Path,
+			intent.Rollout.Offset, intent.Rollout.FailureCode, updatedAt,
+			key.ControllerID, key.TreeID, key.AgentID, intentID,
 			intent.PreparedRevision)
 		if execErr != nil {
 			return fmt.Errorf("bind worker turn-start intent: %w", execErr)
@@ -323,6 +360,28 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ? AND intent_id = ?
 		return nil
 	})
 	return resolution, err
+}
+
+func validateInitialRolloutBinding(
+	intent WorkerTurnStartIntent,
+	rollout WorkerRolloutLocator,
+) error {
+	if intent.PreviousTurnID != "" || rollout.Status != WorkerRolloutAvailable || rollout.Offset != 0 {
+		return ErrWorkerTurnStartIntentConflict
+	}
+	if err := rollout.Validate(intent.ManagedThreadID); err != nil {
+		return fmt.Errorf("%w: invalid initial rollout locator: %v", ErrWorkerTurnStartIntentConflict, err)
+	}
+	if intent.Rollout.Status == WorkerRolloutAvailable {
+		if intent.Rollout != rollout {
+			return ErrWorkerTurnStartIntentConflict
+		}
+		return nil
+	}
+	if intent.Rollout.Status != WorkerRolloutUnavailable {
+		return ErrWorkerTurnStartIntentConflict
+	}
+	return nil
 }
 
 func (s *PeerStore) RejectWorkerTurnStartIntent(

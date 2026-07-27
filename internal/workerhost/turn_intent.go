@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/identity"
@@ -140,8 +141,8 @@ func (h *Host) reconcilePreparedTurnIntent(
 		)
 		return StartedTurn{Worker: worker}, h.retireClient(client, err), err
 	}
-	resolution, err := h.state.BindWorkerTurnStartIntent(
-		ctx, worker.WorkerKey, intent.IntentID, observed.ID, time.Now(),
+	resolution, err := h.bindWorkerTurnStartIntent(
+		ctx, client, worker, intent, observed.ID,
 	)
 	worker, err = h.recordWorkerChange(resolution.Worker, err)
 	if err != nil {
@@ -341,6 +342,95 @@ func (h *Host) refreshLoadedThreadPath(
 	return nil
 }
 
+func (h *Host) refreshInitialRolloutPathAfterTurnStart(
+	ctx context.Context,
+	client application,
+	worker store.WorkerReservation,
+) error {
+	if h.initialRolloutWait <= 0 {
+		return nil
+	}
+	deadline := time.Now().Add(h.initialRolloutWait)
+	wait := 25 * time.Millisecond
+	for {
+		if !time.Now().Before(deadline) {
+			return nil
+		}
+		var read threadResult
+		readContext, cancel := context.WithDeadline(ctx, deadline)
+		err := client.ThreadRead(readContext, threadReadParams{
+			ThreadID: worker.CodexThreadID, IncludeTurns: false,
+		}, &read)
+		cancel()
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				select {
+				case <-client.Done():
+					return fmt.Errorf("read initial managed rollout path after turn start: %w", err)
+				default:
+				}
+				return nil
+			}
+			if !h.shouldRetire(client, err) {
+				h.reportError(fmt.Errorf("read initial managed rollout path after turn start: %w", err))
+				h.markLoaded(client, worker.WorkerKey, worker.CodexThreadID, nil)
+				return nil
+			}
+			return fmt.Errorf("read initial managed rollout path after turn start: %w", err)
+		}
+		if read.Thread.ID != worker.CodexThreadID {
+			return errors.New("app-server read an unexpected initial worker thread after turn start")
+		}
+		h.markLoaded(client, worker.WorkerKey, worker.CodexThreadID, read.Thread.Path)
+		if read.Thread.Path != nil {
+			if _, err := rolloutcapture.Locate(
+				h.codexHome, worker.CodexThreadID, *read.Thread.Path,
+			); err == nil {
+				return nil
+			}
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil
+		}
+		if remaining < wait {
+			wait = remaining
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		if wait < 250*time.Millisecond {
+			wait = min(2*wait, 250*time.Millisecond)
+		}
+	}
+}
+
+func (h *Host) bindWorkerTurnStartIntent(
+	ctx context.Context,
+	client application,
+	worker store.WorkerReservation,
+	intent store.WorkerTurnStartIntent,
+	turnID string,
+) (store.WorkerTurnStartResolution, error) {
+	if intent.PreviousTurnID == "" && intent.Rollout.Status == store.WorkerRolloutUnavailable {
+		rollout := h.rolloutLocator(client, worker)
+		if rollout.Status == store.WorkerRolloutAvailable {
+			rollout.Offset = 0
+			return h.state.BindInitialWorkerTurnStartIntent(
+				ctx, worker.WorkerKey, intent.IntentID, turnID, rollout, time.Now(),
+			)
+		}
+	}
+	return h.state.BindWorkerTurnStartIntent(
+		ctx, worker.WorkerKey, intent.IntentID, turnID, time.Now(),
+	)
+}
+
 func turnsAfter(turns []turn, previousTurnID string) ([]turn, error) {
 	start := 0
 	if previousTurnID != "" {
@@ -373,7 +463,11 @@ func (h *Host) rolloutLocator(
 	}
 	locator, err := rolloutcapture.Locate(h.codexHome, worker.CodexThreadID, loaded.Path)
 	if err != nil {
-		h.reportError(fmt.Errorf("locate managed rollout before turn start: %w", err))
+		home, homeErr := os.Stat(h.codexHome)
+		if worker.LastBoundTurnID != "" || !errors.Is(err, os.ErrNotExist) ||
+			homeErr != nil || !home.IsDir() {
+			h.reportError(fmt.Errorf("locate managed rollout before turn start: %w", err))
+		}
 		return store.WorkerRolloutLocator{
 			Status: store.WorkerRolloutUnavailable, FailureCode: rolloutLocatorFailureCode,
 		}

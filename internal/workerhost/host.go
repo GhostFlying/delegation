@@ -162,6 +162,7 @@ type Host struct {
 	pruneChangesArtifacts    func(context.Context, int, int64) error
 	artifactRetryMin         time.Duration
 	artifactRetryMax         time.Duration
+	initialRolloutWait       time.Duration
 	waitForRolloutFlush      func(context.Context, time.Duration) error
 	maxWorkerSlots           int
 	codexConfig              map[string]any
@@ -379,6 +380,7 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	host.pruneChangesArtifacts = host.prunePublishedChangesArtifacts
 	host.artifactRetryMin = 100 * time.Millisecond
 	host.artifactRetryMax = 5 * time.Second
+	host.initialRolloutWait = 2 * time.Second
 	host.waitForRolloutFlush = waitForRolloutFlush
 	if err := host.validateStoredAuthority(ctx); err != nil {
 		_ = artifactRoot.Close()

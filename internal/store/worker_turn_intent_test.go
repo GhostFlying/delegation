@@ -224,6 +224,115 @@ func TestWorkerTurnStartIntentPrepareBindAndRecoveryAreIdempotent(t *testing.T) 
 	}
 }
 
+func TestInitialWorkerTurnStartBindAtomicallyAddsMaterializedRollout(t *testing.T) {
+	ctx := context.Background()
+	state, err := OpenPeer(ctx, filepath.Join(t.TempDir(), "state", "peer.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	now := time.Unix(1_500, 0)
+	worker := readyInitialTurnWorker(
+		t,
+		state,
+		"123e4567-e89b-42d3-a456-426614175121",
+		"123e4567-e89b-42d3-a456-426614175122",
+		now,
+	)
+	request := unavailableTurnIntentRequest(
+		worker,
+		"123e4567-e89b-42d3-a456-426614175123",
+		"123e4567-e89b-42d3-a456-426614175124",
+		"",
+	)
+	prepared, replay, err := state.PrepareWorkerTurnStartIntent(
+		ctx, request, now.Add(time.Second),
+	)
+	if err != nil || replay {
+		t.Fatalf("prepare initial intent = %#v, %t, %v", prepared, replay, err)
+	}
+	rollout := availableTurnIntentRequest(
+		t,
+		worker,
+		"123e4567-e89b-42d3-a456-426614175125",
+		"123e4567-e89b-42d3-a456-426614175126",
+		"",
+	).Rollout
+	rollout.Offset = 0
+	turnID := "123e4567-e89b-42d3-a456-426614175127"
+
+	invalidRollout := rollout
+	invalidRollout.Path = "relative-rollout.jsonl"
+	if _, err := state.BindInitialWorkerTurnStartIntent(
+		ctx, worker.WorkerKey, request.IntentID, turnID, invalidRollout, now.Add(2*time.Second),
+	); !errors.Is(err, ErrWorkerTurnStartIntentConflict) {
+		t.Fatalf("invalid initial rollout bind error = %v", err)
+	}
+	badRollout := rollout
+	badRollout.Offset = 1
+	if _, err := state.BindInitialWorkerTurnStartIntent(
+		ctx, worker.WorkerKey, request.IntentID, turnID, badRollout, now.Add(2*time.Second),
+	); !errors.Is(err, ErrWorkerTurnStartIntentConflict) {
+		t.Fatalf("nonzero initial rollout bind error = %v", err)
+	}
+	if stored, err := state.GetWorkerTurnStartIntent(ctx, worker.WorkerKey, request.IntentID); err != nil || stored != prepared {
+		t.Fatalf("failed initial rollout bind changed intent = %#v, %v; want %#v", stored, err, prepared)
+	}
+	if _, err := state.db.ExecContext(ctx, `
+CREATE TRIGGER fail_test_initial_rollout_bind
+BEFORE UPDATE OF state ON worker_turn_start_intents
+WHEN NEW.state = 'bound'
+BEGIN
+	SELECT RAISE(ABORT, 'test initial rollout bind rollback');
+END
+`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.BindInitialWorkerTurnStartIntent(
+		ctx, worker.WorkerKey, request.IntentID, turnID, rollout, now.Add(3*time.Second),
+	); err == nil {
+		t.Fatal("initial rollout bind succeeded despite injected transaction failure")
+	}
+	if stored, err := state.GetWorkerTurnStartIntent(ctx, worker.WorkerKey, request.IntentID); err != nil || stored != prepared {
+		t.Fatalf("initial rollout escaped failed bind transaction = %#v, %v; want %#v", stored, err, prepared)
+	}
+	if stored, err := state.GetWorker(ctx, worker.WorkerKey); err != nil || stored != worker {
+		t.Fatalf("worker escaped failed initial bind transaction = %#v, %v; want %#v", stored, err, worker)
+	}
+	if _, err := state.db.ExecContext(ctx, `DROP TRIGGER fail_test_initial_rollout_bind`); err != nil {
+		t.Fatal(err)
+	}
+
+	bound, err := state.BindInitialWorkerTurnStartIntent(
+		ctx, worker.WorkerKey, request.IntentID, turnID, rollout, now.Add(4*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.Intent.Rollout != rollout || bound.Intent.State != WorkerTurnStartBound ||
+		bound.Worker.Status != WorkerRunning || bound.Worker.ActiveTurnID != turnID {
+		t.Fatalf("initial rollout bind = %#v", bound)
+	}
+	replayed, err := state.BindInitialWorkerTurnStartIntent(
+		ctx, worker.WorkerKey, request.IntentID, turnID, rollout, now.Add(5*time.Second),
+	)
+	if err != nil || !reflect.DeepEqual(replayed, bound) {
+		t.Fatalf("initial rollout bind replay = %#v, %v; want %#v", replayed, err, bound)
+	}
+	changed := rollout
+	changed.Path = filepath.Join(
+		changed.CodexHome,
+		"sessions",
+		"other",
+		"rollout-other-"+worker.CodexThreadID+".jsonl",
+	)
+	if _, err := state.BindInitialWorkerTurnStartIntent(
+		ctx, worker.WorkerKey, request.IntentID, turnID, changed, now.Add(6*time.Second),
+	); !errors.Is(err, ErrWorkerTurnStartIntentConflict) {
+		t.Fatalf("changed initial rollout replay error = %v", err)
+	}
+}
+
 func TestFourWorstCaseWorkspaceTurnIntentsFitPeerResultBudget(t *testing.T) {
 	ctx := context.Background()
 	state, err := OpenPeer(ctx, filepath.Join(t.TempDir(), "state", "peer.sqlite3"))
@@ -306,6 +415,24 @@ func TestWorkerTurnStartIntentFollowupBindCompletesReceiptAtomically(t *testing.
 		now.Add(10*time.Second),
 	); !errors.Is(err, ErrWorkerOperationConflict) {
 		t.Fatalf("external operation completion error = %v, want ErrWorkerOperationConflict", err)
+	}
+	initialOnlyRollout := availableTurnIntentRequest(
+		t,
+		worker,
+		"123e4567-e89b-42d3-a456-426614175208",
+		"123e4567-e89b-42d3-a456-426614175209",
+		operationID,
+	).Rollout
+	initialOnlyRollout.Offset = 0
+	if _, err := state.BindInitialWorkerTurnStartIntent(
+		ctx,
+		worker.WorkerKey,
+		request.IntentID,
+		"123e4567-e89b-42d3-a456-426614175210",
+		initialOnlyRollout,
+		now.Add(10*time.Second),
+	); !errors.Is(err, ErrWorkerTurnStartIntentConflict) {
+		t.Fatalf("followup initial-rollout bind error = %v", err)
 	}
 	if stored, err := state.GetWorkerOperation(
 		ctx, worker.ControllerID, operationID,
