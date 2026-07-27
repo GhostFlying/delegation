@@ -10,11 +10,21 @@ import (
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
 const methodStatus = "bridge.status"
 
 const maximumStatusVersionBytes = 128
+
+type ConnectionState string
+
+const (
+	ConnectionConnecting            ConnectionState = "connecting"
+	ConnectionSynchronizing         ConnectionState = "synchronizing"
+	ConnectionReady                 ConnectionState = "ready"
+	ConnectionStateRecoveryRequired ConnectionState = "stateRecoveryRequired"
+)
 
 type WorkerCounts struct {
 	Total       int64 `json:"total"`
@@ -55,19 +65,23 @@ type ResultCounts struct {
 }
 
 type StatusSnapshot struct {
-	Version              string         `json:"version"`
-	ControllerID         string         `json:"controllerId"`
-	DeviceID             string         `json:"deviceId"`
-	DeviceName           string         `json:"deviceName"`
-	Connected            bool           `json:"connected"`
-	RegistryRevision     uint64         `json:"registryRevision"`
-	WorkerRevision       uint64         `json:"workerRevision"`
-	BrokerWorkerRevision uint64         `json:"brokerWorkerRevision"`
-	WorkerSyncReady      bool           `json:"workerSyncReady"`
-	MaxWorkerSlots       int            `json:"maxWorkerSlots"`
-	Workers              WorkerCounts   `json:"workers"`
-	Artifacts            ArtifactCounts `json:"artifacts"`
-	Results              ResultCounts   `json:"results"`
+	Version                    string          `json:"version"`
+	ControllerID               string          `json:"controllerId"`
+	DeviceID                   string          `json:"deviceId"`
+	DeviceName                 string          `json:"deviceName"`
+	ServiceRunning             bool            `json:"serviceRunning"`
+	ConnectionState            ConnectionState `json:"connectionState"`
+	ConnectionErrorCode        string          `json:"connectionErrorCode"`
+	Connected                  bool            `json:"connected"`
+	RegistryRevision           uint64          `json:"registryRevision"`
+	WorkerRevision             uint64          `json:"workerRevision"`
+	BrokerWorkerRevision       uint64          `json:"brokerWorkerRevision"`
+	RecoveryPeerWorkerRevision uint64          `json:"recoveryPeerWorkerRevision"`
+	WorkerSyncReady            bool            `json:"workerSyncReady"`
+	MaxWorkerSlots             int             `json:"maxWorkerSlots"`
+	Workers                    WorkerCounts    `json:"workers"`
+	Artifacts                  ArtifactCounts  `json:"artifacts"`
+	Results                    ResultCounts    `json:"results"`
 }
 
 func (s StatusSnapshot) Validate() error {
@@ -87,6 +101,9 @@ func (s StatusSnapshot) Validate() error {
 	}
 	if err := control.ValidateDeviceName(s.DeviceName); err != nil {
 		return fmt.Errorf("deviceName: %w", err)
+	}
+	if !s.ServiceRunning {
+		return errors.New("local bridge status must describe a running peer service")
 	}
 	if s.MaxWorkerSlots < 1 || s.MaxWorkerSlots > config.MaximumWorkerSlots ||
 		s.Workers.Occupied > int64(s.MaxWorkerSlots) {
@@ -129,6 +146,30 @@ func (s StatusSnapshot) Validate() error {
 	if s.WorkerSyncReady &&
 		(!s.Connected || s.BrokerWorkerRevision != s.WorkerRevision) {
 		return errors.New("worker synchronization state is inconsistent")
+	}
+	switch s.ConnectionState {
+	case ConnectionConnecting:
+		if s.Connected || s.WorkerSyncReady || s.ConnectionErrorCode == protocol.PeerStateRollbackCode ||
+			s.RecoveryPeerWorkerRevision != 0 {
+			return errors.New("connecting peer status is inconsistent")
+		}
+	case ConnectionSynchronizing:
+		if !s.Connected || s.WorkerSyncReady || s.ConnectionErrorCode != "" ||
+			s.RecoveryPeerWorkerRevision != 0 {
+			return errors.New("synchronizing peer status is inconsistent")
+		}
+	case ConnectionReady:
+		if !s.Connected || !s.WorkerSyncReady || s.ConnectionErrorCode != "" ||
+			s.RecoveryPeerWorkerRevision != 0 {
+			return errors.New("ready peer status is inconsistent")
+		}
+	case ConnectionStateRecoveryRequired:
+		if s.Connected || s.WorkerSyncReady || s.ConnectionErrorCode != protocol.PeerStateRollbackCode ||
+			s.BrokerWorkerRevision == 0 || s.RecoveryPeerWorkerRevision >= s.BrokerWorkerRevision {
+			return errors.New("state-loss recovery status is inconsistent")
+		}
+	default:
+		return errors.New("peer connection state is invalid")
 	}
 	outboxCount, ok := sumCounts(
 		s.Results.OutboxCapturePending, s.Results.OutboxPublishPending,

@@ -243,6 +243,10 @@ func RenderScheduledTask(
       <StopOnIdleEnd>false</StopOnIdleEnd>
       <RestartOnIdle>false</RestartOnIdle>
     </IdleSettings>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>255</Count>
+    </RestartOnFailure>
     <Enabled>false</Enabled>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>

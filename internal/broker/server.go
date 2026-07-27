@@ -611,18 +611,27 @@ func (s *Server) acceptHello(
 		ctx,
 		store.WorkerLifecycleSessionClaim{
 			Session:        current.workerLifecycleSession(),
-			WorkerRevision: hello.WorkerRevision,
+			WorkerRevision: hello.WorkerBaselineRevision,
 		},
 	)
 	if err != nil {
 		s.releaseLease(current)
 		if errors.Is(err, store.ErrWorkerLifecyclePeerBehind) {
-			_ = s.writeError(
+			data, marshalErr := json.Marshal(protocol.PeerStateRollbackErrorData{
+				Code:                 protocol.PeerStateRollbackCode,
+				PeerWorkerRevision:   hello.WorkerBaselineRevision,
+				BrokerWorkerRevision: appliedRevision,
+			})
+			if marshalErr != nil {
+				return nil, &internalError{operation: "encode peer state rollback details", err: marshalErr}
+			}
+			_ = s.writeErrorData(
 				ctx,
 				connection,
 				envelope,
 				protocol.ErrorConflict,
 				"peer worker revision is behind broker state",
+				data,
 			)
 			return nil, err
 		}
@@ -1372,6 +1381,17 @@ func (s *Server) writeError(
 	code int,
 	message string,
 ) error {
+	return s.writeErrorData(ctx, connection, request, code, message, nil)
+}
+
+func (s *Server) writeErrorData(
+	ctx context.Context,
+	connection *websocket.Conn,
+	request protocol.Envelope,
+	code int,
+	message string,
+	data json.RawMessage,
+) error {
 	requestID, err := protocol.NewRequestID(protocol.DirectionBroker)
 	if err != nil {
 		return err
@@ -1383,7 +1403,7 @@ func (s *Server) writeError(
 		ReplyTo:         request.RequestID,
 		ControllerID:    s.controllerID,
 		TreeID:          request.TreeID,
-		Error:           &protocol.Error{Code: code, Message: message},
+		Error:           &protocol.Error{Code: code, Message: message, Data: data},
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/broker"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/localbridge"
@@ -26,6 +28,44 @@ import (
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+func TestReportConnectorErrorDistinguishesTerminalStateRecovery(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		want      string
+		doNotWant string
+	}{
+		{
+			name:      "terminal state recovery",
+			err:       fmt.Errorf("%w: broker cursor is ahead", connector.ErrStateRecoveryRequired),
+			want:      "connector halted; state recovery required",
+			doNotWant: "reconnecting",
+		},
+		{
+			name:      "retryable disconnect",
+			err:       context.DeadlineExceeded,
+			want:      "connector reconnecting",
+			doNotWant: "connector halted",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			write := func(format string, args ...any) error {
+				_, err := fmt.Fprintf(&output, format, args...)
+				return err
+			}
+			if err := reportConnectorError(write, test.err); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(output.String(), test.want) ||
+				strings.Contains(output.String(), test.doNotWant) {
+				t.Fatalf("connector error output = %q", output.String())
+			}
+		})
+	}
+}
 
 const (
 	runtimeWorkerID        = "123e4567-e89b-42d3-a456-426614174202"

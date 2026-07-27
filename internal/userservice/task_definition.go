@@ -149,6 +149,13 @@ func normalizeTaskSettings(settings *taskXMLNode) error {
 		}
 		sortTaskChildren(idleSettings)
 	}
+	restartOnFailure, err := optionalUniqueTaskChild(settings, "RestartOnFailure")
+	if err != nil {
+		return err
+	}
+	if restartOnFailure != nil {
+		sortTaskChildren(restartOnFailure)
+	}
 	sortTaskChildren(settings)
 	return nil
 }

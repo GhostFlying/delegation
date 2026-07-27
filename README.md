@@ -161,8 +161,9 @@ whose effect cannot be reconciled returns
 
 Linux requires a working systemd user manager. macOS uses the current GUI launchd domain and thus
 requires that user to have a GUI login. The Windows task uses an interactive user token and likewise
-requires a logged-in user. Runtime-path updates require explicit native service replacement.
-Windows restart-on-failure hardening is deferred to M4.
+requires a logged-in user. A nonzero Windows service exit is retried once per minute for up to 255
+attempts; a clean exit is not restarted. Runtime-path updates require explicit native service
+replacement.
 Restart the peer service after rotating provider credentials or replacing the environment file.
 
 Inspect either process through its explicit role config:
@@ -173,12 +174,22 @@ plugins/delegation/scripts/delegation-mcp status --config <peer.json> --json
 ```
 
 Peer status is read from the same-user local connector bridge and distinguishes local worker state
-from the revision acknowledged by the broker. Broker status combines durable network counters with
+from the revision acknowledged by the broker. A successful status read proves the peer service is
+running; `connectionState=ready` separately proves that its broker connection and worker lifecycle
+sync are usable. Protocol v3 sends both the pre-recovery startup baseline and the current worker
+revision: the broker uses the baseline for rollback detection but does not make the peer
+dispatchable until it has acknowledged the current revision. A replaced peer database is reported
+as `stateRecoveryRequired` with `peer_worker_revision_rollback` and both the local and broker worker
+revisions instead of as a generic disconnect. Broker status combines durable network counters with
 the current synchronized connection set. It includes registered/online/connected/sync-ready device
 counts, current and lifetime dispatch/turn counts, occupied worker slots, and bounded artifact
 counts. Broker result status separates current delivery/detail retention from lifetime delivered,
 source-acknowledged, source-released, and compacted-detail totals. Neither surface includes prompts,
 messages, Git URLs, workspaces, rollout contents, credentials, or provider configuration.
+
+When status reports `stateRecoveryRequired`, stop the peer service and restore the original peer
+database before restarting it. An automated reset policy is intentionally not defined yet because
+discarding or terminalizing managed worker state requires an explicit product decision.
 
 `setup broker` configures the Web status listener as `127.0.0.1:8788` by default. It serves HTML at
 `/status` and the same snapshot as JSON at `/v1/status`. The listener is separate from the broker

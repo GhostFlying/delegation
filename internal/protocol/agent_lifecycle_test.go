@@ -168,6 +168,11 @@ func TestHelloRejectsUnrepresentableWorkerRevision(t *testing.T) {
 	if err := hello.Validate(); err == nil {
 		t.Fatal("hello accepted an unrepresentable worker revision")
 	}
+	hello.WorkerRevision = 10
+	hello.WorkerBaselineRevision = 11
+	if err := hello.Validate(); err == nil {
+		t.Fatal("hello accepted a baseline revision ahead of the current revision")
+	}
 }
 
 func lifecycleSnapshot(revision uint64) WorkerLifecycleSnapshot {

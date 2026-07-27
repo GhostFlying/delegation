@@ -41,6 +41,7 @@ const (
 var (
 	ErrUnavailable                = errors.New("connector is not connected to the broker")
 	ErrBusy                       = errors.New("connector has too many pending broker calls")
+	ErrStateRecoveryRequired      = errors.New("connector state recovery is required")
 	errWorkspaceCleanupIncomplete = errors.New("workspace transfer cleanup is incomplete")
 )
 
@@ -84,6 +85,10 @@ type WorkerLifecycleSource interface {
 	WorkerRevision() uint64
 	WorkerLifecycleChanges() <-chan struct{}
 	ListWorkerLifecycles(context.Context) ([]protocol.WorkerLifecycleSnapshot, error)
+}
+
+type workerLifecycleStartupSource interface {
+	StartupWorkerRevision() uint64
 }
 
 type ChangesArtifactPublication struct {
@@ -243,17 +248,25 @@ type Options struct {
 }
 
 type Status struct {
-	Connected         bool
-	ConnectionID      string
-	RegistryRevision  uint64
-	HeartbeatInterval time.Duration
-	Features          []string
-	WorkerRevision    uint64
+	Connected                    bool
+	ConnectionID                 string
+	RegistryRevision             uint64
+	HeartbeatInterval            time.Duration
+	Features                     []string
+	WorkerRevision               uint64
+	ConnectionErrorCode          string
+	StateRecoveryRequired        bool
+	RecoveryPeerWorkerRevision   uint64
+	RecoveryBrokerWorkerRevision uint64
 }
 
 type RPCError struct {
 	Code    int
 	Message string
+	Data    json.RawMessage
+
+	helloWorkerBaselineRevision uint64
+	helloResponse               bool
 }
 
 func (e *RPCError) Error() string {
@@ -261,27 +274,29 @@ func (e *RPCError) Error() string {
 }
 
 type Client struct {
-	endpoint          string
-	hello             protocol.Hello
-	token             *tokenfile.Token
-	reconnectMin      time.Duration
-	reconnectMax      time.Duration
-	artifactCallLimit time.Duration
-	dial              DialFunc
-	httpClient        *http.Client
-	reportError       func(error)
-	workerSpawner     WorkerSpawner
-	workerController  WorkerController
-	workerLifecycle   WorkerLifecycleSource
-	changesArtifacts  ChangesArtifactSource
-	artifactChanges   <-chan struct{}
-	resultSource      ResultPackageSource
-	resultChanges     <-chan struct{}
-	workspaceManager  WorkspaceManager
-	workspaceTransfer WorkspaceTransferManager
-	resultPackages    ResultPackageManager
-	running           atomic.Bool
-	cleanupPending    atomic.Bool
+	endpoint                string
+	hello                   protocol.Hello
+	token                   *tokenfile.Token
+	reconnectMin            time.Duration
+	reconnectMax            time.Duration
+	artifactCallLimit       time.Duration
+	dial                    DialFunc
+	httpClient              *http.Client
+	reportError             func(error)
+	workerSpawner           WorkerSpawner
+	workerController        WorkerController
+	workerLifecycle         WorkerLifecycleSource
+	changesArtifacts        ChangesArtifactSource
+	artifactChanges         <-chan struct{}
+	resultSource            ResultPackageSource
+	resultChanges           <-chan struct{}
+	workspaceManager        WorkspaceManager
+	workspaceTransfer       WorkspaceTransferManager
+	resultPackages          ResultPackageManager
+	running                 atomic.Bool
+	cleanupPending          atomic.Bool
+	startupBaselineRevision uint64
+	startupBaselinePending  bool
 
 	mu      sync.RWMutex
 	session *session
@@ -399,6 +414,10 @@ func New(options Options) (*Client, error) {
 	if strings.HasPrefix(endpoint, "ws://") {
 		httpTransport.Proxy = nil
 	}
+	startupBaselineRevision := options.WorkerLifecycleSource.WorkerRevision()
+	if source, ok := options.WorkerLifecycleSource.(workerLifecycleStartupSource); ok {
+		startupBaselineRevision = source.StartupWorkerRevision()
+	}
 	return &Client{
 		endpoint:          endpoint,
 		hello:             hello,
@@ -419,8 +438,10 @@ func New(options Options) (*Client, error) {
 		resultSource:     resultSource,
 		resultChanges:    resultChanges,
 		workspaceManager: options.WorkspaceManager, workspaceTransfer: workspaceTransfer,
-		resultPackages: resultManager,
-		updates:        make(chan struct{}),
+		resultPackages:          resultManager,
+		startupBaselineRevision: startupBaselineRevision,
+		startupBaselinePending:  true,
+		updates:                 make(chan struct{}),
 	}, nil
 }
 
@@ -460,6 +481,12 @@ func (c *Client) Run(ctx context.Context) error {
 			return nil
 		}
 		if err != nil {
+			stateRecoveryRequired := c.recordSessionError(err)
+			if stateRecoveryRequired {
+				c.reportError(fmt.Errorf("%w: %w", ErrStateRecoveryRequired, err))
+				<-ctx.Done()
+				return nil
+			}
 			c.reportError(err)
 		}
 		if errors.Is(err, errChangesArtifactNotificationsClosed) {
@@ -585,6 +612,7 @@ func (c *Client) runSession(ctx context.Context) (healthy bool, returnErr error)
 		}
 	}()
 	hello := c.hello
+	hello.WorkerBaselineRevision = c.nextHelloWorkerBaselineRevision()
 	hello.WorkerRevision = c.workerLifecycle.WorkerRevision()
 	if err := hello.Validate(); err != nil {
 		current.close(err)
@@ -603,6 +631,7 @@ func (c *Client) runSession(ctx context.Context) (healthy bool, returnErr error)
 		current.close(err)
 		return false, err
 	}
+	c.acceptStartupWorkerBaseline(hello.WorkerBaselineRevision)
 	helloResult.WorkerAppliedRevision = appliedRevision
 	c.publish(current, helloResult)
 	go current.heartbeatLoop(helloResult.HeartbeatIntervalMS)
@@ -646,6 +675,47 @@ func (c *Client) publish(current *session, result protocol.HelloResult) {
 		WorkerRevision:    result.WorkerAppliedRevision,
 	}
 	c.notifyLocked()
+	c.mu.Unlock()
+}
+
+func (c *Client) recordSessionError(sessionErr error) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var rpcError *RPCError
+	if errors.As(sessionErr, &rpcError) && rpcError.Code == protocol.ErrorConflict {
+		var details protocol.PeerStateRollbackErrorData
+		if rpcError.helloResponse && decodeResult(rpcError.Data, &details) == nil && details.Validate() == nil &&
+			details.PeerWorkerRevision == rpcError.helloWorkerBaselineRevision {
+			c.status.ConnectionErrorCode = details.Code
+			c.status.StateRecoveryRequired = true
+			c.status.RecoveryPeerWorkerRevision = details.PeerWorkerRevision
+			c.status.RecoveryBrokerWorkerRevision = details.BrokerWorkerRevision
+			c.notifyLocked()
+			return true
+		}
+	}
+	if c.status.StateRecoveryRequired {
+		return false
+	}
+	c.status.ConnectionErrorCode = "broker_unavailable"
+	c.notifyLocked()
+	return false
+}
+
+func (c *Client) nextHelloWorkerBaselineRevision() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.startupBaselinePending {
+		return c.startupBaselineRevision
+	}
+	return c.workerLifecycle.WorkerRevision()
+}
+
+func (c *Client) acceptStartupWorkerBaseline(revision uint64) {
+	c.mu.Lock()
+	if c.startupBaselinePending && revision == c.startupBaselineRevision {
+		c.startupBaselinePending = false
+	}
 	c.mu.Unlock()
 }
 

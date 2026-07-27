@@ -35,16 +35,18 @@ func TestEnvelopeAcceptsBoundRootRequest(t *testing.T) {
 }
 
 func TestEnvelopeRejectsUnsupportedProtocolVersion(t *testing.T) {
-	envelope := Envelope{
-		ProtocolVersion: Version + 1,
-		Kind:            KindRequest,
-		RequestID:       requestID,
-		Method:          MethodHeartbeat,
-		ControllerID:    testControllerID,
-		Payload:         json.RawMessage(`{}`),
-	}
-	if err := envelope.Validate(); err == nil {
-		t.Fatal("Validate accepted an unsupported protocol version")
+	for _, version := range []int{Version - 1, Version + 1} {
+		envelope := Envelope{
+			ProtocolVersion: version,
+			Kind:            KindRequest,
+			RequestID:       requestID,
+			Method:          MethodHeartbeat,
+			ControllerID:    testControllerID,
+			Payload:         json.RawMessage(`{}`),
+		}
+		if err := envelope.Validate(); err == nil {
+			t.Fatalf("Validate accepted unsupported protocol version %d", version)
+		}
 	}
 }
 

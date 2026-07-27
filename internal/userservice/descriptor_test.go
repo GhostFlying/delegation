@@ -100,6 +100,8 @@ func TestRenderScheduledTaskProducesDisabledValidXML(t *testing.T) {
 		`<LogonType>InteractiveToken</LogonType>`,
 		`<URI>\Delegation Peer</URI>`,
 		`<UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>`,
+		`<Interval>PT1M</Interval>`,
+		`<Count>255</Count>`,
 		"<Command>C:\\Program Files\\Delegation \u5de5\u5177 &amp; Tools\\delegation.exe</Command>",
 		"<Arguments>ESC[service] ESC[run] ESC[--config] ESC[C:\\Users\\test\\\u914d\u7f6e One.json] ESC[--environment-file] ESC[C:\\Users\\test\\Provider \u5bc6\u94a5.env]</Arguments>",
 		MarkerPeer,

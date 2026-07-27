@@ -12,6 +12,7 @@ import (
 type managedWorkerLifecycleHost interface {
 	Changes() <-chan struct{}
 	ListWorkers(context.Context) ([]store.WorkerReservation, error)
+	StartupWorkerRevision() uint64
 	WorkerRevision() uint64
 }
 
@@ -26,6 +27,13 @@ func (s managedWorkerLifecycleSource) WorkerRevision() uint64 {
 		return 0
 	}
 	return s.host.WorkerRevision()
+}
+
+func (s managedWorkerLifecycleSource) StartupWorkerRevision() uint64 {
+	if s.host == nil {
+		return 0
+	}
+	return s.host.StartupWorkerRevision()
 }
 
 func (s managedWorkerLifecycleSource) WorkerLifecycleChanges() <-chan struct{} {

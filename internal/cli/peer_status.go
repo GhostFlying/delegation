@@ -52,17 +52,35 @@ func (p peerLocalStatusProvider) LocalStatus(ctx context.Context) (localbridge.S
 		return localbridge.StatusSnapshot{}, fmt.Errorf("read durable peer status: %w", err)
 	}
 	connected := p.client.Status()
+	brokerWorkerRevision := connected.WorkerRevision
+	connectionState := localbridge.ConnectionConnecting
+	connectionErrorCode := connected.ConnectionErrorCode
+	workerSyncReady := connected.Connected && connected.WorkerRevision == durable.WorkerRevision
+	if connected.StateRecoveryRequired {
+		brokerWorkerRevision = connected.RecoveryBrokerWorkerRevision
+		connectionState = localbridge.ConnectionStateRecoveryRequired
+	} else if workerSyncReady {
+		connectionState = localbridge.ConnectionReady
+		connectionErrorCode = ""
+	} else if connected.Connected {
+		connectionState = localbridge.ConnectionSynchronizing
+		connectionErrorCode = ""
+	}
 	status := localbridge.StatusSnapshot{
-		Version:              buildinfo.Version,
-		ControllerID:         p.controllerID,
-		DeviceID:             p.deviceID,
-		DeviceName:           p.deviceName,
-		Connected:            connected.Connected,
-		RegistryRevision:     connected.RegistryRevision,
-		WorkerRevision:       durable.WorkerRevision,
-		BrokerWorkerRevision: connected.WorkerRevision,
-		WorkerSyncReady:      connected.Connected && connected.WorkerRevision == durable.WorkerRevision,
-		MaxWorkerSlots:       p.maxWorkerSlots,
+		Version:                    buildinfo.Version,
+		ControllerID:               p.controllerID,
+		DeviceID:                   p.deviceID,
+		DeviceName:                 p.deviceName,
+		ServiceRunning:             true,
+		ConnectionState:            connectionState,
+		ConnectionErrorCode:        connectionErrorCode,
+		Connected:                  connected.Connected,
+		RegistryRevision:           connected.RegistryRevision,
+		WorkerRevision:             durable.WorkerRevision,
+		BrokerWorkerRevision:       brokerWorkerRevision,
+		RecoveryPeerWorkerRevision: connected.RecoveryPeerWorkerRevision,
+		WorkerSyncReady:            workerSyncReady,
+		MaxWorkerSlots:             p.maxWorkerSlots,
 		Workers: localbridge.WorkerCounts{
 			Total:       int64(durable.Workers.Total),
 			Reserved:    int64(durable.Workers.Reserved),
@@ -196,11 +214,19 @@ func writePeerStatus(
 		fmt.Fprintln(&rendered, "delegation peer status")
 		fmt.Fprintf(&rendered, "version: %s\n", status.Version)
 		fmt.Fprintf(&rendered, "device: %s\n", status.DeviceName)
+		fmt.Fprintf(&rendered, "service running: %t\n", status.ServiceRunning)
+		fmt.Fprintf(&rendered, "broker connection: %s\n", status.ConnectionState)
+		if status.ConnectionErrorCode != "" {
+			fmt.Fprintf(&rendered, "connection error: %s\n", status.ConnectionErrorCode)
+		}
 		fmt.Fprintf(&rendered, "connected: %t\n", status.Connected)
 		fmt.Fprintf(&rendered, "worker sync ready: %t\n", status.WorkerSyncReady)
 		fmt.Fprintf(&rendered, "registry revision: %d\n", status.RegistryRevision)
 		fmt.Fprintf(&rendered, "worker revision: %d\n", status.WorkerRevision)
 		fmt.Fprintf(&rendered, "broker worker revision: %d\n", status.BrokerWorkerRevision)
+		if status.ConnectionState == localbridge.ConnectionStateRecoveryRequired {
+			fmt.Fprintf(&rendered, "rejected peer worker revision: %d\n", status.RecoveryPeerWorkerRevision)
+		}
 		fmt.Fprintf(
 			&rendered,
 			"worker slots: %d/%d occupied\n",

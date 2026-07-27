@@ -144,10 +144,75 @@ func TestConnectorDoesNotPublishReadyBeforeInitialLifecycleAck(t *testing.T) {
 	}
 }
 
-func TestConnectorReconnectUsesDurableLifecycleCursorAfterLostAck(t *testing.T) {
-	source := newLifecycleTestSource(1, []protocol.WorkerLifecycleSnapshot{
-		lifecycleSnapshot(connectorTestWorkerID, 1, protocol.WorkerLifecycleRunning),
-	})
+func TestConnectorUsesStartupBaselineButSynchronizesCurrentRevision(t *testing.T) {
+	source := &startupRollbackLifecycleSource{
+		lifecycleTestSource: newLifecycleTestSource(11, nil),
+		startupRevision:     10,
+	}
+	syncSeen := make(chan protocol.SyncWorkerLifecycleParams, 1)
+	releaseAck := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseAck:
+		default:
+			close(releaseAck)
+		}
+	}()
+	hold := make(chan struct{})
+	server := newLifecycleBroker(t, func(connection *websocket.Conn, hello protocol.Hello) {
+		if hello.WorkerBaselineRevision != 10 || hello.WorkerRevision != 11 {
+			t.Errorf("hello revisions = baseline %d, current %d", hello.WorkerBaselineRevision, hello.WorkerRevision)
+		}
+		request := readTestEnvelope(t, connection)
+		params, err := protocol.DecodePayload[protocol.SyncWorkerLifecycleParams](request.Payload)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		syncSeen <- params
+		<-releaseAck
+		writeTestResult(t, connection, request, protocol.SyncWorkerLifecycleResult{AppliedRevision: 11})
+		<-hold
+	}, 10)
+	defer server.Close()
+	defer close(hold)
+	client := newLifecycleClient(t, websocketURL(server.URL), source)
+	runContext, cancelRun := context.WithCancel(context.Background())
+	done := runClient(client, runContext)
+
+	select {
+	case params := <-syncSeen:
+		if params.BaseRevision != 10 || params.ThroughRevision != 11 || !params.Complete ||
+			len(params.Workers) != 0 {
+			t.Fatalf("initial lifecycle page = %#v", params)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial lifecycle sync did not reach broker")
+	}
+	notReadyContext, cancelNotReady := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	err := client.WaitReady(notReadyContext)
+	cancelNotReady()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("connector published before current revision ACK: %v", err)
+	}
+	close(releaseAck)
+	waitReady(t, client)
+	if status := client.Status(); status.WorkerRevision != 11 {
+		t.Fatalf("connector lifecycle status = %#v", status)
+	}
+	cancelRun()
+	if err := waitClient(done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConnectorReconnectRetainsStartupBaselineUntilLifecycleAck(t *testing.T) {
+	source := &startupRollbackLifecycleSource{
+		lifecycleTestSource: newLifecycleTestSource(1, []protocol.WorkerLifecycleSnapshot{
+			lifecycleSnapshot(connectorTestWorkerID, 1, protocol.WorkerLifecycleRunning),
+		}),
+		startupRevision: 0,
+	}
 	firstSync := make(chan struct{})
 	secondHello := make(chan struct{})
 	hold := make(chan struct{})
@@ -158,22 +223,29 @@ func TestConnectorReconnectUsesDurableLifecycleCursorAfterLostAck(t *testing.T) 
 		hello protocol.Hello,
 	) {
 		sequence := connections.Add(1)
-		if hello.WorkerRevision != 1 {
-			t.Errorf("connection %d worker revision = %d", sequence, hello.WorkerRevision)
+		if hello.WorkerBaselineRevision != 0 || hello.WorkerRevision != 1 {
+			t.Errorf(
+				"connection %d revisions = baseline %d, current %d",
+				sequence,
+				hello.WorkerBaselineRevision,
+				hello.WorkerRevision,
+			)
 		}
-		applied := uint64(0)
-		if sequence > 1 {
-			applied = 1
+		writeLifecycleHello(t, connection, helloRequest, 0)
+		request := readTestEnvelope(t, connection)
+		params, err := protocol.DecodePayload[protocol.SyncWorkerLifecycleParams](request.Payload)
+		if err != nil {
+			t.Error(err)
+			return
 		}
-		writeLifecycleHello(t, connection, helloRequest, applied)
+		if params.BaseRevision != 0 || params.ThroughRevision != 1 {
+			t.Errorf("connection %d lifecycle page = %#v", sequence, params)
+		}
 		if sequence == 1 {
-			request := readTestEnvelope(t, connection)
-			if request.Method != protocol.MethodSyncWorkerLifecycle {
-				t.Errorf("first post-hello method = %q", request.Method)
-			}
 			close(firstSync)
 			return
 		}
+		writeTestResult(t, connection, request, protocol.SyncWorkerLifecycleResult{AppliedRevision: 1})
 		close(secondHello)
 		<-hold
 	})

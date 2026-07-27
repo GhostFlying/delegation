@@ -25,6 +25,15 @@ func (h *Host) WorkerRevision() uint64 {
 	return h.workerRevision
 }
 
+// StartupWorkerRevision returns the durable worker cursor observed before
+// startup recovery could allocate new revisions. The connector uses it for the
+// first broker comparison so recovery work cannot conceal a restored database.
+func (h *Host) StartupWorkerRevision() uint64 {
+	h.changesMu.Lock()
+	defer h.changesMu.Unlock()
+	return h.startupWorkerRevision
+}
+
 func (h *Host) signalWorkerChange() {
 	select {
 	case h.changes <- struct{}{}:
@@ -59,13 +68,14 @@ func (h *Host) recordWorkerRecovery(
 }
 
 func (h *Host) seedWorkerRevision(ctx context.Context) error {
-	workers, err := h.state.ListWorkers(ctx)
+	snapshot, err := h.state.ReadPeerStatusSnapshot(ctx, h.controllerID, h.deviceID)
 	if err != nil {
 		return err
 	}
-	for _, worker := range workers {
-		h.advanceWorkerRevision(worker.Revision)
-	}
+	h.advanceWorkerRevision(snapshot.WorkerRevision)
+	h.changesMu.Lock()
+	h.startupWorkerRevision = h.workerRevision
+	h.changesMu.Unlock()
 	return nil
 }
 
