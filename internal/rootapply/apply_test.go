@@ -310,6 +310,65 @@ func TestApplyAgentChangesHasEquivalentSelfAndRemoteSemantics(t *testing.T) {
 	}
 }
 
+func TestApplyAgentChangesAcceptsFullHistoryTransportWarning(t *testing.T) {
+	fixture := newRootApplyFixture(t, nil, func(t *testing.T, _, root string) {
+		writeApplyFile(t, filepath.Join(root, "full-fallback.txt"), "worker result\n")
+	}, applyTestPeerDeviceID)
+	fixture.packages.manifest.Workspace.BaseWarnings = []string{
+		protocol.WorkspaceWarningFullHistoryFallback,
+	}
+	_, descriptor, err := protocol.EncodeResultManifest(fixture.packages.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.authorization.ManifestSHA256 = descriptor.SHA256
+	result := fixture.apply(t)
+	if result.Outcome != localbridge.ApplyAgentChangesApplied || result.FailureCode != "" {
+		t.Fatalf("full fallback apply = %#v", result)
+	}
+	fixture.assertDesired(t)
+}
+
+func TestApplyAgentChangesRejectsContentWarningMismatchWithFullHistoryWarning(t *testing.T) {
+	tests := []struct {
+		name     string
+		warnings []string
+	}{
+		{
+			name: "lfs",
+			warnings: []string{
+				protocol.WorkspaceWarningLFSPayloadNotTransferred,
+				protocol.WorkspaceWarningFullHistoryFallback,
+			},
+		},
+		{
+			name: "submodule",
+			warnings: []string{
+				protocol.WorkspaceWarningFullHistoryFallback,
+				protocol.WorkspaceWarningSubmoduleRepositoryNotTransferred,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRootApplyFixture(t, nil, func(t *testing.T, _, root string) {
+				writeApplyFile(t, filepath.Join(root, "warning-mismatch.txt"), "worker result\n")
+			}, applyTestPeerDeviceID)
+			fixture.packages.manifest.Workspace.BaseWarnings = test.warnings
+			_, descriptor, err := protocol.EncodeResultManifest(fixture.packages.manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.authorization.ManifestSHA256 = descriptor.SHA256
+			result := fixture.apply(t)
+			if result.Outcome != localbridge.ApplyAgentChangesNeedsResolution ||
+				result.FailureCode != "root_workspace_conflict" {
+				t.Fatalf("warning mismatch apply = %#v", result)
+			}
+		})
+	}
+}
+
 func TestApplyAgentChangesSupportsLinkedWorktreeWithoutMovingHeadOrRef(t *testing.T) {
 	fixture := newRootApplyFixtureMode(t, nil, func(t *testing.T, git, root string) {
 		writeApplyFile(t, filepath.Join(root, "linked-commit.txt"), "linked commit\n")

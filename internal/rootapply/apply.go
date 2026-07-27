@@ -432,6 +432,12 @@ func (m *Manager) inspectBase(
 	if err != nil {
 		return gitworkspace.Repository{}, false, err
 	}
+	sourceWarnings := slices.DeleteFunc(
+		slices.Clone(workspace.BaseWarnings),
+		func(warning string) bool {
+			return warning == protocol.WorkspaceWarningFullHistoryFallback
+		},
+	)
 	matches := record.Authorization != nil && record.AuthorizationParams != nil &&
 		record.AuthorizationParams.GitURL == repository.Manifest.GitURL &&
 		record.AuthorizationParams.SourcePathSHA256 == hashPath(sourcePath) &&
@@ -441,7 +447,7 @@ func (m *Manager) inspectBase(
 		repository.Manifest.ObjectFormat == workspace.ObjectFormat &&
 		repository.Manifest.SourceSnapshotHash == workspace.BaseSnapshotHash &&
 		repository.Manifest.Clean == workspace.BaseClean &&
-		slices.Equal(repository.Manifest.Warnings, workspace.BaseWarnings)
+		slices.Equal(repository.Manifest.Warnings, sourceWarnings)
 	return repository, matches, nil
 }
 
