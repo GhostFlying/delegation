@@ -174,6 +174,9 @@ func TestAgentWaitReturnsWorkerMessageWithIndependentCursors(t *testing.T) {
 
 func TestAgentWaitPaginatesDeliveredResultsWithIndependentCursor(t *testing.T) {
 	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	// The test seeds delivered rows directly; keep relay traffic off its raw connection.
+	harness.server.resultRelays.stop()
+	harness.server.resultRelays.waitForShutdown()
 	rootConnection, _, err := dialBroker(harness, nil)
 	if err != nil {
 		t.Fatal(err)

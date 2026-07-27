@@ -87,7 +87,7 @@ func (p *serializedWorkspacePeer) snapshotConcurrency() (int, int) {
 }
 
 func TestWorkspaceSyncSingleFlightWaitsForCanceledTargetCleanup(t *testing.T) {
-	harness := newBrokerHarness(t, config.AuthModeNone, 5*time.Second)
+	harness := newBrokerHarness(t, config.AuthModeNone, workspaceRPCCancellationHeartbeatInterval)
 	gitURL := "ssh://git@example.invalid/repository.git"
 	sourceManager := &recordingWorkspacePeer{
 		deviceID: brokerTestDeviceID,

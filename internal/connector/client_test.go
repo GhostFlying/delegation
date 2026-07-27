@@ -332,6 +332,7 @@ func TestCanceledAgentWaitSendsCancellationWithoutClosingConnector(t *testing.T)
 	case <-time.After(2 * time.Second):
 		t.Fatal("fake broker did not receive agent wait")
 	}
+	waitForCancellableCalls(t, client, 1)
 	cancelWait()
 	if err := <-waitDone; !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled agent wait error = %v", err)
@@ -413,6 +414,7 @@ func TestCanceledWorkspaceSyncSendsCancellationWithoutClosingConnector(t *testin
 	case <-time.After(2 * time.Second):
 		t.Fatal("fake broker did not receive workspace sync")
 	}
+	waitForCancellableCalls(t, client, 1)
 	cancelCall()
 	if err := <-callDone; !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled workspace sync error = %v", err)
