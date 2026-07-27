@@ -170,6 +170,10 @@ func incompleteRecoveryRollouts(
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	resolvedCodexHome, err := filepath.EvalSymlinks(codexHome)
+	if err != nil {
+		t.Fatal(err)
+	}
 	intents := make([]store.WorkerTurnStartIntent, 0, count)
 	terminals := make(map[string]string, count)
 	for range count {
@@ -187,14 +191,18 @@ func incompleteRecoveryRollouts(
 		); err != nil {
 			t.Fatal(err)
 		}
+		resolvedPath, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatal(err)
+		}
 		intents = append(intents, store.WorkerTurnStartIntent{
 			IntentID: newTestID(), ManagedThreadID: threadID, TurnID: turnID,
 			Rollout: store.WorkerRolloutLocator{
-				Status: store.WorkerRolloutAvailable, CodexHome: codexHome,
-				Path: path, Offset: int64(len(prefix)),
+				Status: store.WorkerRolloutAvailable, CodexHome: resolvedCodexHome,
+				Path: resolvedPath, Offset: int64(len(prefix)),
 			},
 		})
-		terminals[path] = testManagedRolloutLine("task_complete", turnID)
+		terminals[resolvedPath] = testManagedRolloutLine("task_complete", turnID)
 	}
 	return intents, terminals
 }

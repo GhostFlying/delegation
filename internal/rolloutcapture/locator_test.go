@@ -25,7 +25,11 @@ func TestLocateManagedRollout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Locator{Path: path, Offset: 8}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Locator{Path: resolvedPath, Offset: 8}
 	if got != want {
 		t.Fatalf("locator = %#v, want %#v", got, want)
 	}
@@ -57,8 +61,46 @@ func TestOpenValidatedKeepsValidatedHandleAfterPathReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "validated\n" || locator.Path != path || locator.Offset != int64(len(data)) {
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "validated\n" || locator.Path != resolvedPath || locator.Offset != int64(len(data)) {
 		t.Fatalf("opened rollout = %q, %#v", data, locator)
+	}
+}
+
+func TestLocateAcceptsAliasAboveManagedHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires optional Windows privileges")
+	}
+	realParent := t.TempDir()
+	aliasParent := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realParent, aliasParent); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(realParent, "codex-home")
+	realPath := filepath.Join(
+		home, "sessions", "rollout-2026-07-26T00-00-00-"+testThreadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(realPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(realPath, []byte("rollout\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aliasPath := filepath.Join(aliasParent, "codex-home", "sessions", filepath.Base(realPath))
+
+	got, err := Locate(home, testThreadID, aliasPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(realPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != (Locator{Path: resolvedPath, Offset: 8}) {
+		t.Fatalf("locator = %#v", got)
 	}
 }
 
@@ -90,7 +132,7 @@ func TestLocateRejectsSymbolicLink(t *testing.T) {
 		t.Skip("symlink creation requires optional Windows privileges")
 	}
 	home := t.TempDir()
-	realDirectory := filepath.Join(home, "real")
+	realDirectory := filepath.Join(home, "sessions", "real")
 	if err := os.MkdirAll(realDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -98,11 +140,11 @@ func TestLocateRejectsSymbolicLink(t *testing.T) {
 	if err := os.WriteFile(realPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sessions := filepath.Join(home, "sessions")
-	if err := os.Symlink(realDirectory, sessions); err != nil {
+	alias := filepath.Join(home, "sessions", "alias")
+	if err := os.Symlink(realDirectory, alias); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Locate(home, testThreadID, filepath.Join(sessions, filepath.Base(realPath))); err == nil {
+	if _, err := Locate(home, testThreadID, filepath.Join(alias, filepath.Base(realPath))); err == nil {
 		t.Fatal("Locate accepted a symbolic-link component")
 	}
 }

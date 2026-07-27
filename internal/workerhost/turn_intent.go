@@ -352,8 +352,16 @@ func (h *Host) refreshInitialRolloutPathAfterTurnStart(
 	}
 	deadline := time.Now().Add(h.initialRolloutWait)
 	wait := 25 * time.Millisecond
+	var lastReadErr error
+	reportLastReadError := func() {
+		if lastReadErr != nil {
+			h.reportError(fmt.Errorf("read initial managed rollout path after turn start: %w", lastReadErr))
+			lastReadErr = nil
+		}
+	}
 	for {
 		if !time.Now().Before(deadline) {
+			reportLastReadError()
 			return nil
 		}
 		var read threadResult
@@ -369,29 +377,31 @@ func (h *Host) refreshInitialRolloutPathAfterTurnStart(
 					return fmt.Errorf("read initial managed rollout path after turn start: %w", err)
 				default:
 				}
+				reportLastReadError()
 				return nil
 			}
-			if !h.shouldRetire(client, err) {
-				h.reportError(fmt.Errorf("read initial managed rollout path after turn start: %w", err))
-				h.markLoaded(client, worker.WorkerKey, worker.CodexThreadID, nil)
-				return nil
+			if h.shouldRetire(client, err) {
+				return fmt.Errorf("read initial managed rollout path after turn start: %w", err)
 			}
-			return fmt.Errorf("read initial managed rollout path after turn start: %w", err)
-		}
-		if read.Thread.ID != worker.CodexThreadID {
-			return errors.New("app-server read an unexpected initial worker thread after turn start")
-		}
-		h.markLoaded(client, worker.WorkerKey, worker.CodexThreadID, read.Thread.Path)
-		if read.Thread.Path != nil {
-			if _, err := rolloutcapture.Locate(
-				h.codexHome, worker.CodexThreadID, *read.Thread.Path,
-			); err == nil {
-				return nil
+			lastReadErr = err
+		} else {
+			lastReadErr = nil
+			if read.Thread.ID != worker.CodexThreadID {
+				return errors.New("app-server read an unexpected initial worker thread after turn start")
+			}
+			h.markLoaded(client, worker.WorkerKey, worker.CodexThreadID, read.Thread.Path)
+			if read.Thread.Path != nil {
+				if _, err := rolloutcapture.Locate(
+					h.codexHome, worker.CodexThreadID, *read.Thread.Path,
+				); err == nil {
+					return nil
+				}
 			}
 		}
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
+			reportLastReadError()
 			return nil
 		}
 		if remaining < wait {
