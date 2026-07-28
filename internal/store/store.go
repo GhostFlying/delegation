@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
@@ -298,11 +299,18 @@ func withImmediateTransaction(
 	}
 	defer connection.Close()
 	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		discardStateConnection(connection)
 		return fmt.Errorf("begin %s state transaction: %w", description, err)
 	}
 	defer func() {
 		if err != nil {
-			_, _ = connection.ExecContext(context.Background(), "ROLLBACK")
+			if _, rollbackErr := connection.ExecContext(context.Background(), "ROLLBACK"); rollbackErr != nil {
+				discardStateConnection(connection)
+				err = errors.Join(
+					err,
+					fmt.Errorf("rollback %s state transaction: %w", description, rollbackErr),
+				)
+			}
 		}
 	}()
 	if err := operation(connection); err != nil {
@@ -312,4 +320,10 @@ func withImmediateTransaction(
 		return fmt.Errorf("commit %s state transaction: %w", description, err)
 	}
 	return nil
+}
+
+func discardStateConnection(connection *sql.Conn) {
+	_ = connection.Raw(func(any) error {
+		return driver.ErrBadConn
+	})
 }
