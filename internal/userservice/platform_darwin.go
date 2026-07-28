@@ -10,6 +10,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+)
+
+const (
+	launchAgentUnloadTimeout = 5 * time.Second
+	launchAgentUnloadPoll    = 50 * time.Millisecond
+)
+
+var (
+	errLaunchAgentIdentityChangedDuringUnload = errors.New("LaunchAgent identity changed during unload")
+	errManagedLaunchAgentRemainedLoaded       = errors.New("managed LaunchAgent remained loaded after bootout")
 )
 
 var runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
@@ -75,21 +86,17 @@ func platformActivate(result Result, invocation Invocation) (Result, error) {
 	}
 	if loaded {
 		bootedOut, bootoutErr := runLaunchctl("bootout", target)
-		reconciled, stillLoaded, printErr := printLaunchAgent(target)
-		if printErr != nil {
-			result.State = StateIndeterminate
-			return result, errors.Join(bootoutErr, commandFailure("unload LaunchAgent", bootedOut), printErr)
-		}
-		if stillLoaded {
-			if filepath.Clean(reconciled.Path) != filepath.Clean(result.Artifact) {
+		unloadErr := waitForLaunchAgentUnloaded(target, result.Artifact)
+		if unloadErr != nil {
+			if errors.Is(unloadErr, errLaunchAgentIdentityChangedDuringUnload) {
 				result.State = StateForeignConflict
-				return result, errors.Join(bootoutErr, errors.New("LaunchAgent identity changed during unload"))
+			} else {
+				result.State = StateIndeterminate
 			}
-			result.State = StateIndeterminate
 			return result, errors.Join(
 				bootoutErr,
 				commandFailure("unload LaunchAgent", bootedOut),
-				errors.New("managed LaunchAgent remained loaded after bootout"),
+				unloadErr,
 			)
 		}
 	}
@@ -136,6 +143,26 @@ func platformActivate(result Result, invocation Invocation) (Result, error) {
 		printErr,
 		errors.New("LaunchAgent did not reach the managed running state"),
 	)
+}
+
+func waitForLaunchAgentUnloaded(target, artifact string) error {
+	deadline := time.Now().Add(launchAgentUnloadTimeout)
+	for {
+		status, loaded, err := printLaunchAgent(target)
+		if err != nil {
+			return err
+		}
+		if !loaded {
+			return nil
+		}
+		if filepath.Clean(status.Path) != filepath.Clean(artifact) {
+			return errLaunchAgentIdentityChangedDuringUnload
+		}
+		if time.Now().After(deadline) {
+			return errManagedLaunchAgentRemainedLoaded
+		}
+		time.Sleep(launchAgentUnloadPoll)
+	}
 }
 
 func launchAgentDefinitionMatches(result Result, invocation Invocation) (bool, error) {
