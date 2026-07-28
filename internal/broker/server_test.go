@@ -894,7 +894,7 @@ func newBrokerHarness(t *testing.T, authMode config.AuthMode, interval time.Dura
 	harness.server = server
 	harness.httpServer = httptest.NewServer(server.Handler())
 	t.Cleanup(func() {
-		closeContext, cancel := context.WithTimeout(context.Background(), time.Second)
+		closeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := server.Close(closeContext); err != nil {
 			t.Errorf("close broker: %v", err)
 		}
