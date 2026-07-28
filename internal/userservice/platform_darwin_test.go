@@ -111,11 +111,14 @@ func TestDarwinInstallAcceptsOnlyManagedLoadedPath(t *testing.T) {
 	loaded := true
 	bootedOut := false
 	bootstrapped := false
+	staleUnloadPrints := 0
+	unloadPrints := 0
 	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
 		switch args[0] {
 		case "bootout":
 			loaded = false
 			bootedOut = true
+			staleUnloadPrints = 1
 			return userServiceCommandResult{}, nil
 		case "bootstrap":
 			loaded = true
@@ -125,7 +128,14 @@ func TestDarwinInstallAcceptsOnlyManagedLoadedPath(t *testing.T) {
 		if args[0] != "print" || len(args) != 2 || !strings.Contains(args[1], LaunchAgentPeerName) {
 			return userServiceCommandResult{}, nil
 		}
+		if staleUnloadPrints > 0 {
+			staleUnloadPrints--
+			unloadPrints++
+			path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
+			return launchctlTestStatus(path, "running"), nil
+		}
 		if !loaded {
+			unloadPrints++
 			return userServiceCommandResult{ExitCode: 113}, nil
 		}
 		path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
@@ -139,14 +149,46 @@ func TestDarwinInstallAcceptsOnlyManagedLoadedPath(t *testing.T) {
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() loaded managed path = %#v, %v", result, err)
 	}
-	if !bootedOut || !bootstrapped {
-		t.Fatalf("loaded LaunchAgent was not reloaded: bootout=%v bootstrap=%v", bootedOut, bootstrapped)
+	if !bootedOut || !bootstrapped || unloadPrints != 2 {
+		t.Fatalf(
+			"loaded LaunchAgent was not reconciled: bootout=%v bootstrap=%v unloadPrints=%d",
+			bootedOut,
+			bootstrapped,
+			unloadPrints,
+		)
 	}
 	foreign = true
 	loaded = true
 	result, err = Install(ServiceRolePeer, invocation)
 	if err == nil || result.State != StateForeignConflict {
 		t.Fatalf("Install() loaded foreign path = %#v, %v", result, err)
+	}
+}
+
+func TestDarwinInstallRejectsIdentityChangeDuringUnload(t *testing.T) {
+	stubDarwinServiceReadiness(t, nil)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	originalRunner := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = originalRunner })
+	targetPrints := 0
+	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
+		if args[0] == "print" && len(args) == 2 && strings.Contains(args[1], LaunchAgentPeerName) {
+			targetPrints++
+			path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
+			if targetPrints > 1 {
+				path = "/tmp/foreign.plist"
+			}
+			return launchctlTestStatus(path, "running"), nil
+		}
+		return userServiceCommandResult{}, nil
+	}
+	result, err := Install(ServiceRolePeer, testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"),
+	))
+	if err == nil || result.State != StateForeignConflict ||
+		!errors.Is(err, errLaunchAgentIdentityChangedDuringUnload) {
+		t.Fatalf("Install() = %#v, %v", result, err)
 	}
 }
 
