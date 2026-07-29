@@ -16,16 +16,16 @@ import (
 )
 
 const (
-	ToolSendMessage    = "send_message"
-	ToolWaitAgent      = "wait_agent"
-	maximumWaitSeconds = 25
-	maximumMailboxPage = 1
+	ToolSendUpstreamMessage    = "send_upstream_message"
+	ToolWaitForUpstreamMessage = "wait_for_upstream_message"
+	maximumWaitSeconds         = 25
+	maximumMailboxPage         = 1
 	// A page contains one message capped at 1 KiB. This larger encoded bound
 	// only accommodates worst-case JSON escaping of that same bounded text.
 	maximumWaitOutput    = 8 * 1024
 	bridgeCallTimeout    = 30 * time.Second
 	lowercaseUUIDPattern = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-	serverInstructions   = "You are a managed Delegation worker. Use send_message to report useful progress or questions to your parent or root agent. Create one lowercase UUID messageId for each logical message. If send_message is unavailable or its outcome is ambiguous, retry promptly with exactly the same messageId, recipient, and message; recent identical retries resolve to the same delivery while the receipt is retained. Never create a new messageId for that logical message. Use wait_agent only when you need a reply. This worker has no device registry, workspace sync, spawn, or agent-management authority."
+	serverInstructions   = "You are a managed Delegation worker. Use send_upstream_message to report useful progress or questions to your parent or root agent. Create one lowercase UUID messageId for each logical message. If send_upstream_message is unavailable or its outcome is ambiguous, retry promptly with exactly the same messageId, recipient, and message; recent identical retries resolve to the same delivery while the receipt is retained. Never create a new messageId for that logical message. Use wait_for_upstream_message only when you need a reply. This worker has no device registry, workspace sync, spawn, or agent-management authority."
 )
 
 type Backend interface {
@@ -83,16 +83,16 @@ func NewServer(backend Backend, principal control.PrincipalIdentity) (*mcp.Serve
 		},
 	)
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        ToolSendMessage,
-		Title:       "Send delegation message",
+		Name:        ToolSendUpstreamMessage,
+		Title:       "Send upstream message",
 		Description: "Send a message to this worker's parent or root agent. Choose one lowercase UUID messageId per logical message; promptly retry unavailable or ambiguous recent calls with every argument unchanged so a retained receipt resolves to the same delivery.",
 		Annotations: mutatingAnnotations(),
 		InputSchema: sendSchema,
 	}, worker.sendMessage)
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        ToolWaitAgent,
-		Title:       "Wait for delegation messages",
-		Description: "Wait for messages addressed to this managed worker and advance its mailbox cursor.",
+		Name:        ToolWaitForUpstreamMessage,
+		Title:       "Wait for upstream messages",
+		Description: "Wait for messages addressed to this managed worker by its parent or root agent and advance its mailbox cursor.",
 		Annotations: readOnlyAnnotations(),
 		InputSchema: waitSchema,
 	}, worker.waitAgent)
@@ -185,11 +185,11 @@ func workerBackendError(method, messageID string, err error) error {
 			if method == protocol.MethodSendMessage {
 				return fmt.Errorf("delegation messageId %s is bound to different arguments; reuse the original complete arguments for this logical message, or use a new lowercase UUID only for a genuinely new message", messageID)
 			}
-			return errors.New("delegation mailbox cursor is stale; retry wait_agent with cursor 0")
+			return errors.New("delegation mailbox cursor is stale; retry wait_for_upstream_message with cursor 0")
 		}
 	}
 	if method == protocol.MethodSendMessage {
-		return fmt.Errorf("delegation service unavailable; promptly retry send_message with messageId %s and the exact same recipient and message", messageID)
+		return fmt.Errorf("delegation service unavailable; promptly retry send_upstream_message with messageId %s and the exact same recipient and message", messageID)
 	}
 	return errors.New("delegation service unavailable")
 }
@@ -239,7 +239,7 @@ func (w *Worker) call(ctx context.Context, method string, params, result any) er
 func inputSchemas() (*jsonschema.Schema, *jsonschema.Schema, error) {
 	send, err := jsonschema.For[SendMessageInput](nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build send_message input schema: %w", err)
+		return nil, nil, fmt.Errorf("build send_upstream_message input schema: %w", err)
 	}
 	recipient := send.Properties["recipient"]
 	recipient.Enum = []any{"parent", "root"}
@@ -250,7 +250,7 @@ func inputSchemas() (*jsonschema.Schema, *jsonschema.Schema, error) {
 
 	wait, err := jsonschema.For[WaitAgentInput](nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build wait_agent input schema: %w", err)
+		return nil, nil, fmt.Errorf("build wait_for_upstream_message input schema: %w", err)
 	}
 	timeout := wait.Properties["timeoutSeconds"]
 	timeout.Minimum = jsonschema.Ptr(1.0)

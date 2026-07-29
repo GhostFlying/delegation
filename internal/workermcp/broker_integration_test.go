@@ -459,7 +459,7 @@ func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 	waitDone := make(chan toolCallOutcome, 1)
 	go func() {
 		result, callErr := clientSession.CallTool(operationContext, &mcp.CallToolParams{
-			Name: ToolWaitAgent,
+			Name: ToolWaitForUpstreamMessage,
 			Arguments: map[string]any{
 				"timeoutSeconds": 5,
 			},
@@ -515,7 +515,7 @@ func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 		"message":   "worker through local bridge",
 	}
 	lostResult, err := clientSession.CallTool(operationContext, &mcp.CallToolParams{
-		Name:      ToolSendMessage,
+		Name:      ToolSendUpstreamMessage,
 		Arguments: sendArguments,
 	})
 	if err != nil {
@@ -525,7 +525,7 @@ func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 		t.Fatalf("lost worker send response = %#v", lostResult)
 	}
 	sendResult, err := clientSession.CallTool(operationContext, &mcp.CallToolParams{
-		Name:      ToolSendMessage,
+		Name:      ToolSendUpstreamMessage,
 		Arguments: sendArguments,
 	})
 	if err != nil {
