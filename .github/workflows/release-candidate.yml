@@ -16,6 +16,7 @@ concurrency:
 jobs:
   gate:
     name: Validate candidate source
+    if: ${{ vars.DELEGATION_ENABLE_SIGNED_RELEASE == 'true' }}
     runs-on: ubuntu-latest
     outputs:
       source_commit: ${{ steps.source.outputs.source_commit }}
