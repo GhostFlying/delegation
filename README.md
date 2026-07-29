@@ -25,6 +25,15 @@ Start a new Codex task after installation, then invoke `$delegation-setup`. The 
 silently download native code from its MCP launcher: setup installs the exact runtime version after
 verifying the SHA-256 pinned in the plugin.
 
+The marketplace snapshot from `main` is the source of truth for the rolling plugin control plane;
+GitHub Releases distribute only immutable native runtime archives. Each tagged release is a
+compatibility checkpoint: its plugin control plane, runtime version, checksums, and native binaries
+must match. Any native runtime change, or any behavior-bearing control-plane change including
+skills, scripts, or MCP configuration, requires updating the plugin and runtime versions together
+and publishing the matching tag and Release as one release operation. Do not announce that revision
+as installable until the Release succeeds. Documentation-only changes do not require a runtime
+release.
+
 For source development, build the native runtime and point the plugin at it:
 
 ```bash
@@ -51,19 +60,24 @@ not runtime dependencies of Delegation.
 
 ## Prepare A Release
 
-Pre-1.0 alpha releases use deterministic unsigned archives. Freeze the version and all
-build-affecting source on `main`, run `go run ./cmd/releasepack -out dist`, and replace
+Pre-1.0 alpha releases use deterministic unsigned archives. For every runtime compatibility
+checkpoint, update `plugins/delegation/VERSION` and the plugin manifest version together, freeze all
+behavior-bearing control-plane and build-affecting source on `main`, run
+`go run ./cmd/releasepack -out dist`, and replace
 `plugins/delegation/release-artifacts.sha256` with the generated manifest in a normal commit. CI
 rebuilds all six Linux, macOS, and Windows archives twice and requires byte-identical output. Before
 tagging, rebuild and commit the manifest from the exact release source tree. Later development does
-not rewrite the manifest for an already published version; the release workflow checks it again at
-the immutable tag.
+not rewrite the runtime version-to-checksum mapping for an already published version; publish a new
+version instead. The release workflow checks the mapping again at the immutable tag.
 
 After the checksum commit passes CI, create `v<VERSION>` at that exact commit. Dispatch `Release`
 from `main` and provide the tag as its `tag` input. The workflow rejects stable versions, validates
 that the prerelease tag matches the version and is contained in `main`, rebuilds the six unsigned
 archives at the tagged commit, and verifies them against the tracked manifest before its
-write-scoped job publishes a GitHub prerelease.
+write-scoped job publishes a GitHub prerelease. The `main` merge necessarily precedes that
+publication. If a marketplace refresh observes the new version during this interval, setup fails
+closed because the exact Release asset is absent; it never substitutes an older runtime. Retry setup
+after the Release workflow succeeds.
 
 Configure the required-reviewer `github-release` environment to accept deployments only from
 `main`. It needs no platform signing credential. Add a tag ruleset that prevents updates and
