@@ -17,6 +17,7 @@ func TestReleaseCandidateWorkflowUsesProtectedNativeSigningAndProvenance(t *test
 		"runs-on: macos-15",
 		"runs-on: windows-latest",
 		"environment: release-signing",
+		"if: ${{ vars.DELEGATION_ENABLE_SIGNED_RELEASE == 'true' }}",
 		"codesign --force --options runtime --timestamp",
 		"codesign --verify --strict",
 		"xcrun notarytool submit",
@@ -42,39 +43,62 @@ func TestReleaseCandidateWorkflowUsesProtectedNativeSigningAndProvenance(t *test
 	assertPinnedActions(t, workflow)
 }
 
-func TestPromotionWorkflowPublishesCandidateWithoutRuntimeRebuild(t *testing.T) {
+func TestReleaseWorkflowPublishesVerifiedUnsignedArtifacts(t *testing.T) {
 	workflow := readWorkflow(t, "release.yml")
 	for _, required := range []string{
-		"test \"$GITHUB_REF_TYPE\" = tag",
-		"verify-github-metadata",
-		"verify-candidate",
-		"verify-promotion",
-		"artifact-ids: ${{ inputs.candidate_artifact_id }}",
-		"run-id: ${{ inputs.candidate_run_id }}",
-		"--signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml\"",
-		"--source-digest \"$SOURCE_COMMIT\"",
-		"predicate-type: https://github.com/GhostFlying/delegation/attestations/release-promotion/v1",
-		"actions/attest@a1948c3f048ba23858d222213b7c278aabede763",
+		"RELEASE_TAG: ${{ inputs.tag }}",
+		"test \"$GITHUB_REF\" = \"refs/heads/$DEFAULT_BRANCH\"",
+		"test \"$RELEASE_TAG\" = \"v$version\"",
+		"[[ \"$version_core\" == *-* ]]",
+		"git merge-base --is-ancestor",
+		"go run ./cmd/releasepack -out dist",
+		"artifact-ids: ${{ needs.build.outputs.artifact_id }}",
+		"source/plugins/delegation/release-artifacts.sha256",
+		"sha256sum --strict -c release-artifacts.sha256",
 		"environment: github-release",
+		"test \"$actual_commit\" = \"$EXPECTED_COMMIT\"",
+		"gh release create \"$RELEASE_TAG\"",
+		"--verify-tag",
+		"sha256sum --strict -c release-artifacts.sha256",
+		"--notes \"$notes\"",
+		"--prerelease",
 	} {
 		if !strings.Contains(workflow, required) {
-			t.Errorf("promotion workflow is missing %q", required)
+			t.Errorf("release workflow is missing %q", required)
 		}
 	}
-	if strings.Contains(workflow, "secrets.") {
-		t.Fatal("promotion workflow must not receive platform signing credentials")
+	for _, forbidden := range []string{
+		"candidate_run_id",
+		"candidate_artifact_id",
+		"verify-candidate",
+		"verify-promotion",
+		"actions/attest@",
+		"environment: release-signing",
+		"secrets.",
+	} {
+		if strings.Contains(workflow, forbidden) {
+			t.Errorf("unsigned prerelease workflow contains signed promotion behavior %q", forbidden)
+		}
 	}
-	if strings.Contains(workflow, "build-target") || strings.Contains(workflow, "package-target") ||
-		strings.Contains(workflow, "go build") {
-		t.Fatal("promotion workflow rebuilds or repackages runtime bytes")
+	if got := strings.Count(
+		workflow,
+		"source/plugins/delegation/release-artifacts.sha256",
+	); got != 2 {
+		t.Fatalf("tracked manifest verification count = %d, want 2", got)
 	}
-	if got := strings.Count(workflow, "verify-github-metadata"); got != 2 {
-		t.Fatalf("GitHub metadata verification count = %d, want 2", got)
+	if got := strings.Count(
+		workflow,
+		"sha256sum --strict -c release-artifacts.sha256",
+	); got != 3 {
+		t.Fatalf("artifact checksum command reference count = %d, want 3", got)
+	}
+	if got := strings.Count(workflow, "contents: write"); got != 1 {
+		t.Fatalf("write-scoped contents permission count = %d, want 1", got)
 	}
 	assertPinnedActions(t, workflow)
 }
 
-func TestOrdinaryCIValidatesUnsignedPackagesWithoutBindingTheReleaseManifest(t *testing.T) {
+func TestOrdinaryCIValidatesUnsignedPackagesWithoutRebindingPublishedManifest(t *testing.T) {
 	workflow := readWorkflow(t, "ci.yml")
 	if !strings.Contains(workflow, "diff -r dist-first dist-second") {
 		t.Fatal("ordinary CI does not compare deterministic unsigned package bytes")
@@ -83,7 +107,7 @@ func TestOrdinaryCIValidatesUnsignedPackagesWithoutBindingTheReleaseManifest(t *
 		workflow,
 		"diff -u plugins/delegation/release-artifacts.sha256 dist-first/release-artifacts.sha256",
 	) {
-		t.Fatal("ordinary CI binds the signed release manifest to unsigned package bytes")
+		t.Fatal("ordinary CI rebinds the published manifest to post-release source")
 	}
 	assertPinnedActions(t, workflow)
 }

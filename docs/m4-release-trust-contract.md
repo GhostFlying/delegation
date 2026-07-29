@@ -1,7 +1,11 @@
 # M4 Release Trust Contract
 
-This document fixes the release trust model for signed Delegation runtimes. It is an operational
-contract for future releases; it does not claim that an existing release was retroactively signed.
+This document fixes the future release trust model for signed Delegation runtimes. It is not active
+for the current pre-1.0 alpha series, which publishes deterministic unsigned archives and marks every
+GitHub release as a prerelease. Enabling this contract requires the protected signing environment,
+native credentials, the repository variable `DELEGATION_ENABLE_SIGNED_RELEASE=true`, and the
+candidate-and-promotion workflow described below; it does not claim that an existing release was
+retroactively signed.
 
 ## Trust Goals
 

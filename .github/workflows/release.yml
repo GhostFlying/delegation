@@ -3,285 +3,239 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      candidate_run_id:
-        description: Successful Release candidate workflow run ID
-        required: true
-        type: string
-      candidate_artifact_id:
-        description: Immutable candidate artifact ID from that run
+      tag:
+        description: Existing v<VERSION> tag to publish
         required: true
         type: string
 
 permissions:
-  actions: read
   contents: read
 
 env:
   GOTOOLCHAIN: local
 
 concurrency:
-  group: release-${{ github.ref }}-${{ inputs.candidate_run_id }}
+  group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
-  verify:
-    name: Verify candidate and promotion contract
+  gate:
+    name: Validate release ref
     runs-on: ubuntu-latest
     outputs:
-      source_commit: ${{ steps.candidate.outputs.source_commit }}
-      source_ref: ${{ steps.candidate.outputs.source_ref }}
-      artifact_name: ${{ steps.candidate.outputs.artifact_name }}
-      artifact_digest: ${{ steps.candidate.outputs.artifact_digest }}
-      version: ${{ steps.promotion.outputs.version }}
-      tag_commit: ${{ steps.promotion.outputs.tag_commit }}
-      payload_sha256: ${{ steps.promotion.outputs.payload_sha256 }}
+      commit: ${{ steps.contract.outputs.commit }}
+      tag: ${{ steps.contract.outputs.tag }}
+      version: ${{ steps.contract.outputs.version }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
+      - name: Validate trusted release ref
+        id: contract
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          [[ "$RELEASE_TAG" != refs/* ]]
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          git fetch --force origin \
+            "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH" \
+            "+refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          commit=$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")
+          mapfile -t version_lines < <(git show "$commit:plugins/delegation/VERSION")
+          test "${#version_lines[@]}" -eq 1
+          version=${version_lines[0]%$'\r'}
+          test -n "$version"
+          test "$RELEASE_TAG" = "v$version"
+          version_core=${version%%+*}
+          [[ "$version_core" == *-* ]]
+          git merge-base --is-ancestor \
+            "$commit" "refs/remotes/origin/$DEFAULT_BRANCH"
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build release artifacts
+    needs: gate
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.upload.outputs['artifact-id'] }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
           persist-credentials: false
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version: 1.26.5
           check-latest: false
           cache: true
-      - name: Verify selected candidate run and artifact identity
-        id: candidate
-        shell: bash
-        env:
-          CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REF_TYPE" = tag
-          test "$GITHUB_REF" = "refs/tags/$GITHUB_REF_NAME"
-          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          [[ "$CANDIDATE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
-          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" \
-            > "$RUNNER_TEMP/candidate-run.json"
-          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID" \
-            > "$RUNNER_TEMP/candidate-artifact.json"
-          go run ./cmd/releasepack verify-github-metadata \
-            --run-json "$RUNNER_TEMP/candidate-run.json" \
-            --artifact-json "$RUNNER_TEMP/candidate-artifact.json" \
-            --repository "$GITHUB_REPOSITORY" \
-            --default-branch "$DEFAULT_BRANCH" \
-            --workflow-run-id "$CANDIDATE_RUN_ID" \
-            --artifact-id "$CANDIDATE_ARTIFACT_ID" \
-            --github-output "$GITHUB_OUTPUT"
-      - name: Download selected immutable candidate
+      - name: Rebuild release artifacts
+        run: go run ./cmd/releasepack -out dist
+      - name: Upload untrusted build output
+        id: upload
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: release-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  verify:
+    name: Verify release artifacts
+    needs: [gate, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+          path: source
+          persist-credentials: false
+      - name: Download build output
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          artifact-ids: ${{ inputs.candidate_artifact_id }}
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
           path: dist
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.candidate_run_id }}
-      - name: Verify candidate bytes, provenance, and manifest-only commit
-        id: promotion
+      - name: Verify tracked manifest and files
         shell: bash
         env:
-          ARTIFACT_NAME: ${{ steps.candidate.outputs.artifact_name }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          SOURCE_COMMIT: ${{ steps.candidate.outputs.source_commit }}
-          SOURCE_REF: ${{ steps.candidate.outputs.source_ref }}
+          VERSION: ${{ needs.gate.outputs.version }}
         run: |
           set -euo pipefail
-          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          go run ./cmd/releasepack verify-candidate \
-            --candidate dist \
-            --repository "$GITHUB_REPOSITORY" \
-            --source-commit "$SOURCE_COMMIT" \
-            --workflow-run-id "$CANDIDATE_RUN_ID" \
-            --candidate-name "$ARTIFACT_NAME"
-          while IFS= read -r archive; do
-            gh attestation verify "$archive" \
-              --repo "$GITHUB_REPOSITORY" \
-              --bundle dist/candidate-provenance.sigstore.json \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml" \
-              --source-digest "$SOURCE_COMMIT" \
-              --source-ref "$SOURCE_REF" \
-              --deny-self-hosted-runners
-          done < <(find dist -maxdepth 1 -type f -name 'delegation_*' | LC_ALL=C sort)
-          go run ./cmd/releasepack verify-promotion \
-            --repo . \
-            --candidate dist \
-            --repository "$GITHUB_REPOSITORY" \
-            --tag "$RELEASE_TAG" \
-            --source-commit "$SOURCE_COMMIT" \
-            --workflow-run-id "$CANDIDATE_RUN_ID" \
-            --candidate-name "$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          diff -u \
+            source/plugins/delegation/release-artifacts.sha256 \
+            dist/release-artifacts.sha256
+          test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 7
+          test "$(find dist -mindepth 1 -maxdepth 1 ! -type f | wc -l)" -eq 0
+          archive_assets="$RUNNER_TEMP/archive-assets.txt"
+          manifest_assets="$RUNNER_TEMP/manifest-assets.txt"
+          LC_ALL=C find dist -mindepth 1 -maxdepth 1 -type f \
+            -name 'delegation_*' -printf '%f\n' | LC_ALL=C sort > "$archive_assets"
+          LC_ALL=C awk '
+            {
+              digest = substr($0, 1, 64)
+              separator = substr($0, 65, 2)
+              name = substr($0, 67)
+              if (length(digest) != 64 || digest !~ /^[0-9a-f]+$/ ||
+                  separator != "  " ||
+                  name !~ /^delegation_[A-Za-z0-9][A-Za-z0-9._+-]*$/) {
+                exit 1
+              }
+              print name
+            }
+          ' dist/release-artifacts.sha256 | LC_ALL=C sort > "$manifest_assets"
+          test "$(wc -l < "$archive_assets")" -eq 6
+          test "$(wc -l < "$manifest_assets")" -eq 6
+          test "$(LC_ALL=C sort -u "$manifest_assets" | wc -l)" -eq 6
+          diff -u "$manifest_assets" "$archive_assets"
+          expected_assets="$RUNNER_TEMP/expected-assets.txt"
+          printf '%s\n' \
+            "delegation_${VERSION}_darwin_amd64.tar.gz" \
+            "delegation_${VERSION}_darwin_arm64.tar.gz" \
+            "delegation_${VERSION}_linux_amd64.tar.gz" \
+            "delegation_${VERSION}_linux_arm64.tar.gz" \
+            "delegation_${VERSION}_windows_amd64.zip" \
+            "delegation_${VERSION}_windows_arm64.zip" \
+            | LC_ALL=C sort > "$expected_assets"
+          diff -u "$expected_assets" "$manifest_assets"
+          (cd dist && sha256sum --strict -c release-artifacts.sha256)
 
   publish:
-    name: Promote signed candidate to GitHub Release
-    needs: verify
+    name: Publish GitHub Release
+    needs: [gate, build, verify]
     runs-on: ubuntu-latest
     environment: github-release
     permissions:
-      actions: read
       contents: write
-      id-token: write
-      attestations: write
-      artifact-metadata: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ needs.verify.outputs.tag_commit }}
+          ref: ${{ needs.gate.outputs.commit }}
+          path: source
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
-        with:
-          go-version: 1.26.5
-          check-latest: false
-          cache: true
-      - name: Revalidate candidate API identity after approval
-        id: candidate
-        shell: bash
-        env:
-          CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" \
-            > "$RUNNER_TEMP/candidate-run.json"
-          gh api "/repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID" \
-            > "$RUNNER_TEMP/candidate-artifact.json"
-          go run ./cmd/releasepack verify-github-metadata \
-            --run-json "$RUNNER_TEMP/candidate-run.json" \
-            --artifact-json "$RUNNER_TEMP/candidate-artifact.json" \
-            --repository "$GITHUB_REPOSITORY" \
-            --default-branch "$DEFAULT_BRANCH" \
-            --workflow-run-id "$CANDIDATE_RUN_ID" \
-            --artifact-id "$CANDIDATE_ARTIFACT_ID" \
-            --github-output "$GITHUB_OUTPUT"
-          test "$(tail -n +1 "$GITHUB_OUTPUT" | sed -n 's/^source_commit=//p')" = \
-            "${{ needs.verify.outputs.source_commit }}"
-          test "$(tail -n +1 "$GITHUB_OUTPUT" | sed -n 's/^artifact_name=//p')" = \
-            "${{ needs.verify.outputs.artifact_name }}"
-          test "$(tail -n +1 "$GITHUB_OUTPUT" | sed -n 's/^artifact_digest=//p')" = \
-            "${{ needs.verify.outputs.artifact_digest }}"
-      - name: Download the same immutable candidate
+      - name: Download verified build output
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          artifact-ids: ${{ inputs.candidate_artifact_id }}
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
           path: dist
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.candidate_run_id }}
-      - name: Reverify candidate and release tag
+      - name: Revalidate and publish tag assets
         shell: bash
         env:
-          ARTIFACT_NAME: ${{ needs.verify.outputs.artifact_name }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          SOURCE_COMMIT: ${{ needs.verify.outputs.source_commit }}
-          SOURCE_REF: ${{ steps.candidate.outputs.source_ref }}
-        run: |
-          set -euo pipefail
-          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          go run ./cmd/releasepack verify-candidate \
-            --candidate dist \
-            --repository "$GITHUB_REPOSITORY" \
-            --source-commit "$SOURCE_COMMIT" \
-            --workflow-run-id "$CANDIDATE_RUN_ID" \
-            --candidate-name "$ARTIFACT_NAME"
-          while IFS= read -r archive; do
-            gh attestation verify "$archive" \
-              --repo "$GITHUB_REPOSITORY" \
-              --bundle dist/candidate-provenance.sigstore.json \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml" \
-              --source-digest "$SOURCE_COMMIT" \
-              --source-ref "$SOURCE_REF" \
-              --deny-self-hosted-runners
-          done < <(find dist -maxdepth 1 -type f -name 'delegation_*' | LC_ALL=C sort)
-          go run ./cmd/releasepack verify-promotion \
-            --repo . \
-            --candidate dist \
-            --repository "$GITHUB_REPOSITORY" \
-            --tag "$RELEASE_TAG" \
-            --source-commit "$SOURCE_COMMIT" \
-            --workflow-run-id "$CANDIDATE_RUN_ID" \
-            --candidate-name "$ARTIFACT_NAME"
-      - name: Write canonical promotion predicate
-        shell: bash
-        env:
-          CANDIDATE_ARTIFACT_ID: ${{ inputs.candidate_artifact_id }}
-          ARTIFACT_DIGEST: ${{ needs.verify.outputs.artifact_digest }}
-          ARTIFACT_NAME: ${{ needs.verify.outputs.artifact_name }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          SOURCE_COMMIT: ${{ needs.verify.outputs.source_commit }}
-        run: |
-          set -euo pipefail
-          go run ./cmd/releasepack write-promotion-predicate \
-            --repo . \
-            --candidate dist \
-            --repository "$GITHUB_REPOSITORY" \
-            --tag "$RELEASE_TAG" \
-            --source-commit "$SOURCE_COMMIT" \
-            --workflow-run-id "$CANDIDATE_RUN_ID" \
-            --candidate-name "$ARTIFACT_NAME" \
-            --artifact-id "$CANDIDATE_ARTIFACT_ID" \
-            --artifact-digest "$ARTIFACT_DIGEST" \
-            --out "$RUNNER_TEMP/release-promotion-predicate.json"
-      - name: Attest promotion at immutable tag
-        id: promotion-attestation
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
-        with:
-          subject-checksums: dist/release-artifacts.sha256
-          predicate-type: https://github.com/GhostFlying/delegation/attestations/release-promotion/v1
-          predicate-path: ${{ runner.temp }}/release-promotion-predicate.json
-      - name: Publish original candidate bytes
-        shell: bash
-        env:
-          ARTIFACT_NAME: ${{ needs.verify.outputs.artifact_name }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_COMMIT: ${{ needs.gate.outputs.commit }}
           GH_TOKEN: ${{ github.token }}
-          PROMOTION_BUNDLE: ${{ steps.promotion-attestation.outputs.bundle-path }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          SOURCE_COMMIT: ${{ needs.verify.outputs.source_commit }}
-          TAG_COMMIT: ${{ needs.verify.outputs.tag_commit }}
-          VERSION: ${{ needs.verify.outputs.version }}
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+          VERSION: ${{ needs.gate.outputs.version }}
         run: |
           set -euo pipefail
-          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
-          go run ./cmd/releasepack verify-promotion \
-            --repo . \
-            --candidate dist \
-            --repository "$GITHUB_REPOSITORY" \
-            --tag "$RELEASE_TAG" \
-            --source-commit "$SOURCE_COMMIT" \
-            --workflow-run-id "$CANDIDATE_RUN_ID" \
-            --candidate-name "$ARTIFACT_NAME"
-          test "$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$TAG_COMMIT"
-          cp "$PROMOTION_BUNDLE" dist/promotion-attestation.sigstore.json
+          diff -u \
+            source/plugins/delegation/release-artifacts.sha256 \
+            dist/release-artifacts.sha256
+          test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 7
+          test "$(find dist -mindepth 1 -maxdepth 1 ! -type f | wc -l)" -eq 0
+          archive_assets="$RUNNER_TEMP/archive-assets.txt"
+          manifest_assets="$RUNNER_TEMP/manifest-assets.txt"
+          LC_ALL=C find dist -mindepth 1 -maxdepth 1 -type f \
+            -name 'delegation_*' -printf '%f\n' | LC_ALL=C sort > "$archive_assets"
+          LC_ALL=C awk '
+            {
+              digest = substr($0, 1, 64)
+              separator = substr($0, 65, 2)
+              name = substr($0, 67)
+              if (length(digest) != 64 || digest !~ /^[0-9a-f]+$/ ||
+                  separator != "  " ||
+                  name !~ /^delegation_[A-Za-z0-9][A-Za-z0-9._+-]*$/) {
+                exit 1
+              }
+              print name
+            }
+          ' dist/release-artifacts.sha256 | LC_ALL=C sort > "$manifest_assets"
+          test "$(wc -l < "$archive_assets")" -eq 6
+          test "$(wc -l < "$manifest_assets")" -eq 6
+          test "$(LC_ALL=C sort -u "$manifest_assets" | wc -l)" -eq 6
+          diff -u "$manifest_assets" "$archive_assets"
+          expected_assets="$RUNNER_TEMP/expected-assets.txt"
+          printf '%s\n' \
+            "delegation_${VERSION}_darwin_amd64.tar.gz" \
+            "delegation_${VERSION}_darwin_arm64.tar.gz" \
+            "delegation_${VERSION}_linux_amd64.tar.gz" \
+            "delegation_${VERSION}_linux_arm64.tar.gz" \
+            "delegation_${VERSION}_windows_amd64.zip" \
+            "delegation_${VERSION}_windows_arm64.zip" \
+            | LC_ALL=C sort > "$expected_assets"
+          diff -u "$expected_assets" "$manifest_assets"
+          (cd dist && sha256sum --strict -c release-artifacts.sha256)
+
+          mapfile -t asset_names < "$archive_assets"
+          assets=()
+          for name in "${asset_names[@]}"; do
+            assets+=("dist/$name")
+          done
+          assets+=(dist/release-artifacts.sha256)
+
+          git -C source fetch --force origin \
+            "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH" \
+            "+refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          actual_commit=$(git -C source rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")
+          test "$actual_commit" = "$EXPECTED_COMMIT"
+          git -C source merge-base --is-ancestor \
+            "$EXPECTED_COMMIT" "refs/remotes/origin/$DEFAULT_BRANCH"
 
           notes=$(printf '%s\n' \
-            "Promoted immutable candidate artifact \`$ARTIFACT_NAME\` from workflow run \`$CANDIDATE_RUN_ID\`." \
-            "Candidate source: \`$SOURCE_COMMIT\`. Promotion tag commit: \`$TAG_COMMIT\`." \
-            '' \
             'Verify the downloaded directory:' \
             '```bash' \
             'sha256sum --strict -c release-artifacts.sha256' \
-            "gh attestation verify delegation_${VERSION}_linux_amd64.tar.gz --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release-candidate.yml --source-digest $SOURCE_COMMIT" \
-            "gh attestation verify delegation_${VERSION}_linux_amd64.tar.gz --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml --source-digest $TAG_COMMIT --source-ref refs/tags/$RELEASE_TAG --predicate-type https://github.com/GhostFlying/delegation/attestations/release-promotion/v1" \
             '```')
 
-          mapfile -t assets < <(find dist -mindepth 1 -maxdepth 1 -type f | LC_ALL=C sort)
-          flags=()
-          version_core=${VERSION%%+*}
-          if [[ "$version_core" == *-* ]]; then
-            flags+=(--prerelease)
-          fi
           gh release create "$RELEASE_TAG" "${assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "Delegation $VERSION" \
             --generate-notes \
             --notes "$notes" \
-            "${flags[@]}"
+            --prerelease

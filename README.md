@@ -11,8 +11,8 @@ It synchronizes an exact Git HEAD plus the root task's dirty index and worktree 
 returns each terminal rollout and Git result package to the originating root peer. The root agent can
 explicitly apply a selected package without moving HEAD: descendant commits become staged changes,
 dirty state is preserved, and conflicts stop before mutation. Result relay, replay, deduplication,
-garbage collection, safe apply recovery, and the signed release-candidate workflow are covered by
-the M4 contracts.
+garbage collection, safe apply recovery, and the future signed release-candidate design are covered
+by the M4 contracts.
 
 ## Install The Plugin
 
@@ -51,36 +51,27 @@ not runtime dependencies of Delegation.
 
 ## Prepare A Release
 
-Delegation promotes a signed candidate because Apple notarization and RFC 3161 timestamps make a
-second build byte-different. Freeze the version and every build-affecting source file in a commit
-`S` on `main`, then dispatch `Release candidate` from `main`. Native Linux, macOS, and Windows jobs
-build the six targets. The protected macOS and Windows jobs sign and verify each executable before
-packaging it; the final job creates a canonical descriptor, checksum manifest, signing evidence,
-and candidate SLSA provenance, then uploads one immutable candidate artifact. Its summary records
-the workflow run ID, artifact ID, GitHub artifact digest, and source commit.
+Pre-1.0 alpha releases use deterministic unsigned archives. Freeze the version and all
+build-affecting source on `main`, run `go run ./cmd/releasepack -out dist`, and replace
+`plugins/delegation/release-artifacts.sha256` with the generated manifest in a normal commit. CI
+rebuilds all six Linux, macOS, and Windows archives twice and requires byte-identical output. Before
+tagging, rebuild and commit the manifest from the exact release source tree. Later development does
+not rewrite the manifest for an already published version; the release workflow checks it again at
+the immutable tag.
 
-Review the candidate and replace `plugins/delegation/release-artifacts.sha256` with its manifest in
-one normal commit `M`. That must be the only `S -> M` change, and `S` must be the single parent of
-`M`. Any source, version, dependency, build flag, signing input, or packaging change requires a new
-candidate. After the manifest commit passes CI, create `v<VERSION>` at `M`. Dispatch `Release` while
-selecting that tag as the workflow ref, and provide the candidate workflow run ID and artifact ID.
-Promotion verifies the GitHub run and artifact identities, the exact `S -> M` relationship, every
-archive and evidence digest, and the candidate provenance. It publishes the original candidate
-bytes without rebuilding or repackaging them, and adds a tag-bound promotion attestation.
+After the checksum commit passes CI, create `v<VERSION>` at that exact commit. Dispatch `Release`
+from `main` and provide the tag as its `tag` input. The workflow rejects stable versions, validates
+that the prerelease tag matches the version and is contained in `main`, rebuilds the six unsigned
+archives at the tagged commit, and verifies them against the tracked manifest before its
+write-scoped job publishes a GitHub prerelease.
 
-Before enabling signing, configure a required-reviewer `release-signing` environment that accepts
-deployments only from `main`. Define `MACOS_SIGNING_IDENTITY` and `WINDOWS_TIMESTAMP_URL` as
-environment variables, and add these environment secrets:
-
-- `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`, and
-  `APPLE_APP_SPECIFIC_PASSWORD`;
-- `WINDOWS_CERTIFICATE_PFX_BASE64` and `WINDOWS_CERTIFICATE_PASSWORD`.
-
-Configure a separate required-reviewer `github-release` environment that accepts only `v*` tags;
-it needs no platform signing credential. Add a tag ruleset that prevents updates and deletion for
-`v*`, and enable immutable releases. Pull requests, ordinary CI, and promotion never receive the
-platform signing secrets. See [the M4 release trust contract](docs/m4-release-trust-contract.md) for
-the descriptor, provenance, verification, and credential-rotation rules.
+Configure the required-reviewer `github-release` environment to accept deployments only from
+`main`. It needs no platform signing credential. Add a tag ruleset that prevents updates and
+deletion for `v*`, and enable immutable releases. The signed candidate-and-promotion design remains
+documented in [the M4 release trust contract](docs/m4-release-trust-contract.md), but is not the
+release path for the current unsigned alpha series. Keep the repository variable
+`DELEGATION_ENABLE_SIGNED_RELEASE` unset or different from `true`; setting it to `true` explicitly
+enables the future `Release candidate` gate.
 
 ## Configure The Network
 
