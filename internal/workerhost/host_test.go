@@ -687,7 +687,12 @@ func TestHostCloseContinuesAfterCallerTimeout(t *testing.T) {
 func TestHostFailsClosedWhenWorkerMCPInventoryIsWrong(t *testing.T) {
 	tests := map[string]func(*fakeApplication){
 		"unexpected tool": func(application *fakeApplication) {
-			application.tools = []string{"send_message", "spawn_agent", "wait_agent"}
+			application.tools = []string{
+				"send_message",
+				"send_upstream_message",
+				"wait_agent",
+				"wait_for_upstream_message",
+			}
 		},
 		"extra server": func(application *fakeApplication) {
 			application.extraServers = []mcpServerStatus{{Name: "delegation"}}
@@ -1320,7 +1325,12 @@ func TestAmbiguousTurnStartConflictingEvidenceFailsHost(t *testing.T) {
 			}
 		},
 		"blocked worker MCP": func(_, application *fakeApplication) {
-			application.tools = []string{"send_message", "spawn_agent", "wait_agent"}
+			application.tools = []string{
+				"send_message",
+				"send_upstream_message",
+				"wait_agent",
+				"wait_for_upstream_message",
+			}
 		},
 	}
 	for name, mutate := range tests {
@@ -2706,7 +2716,7 @@ type fakeApplication struct {
 
 func newFakeApplication() *fakeApplication {
 	return &fakeApplication{
-		tools:         []string{"send_message", "wait_agent"},
+		tools:         []string{"send_upstream_message", "wait_for_upstream_message"},
 		authStatus:    "unsupported",
 		threadTurns:   make(map[string][]turn),
 		notifications: make(chan appserver.Notification, 16), done: make(chan struct{}),

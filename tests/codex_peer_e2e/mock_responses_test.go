@@ -427,7 +427,7 @@ func (m *mockResponses) handleWorkerCollaborationInitial(
 		writeWorkerToolSearchResponse(writer, key, searchID)
 	case 2:
 		m.validateWorkerToolSearch(body, key, searchID)
-		writeWorkerToolCallResponse(writer, key, sendCallID, "send_message", map[string]any{
+		writeWorkerToolCallResponse(writer, key, sendCallID, "send_upstream_message", map[string]any{
 			"messageId": managedInitialReplyID,
 			"recipient": "parent",
 			"message":   managedInitialReply,
@@ -437,7 +437,7 @@ func (m *mockResponses) handleWorkerCollaborationInitial(
 		if err != nil {
 			m.record(fmt.Errorf("case %s: %w", key, err))
 		} else if !strings.Contains(output, managedInitialReplyID) {
-			m.record(fmt.Errorf("case %s send_message receipt omitted message ID: %s", key, output))
+			m.record(fmt.Errorf("case %s send_upstream_message receipt omitted message ID: %s", key, output))
 		}
 		writeFinalResponse(writer, key)
 	default:
@@ -465,7 +465,7 @@ func (m *mockResponses) handleWorkerMailboxFollowup(
 		writeWorkerToolSearchResponse(writer, key, searchID)
 	case 1:
 		m.validateWorkerToolSearch(body, key, searchID)
-		writeWorkerToolCallResponse(writer, key, waitCallID, "wait_agent", map[string]any{
+		writeWorkerToolCallResponse(writer, key, waitCallID, "wait_for_upstream_message", map[string]any{
 			"cursor": 0, "timeoutSeconds": 2,
 		})
 	case 2:
@@ -474,9 +474,9 @@ func (m *mockResponses) handleWorkerMailboxFollowup(
 			m.record(fmt.Errorf("case %s: %w", key, err))
 		} else if !strings.Contains(output, queuedMessageID) ||
 			!strings.Contains(output, queuedMessage) {
-			m.record(fmt.Errorf("case %s wait_agent omitted queued root message: %s", key, output))
+			m.record(fmt.Errorf("case %s wait_for_upstream_message omitted queued root message: %s", key, output))
 		}
-		writeWorkerToolCallResponse(writer, key, sendCallID, "send_message", map[string]any{
+		writeWorkerToolCallResponse(writer, key, sendCallID, "send_upstream_message", map[string]any{
 			"messageId": replyMessageID,
 			"recipient": "parent",
 			"message":   replyMessage,
@@ -486,7 +486,7 @@ func (m *mockResponses) handleWorkerMailboxFollowup(
 		if err != nil {
 			m.record(fmt.Errorf("case %s: %w", key, err))
 		} else if !strings.Contains(output, replyMessageID) {
-			m.record(fmt.Errorf("case %s send_message receipt omitted message ID: %s", key, output))
+			m.record(fmt.Errorf("case %s send_upstream_message receipt omitted message ID: %s", key, output))
 		}
 		writeFinalResponse(writer, key)
 	default:
@@ -511,8 +511,8 @@ func (m *mockResponses) validateWorkerToolSearch(body map[string]any, key, searc
 		return
 	}
 	want := map[string]bool{
-		"send_message": false,
-		"wait_agent":   false,
+		"send_upstream_message":     false,
+		"wait_for_upstream_message": false,
 	}
 	for _, name := range names {
 		if _, ok := want[name]; !ok {
@@ -817,7 +817,7 @@ func writeWorkerToolSearchResponse(writer http.ResponseWriter, key, searchID str
 		map[string]any{"type": "response.output_item.done", "item": map[string]any{
 			"type": "tool_search_call", "call_id": searchID, "execution": "client",
 			"arguments": map[string]any{
-				"query": "delegation worker send_message wait_agent parent mailbox", "limit": 8,
+				"query": "delegation worker upstream message parent mailbox", "limit": 8,
 			},
 		}},
 		completedEvent("resp-"+key+"-search"),

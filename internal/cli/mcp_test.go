@@ -102,8 +102,8 @@ func TestWorkerMCPInitializesOfflineWithoutReadingPeerToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 2 || tools.Tools[0].Name != workermcp.ToolSendMessage ||
-		tools.Tools[1].Name != workermcp.ToolWaitAgent {
+	if len(tools.Tools) != 2 || tools.Tools[0].Name != workermcp.ToolSendUpstreamMessage ||
+		tools.Tools[1].Name != workermcp.ToolWaitForUpstreamMessage {
 		t.Fatalf("worker MCP tools = %#v", tools.Tools)
 	}
 	if err := session.Close(); err != nil {

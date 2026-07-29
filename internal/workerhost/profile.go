@@ -24,7 +24,7 @@ const (
 	mcpPageSize             = 100
 )
 
-var requiredWorkerTools = []string{"send_message", "wait_agent"}
+var requiredWorkerTools = []string{"send_upstream_message", "wait_for_upstream_message"}
 
 func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 	config := codexconfig.Clone(h.codexConfig)

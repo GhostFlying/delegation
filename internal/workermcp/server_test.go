@@ -119,11 +119,19 @@ func TestWorkerMCPExposesOnlyMessageToolsAndBindsPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools.Tools) != 2 || tools.Tools[0].Name != ToolSendMessage || tools.Tools[1].Name != ToolWaitAgent {
+	if len(tools.Tools) != 2 ||
+		tools.Tools[0].Name != ToolSendUpstreamMessage ||
+		tools.Tools[1].Name != ToolWaitForUpstreamMessage {
 		t.Fatalf("worker MCP tools = %#v", tools.Tools)
 	}
+	for _, legacyName := range []string{"send_message", "wait_agent"} {
+		result, callErr := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: legacyName})
+		if callErr == nil && (result == nil || !result.IsError) {
+			t.Fatalf("legacy worker tool %q remained callable: %#v", legacyName, result)
+		}
+	}
 	if _, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
-		Name: ToolSendMessage,
+		Name: ToolSendUpstreamMessage,
 		Arguments: map[string]any{
 			"messageId": workerTestMessageID,
 			"recipient": "root",
@@ -133,7 +141,7 @@ func TestWorkerMCPExposesOnlyMessageToolsAndBindsPrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
-		Name: ToolWaitAgent,
+		Name: ToolWaitForUpstreamMessage,
 		Arguments: map[string]any{
 			"cursor":         4,
 			"timeoutSeconds": 3,
@@ -148,7 +156,7 @@ func TestWorkerMCPExposesOnlyMessageToolsAndBindsPrincipal(t *testing.T) {
 	}
 	sendParams := calls[0].params.(protocol.SendMessageParams)
 	if sendParams.MessageID != workerTestMessageID {
-		t.Fatalf("send_message messageId = %q, want %q", sendParams.MessageID, workerTestMessageID)
+		t.Fatalf("send_upstream_message messageId = %q, want %q", sendParams.MessageID, workerTestMessageID)
 	}
 	want := []recordedWorkerCall{
 		{
@@ -191,7 +199,7 @@ func TestWorkerMCPRejectsRootIdentityAndInvalidInputs(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, _, err := worker.sendMessage(context.Background(), nil, input); err == nil {
-				t.Fatal("send_message accepted an invalid messageId")
+				t.Fatal("send_upstream_message accepted an invalid messageId")
 			}
 		})
 	}
@@ -200,24 +208,24 @@ func TestWorkerMCPRejectsRootIdentityAndInvalidInputs(t *testing.T) {
 		Recipient: "agent",
 		Message:   "invalid target",
 	}); err == nil {
-		t.Fatal("send_message accepted an arbitrary recipient")
+		t.Fatal("send_upstream_message accepted an arbitrary recipient")
 	}
 	if _, _, err := worker.sendMessage(context.Background(), nil, SendMessageInput{
 		MessageID: workerTestMessageID,
 		Message:   string([]byte{0xff}),
 	}); err == nil {
-		t.Fatal("send_message accepted invalid UTF-8")
+		t.Fatal("send_upstream_message accepted invalid UTF-8")
 	}
 	if _, _, err := worker.sendMessage(context.Background(), nil, SendMessageInput{
 		MessageID: workerTestMessageID,
 		Message:   strings.Repeat("x", protocol.MaximumMailboxMessageBytes+1),
 	}); err == nil {
-		t.Fatal("send_message accepted an oversized message")
+		t.Fatal("send_upstream_message accepted an oversized message")
 	}
 	if _, _, err := worker.waitAgent(context.Background(), nil, WaitAgentInput{
 		TimeoutSeconds: maximumWaitSeconds + 1,
 	}); err == nil {
-		t.Fatal("wait_agent accepted an excessive timeout")
+		t.Fatal("wait_for_upstream_message accepted an excessive timeout")
 	}
 	if calls := backend.snapshot(); len(calls) != 0 {
 		data, _ := json.Marshal(calls)
@@ -254,7 +262,7 @@ func TestWorkerMCPValidatesMailboxResultsAndOutputBound(t *testing.T) {
 			if _, _, err := worker.waitAgent(context.Background(), nil, WaitAgentInput{
 				Cursor: 4, TimeoutSeconds: 1,
 			}); err == nil {
-				t.Fatal("wait_agent accepted an invalid mailbox result")
+				t.Fatal("wait_for_upstream_message accepted an invalid mailbox result")
 			}
 		})
 	}
@@ -267,7 +275,7 @@ func TestWorkerMCPValidatesMailboxResultsAndOutputBound(t *testing.T) {
 		Cursor: 4, TimeoutSeconds: 1,
 	})
 	if err != nil || !reflect.DeepEqual(output, WaitAgentOutput(valid)) {
-		t.Fatalf("valid wait_agent output = %#v, %v", output, err)
+		t.Fatalf("valid wait_for_upstream_message output = %#v, %v", output, err)
 	}
 }
 
@@ -289,13 +297,13 @@ func TestWorkerMCPAcceptsWorstCaseEncodedMessageWithinOutputBound(t *testing.T) 
 		MessageID: workerTestMessageID,
 		Message:   message,
 	}); err != nil {
-		t.Fatalf("send_message rejected a maximum legal message: %v", err)
+		t.Fatalf("send_upstream_message rejected a maximum legal message: %v", err)
 	}
 	_, output, err := worker.waitAgent(context.Background(), nil, WaitAgentInput{
 		Cursor: 4, TimeoutSeconds: 1,
 	})
 	if err != nil || !reflect.DeepEqual(output, WaitAgentOutput(result)) {
-		t.Fatalf("wait_agent maximum legal output = %#v, %v", output, err)
+		t.Fatalf("wait_for_upstream_message maximum legal output = %#v, %v", output, err)
 	}
 }
 
@@ -317,7 +325,7 @@ func TestWorkerMCPRejectsInvalidMessageReceipt(t *testing.T) {
 				MessageID: workerTestMessageID,
 				Message:   "status update",
 			}); err == nil {
-				t.Fatal("send_message accepted an invalid receipt")
+				t.Fatal("send_upstream_message accepted an invalid receipt")
 			}
 		})
 	}
@@ -330,13 +338,13 @@ func TestWorkerMCPSendMessageUsesUTF8ByteBoundWithoutMisleadingSchemaLimit(t *te
 	}
 	messageSchema := send.Properties["message"]
 	if messageSchema.MaxLength != nil || !strings.Contains(messageSchema.Description, "1024 UTF-8 bytes") {
-		t.Fatalf("send_message message schema = %#v", messageSchema)
+		t.Fatalf("send_upstream_message message schema = %#v", messageSchema)
 	}
 	messageIDSchema := send.Properties["messageId"]
 	if messageIDSchema.Pattern != lowercaseUUIDPattern ||
 		!strings.Contains(messageIDSchema.Description, "reuse it with identical arguments") ||
 		!containsString(send.Required, "messageId") {
-		t.Fatalf("send_message messageId schema = %#v, required = %#v", messageIDSchema, send.Required)
+		t.Fatalf("send_upstream_message messageId schema = %#v, required = %#v", messageIDSchema, send.Required)
 	}
 	if !strings.Contains(serverInstructions, "exactly the same messageId, recipient, and message") ||
 		!strings.Contains(serverInstructions, "while the receipt is retained") {
@@ -351,13 +359,13 @@ func TestWorkerMCPSendMessageUsesUTF8ByteBoundWithoutMisleadingSchemaLimit(t *te
 	if _, _, err := worker.sendMessage(
 		context.Background(), nil, SendMessageInput{MessageID: workerTestMessageID, Message: boundary},
 	); err != nil {
-		t.Fatalf("send_message rejected %d-byte non-ASCII message: %v", len(boundary), err)
+		t.Fatalf("send_upstream_message rejected %d-byte non-ASCII message: %v", len(boundary), err)
 	}
 	oversized := boundary + "x"
 	if _, _, err := worker.sendMessage(
 		context.Background(), nil, SendMessageInput{MessageID: workerTestMessageID, Message: oversized},
 	); err == nil {
-		t.Fatalf("send_message accepted %d-byte non-ASCII message", len(oversized))
+		t.Fatalf("send_upstream_message accepted %d-byte non-ASCII message", len(oversized))
 	}
 }
 
@@ -378,7 +386,7 @@ func TestWorkerMCPDoesNotExposeBackendTransportDetails(t *testing.T) {
 		WaitAgentInput{TimeoutSeconds: 1},
 	)
 	if sendErr == nil || strings.Contains(sendErr.Error(), transportDetail) ||
-		sendErr.Error() != "delegation service unavailable; promptly retry send_message with messageId "+workerTestMessageID+" and the exact same recipient and message" {
+		sendErr.Error() != "delegation service unavailable; promptly retry send_upstream_message with messageId "+workerTestMessageID+" and the exact same recipient and message" {
 		t.Fatalf("worker send transport error = %v", sendErr)
 	}
 	if waitErr == nil || strings.Contains(waitErr.Error(), transportDetail) ||
@@ -395,7 +403,7 @@ func TestWorkerMCPExplainsPermanentBrokerErrorsWithoutLeakingDetails(t *testing.
 		{code: protocol.ErrorInvalidParams, want: "delegation request was rejected"},
 		{code: protocol.ErrorForbidden, want: "delegation worker is no longer authorized"},
 		{code: protocol.ErrorNotFound, want: "delegation message recipient is unavailable"},
-		{code: protocol.ErrorConflict, want: "delegation mailbox cursor is stale; retry wait_agent with cursor 0"},
+		{code: protocol.ErrorConflict, want: "delegation mailbox cursor is stale; retry wait_for_upstream_message with cursor 0"},
 	}
 	for _, test := range tests {
 		t.Run(test.want, func(t *testing.T) {
