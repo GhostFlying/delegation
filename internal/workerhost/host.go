@@ -150,6 +150,7 @@ type OperationResult struct {
 type Host struct {
 	controllerID             string
 	deviceID                 string
+	hostKind                 hostkind.Kind
 	peerConfigPath           string
 	delegationBinary         string
 	cliLaunch                clilaunch.Spec
@@ -302,10 +303,7 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	if options.MaxWorkerSlots < 1 || options.MaxWorkerSlots > config.MaximumWorkerSlots {
 		return nil, fmt.Errorf("max worker slots must be from 1 through %d", config.MaximumWorkerSlots)
 	}
-	if err := config.ValidatePrivateDirectory(options.CodexHome); err != nil {
-		return nil, fmt.Errorf("validate managed CODEX_HOME: %w", err)
-	}
-	if err := codexconfig.ValidateManagedHome(options.CodexHome); err != nil {
+	if err := validateManagedRuntimeHome(options.HostKind, options.CodexHome); err != nil {
 		return nil, err
 	}
 	codexHome, err := filepath.EvalSymlinks(options.CodexHome)
@@ -379,7 +377,7 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		credentialEnvironment...,
 	)
 	host := &Host{
-		controllerID: options.ControllerID, deviceID: options.DeviceID,
+		controllerID: options.ControllerID, deviceID: options.DeviceID, hostKind: options.HostKind,
 		peerConfigPath: options.PeerConfigPath, delegationBinary: options.DelegationBinary,
 		cliLaunch: cliLaunch, cliRuntimeExecutable: cliRuntimeExecutable,
 		git: gitRunner, workerGitBinary: workerGitBinary,
@@ -480,10 +478,6 @@ func runtimeHomeEnvironment(
 		} else if err := config.ValidatePrivateDirectory(cliHome); err != nil {
 			return nil, nil, fmt.Errorf("validate managed TRAECLI_HOME: %w", err)
 		}
-		resolvedCLIHome, err = filepath.EvalSymlinks(cliHome)
-		if err != nil {
-			return nil, nil, fmt.Errorf("resolve managed TRAECLI_HOME: %w", err)
-		}
 		return map[string]string{
 			"TRAE_HOME":    managedHome,
 			"TRAECLI_HOME": resolvedCLIHome,
@@ -491,6 +485,20 @@ func runtimeHomeEnvironment(
 	default:
 		return nil, nil, fmt.Errorf("unsupported host kind %q", kind)
 	}
+}
+
+func validateManagedRuntimeHome(kind hostkind.Kind, path string) error {
+	name := "CODEX_HOME"
+	if kind == hostkind.TraeX {
+		name = "TRAE_HOME"
+	}
+	if err := config.ValidatePrivateDirectory(path); err != nil {
+		return fmt.Errorf("validate managed %s: %w", name, err)
+	}
+	if kind == hostkind.Codex {
+		return codexconfig.ValidateManagedHome(path)
+	}
+	return nil
 }
 
 func sameCanonicalPath(left, right string) bool {
