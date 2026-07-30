@@ -774,6 +774,9 @@ func TestSetupPeerRejectsPrepopulatedManagedTraeXHomeWithoutSideEffects(t *testi
 	}{
 		{name: "instructions", relative: "AGENTS.md", want: "AGENTS.md"},
 		{name: "CLI authentication", relative: filepath.Join("cli", "auth.json"), want: "auth.json"},
+		{name: "CLI hooks", relative: filepath.Join("cli", "hooks.json"), want: "hooks.json"},
+		{name: "CLI plugins", relative: filepath.Join("cli", "plugins"), want: "plugins"},
+		{name: "CLI rules", relative: filepath.Join("cli", "rules"), want: "rules"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -819,6 +822,54 @@ func TestSetupPeerRejectsPrepopulatedManagedTraeXHomeWithoutSideEffects(t *testi
 				}
 			}
 		})
+	}
+}
+
+func TestSetupPeerRejectsSymlinkedTraeCLIHomeWithoutSideEffects(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config", "peer.json")
+	managedHome := filepath.Join(root, "managed-trae")
+	workspaceRoot := filepath.Join(root, "workspaces")
+	statePath := filepath.Join(root, "state", "peer.sqlite3")
+	target := filepath.Join(root, "external-cli")
+	if err := os.MkdirAll(managedHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(managedHome, "cli")); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+	executable := testCodexBinary(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "peer",
+		"--config", configPath,
+		"--instance", "traex-main",
+		"--host-kind", "traex",
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+		"--cli-command", executable,
+		"--cli-launcher", executable,
+		"--codex-home", managedHome,
+		"--workspace-root", workspaceRoot,
+		"--state", statePath,
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "TRAECLI_HOME must not be a symbolic link") {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, path := range []string{
+		filepath.Dir(configPath),
+		workspaceRoot,
+		filepath.Dir(statePath),
+	} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("setup created %s before rejecting symlinked TRAECLI_HOME: %v", path, err)
+		}
 	}
 }
 

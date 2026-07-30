@@ -667,10 +667,14 @@ func resolveCLILauncher(name string, prefixArguments []string) (clilaunch.Spec, 
 	if err != nil {
 		return clilaunch.Spec{}, fmt.Errorf("resolve CLI launcher path: %w", err)
 	}
-	return clilaunch.Resolve(clilaunch.Spec{
+	spec := clilaunch.Spec{
 		Executable:      executable,
 		PrefixArguments: append([]string(nil), prefixArguments...),
-	})
+	}
+	if _, err := clilaunch.Resolve(spec); err != nil {
+		return clilaunch.Spec{}, err
+	}
+	return spec, nil
 }
 
 func resolveGitExecutable(name string) (string, error) {

@@ -131,6 +131,74 @@ func TestResolveConfiguredCLILaunchPreservesArgumentBoundaries(t *testing.T) {
 	}
 }
 
+func TestResolveConfiguredCLILaunchFollowsUpdatedLauncherSymlink(t *testing.T) {
+	root := t.TempDir()
+	firstTarget := filepath.Join(root, "warmpool-first")
+	secondTarget := filepath.Join(root, "warmpool-second")
+	launcher := filepath.Join(root, "warmpool")
+	runtimeExecutable := filepath.Join(root, "traex")
+	for _, path := range []string{firstTarget, secondTarget, runtimeExecutable} {
+		if err := os.WriteFile(path, []byte("test"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(firstTarget, launcher); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+	configuredLauncher, err := resolveCLILauncher(launcher, []string{"run", "--"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuredLauncher.Executable != launcher {
+		t.Fatalf(
+			"configured launcher = %q, want lexical path %q",
+			configuredLauncher.Executable,
+			launcher,
+		)
+	}
+	resolve := func() clilaunch.Spec {
+		t.Helper()
+		resolved, resolveErr := resolveConfiguredCLILaunch(
+			delegationconfig.CLIConfig{Launcher: &configuredLauncher},
+			runtimeExecutable,
+		)
+		if resolveErr != nil {
+			t.Fatal(resolveErr)
+		}
+		return resolved
+	}
+	first := resolve()
+	resolvedFirstTarget, err := filepath.EvalSymlinks(firstTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Executable != resolvedFirstTarget {
+		t.Fatalf(
+			"first resolved launcher = %q, want %q",
+			first.Executable,
+			resolvedFirstTarget,
+		)
+	}
+	if err := os.Remove(launcher); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secondTarget, launcher); err != nil {
+		t.Fatal(err)
+	}
+	second := resolve()
+	resolvedSecondTarget, err := filepath.EvalSymlinks(secondTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Executable != resolvedSecondTarget {
+		t.Fatalf(
+			"updated resolved launcher = %q, want %q",
+			second.Executable,
+			resolvedSecondTarget,
+		)
+	}
+}
+
 const (
 	runtimeWorkerID        = "123e4567-e89b-42d3-a456-426614174202"
 	runtimeThreadID        = "123e4567-e89b-42d3-a456-426614174203"

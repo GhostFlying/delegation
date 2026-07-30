@@ -55,16 +55,46 @@ func TestValidateManagedRuntimeHomeAppliesHostContentPolicy(t *testing.T) {
 			want:     "managed TRAECLI_HOME must not contain auth.json",
 		},
 		{
+			name:     "TraeX CLI hooks",
+			hostKind: hostkind.TraeX,
+			relative: filepath.Join("cli", "hooks.json"),
+			want:     "managed TRAECLI_HOME must not contain hooks.json",
+		},
+		{
+			name:     "TraeX CLI plugins",
+			hostKind: hostkind.TraeX,
+			relative: filepath.Join("cli", "plugins"),
+			want:     "managed TRAECLI_HOME must not contain plugins",
+		},
+		{
+			name:     "TraeX CLI rules",
+			hostKind: hostkind.TraeX,
+			relative: filepath.Join("cli", "rules"),
+			want:     "managed TRAECLI_HOME must not contain rules",
+		},
+		{
 			name:     "TraeX named profile",
 			hostKind: hostkind.TraeX,
 			relative: "custom.TRAECLI.TOML",
 			want:     "managed TRAE_HOME must not contain custom.TRAECLI.TOML",
 		},
 		{
+			name:     "TraeX CLI named profile",
+			hostKind: hostkind.TraeX,
+			relative: filepath.Join("cli", "custom.traecli.toml"),
+			want:     "managed TRAECLI_HOME must not contain custom.traecli.toml",
+		},
+		{
 			name:     "TraeX user skill",
 			hostKind: hostkind.TraeX,
 			relative: filepath.Join("skills", "custom"),
 			want:     "managed TRAE_HOME must not contain skills/custom",
+		},
+		{
+			name:     "TraeX CLI user skill",
+			hostKind: hostkind.TraeX,
+			relative: filepath.Join("cli", "skills", "custom"),
+			want:     "managed TRAECLI_HOME must not contain skills/custom",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -95,6 +125,7 @@ func TestValidateManagedRuntimeHomeAllowsTraeXGeneratedArtifacts(t *testing.T) {
 	for _, directory := range []string{
 		".tmp",
 		filepath.Join("cli", "memories"),
+		filepath.Join("cli", "skills", ".system"),
 		filepath.Join("skills", ".system"),
 	} {
 		if err := os.MkdirAll(filepath.Join(home, directory), 0o700); err != nil {
@@ -138,7 +169,7 @@ func TestValidateManagedRuntimeHomeRejectsAllTraeXForbiddenEntries(t *testing.T)
 			}
 		})
 	}
-	for _, entry := range forbiddenManagedTraeCLIHomeEntries {
+	for _, entry := range forbiddenManagedTraeHomeEntries {
 		t.Run("TRAECLI_HOME "+entry, func(t *testing.T) {
 			home := t.TempDir()
 			path := filepath.Join(home, "cli", entry)

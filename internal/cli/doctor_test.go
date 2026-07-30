@@ -161,6 +161,9 @@ func TestDoctorRejectsPrepopulatedManagedTraeXHome(t *testing.T) {
 	}{
 		{name: "instructions", relative: "AGENTS.md", want: "AGENTS.md"},
 		{name: "CLI authentication", relative: filepath.Join("cli", "auth.json"), want: "auth.json"},
+		{name: "CLI hooks", relative: filepath.Join("cli", "hooks.json"), want: "hooks.json"},
+		{name: "CLI plugins", relative: filepath.Join("cli", "plugins"), want: "plugins"},
+		{name: "CLI rules", relative: filepath.Join("cli", "rules"), want: "rules"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := privateTestDirectory(t)
@@ -198,6 +201,44 @@ func TestDoctorRejectsPrepopulatedManagedTraeXHome(t *testing.T) {
 				t.Fatalf("doctor code = %d, stderr = %q", code, stderr.String())
 			}
 		})
+	}
+}
+
+func TestDoctorRejectsSymlinkedTraeCLIHome(t *testing.T) {
+	root := privateTestDirectory(t)
+	configPath := filepath.Join(root, "peer.json")
+	managedHome := filepath.Join(root, "managed-trae")
+	executable := testCodexBinary(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := Run([]string{
+		"setup", "peer",
+		"--config", configPath,
+		"--instance", "traex-main",
+		"--host-kind", "traex",
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+		"--cli-command", executable,
+		"--cli-launcher", executable,
+		"--codex-home", managedHome,
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	cliHome := filepath.Join(managedHome, "cli")
+	target := filepath.Join(root, "external-cli")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, cliHome); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code := Run([]string{"doctor", "--config", configPath}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "TRAECLI_HOME must not be a symbolic link") {
+		t.Fatalf("doctor code = %d, stderr = %q", code, stderr.String())
 	}
 }
 

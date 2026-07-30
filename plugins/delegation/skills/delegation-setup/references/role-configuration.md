@@ -42,16 +42,20 @@ setup peer
   --cli-launcher-prefix-argument=--
 ```
 
+This configures and validates TraeX launch only. Managed TraeX worker execution remains unavailable
+until the TraeX app-server protocol adaptation lands.
+
 The launcher must preserve stdio. On Linux it must `exec` the target CLI; on macOS and Windows it
 must remain attached and must not daemonize or detach. The connector assembles
-`warmpool run -- traex -p ultra app-server --listen stdio://` without invoking a shell.
+`warmpool run -- <resolved-native-traex> -p ultra app-server --listen stdio://` without invoking a
+shell.
 
 `--codex-home` and `peer.codexHome` keep their version-3 compatibility names. They are the managed
 CLI home: Codex receives the path as `CODEX_HOME`; TraeX receives it as `TRAE_HOME` and uses its
 `cli` child as `TRAECLI_HOME`. Never point this field at the user's normal CLI home: setup, doctor,
 and worker launch reject user authentication, instructions, profiles, plugins, hooks, model
-providers, and non-system skills. Setup and doctor validate the command, launcher, paths, and protected
-configuration without starting the CLI.
+providers, execution rules, and non-system skills. Setup and doctor validate the command, launcher,
+paths, and protected configuration without starting the CLI.
 
 For token authentication, enroll every peer from the configured broker:
 
