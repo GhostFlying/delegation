@@ -19,8 +19,8 @@ type taskDefinition struct {
 	Actions         string
 }
 
-func taskOwned(task taskDefinition, role ServiceRole) bool {
-	spec, err := specFor(role)
+func taskOwned(task taskDefinition, role ServiceRole, instanceID string) bool {
+	spec, err := specFor(role, instanceID)
 	return err == nil && task.Description == spec.marker && task.URI == spec.scheduled
 }
 

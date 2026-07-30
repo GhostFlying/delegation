@@ -54,6 +54,48 @@ func TestManagedFileRefusesReplacementAndForeignCollision(t *testing.T) {
 	}
 }
 
+func TestManagedFileRefusesAnotherInstanceIdentity(t *testing.T) {
+	for _, render := range []struct {
+		name string
+		call func(Invocation) (Descriptor, error)
+	}{
+		{
+			name: "systemd",
+			call: func(invocation Invocation) (Descriptor, error) {
+				return RenderSystemd(ServiceRolePeer, invocation)
+			},
+		},
+		{
+			name: "launchd",
+			call: func(invocation Invocation) (Descriptor, error) {
+				return RenderLaunchAgent(ServiceRolePeer, invocation)
+			},
+		},
+	} {
+		t.Run(render.name, func(t *testing.T) {
+			alphaInvocation := testInvocation(ServiceRolePeer, "/opt/delegation", "/home/test/config.json")
+			alphaInvocation.InstanceID = "alpha"
+			betaInvocation := alphaInvocation
+			betaInvocation.InstanceID = "beta"
+			alpha, err := render.call(alphaInvocation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beta, err := render.call(betaInvocation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "service")
+			if state, err := installManagedFile(path, alpha); err != nil || state != StatePrepared {
+				t.Fatalf("install alpha = %s, %v", state, err)
+			}
+			if state, err := installManagedFile(path, beta); err == nil || state != StateForeignConflict {
+				t.Fatalf("install beta over alpha = %s, %v", state, err)
+			}
+		})
+	}
+}
+
 func TestManagedFileRefusesSymlink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target")

@@ -101,6 +101,76 @@ func TestDarwinInstallBootstrapsEnablesAndStartsService(t *testing.T) {
 	}
 }
 
+func TestDarwinNamedInstanceLifecycleTargetsNamedAgent(t *testing.T) {
+	stubDarwinServiceReadiness(t, nil)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
+	invocation.InstanceID = "alpha-2"
+	label := "com.github.ghostflying.delegation.alpha-2.peer"
+	artifact := filepath.Join(home, "Library", "LaunchAgents", label+".plist")
+	originalRunner := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = originalRunner })
+	var calls [][]string
+	targetPrints := 0
+	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
+		calls = append(calls, slices.Clone(args))
+		if args[0] == "print" && len(args) == 2 && args[1] == fmt.Sprintf("gui/%d", os.Geteuid()) {
+			return userServiceCommandResult{}, nil
+		}
+		if args[0] == "print" {
+			targetPrints++
+			if targetPrints > 1 {
+				return launchctlTestStatus(artifact, "running"), nil
+			}
+			return userServiceCommandResult{ExitCode: 113}, nil
+		}
+		return userServiceCommandResult{}, nil
+	}
+	result, err := Install(ServiceRolePeer, invocation)
+	if err != nil || result.State != StateActive || result.Artifact != artifact {
+		t.Fatalf("Install() = %#v, %v", result, err)
+	}
+	target := fmt.Sprintf("gui/%d/%s", os.Geteuid(), label)
+	for _, call := range calls {
+		if slices.Contains(call, LaunchAgentPeerName) {
+			t.Fatalf("named lifecycle targeted legacy label: %q", calls)
+		}
+		if (call[0] == "enable" || call[0] == "kickstart" || call[0] == "print" && len(call) == 2 &&
+			call[1] != fmt.Sprintf("gui/%d", os.Geteuid())) && !slices.Contains(call, target) {
+			t.Fatalf("named lifecycle omitted target %q: %q", target, call)
+		}
+		if call[0] == "bootstrap" && call[2] != artifact {
+			t.Fatalf("named lifecycle bootstrapped %q, want %q", call[2], artifact)
+		}
+	}
+}
+
+func TestDarwinPrepareRejectsInvalidInstanceWithoutSideEffects(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
+	invocation.InstanceID = "unsafe/instance"
+	if _, err := Prepare(ServiceRolePeer, invocation); err == nil {
+		t.Fatal("Prepare() accepted invalid instance ID")
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("invalid instance created files: %v", entries)
+	}
+}
+
 func TestDarwinInstallAcceptsOnlyManagedLoadedPath(t *testing.T) {
 	stubDarwinServiceReadiness(t, nil)
 	home := t.TempDir()
@@ -383,7 +453,7 @@ func TestDarwinLaunchAgentRoundTrip(t *testing.T) {
 	}
 	domain := fmt.Sprintf("gui/%d", os.Geteuid())
 	target := domain + "/" + LaunchAgentPeerName
-	artifact, err := darwinServicePath(ServiceRolePeer)
+	artifact, err := darwinServicePath(ServiceRolePeer, "")
 	if err != nil {
 		t.Fatal(err)
 	}

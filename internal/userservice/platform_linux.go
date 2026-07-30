@@ -22,7 +22,7 @@ func platformPrepare(role ServiceRole, invocation Invocation) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	path, err := linuxServicePath(role)
+	path, err := linuxServicePath(role, invocation.InstanceID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -34,7 +34,7 @@ func platformActivate(result Result, invocation Invocation) (Result, error) {
 	if result.State != StatePrepared && result.State != StateActive {
 		return result, fmt.Errorf("cannot activate systemd user service from state %s", result.State)
 	}
-	spec, err := specFor(result.Role)
+	spec, err := specFor(result.Role, invocation.InstanceID)
 	if err != nil {
 		return result, err
 	}
@@ -63,7 +63,7 @@ func platformActivate(result Result, invocation Invocation) (Result, error) {
 			errors.Join(err, commandFailure("enable systemd user service", enabled)),
 		)
 	}
-	isEnabled, isActive, err := querySystemdState(result.Role)
+	isEnabled, isActive, err := querySystemdState(result.Role, invocation.InstanceID)
 	if err != nil || !isEnabled || !isActive {
 		result.State = StateIndeterminate
 		return result, errors.Join(err, errors.New("systemd user service did not become enabled and active"))
@@ -99,7 +99,7 @@ func reconcileSystemdFailure(
 		result.State = StateForeignConflict
 		return result, errors.Join(activationErr, errors.New("loaded systemd unit is shadowed or has drop-in overrides"))
 	}
-	enabled, active, queryErr := querySystemdState(result.Role)
+	enabled, active, queryErr := querySystemdState(result.Role, invocation.InstanceID)
 	if queryErr != nil {
 		result.State = StateIndeterminate
 		return result, errors.Join(activationErr, queryErr)
@@ -130,7 +130,7 @@ func querySystemdIdentity(result Result, invocation Invocation) (bool, error) {
 	if !bytes.Equal(content, descriptor.Content) {
 		return false, nil
 	}
-	spec, err := specFor(result.Role)
+	spec, err := specFor(result.Role, invocation.InstanceID)
 	if err != nil {
 		return false, err
 	}
@@ -160,8 +160,8 @@ func querySystemdIdentity(result Result, invocation Invocation) (bool, error) {
 	return filepath.Clean(fragment) == filepath.Clean(result.Artifact) && strings.TrimSpace(dropIns) == "", nil
 }
 
-func querySystemdState(role ServiceRole) (bool, bool, error) {
-	spec, err := specFor(role)
+func querySystemdState(role ServiceRole, instanceID string) (bool, bool, error) {
+	spec, err := specFor(role, instanceID)
 	if err != nil {
 		return false, false, err
 	}
@@ -180,8 +180,8 @@ func querySystemdState(role ServiceRole) (bool, bool, error) {
 	return enabled.ExitCode == 0, active.ExitCode == 0, nil
 }
 
-func linuxServicePath(role ServiceRole) (string, error) {
-	spec, err := specFor(role)
+func linuxServicePath(role ServiceRole, instanceID string) (string, error) {
+	spec, err := specFor(role, instanceID)
 	if err != nil {
 		return "", err
 	}

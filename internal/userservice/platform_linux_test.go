@@ -95,6 +95,59 @@ func TestLinuxInstallEnablesStartsAndVerifiesService(t *testing.T) {
 	}
 }
 
+func TestLinuxNamedInstanceLifecycleTargetsNamedUnit(t *testing.T) {
+	stubLinuxServiceReadiness(t, nil)
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	invocation := testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/config.json",
+	)
+	invocation.InstanceID = "alpha-2"
+	unitName := "delegation-alpha-2-peer.service"
+	artifact := filepath.Join(configHome, "systemd", "user", unitName)
+	originalRunner := runSystemctl
+	t.Cleanup(func() { runSystemctl = originalRunner })
+	var calls [][]string
+	runSystemctl = func(args ...string) (userServiceCommandResult, error) {
+		calls = append(calls, slices.Clone(args))
+		if slices.Contains(args, "show") {
+			return systemdIdentityResult(artifact, ""), nil
+		}
+		return userServiceCommandResult{}, nil
+	}
+	result, err := Install(ServiceRolePeer, invocation)
+	if err != nil || result.State != StateActive || result.Artifact != artifact {
+		t.Fatalf("Install() = %#v, %v", result, err)
+	}
+	for _, call := range calls {
+		if slices.Contains(call, SystemdPeerUnitName) {
+			t.Fatalf("named lifecycle targeted legacy unit: %q", calls)
+		}
+		if call[2] != "daemon-reload" && !slices.Contains(call, unitName) {
+			t.Fatalf("named lifecycle omitted unit %q: %q", unitName, call)
+		}
+	}
+}
+
+func TestLinuxPrepareRejectsInvalidInstanceWithoutSideEffects(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	invocation := testInvocation(
+		ServiceRolePeer, "/opt/delegation/bin/delegation", "/home/test/.delegation/config.json",
+	)
+	invocation.InstanceID = "unsafe/instance"
+	if _, err := Prepare(ServiceRolePeer, invocation); err == nil {
+		t.Fatal("Prepare() accepted invalid instance ID")
+	}
+	entries, err := os.ReadDir(configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("invalid instance created files: %v", entries)
+	}
+}
+
 func TestLinuxInstallReconcilesLostActivationResponse(t *testing.T) {
 	stubLinuxServiceReadiness(t, nil)
 	configHome := t.TempDir()

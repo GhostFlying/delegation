@@ -34,7 +34,7 @@ func platformPrepare(role ServiceRole, invocation Invocation) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	path, err := darwinServicePath(role)
+	path, err := darwinServicePath(role, invocation.InstanceID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -46,7 +46,7 @@ func platformActivate(result Result, invocation Invocation) (Result, error) {
 	if result.State != StatePrepared && result.State != StateActive {
 		return result, fmt.Errorf("cannot activate LaunchAgent from state %s", result.State)
 	}
-	spec, err := specFor(result.Role)
+	spec, err := specFor(result.Role, invocation.InstanceID)
 	if err != nil {
 		return result, err
 	}
@@ -258,8 +258,8 @@ func parseLaunchAgentStatus(result userServiceCommandResult) (launchAgentStatus,
 	return status, nil
 }
 
-func darwinServicePath(role ServiceRole) (string, error) {
-	spec, err := specFor(role)
+func darwinServicePath(role ServiceRole, instanceID string) (string, error) {
+	spec, err := specFor(role, instanceID)
 	if err != nil {
 		return "", err
 	}

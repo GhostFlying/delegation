@@ -88,6 +88,60 @@ func TestConnectorReadinessRejectsWrongBridgeIdentity(t *testing.T) {
 	}
 }
 
+func TestConnectorReadinessUsesInstanceEndpoint(t *testing.T) {
+	temporaryRoot := ""
+	if runtime.GOOS != "windows" {
+		temporaryRoot = "/tmp"
+	}
+	home, err := os.MkdirTemp(temporaryRoot, "dr-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	cfg := delegationconfig.Config{
+		InstanceID:   "alpha",
+		Role:         delegationconfig.RolePeer,
+		ControllerID: readinessControllerID,
+		DeviceID:     readinessDeviceID,
+	}
+	endpoint, err := localbridge.EndpointForInstance(
+		cfg.EffectiveInstanceID(), cfg.ControllerID, cfg.DeviceID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := localbridge.Listen(endpoint, localbridge.ServiceIdentity{
+		ControllerID: cfg.ControllerID,
+		DeviceID:     cfg.DeviceID,
+	}, &readinessBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveContext, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(serveContext) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := server.Close(); err != nil {
+			t.Errorf("close readiness bridge: %v", err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("serve readiness bridge: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("readiness bridge did not stop")
+		}
+	})
+	probeContext, cancelProbe := context.WithTimeout(context.Background(), time.Second)
+	defer cancelProbe()
+	if err := probeService(probeContext, cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBrokerReadinessRequiresDelegationIdentity(t *testing.T) {
 	valid := false
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {

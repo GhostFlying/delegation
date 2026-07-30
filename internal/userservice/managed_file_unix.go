@@ -32,6 +32,9 @@ func installManagedFile(path string, descriptor Descriptor) (State, error) {
 	}
 	switch state {
 	case StatePrepared:
+		if !descriptorOwnedBy(descriptor, existing) {
+			return StateForeignConflict, errors.New("service definition path is occupied by another Delegation service")
+		}
 		if bytes.Equal(existing, descriptor.Content) {
 			return StatePrepared, nil
 		}
@@ -161,8 +164,8 @@ func createManagedDirectoriesDurably(path string) error {
 func ownsDescriptor(kind Kind, data []byte) bool {
 	switch kind {
 	case KindSystemd:
-		return bytes.HasPrefix(data, []byte("# "+MarkerBroker+"\n")) ||
-			bytes.HasPrefix(data, []byte("# "+MarkerPeer+"\n"))
+		line, _, found := bytes.Cut(data, []byte("\n"))
+		return found && bytes.HasPrefix(line, []byte("# ")) && ownedMarker(string(line[2:]))
 	case KindLaunchAgent:
 		return ownsLaunchAgent(data)
 	case KindScheduledTask:
@@ -172,6 +175,26 @@ func ownsDescriptor(kind Kind, data []byte) bool {
 }
 
 func ownsLaunchAgent(data []byte) bool {
+	label, marker, ok := launchAgentIdentity(data)
+	return ok && ownedLaunchAgentIdentity(label, marker)
+}
+
+func descriptorOwnedBy(descriptor Descriptor, data []byte) bool {
+	switch descriptor.Kind {
+	case KindSystemd:
+		expected, _, expectedFound := bytes.Cut(descriptor.Content, []byte("\n"))
+		actual, _, actualFound := bytes.Cut(data, []byte("\n"))
+		return expectedFound && actualFound && bytes.Equal(expected, actual)
+	case KindLaunchAgent:
+		expectedLabel, expectedMarker, expectedOK := launchAgentIdentity(descriptor.Content)
+		actualLabel, actualMarker, actualOK := launchAgentIdentity(data)
+		return expectedOK && actualOK && expectedLabel == actualLabel && expectedMarker == actualMarker
+	default:
+		return false
+	}
+}
+
+func launchAgentIdentity(data []byte) (string, string, bool) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	depth := 0
 	rootSeen := false
@@ -187,16 +210,16 @@ func ownsLaunchAgent(data []byte) bool {
 			break
 		}
 		if err != nil {
-			return false
+			return "", "", false
 		}
 		switch element := token.(type) {
 		case xml.StartElement:
 			if rootClosed {
-				return false
+				return "", "", false
 			}
 			if depth == 0 {
 				if rootSeen || element.Name.Space != "" || element.Name.Local != "plist" {
-					return false
+					return "", "", false
 				}
 				rootSeen = true
 				depth = 1
@@ -204,26 +227,26 @@ func ownsLaunchAgent(data []byte) bool {
 			}
 			if depth == 1 {
 				if dictSeen || element.Name.Space != "" || element.Name.Local != "dict" {
-					return false
+					return "", "", false
 				}
 				dictSeen = true
 				depth = 2
 				continue
 			}
 			if depth != 2 || element.Name.Space != "" {
-				return false
+				return "", "", false
 			}
 			if element.Name.Local == "key" {
 				if pendingKey != "" {
-					return false
+					return "", "", false
 				}
 				key, ok := readPlistScalar(decoder, element)
 				if !ok {
-					return false
+					return "", "", false
 				}
 				if key == "Label" || key == "Description" {
 					if seen[key] {
-						return false
+						return "", "", false
 					}
 					seen[key] = true
 				}
@@ -231,58 +254,95 @@ func ownsLaunchAgent(data []byte) bool {
 				continue
 			}
 			if pendingKey == "" {
-				return false
+				return "", "", false
 			}
 			key := pendingKey
 			pendingKey = ""
 			if key == "Label" || key == "Description" {
 				if element.Name.Local != "string" {
-					return false
+					return "", "", false
 				}
 				value, ok := readPlistScalar(decoder, element)
 				if !ok {
-					return false
+					return "", "", false
 				}
 				values[key] = value
 				continue
 			}
 			if err := decoder.Skip(); err != nil {
-				return false
+				return "", "", false
 			}
 		case xml.EndElement:
 			switch depth {
 			case 2:
 				if element.Name.Space != "" || element.Name.Local != "dict" || pendingKey != "" {
-					return false
+					return "", "", false
 				}
 				dictClosed = true
 				depth = 1
 			case 1:
 				if element.Name.Space != "" || element.Name.Local != "plist" || !dictClosed {
-					return false
+					return "", "", false
 				}
 				rootClosed = true
 				depth = 0
 			default:
-				return false
+				return "", "", false
 			}
 		case xml.CharData:
 			if strings.TrimSpace(string(element)) != "" {
-				return false
+				return "", "", false
 			}
 		case xml.Directive, xml.ProcInst:
 			if rootSeen {
-				return false
+				return "", "", false
 			}
 		}
 	}
 	if !rootSeen || !rootClosed || !dictSeen || !dictClosed || depth != 0 || pendingKey != "" ||
 		!seen["Label"] || !seen["Description"] {
-		return false
+		return "", "", false
 	}
+	return values["Label"], values["Description"], true
+}
+
+func ownedLaunchAgentIdentity(label, marker string) bool {
 	for _, role := range []ServiceRole{ServiceRoleBroker, ServiceRolePeer} {
-		spec, _ := specFor(role)
-		if values["Label"] == spec.launchAgent && values["Description"] == spec.marker {
+		legacy, _ := specFor(role, "")
+		if label == legacy.launchAgent && marker == legacy.marker {
+			return true
+		}
+		const labelPrefix = "com.github.ghostflying.delegation."
+		if !strings.HasPrefix(label, labelPrefix) {
+			continue
+		}
+		suffix := strings.TrimPrefix(label, labelPrefix)
+		instanceID, labelRole, found := strings.Cut(suffix, ".")
+		if !found || labelRole != string(role) {
+			continue
+		}
+		spec, err := specFor(role, instanceID)
+		if err == nil && label == spec.launchAgent && marker == spec.marker {
+			return true
+		}
+	}
+	return false
+}
+
+func ownedMarker(marker string) bool {
+	for _, role := range []ServiceRole{ServiceRoleBroker, ServiceRolePeer} {
+		legacy, _ := specFor(role, "")
+		if marker == legacy.marker {
+			return true
+		}
+		prefix := markerPrefix
+		suffix := ":" + string(role)
+		if !strings.HasPrefix(marker, prefix) || !strings.HasSuffix(marker, suffix) {
+			continue
+		}
+		instanceID := strings.TrimSuffix(strings.TrimPrefix(marker, prefix), suffix)
+		spec, err := specFor(role, instanceID)
+		if err == nil && marker == spec.marker {
 			return true
 		}
 	}
