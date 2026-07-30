@@ -377,24 +377,32 @@ ON CONFLICT(singleton) DO NOTHING
 `, kind); err != nil {
 			return fmt.Errorf("initialize broker state host kind: %w", err)
 		}
-		var stateKind hostkind.Kind
-		if err := connection.QueryRowContext(ctx, `
+		return verifyBrokerHostKind(ctx, connection, kind)
+	})
+}
+
+func verifyBrokerHostKind(
+	ctx context.Context,
+	queryer rowQueryer,
+	kind hostkind.Kind,
+) error {
+	var stateKind hostkind.Kind
+	if err := queryer.QueryRowContext(ctx, `
 SELECT host_kind FROM broker_metadata WHERE singleton = 1
 `).Scan(&stateKind); err != nil {
-			return fmt.Errorf("load broker state host kind: %w", err)
-		}
-		if err := stateKind.Validate(); err != nil {
-			return fmt.Errorf("stored broker state host kind: %w", err)
-		}
-		if stateKind != kind {
-			return fmt.Errorf(
-				"broker host kind %q does not match state host kind %q",
-				kind,
-				stateKind,
-			)
-		}
-		return nil
-	})
+		return fmt.Errorf("load broker state host kind: %w", err)
+	}
+	if err := stateKind.Validate(); err != nil {
+		return fmt.Errorf("stored broker state host kind: %w", err)
+	}
+	if stateKind != kind {
+		return fmt.Errorf(
+			"broker host kind %q does not match state host kind %q",
+			kind,
+			stateKind,
+		)
+	}
+	return nil
 }
 
 func controllerRevision(ctx context.Context, queryer rowQueryer, controllerID string) (uint64, error) {

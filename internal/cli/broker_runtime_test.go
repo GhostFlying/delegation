@@ -115,6 +115,11 @@ func TestBrokerServiceUsesConfiguredMasterToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := registry.BeginBrokerEpoch(
+		context.Background(), cfg.ControllerID, cfg.EffectiveHostKind(),
+	); err != nil {
+		t.Fatal(err)
+	}
 	if err := registry.Close(); err != nil {
 		t.Fatal(err)
 	}

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	delegationcredential "github.com/GhostFlying/delegation/internal/credential"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -68,6 +69,33 @@ func TestCredentialRevokeIsDurableAndIdempotent(t *testing.T) {
 
 	if _, stderr, code := runCredentialTestCommand(credentialRevokeArgs(environment)); code != 0 {
 		t.Fatalf("idempotent revoke code = %d, stderr = %q", code, stderr)
+	}
+}
+
+func TestCredentialRevokeRejectsMismatchedStateHostKindWithoutMutation(t *testing.T) {
+	environment := setupCredentialTestBroker(t, "token")
+	tokenPath := privateTestPath(t, "device.token")
+	if _, stderr, code := runCredentialTestCommand(
+		credentialIssueArgs(environment, credentialTestDeviceID, tokenPath),
+	); code != 0 {
+		t.Fatalf("issue code = %d, stderr = %q", code, stderr)
+	}
+	setCredentialTestHostKind(t, environment.configPath, hostkind.TraeX)
+
+	_, stderr, code := runCredentialTestCommand(credentialRevokeArgs(environment))
+	if code == 0 || !strings.Contains(stderr, "does not match state host kind") {
+		t.Fatalf("revoke code = %d, stderr = %q", code, stderr)
+	}
+	registry := openCredentialTestStore(t, environment.statePath)
+	defer registry.Close()
+	stored, err := registry.Credential(
+		context.Background(), credentialTestControllerID, credentialTestDeviceID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Disabled || stored.Pending {
+		t.Fatalf("mismatched revoke changed credential: %#v", stored)
 	}
 }
 

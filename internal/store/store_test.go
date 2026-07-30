@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/GhostFlying/delegation/internal/hostkind"
 )
 
 func TestOpenCreatesAndReopensSchema(t *testing.T) {
@@ -200,6 +203,44 @@ func TestOpenCurrentDoesNotInitializeState(t *testing.T) {
 	}
 	if objectCount != 0 {
 		t.Fatalf("OpenCurrent created %d schema objects", objectCount)
+	}
+}
+
+func TestOpenCurrentForHostRequiresMatchingBoundState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "broker.sqlite3")
+	registry, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenCurrentForHost(context.Background(), path, hostkind.Codex); err == nil ||
+		!strings.Contains(err.Error(), "load broker state host kind") {
+		t.Fatalf("unbound state error = %v", err)
+	}
+
+	registry, err = Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.BeginBrokerEpoch(context.Background(), testControllerID, hostkind.Codex); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	registry, err = OpenCurrentForHost(context.Background(), path, hostkind.Codex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenCurrentForHost(context.Background(), path, hostkind.TraeX); err == nil ||
+		!strings.Contains(err.Error(), "does not match state host kind") {
+		t.Fatalf("mismatched state error = %v", err)
 	}
 }
 

@@ -43,6 +43,9 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 		if _, err := loadBrokerAuthority(resolvedConfig, cfg); err != nil {
 			return writeError(stderr, err)
 		}
+		if err := validateExistingBrokerStateHost(cfg); err != nil {
+			return writeError(stderr, err)
+		}
 		checks = append(checks, "broker state and authority paths are safe")
 	} else {
 		if _, err := loadConnectorAuthority(resolvedConfig, cfg); err != nil {

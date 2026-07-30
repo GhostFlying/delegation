@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/broker"
@@ -245,6 +246,21 @@ func loadBrokerAuthority(
 		return nil, fmt.Errorf("read broker master token: %w", err)
 	}
 	return &masterToken, nil
+}
+
+func validateExistingBrokerStateHost(cfg delegationconfig.Config) error {
+	if _, err := os.Lstat(cfg.Broker.StateFile); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect broker state: %w", err)
+	}
+	registry, err := store.OpenCurrentForHost(
+		context.Background(), cfg.Broker.StateFile, cfg.EffectiveHostKind(),
+	)
+	if err != nil {
+		return err
+	}
+	return registry.Close()
 }
 
 func (r *brokerRuntimeResources) close() error {
