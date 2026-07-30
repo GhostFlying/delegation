@@ -11,10 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 )
 
 const (
@@ -142,6 +145,26 @@ func TestClientRoutesConcurrentResponsesAndNotifications(t *testing.T) {
 	callWithTimeout(t, client, "test/after-late", nil, &afterLate)
 	if afterLate != "after-late" {
 		t.Fatalf("response after late response = %q", afterLate)
+	}
+}
+
+func TestClientPreservesStructuredLaunchPrefixArguments(t *testing.T) {
+	prefix := []string{"warmpool run", "--", "traex;not-a-shell", "-p", "ultra"}
+	client := startHelperClient(t, "normal", Options{
+		Launch: clilaunch.Spec{PrefixArguments: prefix},
+	})
+	var inspect struct {
+		Arguments []string `json:"arguments"`
+	}
+	callWithTimeout(t, client, "test/inspect", nil, &inspect)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append([]string{filepath.Clean(executable)}, prefix...)
+	want = append(want, "app-server", "--listen", "stdio://")
+	if !slices.Equal(inspect.Arguments, want) {
+		t.Fatalf("helper arguments = %q, want %q", inspect.Arguments, want)
 	}
 }
 
@@ -745,7 +768,7 @@ func TestEnvironmentCODEXHOMEConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = validateOptions(Options{
-		Binary: executable, SupervisorBinary: executable,
+		Launch: directLaunch(executable), SupervisorBinary: executable,
 		CodexHome: t.TempDir(), Environment: map[string]string{"CODEX_HOME": t.TempDir()},
 	})
 	if err == nil || !strings.Contains(err.Error(), "conflicts") {
@@ -794,12 +817,15 @@ func startHelperClient(t *testing.T, mode string, overrides Options) *Client {
 		environment[key] = value
 	}
 	options := Options{
-		Binary: executable, SupervisorBinary: executable,
+		Launch: directLaunch(executable), SupervisorBinary: executable,
 		CodexHome: codexHome, Environment: environment,
 		UnsetEnvironment: overrides.UnsetEnvironment,
 		ClientVersion:    "test", HandshakeTimeout: 2 * time.Second,
 		CloseTimeout: overrides.CloseTimeout, StderrLimit: overrides.StderrLimit,
 		NotificationBuffer: overrides.NotificationBuffer, MaxPendingCalls: overrides.MaxPendingCalls,
+	}
+	if len(overrides.Launch.PrefixArguments) > 0 {
+		options.Launch.PrefixArguments = slices.Clone(overrides.Launch.PrefixArguments)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -813,6 +839,10 @@ func startHelperClient(t *testing.T, mode string, overrides Options) *Client {
 		_ = client.Close(ctx)
 	})
 	return client
+}
+
+func directLaunch(executable string) clilaunch.Spec {
+	return clilaunch.Spec{Executable: executable}
 }
 
 func callWithTimeout(t *testing.T, client *Client, method string, params, result any) {

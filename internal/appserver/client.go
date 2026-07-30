@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 )
 
 const (
@@ -71,7 +72,7 @@ var (
 
 // Options defines one isolated app-server child process.
 type Options struct {
-	Binary string
+	Launch clilaunch.Spec
 	// SupervisorBinary is required on macOS and must dispatch
 	// RunDarwinSupervisorIfRequested before normal command handling. Other
 	// platforms ignore it.
@@ -163,7 +164,11 @@ func Start(ctx context.Context, options Options) (*Client, error) {
 	// The released Codex multitool does not expose the standalone
 	// codex-app-server --session-source flag. Managed identity is carried by the
 	// thread-scoped threadSource and broker principal instead.
-	command := exec.Command(validated.Binary, "app-server", "--listen", "stdio://")
+	arguments := append(
+		slices.Clone(validated.Launch.PrefixArguments),
+		"app-server", "--listen", "stdio://",
+	)
+	command := exec.Command(validated.Launch.Executable, arguments...)
 	command.Env = buildEnvironment(
 		validated.Environment,
 		validated.UnsetEnvironment,
@@ -932,16 +937,11 @@ func readBoundedLine(reader *bufio.Reader, limit int) ([]byte, error) {
 }
 
 func validateOptions(options Options) (Options, error) {
-	if options.Binary == "" || !filepath.IsAbs(options.Binary) {
-		return Options{}, errors.New("app-server binary must be an absolute path")
-	}
-	info, err := os.Stat(options.Binary)
+	launch, err := clilaunch.Resolve(options.Launch)
 	if err != nil {
-		return Options{}, fmt.Errorf("inspect app-server binary: %w", err)
+		return Options{}, err
 	}
-	if !info.Mode().IsRegular() {
-		return Options{}, errors.New("app-server binary must be a regular file")
-	}
+	options.Launch = launch
 	if options.CodexHome == "" || !filepath.IsAbs(options.CodexHome) {
 		return Options{}, errors.New("app-server CODEX_HOME must be an absolute path")
 	}

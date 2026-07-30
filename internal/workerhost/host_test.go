@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/appserver"
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
@@ -82,6 +83,55 @@ func TestHostUsesOneAppServerAndEnforcesWorkerSlots(t *testing.T) {
 	}
 	if len(workers) != 2 {
 		t.Fatalf("stored workers = %#v", workers)
+	}
+}
+
+func TestHostPassesStructuredCLILaunchToAppServer(t *testing.T) {
+	application := newFakeApplication()
+	host, _, paths := newTestHost(t, 1, application)
+	launcher := filepath.Join(t.TempDir(), "warmpool")
+	runtimeExecutable := filepath.Join(t.TempDir(), "traex")
+	for _, path := range []string{launcher, runtimeExecutable} {
+		if err := os.WriteFile(path, []byte("test"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolved, err := clilaunch.Resolve(clilaunch.Spec{
+		Executable:      launcher,
+		PrefixArguments: []string{"run", "--", "traex", "-p", "ultra"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedRuntime, err := clilaunch.ResolveRuntimeExecutable(runtimeExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.cliLaunch = resolved
+	host.cliRuntimeExecutable = resolvedRuntime
+
+	spawnTestWorker(t, host, "123e4567-e89b-42d3-a456-426614174413", "structured launch")
+
+	if !reflect.DeepEqual(paths.launchOptions.Launch, resolved) {
+		t.Fatalf("app-server launch = %#v, want %#v", paths.launchOptions.Launch, resolved)
+	}
+	config := host.managedConfig(store.WorkerReservation{
+		WorkerKey: store.WorkerKey{
+			ControllerID: testControllerID,
+			TreeID:       testTreeID,
+			AgentID:      "123e4567-e89b-42d3-a456-426614174414",
+		},
+		ParentAgentID: testParentID,
+		WorkspacePath: filepath.Join(filepath.Dir(paths.codexHome), "managed-worker"),
+	})
+	if runtime.GOOS == "linux" {
+		filesystem := managedFilesystemPermissions(t, config)
+		if filesystem[resolvedRuntime] != "read" {
+			t.Fatalf("managed profile omits CLI runtime: %#v", filesystem)
+		}
+		if _, found := filesystem[resolved.Executable]; found {
+			t.Fatalf("managed profile grants launcher wrapper to worker shell: %#v", filesystem)
+		}
 	}
 }
 
@@ -2203,7 +2253,10 @@ func TestManagedProfileUsesPlatformPermissionBoundary(t *testing.T) {
 	if filepath.Dir(paths.configPath) != filepath.Dir(paths.codexBinary) {
 		t.Fatal("test fixture does not co-locate the peer config and Codex binary")
 	}
-	for _, directory := range []string{filepath.Dir(paths.codexBinary), filepath.Dir(host.codexBinary)} {
+	for _, directory := range []string{
+		filepath.Dir(paths.codexBinary),
+		filepath.Dir(host.cliRuntimeExecutable),
+	} {
 		if _, found := filesystem[directory]; found {
 			t.Fatalf("managed profile grants the Codex binary directory %q: %#v", directory, filesystem)
 		}
@@ -2211,7 +2264,7 @@ func TestManagedProfileUsesPlatformPermissionBoundary(t *testing.T) {
 	if _, found := filesystem[paths.configPath]; found {
 		t.Fatalf("managed profile grants the co-located peer config: %#v", filesystem)
 	}
-	assertCodexRuntimeFilesystemPermission(t, filesystem, host.codexBinary)
+	assertCodexRuntimeFilesystemPermission(t, filesystem, host.cliRuntimeExecutable)
 	if filesystem[host.workerGitBinary] != "read" {
 		t.Fatalf("managed profile does not grant the exact Git executable: %#v", filesystem)
 	}
@@ -2231,6 +2284,10 @@ type testHostPaths struct {
 	providerEnvironmentFile string
 	launchOptions           *appserver.Options
 	allowCloseError         *atomic.Bool
+}
+
+func directWorkerCLILaunch(executable string) clilaunch.Spec {
+	return clilaunch.Spec{Executable: executable}
 }
 
 func newTestHost(
@@ -2291,13 +2348,16 @@ func newTestHostWithStateSetupAndResultPublisher(
 		providerEnvironmentFile: filepath.Join(root, "peer.env"),
 		launchOptions:           &appserver.Options{}, allowCloseError: &atomic.Bool{},
 	}
-	for _, path := range []string{
-		paths.configPath,
-		paths.delegationBinary,
-		paths.codexBinary,
-		paths.providerEnvironmentFile,
+	for _, file := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{path: paths.configPath, mode: 0o600},
+		{path: paths.delegationBinary, mode: 0o600},
+		{path: paths.codexBinary, mode: 0o700},
+		{path: paths.providerEnvironmentFile, mode: 0o600},
 	} {
-		if err := os.WriteFile(path, []byte("test"), 0o600); err != nil {
+		if err := os.WriteFile(file.path, []byte("test"), file.mode); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2337,7 +2397,8 @@ func newTestHostWithStateSetupAndResultPublisher(
 	host, err := New(context.Background(), Options{
 		ControllerID: testControllerID, DeviceID: testDeviceID,
 		PeerConfigPath: paths.configPath, DelegationBinary: paths.delegationBinary,
-		CodexBinary: paths.codexBinary, GitBinary: paths.gitBinary,
+		CLILaunch:            directWorkerCLILaunch(paths.codexBinary),
+		CLIRuntimeExecutable: paths.codexBinary, GitBinary: paths.gitBinary,
 		CodexHome: paths.codexHome,
 		CodexEnvironment: map[string]string{
 			"CODEX_ACCESS_TOKEN":  "host-auth",
@@ -2491,7 +2552,7 @@ func assertManagedProfile(
 	if err != nil {
 		t.Fatal(err)
 	}
-	addCodexRuntimeFilesystemPermission(filesystem, resolvedCodexBinary)
+	addCLIRuntimeFilesystemPermission(filesystem, resolvedCodexBinary)
 	workerGitBinary, err := resolveWorkerGitBinary(context.Background(), paths.gitBinary)
 	if err != nil {
 		t.Fatal(err)

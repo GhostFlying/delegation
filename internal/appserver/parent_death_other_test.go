@@ -88,7 +88,7 @@ func runParentDeathConnectorHelper() int {
 		return parentDeathHelperFailure("resolve app-server helper: %v", err)
 	}
 	client, err := Start(context.Background(), Options{
-		Binary: executable, CodexHome: os.Getenv(parentDeathHomeEnvironment),
+		Launch: directLaunch(executable), CodexHome: os.Getenv(parentDeathHomeEnvironment),
 		Environment: map[string]string{
 			parentDeathHelperEnvironment:  parentDeathAppServerHelper,
 			helperFileEnvironment:         os.Getenv(helperFileEnvironment),
