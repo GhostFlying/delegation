@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/GhostFlying/delegation/internal/hostkind"
 )
 
 var forbiddenManagedHomeEntries = []string{
@@ -26,6 +28,18 @@ func ValidateManagedHome(path string) error {
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("inspect managed CODEX_HOME %s: %w", name, err)
 		}
+	}
+	return nil
+}
+
+// ValidateManagedRuntimeHome applies the content policy for the CLI that owns
+// an isolated managed runtime home.
+func ValidateManagedRuntimeHome(kind hostkind.Kind, path string) error {
+	if err := kind.Validate(); err != nil {
+		return err
+	}
+	if kind == hostkind.Codex {
+		return ValidateManagedHome(path)
 	}
 	return nil
 }

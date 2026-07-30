@@ -357,7 +357,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if err := delegationconfig.PrepareWrite(resolvedConfig); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := codexconfig.ValidateManagedHome(resolvedCodexHome); err != nil {
+	if err := codexconfig.ValidateManagedRuntimeHome(networkHostKind, resolvedCodexHome); err != nil {
 		return writeError(stderr, err)
 	}
 	var preparedDirectories []string

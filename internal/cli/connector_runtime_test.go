@@ -21,6 +21,7 @@ import (
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/protocol"
@@ -515,6 +516,30 @@ func TestConnectorAuthorityIsReadBeforeRuntimeSideEffects(t *testing.T) {
 	err = runConnectorService(ctx, configPath, cfg, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "read peer token") {
 		t.Fatalf("missing connector authority error = %v", err)
+	}
+}
+
+func TestConnectorAuthorityAppliesManagedHomePolicyByHostKind(t *testing.T) {
+	configPath, cfg := setupConnectorRuntimeTest(
+		t,
+		runtimeDeviceID,
+		"runtime-home-policy",
+		"wss://broker.example.test",
+	)
+	if err := os.WriteFile(
+		filepath.Join(cfg.Peer.CodexHome, "config.toml"),
+		[]byte("model = \"managed\"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConnectorAuthority(configPath, cfg); err == nil ||
+		!strings.Contains(err.Error(), "config.toml") {
+		t.Fatalf("Codex connector authority error = %v", err)
+	}
+	cfg.HostKind = hostkind.TraeX
+	if _, err := loadConnectorAuthority(configPath, cfg); err != nil {
+		t.Fatalf("TraeX connector authority error = %v", err)
 	}
 }
 
