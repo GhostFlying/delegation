@@ -46,8 +46,8 @@ instance.
 Before installing or replacing a user service, read
 [native services](references/native-services.md). Install broker and peer processes independently,
 and stop when the native service manager reports a foreign, drifted, or indeterminate definition.
-Named instances currently run in the foreground; do not bypass the runtime's fail-closed rejection
-of native service installation for a named instance.
+Use the exact named config when installing a named instance; its `instanceId` selects a distinct
+native service identity.
 
 ## Verify And Hand Off
 

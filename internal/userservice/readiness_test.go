@@ -114,6 +114,7 @@ func TestConnectorReadinessUsesInstanceEndpoint(t *testing.T) {
 	server, err := localbridge.Listen(endpoint, localbridge.ServiceIdentity{
 		ControllerID: cfg.ControllerID,
 		DeviceID:     cfg.DeviceID,
+		InstanceID:   cfg.InstanceID,
 	}, &readinessBackend{})
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +140,61 @@ func TestConnectorReadinessUsesInstanceEndpoint(t *testing.T) {
 	defer cancelProbe()
 	if err := probeService(probeContext, cfg); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConnectorReadinessRejectsWrongInstanceIdentity(t *testing.T) {
+	temporaryRoot := ""
+	if runtime.GOOS != "windows" {
+		temporaryRoot = "/tmp"
+	}
+	home, err := os.MkdirTemp(temporaryRoot, "dr-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	cfg := delegationconfig.Config{
+		InstanceID:   "alpha",
+		Role:         delegationconfig.RolePeer,
+		ControllerID: readinessControllerID,
+		DeviceID:     readinessDeviceID,
+	}
+	endpoint, err := localbridge.EndpointForInstance(
+		cfg.EffectiveInstanceID(), cfg.ControllerID, cfg.DeviceID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := localbridge.Listen(endpoint, localbridge.ServiceIdentity{
+		ControllerID: cfg.ControllerID,
+		DeviceID:     cfg.DeviceID,
+		InstanceID:   "beta",
+	}, &readinessBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveContext, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(serveContext) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := server.Close(); err != nil {
+			t.Errorf("close readiness bridge: %v", err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("serve readiness bridge: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("readiness bridge did not stop")
+		}
+	})
+	probeContext, cancelProbe := context.WithTimeout(context.Background(), time.Second)
+	defer cancelProbe()
+	if err := probeService(probeContext, cfg); err == nil {
+		t.Fatal("probeService accepted a connector bridge from another instance")
 	}
 }
 
@@ -170,6 +226,34 @@ func TestBrokerReadinessRequiresDelegationIdentity(t *testing.T) {
 		t.Fatal("probeService accepted an unrelated HTTP health endpoint")
 	}
 	valid = true
+	if err := probeService(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBrokerReadinessRequiresNamedInstanceIdentity(t *testing.T) {
+	responseInstanceID := "beta"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set(broker.HealthServiceHeader, "broker")
+		writer.Header().Set(broker.HealthControllerHeader, readinessControllerID)
+		writer.Header().Set(broker.HealthInstanceHeader, responseInstanceID)
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte("ok\n"))
+	}))
+	defer server.Close()
+	cfg := delegationconfig.Config{
+		InstanceID:   "alpha",
+		Role:         delegationconfig.RoleBroker,
+		ControllerID: readinessControllerID,
+		Broker: delegationconfig.BrokerConfig{
+			Listen: strings.TrimPrefix(server.URL, "http://"),
+			Auth:   delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
+		},
+	}
+	if err := probeService(context.Background(), cfg); err == nil {
+		t.Fatal("probeService accepted broker health from another instance")
+	}
+	responseInstanceID = cfg.InstanceID
 	if err := probeService(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}

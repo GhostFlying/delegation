@@ -30,6 +30,7 @@ const (
 	ConnectPath                    = "/v1/connect"
 	HealthServiceHeader            = "X-Delegation-Service"
 	HealthControllerHeader         = "X-Delegation-Controller-Id"
+	HealthInstanceHeader           = "X-Delegation-Instance-Id"
 	defaultHeartbeatInterval       = 15 * time.Second
 	writeTimeout                   = 10 * time.Second
 	cleanupTimeout                 = 5 * time.Second
@@ -91,6 +92,7 @@ type Registry interface {
 
 type Options struct {
 	ControllerID      string
+	InstanceID        string
 	HostKind          hostkind.Kind
 	AuthMode          config.AuthMode
 	MasterToken       *tokenfile.Token
@@ -104,6 +106,7 @@ type Options struct {
 
 type Server struct {
 	controllerID      string
+	instanceID        string
 	hostKind          hostkind.Kind
 	authMode          config.AuthMode
 	masterToken       tokenfile.Token
@@ -215,6 +218,12 @@ func New(options Options) (*Server, error) {
 	if err := identity.ValidateID(options.ControllerID); err != nil {
 		return nil, fmt.Errorf("controllerId %w", err)
 	}
+	if options.InstanceID == "" {
+		options.InstanceID = config.DefaultInstanceID
+	}
+	if err := config.ValidateInstanceID(options.InstanceID); err != nil {
+		return nil, err
+	}
 	if options.HostKind == "" {
 		options.HostKind = hostkind.Codex
 	}
@@ -259,6 +268,7 @@ func New(options Options) (*Server, error) {
 	}
 	server := &Server{
 		controllerID:            options.ControllerID,
+		instanceID:              options.InstanceID,
 		hostKind:                options.HostKind,
 		authMode:                options.AuthMode,
 		registry:                options.Registry,
@@ -320,6 +330,9 @@ func (s *Server) Handler() http.Handler {
 		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		writer.Header().Set(HealthServiceHeader, "broker")
 		writer.Header().Set(HealthControllerHeader, s.controllerID)
+		if s.instanceID != config.DefaultInstanceID {
+			writer.Header().Set(HealthInstanceHeader, s.instanceID)
+		}
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte("ok\n"))
 	})

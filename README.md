@@ -126,11 +126,10 @@ TraeX peer setup remains disabled until the configurable non-shell CLI launch sp
 available. The `default` instance keeps the existing `~/.delegation/broker.json`,
 `~/.delegation/peer.json`, local bridge, and native service identities. A named instance uses
 `~/.delegation/instances/<instanceId>/` for its default broker and peer configuration, state,
-secrets, managed Codex home, and workspaces. Its local bridge is also instance-scoped. Named broker
-setup requires explicit `--listen` and `--status-listen` addresses because the runtime does not
-guess free ports. Explicit `--config`, path, and listener arguments remain authoritative. Named
-instances can run as foreground processes, while native service installation fails closed until
-instance-scoped systemd, LaunchAgent, and Scheduled Task identities land in the next checkpoint.
+secrets, managed Codex home, and workspaces. Its local bridge and native service identities are
+also instance-scoped. Named broker setup requires explicit `--listen` and `--status-listen`
+addresses because the runtime does not guess free ports. Explicit `--config`, path, and listener
+arguments remain authoritative.
 Set `DELEGATION_INSTANCE=<instanceId>` in the Codex or TraeX host environment before it loads the
 plugin to make the shipped root MCP select that named peer, or set `DELEGATION_CONFIG` to the exact
 peer config. An explicit instance selector must match the selected config. Named setup refuses an
@@ -188,12 +187,13 @@ inherits the same values from the current environment; add `--environment-file` 
 native-service source directly.
 
 Installation writes a disabled definition first, then enables, starts, and verifies it through the
-native service manager. The definitions are `delegation-broker.service` and
+native service manager. The default definitions are `delegation-broker.service` and
 `delegation-peer.service` on Linux, matching `.broker` and `.peer` LaunchAgents on macOS, and
-`Delegation Broker` and `Delegation Peer` Scheduled Tasks on Windows. They are currently reserved
-for the `default` instance; named installation is rejected before writing an artifact. Installation
-refuses foreign definitions and managed definitions whose executable or configuration path has
-drifted. A command whose effect cannot be reconciled returns
+`Delegation Broker` and `Delegation Peer` Scheduled Tasks on Windows. Named definitions include the
+config's `instanceId`, so broker and peer services from different local instances coexist without
+replacing or being mistaken for each other. Installation refuses foreign definitions and managed
+definitions whose executable or configuration path has drifted. A command whose effect cannot be
+reconciled returns
 `indeterminate` and leaves the definition in place for inspection.
 
 Linux requires a working systemd user manager. macOS uses the current GUI launchd domain and thus

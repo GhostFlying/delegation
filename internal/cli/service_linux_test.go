@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -206,6 +207,102 @@ esac
 	}
 }
 
+func TestNamedBrokerServiceInstallsUseDistinctSystemdUnits(t *testing.T) {
+	root := privateTestDirectory(t)
+	configHome := filepath.Join(root, "xdg")
+	commandLog := filepath.Join(root, "systemctl.log")
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	systemctl := filepath.Join(bin, "systemctl")
+	if err := os.WriteFile(systemctl, []byte(`#!/bin/sh
+printf '%s\n' "$*" >>"$DELEGATION_TEST_SYSTEMCTL_LOG"
+case " $* " in
+  *" show "*)
+    for arg in "$@"; do
+      case "$arg" in
+        delegation-*-broker.service)
+          printf 'FragmentPath=%s/systemd/user/%s\nDropInPaths=\n' "$XDG_CONFIG_HOME" "$arg"
+          exit 0
+          ;;
+      esac
+    done
+    exit 1
+    ;;
+esac
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("DELEGATION_TEST_SYSTEMCTL_LOG", commandLog)
+
+	for index, instanceID := range []string{"alpha", "beta"} {
+		listen := startTestBrokerReadiness(t, instanceID)
+		configPath := filepath.Join(root, "instances", instanceID, "broker.json")
+		var setupOutput bytes.Buffer
+		var setupError bytes.Buffer
+		if code := Run([]string{
+			"setup", "broker",
+			"--config", configPath,
+			"--instance", instanceID,
+			"--auth-mode", "none",
+			"--controller-id", serviceTestControllerID,
+			"--listen", listen,
+			"--status-listen", fmt.Sprintf("127.0.0.1:%d", 18881+index),
+		}, &setupOutput, &setupError); code != 0 {
+			t.Fatalf("setup %s code = %d, stderr = %q", instanceID, code, setupError.String())
+		}
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if code := Run(
+			[]string{"service", "install", "--config", configPath, "--json"},
+			&stdout,
+			&stderr,
+		); code != 0 {
+			t.Fatalf("install %s code = %d, stderr = %q", instanceID, code, stderr.String())
+		}
+		var result serviceInstallResult
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		unitName := "delegation-" + instanceID + "-broker.service"
+		wantArtifact := filepath.Join(configHome, "systemd", "user", unitName)
+		if result.State != userservice.StateActive || result.Artifact != wantArtifact {
+			t.Fatalf("install %s result = %#v", instanceID, result)
+		}
+		content, err := os.ReadFile(wantArtifact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(content, []byte("delegation-managed:v1:"+instanceID+":broker")) ||
+			!bytes.Contains(content, []byte(configPath)) {
+			t.Fatalf("named unit %s has wrong identity:\n%s", unitName, content)
+		}
+	}
+
+	defaultArtifact := filepath.Join(configHome, "systemd", "user", userservice.SystemdBrokerUnitName)
+	assertPathAbsent(t, defaultArtifact)
+	log, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unitName := range []string{
+		"delegation-alpha-broker.service",
+		"delegation-beta-broker.service",
+	} {
+		if !bytes.Contains(log, []byte("enable --now "+unitName)) ||
+			!bytes.Contains(log, []byte("is-enabled --quiet "+unitName)) ||
+			!bytes.Contains(log, []byte("is-active --quiet "+unitName)) {
+			t.Fatalf("systemctl log omits lifecycle for %s:\n%s", unitName, log)
+		}
+	}
+	if bytes.Contains(log, []byte(userservice.SystemdBrokerUnitName)) {
+		t.Fatalf("named installs targeted default unit:\n%s", log)
+	}
+}
+
 func TestServiceInstallValidatesBeforeWritingArtifact(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "invalid.json")
@@ -383,11 +480,14 @@ exit 0
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func startTestBrokerReadiness(t *testing.T) string {
+func startTestBrokerReadiness(t *testing.T, instanceIDs ...string) string {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set(broker.HealthServiceHeader, "broker")
 		writer.Header().Set(broker.HealthControllerHeader, serviceTestControllerID)
+		if len(instanceIDs) > 0 && instanceIDs[0] != delegationconfig.DefaultInstanceID {
+			writer.Header().Set(broker.HealthInstanceHeader, instanceIDs[0])
+		}
 		_, _ = writer.Write([]byte("ok\n"))
 	}))
 	t.Cleanup(server.Close)
