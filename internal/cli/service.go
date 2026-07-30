@@ -80,6 +80,9 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 		if _, err := loadBrokerAuthority(resolvedConfig, cfg); err != nil {
 			return writeError(stderr, err)
 		}
+		if err := validateExistingBrokerStateHost(cfg); err != nil {
+			return writeError(stderr, err)
+		}
 	} else {
 		if resolvedEnvironment == "" {
 			return writeError(stderr, errors.New("peer service install requires --environment-file"))

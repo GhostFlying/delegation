@@ -41,7 +41,9 @@ func runCredentialRevoke(args []string, stdout, stderr io.Writer) int {
 	if err := pathguard.ValidateBrokerAuthority(resolvedConfig, resolvedState, cfg.Broker.Auth.TokenFile); err != nil {
 		return writeError(stderr, err)
 	}
-	registry, err := store.OpenCurrent(context.Background(), resolvedState)
+	registry, err := store.OpenCurrentForHost(
+		context.Background(), resolvedState, cfg.EffectiveHostKind(),
+	)
 	if err != nil {
 		return writeError(stderr, err)
 	}

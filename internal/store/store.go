@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	moderncsqlite "modernc.org/sqlite"
 )
 
@@ -36,6 +37,20 @@ func OpenCurrent(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("inspect existing broker state: %w", err)
 	}
 	return open(ctx, path, false)
+}
+
+func OpenCurrentForHost(ctx context.Context, path string, kind hostkind.Kind) (*Store, error) {
+	if err := kind.Validate(); err != nil {
+		return nil, err
+	}
+	store, err := OpenCurrent(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyBrokerHostKind(ctx, store.db, kind); err != nil {
+		return nil, errors.Join(err, store.Close())
+	}
+	return store, nil
 }
 
 func open(ctx context.Context, path string, initialize bool) (*Store, error) {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 )
 
 func TestDoctorValidatesBrokerConfiguration(t *testing.T) {
@@ -69,5 +70,21 @@ func TestDoctorRejectsMalformedToken(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "256-bit base64url token") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestDoctorRejectsMismatchedBrokerStateHostKind(t *testing.T) {
+	environment := setupCredentialTestBroker(t, "token")
+	setCredentialTestHostKind(t, environment.configPath, hostkind.TraeX)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run(
+		[]string{"doctor", "--config", environment.configPath, "--json"},
+		&stdout,
+		&stderr,
+	)
+	if code == 0 || !strings.Contains(stderr.String(), "does not match state host kind") {
+		t.Fatalf("doctor code = %d, stderr = %q", code, stderr.String())
 	}
 }

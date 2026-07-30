@@ -15,6 +15,7 @@ import (
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	delegationcredential "github.com/GhostFlying/delegation/internal/credential"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
@@ -535,6 +536,11 @@ func setupCredentialTestBroker(t *testing.T, authMode string) credentialTestEnvi
 	if err != nil {
 		t.Fatalf("initialize broker state: %v", err)
 	}
+	if _, err := registry.BeginBrokerEpoch(
+		context.Background(), credentialTestControllerID, hostkind.Codex,
+	); err != nil {
+		t.Fatalf("bind broker state host kind: %v", err)
+	}
 	if err := registry.Close(); err != nil {
 		t.Fatalf("close initialized broker state: %v", err)
 	}
@@ -548,6 +554,26 @@ func credentialIssueArgs(environment credentialTestEnvironment, deviceID, tokenP
 		"--device-id", deviceID,
 		"--out", tokenPath,
 		"--json",
+	}
+}
+
+func setCredentialTestHostKind(
+	t *testing.T,
+	configPath string,
+	kind hostkind.Kind,
+) {
+	t.Helper()
+	cfg, err := delegationconfig.Read(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.HostKind = kind
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -568,6 +594,29 @@ func TestCredentialUsesBrokerConfiguredState(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(otherHome, "state", "broker.sqlite3")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("credential opened environment-derived state: %v", err)
+	}
+}
+
+func TestCredentialIssueRejectsMismatchedStateHostKindWithoutSideEffects(t *testing.T) {
+	environment := setupCredentialTestBroker(t, "token")
+	setCredentialTestHostKind(t, environment.configPath, hostkind.TraeX)
+	tokenPath := privateTestPath(t, "device.token")
+
+	_, stderr, code := runCredentialTestCommand(credentialIssueArgs(
+		environment, credentialTestDeviceID, tokenPath,
+	))
+	if code == 0 || !strings.Contains(stderr, "does not match state host kind") {
+		t.Fatalf("issue code = %d, stderr = %q", code, stderr)
+	}
+	if _, err := os.Lstat(tokenPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mismatched issue created output token: %v", err)
+	}
+	registry := openCredentialTestStore(t, environment.statePath)
+	defer registry.Close()
+	if _, err := registry.Credential(
+		context.Background(), credentialTestControllerID, credentialTestDeviceID,
+	); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("mismatched issue created credential: %v", err)
 	}
 }
 
