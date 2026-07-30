@@ -43,7 +43,11 @@ func Resolve(kind hostkind.Kind, command string) (Launch, error) {
 		if err != nil {
 			return Launch{}, err
 		}
-		return Launch{CommandPath: commandPath, RuntimePath: runtimePath}, nil
+		return Launch{
+			CommandPath:      commandPath,
+			RuntimePath:      runtimePath,
+			UnsetEnvironment: codexcommand.ManagedEnvironmentKeys(),
+		}, nil
 	default:
 		return Launch{}, fmt.Errorf("unsupported host kind %q", kind)
 	}

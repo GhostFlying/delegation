@@ -22,6 +22,12 @@ var managedEnvironmentKeys = []string{
 	"CODEX_MANAGED_BY_BUN",
 }
 
+// ManagedEnvironmentKeys returns the Codex package-manager metadata that must
+// not leak across independently resolved CLI launches.
+func ManagedEnvironmentKeys() []string {
+	return append([]string(nil), managedEnvironmentKeys...)
+}
+
 // Launch identifies the lexical command selected by the user and the native
 // Codex executable resolved from it for the current connector start.
 type Launch struct {
@@ -68,7 +74,7 @@ func Resolve(command string) (Launch, error) {
 	} else if native {
 		return Launch{
 			CommandPath: commandPath, NativePath: canonical,
-			UnsetEnvironment: append([]string(nil), managedEnvironmentKeys...),
+			UnsetEnvironment: ManagedEnvironmentKeys(),
 		}, nil
 	}
 
@@ -98,7 +104,7 @@ func Resolve(command string) (Launch, error) {
 			"CODEX_MANAGED_PACKAGE_ROOT": packageRoot,
 			managerKey:                   "1",
 		},
-		UnsetEnvironment: append([]string(nil), managedEnvironmentKeys...),
+		UnsetEnvironment: ManagedEnvironmentKeys(),
 	}, nil
 }
 

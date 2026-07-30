@@ -538,7 +538,8 @@ func TestConnectorAuthorityAppliesManagedHomePolicyByHostKind(t *testing.T) {
 		t.Fatalf("Codex connector authority error = %v", err)
 	}
 	cfg.HostKind = hostkind.TraeX
-	if _, err := loadConnectorAuthority(configPath, cfg); err != nil {
+	if _, err := loadConnectorAuthority(configPath, cfg); err == nil ||
+		!strings.Contains(err.Error(), "config.toml") {
 		t.Fatalf("TraeX connector authority error = %v", err)
 	}
 }

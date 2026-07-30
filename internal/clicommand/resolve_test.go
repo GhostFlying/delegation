@@ -32,8 +32,17 @@ func TestResolveTraeXCommandDoesNotAddCodexEnvironment(t *testing.T) {
 	if got.CommandPath != commandPath || got.RuntimePath != wantRuntime {
 		t.Fatalf("Resolve() = %#v", got)
 	}
-	if got.Environment != nil || got.UnsetEnvironment != nil {
-		t.Fatalf("TraeX command inherited Codex environment metadata: %#v", got)
+	if got.Environment != nil {
+		t.Fatalf("TraeX command added Codex environment metadata: %#v", got)
+	}
+	wantUnset := []string{
+		"CODEX_MANAGED_PACKAGE_ROOT",
+		"CODEX_MANAGED_BY_NPM",
+		"CODEX_MANAGED_BY_PNPM",
+		"CODEX_MANAGED_BY_BUN",
+	}
+	if !reflect.DeepEqual(got.UnsetEnvironment, wantUnset) {
+		t.Fatalf("TraeX unset environment = %#v, want %#v", got.UnsetEnvironment, wantUnset)
 	}
 }
 

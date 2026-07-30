@@ -766,6 +766,62 @@ func TestSetupPeerRejectsPrepopulatedManagedCodexHome(t *testing.T) {
 	}
 }
 
+func TestSetupPeerRejectsPrepopulatedManagedTraeXHomeWithoutSideEffects(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		relative string
+		want     string
+	}{
+		{name: "instructions", relative: "AGENTS.md", want: "AGENTS.md"},
+		{name: "CLI authentication", relative: filepath.Join("cli", "auth.json"), want: "auth.json"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			configPath := filepath.Join(root, "config", "peer.json")
+			managedHome := filepath.Join(root, "managed-trae")
+			workspaceRoot := filepath.Join(root, "workspaces")
+			statePath := filepath.Join(root, "state", "peer.sqlite3")
+			artifact := filepath.Join(managedHome, test.relative)
+			if err := os.MkdirAll(filepath.Dir(artifact), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(artifact, []byte("ambient"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			executable := testCodexBinary(t)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Run([]string{
+				"setup", "peer",
+				"--config", configPath,
+				"--instance", "traex-main",
+				"--host-kind", "traex",
+				"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+				"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+				"--broker-url", "wss://broker.example.test",
+				"--auth-mode", "none",
+				"--cli-command", executable,
+				"--cli-launcher", executable,
+				"--codex-home", managedHome,
+				"--workspace-root", workspaceRoot,
+				"--state", statePath,
+			}, &stdout, &stderr)
+			if code == 0 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+			}
+			for _, path := range []string{
+				filepath.Dir(configPath),
+				workspaceRoot,
+				filepath.Dir(statePath),
+			} {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("setup created %s before rejecting managed TraeX home: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSetupPeerRollsBackNewManagedHomeWhenWorkspacePreparationFails(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config", "peer.json")
