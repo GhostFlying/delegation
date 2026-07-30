@@ -21,6 +21,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/credential"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
@@ -113,6 +114,7 @@ func TestTokenConnectorMaintainsPresenceAndCallsBroker(t *testing.T) {
 		ControllerID:   connectorTestControllerID,
 		DeviceID:       connectorTestWorkerID,
 		DeviceName:     "windows-builder",
+		HostKind:       hostkind.Codex,
 		OS:             "windows",
 		Arch:           "amd64",
 		RuntimeVersion: "0.1.0-alpha.0.m1.1",
@@ -467,6 +469,7 @@ func TestResultPackageFeatureNegotiationFailsClosed(t *testing.T) {
 		ControllerID:   connectorTestControllerID,
 		DeviceID:       connectorTestDeviceID,
 		DeviceName:     "builder",
+		HostKind:       hostkind.Codex,
 		OS:             "linux",
 		Arch:           "amd64",
 		RuntimeVersion: "0.1.0-alpha.0.m4",
@@ -481,6 +484,7 @@ func TestResultPackageFeatureNegotiationFailsClosed(t *testing.T) {
 	)
 	err := validateHelloResult(protocol.HelloResult{
 		ConnectionID:        connectorTestConnectionID,
+		HostKind:            hostkind.Codex,
 		Features:            legacyBrokerFeatures,
 		HeartbeatIntervalMS: time.Second.Milliseconds(),
 		Revision:            1,
@@ -493,7 +497,7 @@ func TestResultPackageFeatureNegotiationFailsClosed(t *testing.T) {
 func TestResultApplyFeatureNegotiationFailsClosed(t *testing.T) {
 	hello := protocol.Hello{
 		ControllerID: connectorTestControllerID, DeviceID: connectorTestDeviceID,
-		DeviceName: "builder", OS: "linux", Arch: "amd64",
+		DeviceName: "builder", HostKind: hostkind.Codex, OS: "linux", Arch: "amd64",
 		RuntimeVersion: "0.1.0-alpha.0.m4", Features: connectorProtocolFeatures(),
 	}
 	legacyBrokerFeatures := slices.DeleteFunc(
@@ -501,11 +505,26 @@ func TestResultApplyFeatureNegotiationFailsClosed(t *testing.T) {
 		func(feature string) bool { return feature == protocol.FeatureResultApply },
 	)
 	err := validateHelloResult(protocol.HelloResult{
-		ConnectionID: connectorTestConnectionID, Features: legacyBrokerFeatures,
+		ConnectionID: connectorTestConnectionID, HostKind: hostkind.Codex, Features: legacyBrokerFeatures,
 		HeartbeatIntervalMS: time.Second.Milliseconds(), Revision: 1,
 	}, hello)
 	if err == nil || !strings.Contains(err.Error(), protocol.FeatureResultApply) {
 		t.Fatalf("legacy broker result apply feature validation error = %v", err)
+	}
+}
+
+func TestTraeXConnectorRejectsCodexBrokerFeatures(t *testing.T) {
+	hello := protocol.Hello{
+		ControllerID: connectorTestControllerID, DeviceID: connectorTestDeviceID,
+		DeviceName: "builder", HostKind: hostkind.TraeX, OS: "linux", Arch: "amd64",
+		RuntimeVersion: "0.1.0-alpha.0.m5", Features: connectorProtocolFeatures(),
+	}
+	err := validateHelloResult(protocol.HelloResult{
+		ConnectionID: connectorTestConnectionID, HostKind: hostkind.Codex, Features: connectorProtocolFeatures(),
+		HeartbeatIntervalMS: time.Second.Milliseconds(), Revision: 1,
+	}, hello)
+	if err == nil || !strings.Contains(err.Error(), "does not match connector host kind") {
+		t.Fatalf("mismatched broker host kind error = %v", err)
 	}
 }
 
@@ -1547,6 +1566,7 @@ func newFakeBrokerWithFeatures(
 		hello := readTestEnvelope(t, connection)
 		writeTestResult(t, connection, hello, protocol.HelloResult{
 			ConnectionID:        connectorTestConnectionID,
+			HostKind:            hostkind.Codex,
 			Features:            append([]string(nil), features...),
 			HeartbeatIntervalMS: time.Hour.Milliseconds(),
 			Revision:            1,

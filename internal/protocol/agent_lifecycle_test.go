@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"testing"
+
+	"github.com/GhostFlying/delegation/internal/hostkind"
 )
 
 const (
@@ -162,7 +164,8 @@ func TestSyncWorkerLifecycleRejectsMalformedPages(t *testing.T) {
 func TestHelloRejectsUnrepresentableWorkerRevision(t *testing.T) {
 	hello := Hello{
 		ControllerID: testControllerID, DeviceID: testDeviceID, DeviceName: "builder",
-		OS: "linux", Arch: "amd64", RuntimeVersion: "0.1.0", Features: []string{},
+		HostKind: hostkind.Codex, OS: "linux", Arch: "amd64",
+		RuntimeVersion: "0.1.0", Features: []string{},
 		WorkerRevision: math.MaxInt64 + 1,
 	}
 	if err := hello.Validate(); err == nil {

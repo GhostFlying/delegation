@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GhostFlying/delegation/internal/hostkind"
 )
 
 const testID = "123e4567-e89b-42d3-a456-426614174000"
@@ -18,6 +20,8 @@ func TestConfigRoundTrip(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "device.token")
 	cfg := Config{
 		SchemaVersion: CurrentSchemaVersion,
+		InstanceID:    DefaultInstanceID,
+		HostKind:      hostkind.Codex,
 		Role:          RolePeer,
 		ControllerID:  testID,
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
@@ -44,6 +48,61 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 	if got != cfg {
 		t.Fatalf("Read() = %#v, want %#v", got, cfg)
+	}
+}
+
+func TestLegacyConfigUsesDefaultCodexInstance(t *testing.T) {
+	cfg := protectedTestConfig(t)
+	cfg.InstanceID = ""
+	cfg.HostKind = ""
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "private", "legacy.json")
+	writeProtectedConfigFixture(t, path, data)
+
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.InstanceID != "" || got.HostKind != "" ||
+		got.EffectiveInstanceID() != DefaultInstanceID ||
+		got.EffectiveHostKind() != hostkind.Codex {
+		t.Fatalf("legacy config = %#v", got)
+	}
+}
+
+func TestInstanceAndHostKindValidation(t *testing.T) {
+	for _, invalid := range []string{"Codex", "1codex", "codex_", "codex-", strings.Repeat("a", 33)} {
+		cfg := protectedTestConfig(t)
+		cfg.InstanceID = invalid
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("Validate accepted instanceId %q", invalid)
+		}
+	}
+	cfg := protectedTestConfig(t)
+	cfg.HostKind = "claude"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate accepted unsupported host kind")
+	}
+}
+
+func TestTraeXPeerConfigRequiresLaunchSupport(t *testing.T) {
+	cfg := protectedTestConfig(t)
+	cfg.Role = RolePeer
+	cfg.DeviceID = "123e4567-e89b-42d3-a456-426614174001"
+	cfg.DeviceName = "traex-peer"
+	cfg.HostKind = hostkind.TraeX
+	cfg.Broker = BrokerConfig{
+		URL:  "wss://broker.example.test/v1/connect",
+		Auth: AuthConfig{Mode: AuthModeNone},
+	}
+	cfg.Peer = testPeerRuntime(t)
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "requires configurable CLI launch support") {
+		t.Fatalf("TraeX peer validation error = %v", err)
 	}
 }
 
@@ -501,6 +560,8 @@ func protectedTestConfig(t *testing.T) Config {
 	t.Helper()
 	return Config{
 		SchemaVersion: CurrentSchemaVersion,
+		InstanceID:    DefaultInstanceID,
+		HostKind:      hostkind.Codex,
 		Role:          RoleBroker,
 		ControllerID:  testID,
 		Broker: BrokerConfig{

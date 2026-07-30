@@ -212,6 +212,7 @@ func runConnectorServiceWithProviderEnvironment(
 		ControllerID:             cfg.ControllerID,
 		DeviceID:                 cfg.DeviceID,
 		DeviceName:               cfg.DeviceName,
+		HostKind:                 cfg.EffectiveHostKind(),
 		AuthMode:                 cfg.Broker.Auth.Mode,
 		Token:                    token,
 		WorkerSpawner:            workerManager,

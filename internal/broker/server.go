@@ -18,6 +18,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/credential"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/store"
@@ -53,7 +54,7 @@ type Registry interface {
 	RegisterTrustedDevice(context.Context, control.DeviceDescriptor, time.Time) (control.Device, error)
 	HeartbeatDevice(context.Context, string, string, uint64, time.Time) (control.Device, error)
 	MarkDeviceOffline(context.Context, string, string, uint64, time.Time) (control.Device, error)
-	BeginBrokerEpoch(context.Context, string) (store.PresenceTransition, error)
+	BeginBrokerEpoch(context.Context, string, hostkind.Kind) (store.PresenceTransition, error)
 	EnsureRootTree(context.Context, string, string, string, time.Time) (control.Tree, control.Principal, error)
 	AuthorizePrincipal(context.Context, control.PrincipalIdentity, control.Capability) (control.Principal, error)
 	ListDevices(context.Context, string, store.DevicePageRequest) (store.DevicePage, error)
@@ -90,6 +91,7 @@ type Registry interface {
 
 type Options struct {
 	ControllerID      string
+	HostKind          hostkind.Kind
 	AuthMode          config.AuthMode
 	MasterToken       *tokenfile.Token
 	Registry          Registry
@@ -102,6 +104,7 @@ type Options struct {
 
 type Server struct {
 	controllerID      string
+	hostKind          hostkind.Kind
 	authMode          config.AuthMode
 	masterToken       tokenfile.Token
 	registry          Registry
@@ -212,6 +215,12 @@ func New(options Options) (*Server, error) {
 	if err := identity.ValidateID(options.ControllerID); err != nil {
 		return nil, fmt.Errorf("controllerId %w", err)
 	}
+	if options.HostKind == "" {
+		options.HostKind = hostkind.Codex
+	}
+	if err := options.HostKind.Validate(); err != nil {
+		return nil, err
+	}
 	if options.Registry == nil {
 		return nil, errors.New("broker registry is required")
 	}
@@ -250,6 +259,7 @@ func New(options Options) (*Server, error) {
 	}
 	server := &Server{
 		controllerID:            options.ControllerID,
+		hostKind:                options.HostKind,
 		authMode:                options.AuthMode,
 		registry:                options.Registry,
 		statusReader:            options.StatusReader,
@@ -296,7 +306,7 @@ func New(options Options) (*Server, error) {
 }
 
 func (s *Server) Prepare(ctx context.Context) (store.PresenceTransition, error) {
-	transition, err := s.registry.BeginBrokerEpoch(ctx, s.controllerID)
+	transition, err := s.registry.BeginBrokerEpoch(ctx, s.controllerID, s.hostKind)
 	if err == nil {
 		s.wakeResultPackageGC()
 	}
@@ -360,7 +370,7 @@ func (s *Server) startShutdown() {
 			failures = append(failures, fmt.Errorf("force close peer: %w", err))
 		}
 		cleanupContext, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-		_, err := s.registry.BeginBrokerEpoch(cleanupContext, s.controllerID)
+		_, err := s.registry.BeginBrokerEpoch(cleanupContext, s.controllerID, s.hostKind)
 		cancel()
 		if err != nil {
 			failures = append(failures, fmt.Errorf("mark broker devices offline: %w", err))
@@ -569,6 +579,10 @@ func (s *Server) acceptHello(
 		_ = s.writeError(ctx, connection, envelope, protocol.ErrorInvalidParams, "invalid hello payload")
 		return nil, errors.New("invalid hello payload")
 	}
+	if hello.HostKind != s.hostKind {
+		_ = s.writeError(ctx, connection, envelope, protocol.ErrorInvalidParams, "peer host kind does not match broker")
+		return nil, fmt.Errorf("peer host kind %q does not match broker host kind %q", hello.HostKind, s.hostKind)
+	}
 	if err := validatePeerFeatures(hello.Features); err != nil {
 		_ = s.writeError(ctx, connection, envelope, protocol.ErrorInvalidParams, "peer does not support required protocol features")
 		return nil, err
@@ -648,6 +662,7 @@ func (s *Server) acceptHello(
 	current.workerReady.Store(appliedRevision == hello.WorkerRevision)
 	result := protocol.HelloResult{
 		ConnectionID:          connectionID,
+		HostKind:              s.hostKind,
 		Features:              brokerProtocolFeatures(),
 		HeartbeatIntervalMS:   s.heartbeatInterval.Milliseconds(),
 		Revision:              device.Revision,

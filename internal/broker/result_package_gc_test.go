@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -33,6 +34,7 @@ type runningResultPackageGCRegistry struct {
 func (r *runningResultPackageGCRegistry) BeginBrokerEpoch(
 	context.Context,
 	string,
+	hostkind.Kind,
 ) (store.PresenceTransition, error) {
 	return store.PresenceTransition{}, nil
 }
@@ -55,6 +57,7 @@ type blockingResultPackageGCRegistry struct {
 func (r *blockingResultPackageGCRegistry) BeginBrokerEpoch(
 	context.Context,
 	string,
+	hostkind.Kind,
 ) (store.PresenceTransition, error) {
 	return store.PresenceTransition{}, nil
 }
@@ -73,6 +76,7 @@ func (r *blockingResultPackageGCRegistry) CompactReleasedResultPackageDetails(
 func (r *prepareResultPackageGCRegistry) BeginBrokerEpoch(
 	context.Context,
 	string,
+	hostkind.Kind,
 ) (store.PresenceTransition, error) {
 	return store.PresenceTransition{}, r.err
 }

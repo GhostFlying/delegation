@@ -19,6 +19,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/buildinfo"
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
@@ -229,6 +230,7 @@ type Options struct {
 	ControllerID             string
 	DeviceID                 string
 	DeviceName               string
+	HostKind                 hostkind.Kind
 	AuthMode                 config.AuthMode
 	Token                    *tokenfile.Token
 	RuntimeVersion           string
@@ -318,6 +320,12 @@ func New(options Options) (*Client, error) {
 	if options.Architecture == "" {
 		options.Architecture = runtime.GOARCH
 	}
+	if options.HostKind == "" {
+		options.HostKind = hostkind.Codex
+	}
+	if err := options.HostKind.Validate(); err != nil {
+		return nil, err
+	}
 	if options.WorkerSpawner == nil {
 		return nil, errors.New("connector worker spawner is required")
 	}
@@ -368,6 +376,7 @@ func New(options Options) (*Client, error) {
 		ControllerID:   options.ControllerID,
 		DeviceID:       options.DeviceID,
 		DeviceName:     options.DeviceName,
+		HostKind:       options.HostKind,
 		OS:             options.OperatingSystem,
 		Arch:           options.Architecture,
 		RuntimeVersion: options.RuntimeVersion,
@@ -800,6 +809,12 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 	descriptor.Features = result.Features
 	if err := descriptor.Validate(); err != nil {
 		return fmt.Errorf("broker features: %w", err)
+	}
+	if err := result.HostKind.Validate(); err != nil {
+		return fmt.Errorf("broker host kind: %w", err)
+	}
+	if result.HostKind != hello.HostKind {
+		return fmt.Errorf("broker host kind %q does not match connector host kind %q", result.HostKind, hello.HostKind)
 	}
 	for _, feature := range connectorProtocolFeatures() {
 		if !slices.Contains(result.Features, feature) {

@@ -129,6 +129,7 @@ func runBrokerService(
 	}
 	brokerServer, err := broker.New(broker.Options{
 		ControllerID: cfg.ControllerID,
+		HostKind:     cfg.EffectiveHostKind(),
 		AuthMode:     cfg.Broker.Auth.Mode,
 		MasterToken:  masterToken,
 		Registry:     resources.registry,

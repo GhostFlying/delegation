@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 )
 
@@ -209,7 +210,20 @@ WHERE controller_id = ? AND device_id = ?
 	return updated, err
 }
 
-func (s *Store) BeginBrokerEpoch(ctx context.Context, controllerID string) (PresenceTransition, error) {
+func (s *Store) BeginBrokerEpoch(
+	ctx context.Context,
+	controllerID string,
+	kind hostkind.Kind,
+) (PresenceTransition, error) {
+	if err := identity.ValidateID(controllerID); err != nil {
+		return PresenceTransition{}, fmt.Errorf("controllerId %w", err)
+	}
+	if err := kind.Validate(); err != nil {
+		return PresenceTransition{}, err
+	}
+	if err := s.bindBrokerHostKind(ctx, kind); err != nil {
+		return PresenceTransition{}, err
+	}
 	return s.markMatchingDevicesOffline(ctx, controllerID, "online = 1", nil)
 }
 
@@ -349,6 +363,38 @@ WHERE controller_id = ? AND revision = ?
 		return 0, err
 	}
 	return uint64(next), nil
+}
+
+func (s *Store) bindBrokerHostKind(
+	ctx context.Context,
+	kind hostkind.Kind,
+) error {
+	return s.withImmediateTransaction(ctx, func(connection *sql.Conn) error {
+		if _, err := connection.ExecContext(ctx, `
+INSERT INTO broker_metadata(singleton, host_kind)
+VALUES (1, ?)
+ON CONFLICT(singleton) DO NOTHING
+`, kind); err != nil {
+			return fmt.Errorf("initialize broker state host kind: %w", err)
+		}
+		var stateKind hostkind.Kind
+		if err := connection.QueryRowContext(ctx, `
+SELECT host_kind FROM broker_metadata WHERE singleton = 1
+`).Scan(&stateKind); err != nil {
+			return fmt.Errorf("load broker state host kind: %w", err)
+		}
+		if err := stateKind.Validate(); err != nil {
+			return fmt.Errorf("stored broker state host kind: %w", err)
+		}
+		if stateKind != kind {
+			return fmt.Errorf(
+				"broker host kind %q does not match state host kind %q",
+				kind,
+				stateKind,
+			)
+		}
+		return nil
+	})
 }
 
 func controllerRevision(ctx context.Context, queryer rowQueryer, controllerID string) (uint64, error) {

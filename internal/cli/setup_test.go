@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
@@ -40,6 +41,7 @@ func TestSetupBroker(t *testing.T) {
 	}
 	wantState := filepath.Join(dir, "state", "broker.sqlite3")
 	if result.Role != delegationconfig.RoleBroker || result.ConfigPath != configPath || result.ControllerID == "" ||
+		result.InstanceID != delegationconfig.DefaultInstanceID || result.HostKind != hostkind.Codex ||
 		result.StatePath != wantState || result.TokenFile == "" || result.StatusListen != "127.0.0.1:8788" {
 		t.Fatalf("setup result = %#v", result)
 	}
@@ -48,6 +50,7 @@ func TestSetupBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Role != delegationconfig.RoleBroker || cfg.ControllerID != result.ControllerID ||
+		cfg.InstanceID != result.InstanceID || cfg.HostKind != result.HostKind ||
 		cfg.Broker.StateFile != result.StatePath || cfg.Broker.Auth.TokenFile != result.TokenFile ||
 		cfg.Broker.StatusListen != result.StatusListen {
 		t.Fatalf("config = %#v, setup result = %#v", cfg, result)
@@ -62,6 +65,73 @@ func TestSetupBroker(t *testing.T) {
 	}
 	if bytes.Contains(configData, bytes.TrimSpace(token)) {
 		t.Fatal("config contains token material")
+	}
+}
+
+func TestSetupBrokerPersistsInstanceAndTraeXNetworkKind(t *testing.T) {
+	configPath := filepath.Join(privateTestDirectory(t), "traex.json")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "broker",
+		"--config", configPath,
+		"--instance", "traex-main",
+		"--host-kind", "traex",
+		"--auth-mode", "none",
+		"--json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	cfg, err := delegationconfig.Read(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.InstanceID != "traex-main" || cfg.HostKind != hostkind.TraeX {
+		t.Fatalf("TraeX broker config = %#v", cfg)
+	}
+}
+
+func TestSetupPeerRejectsTraeXBeforeLaunchSupportWithoutSideEffects(t *testing.T) {
+	configPath := privateTestPath(t, "traex-peer.json")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "peer",
+		"--config", configPath,
+		"--instance", "traex-main",
+		"--host-kind", "traex",
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "requires configurable CLI launch support") {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("setup created unsupported TraeX peer config: %v", err)
+	}
+}
+
+func TestSetupPeerRejectsUnsupportedHostKindBeforeSideEffects(t *testing.T) {
+	configPath := privateTestPath(t, "unsupported-peer.json")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "peer",
+		"--config", configPath,
+		"--host-kind", "claude",
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), `unsupported host kind "claude"`) {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("setup created unsupported peer config: %v", err)
 	}
 }
 
@@ -214,6 +284,8 @@ func TestSetupPeerWithoutAuthentication(t *testing.T) {
 	}
 	want := delegationconfig.Config{
 		SchemaVersion: delegationconfig.CurrentSchemaVersion,
+		InstanceID:    delegationconfig.DefaultInstanceID,
+		HostKind:      hostkind.Codex,
 		Role:          delegationconfig.RolePeer,
 		ControllerID:  "123e4567-e89b-42d3-a456-426614174000",
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",

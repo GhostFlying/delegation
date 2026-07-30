@@ -15,6 +15,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/gitworkspace"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/store"
@@ -23,6 +24,8 @@ import (
 
 type setupResult struct {
 	Role          delegationconfig.Role `json:"role"`
+	InstanceID    string                `json:"instanceId"`
+	HostKind      hostkind.Kind         `json:"hostKind"`
 	ConfigPath    string                `json:"configPath"`
 	ControllerID  string                `json:"controllerId"`
 	DeviceID      string                `json:"deviceId,omitempty"`
@@ -59,6 +62,8 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("delegation setup broker", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", defaultPath, "configuration file path")
+	instanceID := flags.String("instance", delegationconfig.DefaultInstanceID, "local Delegation instance name")
+	hostKind := flags.String("host-kind", string(hostkind.Codex), "network host kind: codex or traex")
 	controllerID := flags.String("controller-id", "", "stable Delegation network UUID; generated when omitted")
 	listen := flags.String("listen", "127.0.0.1:8787", "broker listen address")
 	statusListen := flags.String("status-listen", "127.0.0.1:8788", "loopback broker status listen address")
@@ -69,6 +74,13 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	jsonOutput := flags.Bool("json", false, "print setup result as JSON")
 	if code := parseFlags(flags, args); code >= 0 {
 		return code
+	}
+	if err := delegationconfig.ValidateInstanceID(*instanceID); err != nil {
+		return writeError(stderr, err)
+	}
+	networkHostKind := hostkind.Kind(*hostKind)
+	if err := networkHostKind.Validate(); err != nil {
+		return writeError(stderr, err)
 	}
 	resolvedConfig, err := absolutePath(*configPath)
 	if err != nil {
@@ -93,6 +105,8 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg := delegationconfig.Config{
 		SchemaVersion: delegationconfig.CurrentSchemaVersion,
+		InstanceID:    *instanceID,
+		HostKind:      networkHostKind,
 		Role:          delegationconfig.RoleBroker,
 		ControllerID:  *controllerID,
 		Broker: delegationconfig.BrokerConfig{
@@ -131,6 +145,8 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	}
 	return writeSetupResult(stdout, stderr, setupResult{
 		Role:         cfg.Role,
+		InstanceID:   cfg.InstanceID,
+		HostKind:     cfg.HostKind,
 		ConfigPath:   resolvedConfig,
 		ControllerID: cfg.ControllerID,
 		StatePath:    cfg.Broker.StateFile,
@@ -147,6 +163,8 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("delegation setup peer", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", defaultPath, "configuration file path")
+	instanceID := flags.String("instance", delegationconfig.DefaultInstanceID, "local Delegation instance name")
+	hostKind := flags.String("host-kind", string(hostkind.Codex), "network host kind: codex or traex")
 	controllerID := flags.String("controller-id", "", "Delegation network UUID")
 	deviceID := flags.String("device-id", "", "stable device UUID; required in token mode, generated in none mode")
 	deviceName := flags.String("device-name", "", "device display name; hostname when omitted")
@@ -168,11 +186,21 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if code := parseFlags(flags, args); code >= 0 {
 		return code
 	}
+	if err := delegationconfig.ValidateInstanceID(*instanceID); err != nil {
+		return writeError(stderr, err)
+	}
+	networkHostKind := hostkind.Kind(*hostKind)
+	if err := networkHostKind.Validate(); err != nil {
+		return writeError(stderr, err)
+	}
 	if *controllerID == "" {
 		return writeError(stderr, errors.New("--controller-id is required"))
 	}
 	if *brokerURL == "" {
 		return writeError(stderr, errors.New("--broker-url is required"))
+	}
+	if networkHostKind == hostkind.TraeX {
+		return writeError(stderr, errors.New("TraeX peer setup requires configurable CLI launch support"))
 	}
 	resolvedConfig, err := absolutePath(*configPath)
 	if err != nil {
@@ -238,6 +266,8 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg := delegationconfig.Config{
 		SchemaVersion: delegationconfig.CurrentSchemaVersion,
+		InstanceID:    *instanceID,
+		HostKind:      networkHostKind,
 		Role:          delegationconfig.RolePeer,
 		ControllerID:  *controllerID,
 		DeviceID:      *deviceID,
@@ -337,6 +367,8 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	committed = true
 	return writeSetupResult(stdout, stderr, setupResult{
 		Role:          cfg.Role,
+		InstanceID:    cfg.InstanceID,
+		HostKind:      cfg.HostKind,
 		ConfigPath:    resolvedConfig,
 		ControllerID:  cfg.ControllerID,
 		DeviceID:      cfg.DeviceID,
@@ -438,6 +470,8 @@ func writeSetupResult(stdout, stderr io.Writer, result setupResult, jsonOutput b
 		return 0
 	}
 	fmt.Fprintf(stdout, "configured %s\n", result.Role)
+	fmt.Fprintf(stdout, "instance: %s\n", result.InstanceID)
+	fmt.Fprintf(stdout, "host kind: %s\n", result.HostKind)
 	fmt.Fprintf(stdout, "config: %s\n", result.ConfigPath)
 	fmt.Fprintf(stdout, "controllerId: %s\n", result.ControllerID)
 	if result.DeviceID != "" {
