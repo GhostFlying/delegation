@@ -98,7 +98,7 @@ func startDetachedDarwinTestClient(t *testing.T, heartbeat, pidFile string) *Cli
 		t.Fatal(err)
 	}
 	client, err := Start(context.Background(), Options{
-		Binary: executable, SupervisorBinary: executable,
+		Launch: directLaunch(executable), SupervisorBinary: executable,
 		CodexHome: t.TempDir(), CloseTimeout: 50 * time.Millisecond,
 		Environment: map[string]string{
 			parentDeathHelperEnvironment:  parentDeathAppServerHelper,
@@ -135,7 +135,7 @@ func runParentDeathConnectorHelper() int {
 		return 1
 	}
 	client, err := Start(context.Background(), Options{
-		Binary: executable, SupervisorBinary: executable,
+		Launch: directLaunch(executable), SupervisorBinary: executable,
 		CodexHome:    os.Getenv(parentDeathHomeEnvironment),
 		CloseTimeout: 50 * time.Millisecond,
 		Environment: map[string]string{

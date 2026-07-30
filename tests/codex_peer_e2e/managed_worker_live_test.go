@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 	"github.com/GhostFlying/delegation/internal/codexcommand"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
@@ -105,7 +106,8 @@ func TestManagedWorkerLiveProviderSmoke(t *testing.T) {
 	host, err := workerhost.New(context.Background(), workerhost.Options{
 		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
 		PeerConfigPath: configPath, DelegationBinary: delegationBinary,
-		CodexBinary: codexLaunch.NativePath, CodexHome: cfg.Peer.CodexHome,
+		CLILaunch:            clilaunch.Spec{Executable: codexLaunch.NativePath},
+		CLIRuntimeExecutable: codexLaunch.NativePath, CodexHome: cfg.Peer.CodexHome,
 		GitBinary:             cfg.Peer.GitBinary,
 		CodexEnvironment:      codexLaunch.Environment,
 		CodexUnsetEnvironment: codexLaunch.UnsetEnvironment,

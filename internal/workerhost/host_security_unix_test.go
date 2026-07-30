@@ -53,17 +53,18 @@ func TestHostCanonicalizesSymlinkedCodexBinaryWithoutGrantingEitherDirectory(t *
 	}
 
 	host, err := New(context.Background(), Options{
-		ControllerID:     testControllerID,
-		DeviceID:         testDeviceID,
-		PeerConfigPath:   paths.configPath,
-		DelegationBinary: paths.delegationBinary,
-		CodexBinary:      symlink,
-		GitBinary:        paths.codexBinary,
-		CodexHome:        paths.codexHome,
-		WorkspaceRoot:    filepath.Join(filepath.Dir(paths.configPath), "workspaces"),
-		MaxWorkerSlots:   1,
-		Store:            state,
-		ResultPackages:   fixtureHost.resultPackages,
+		ControllerID:         testControllerID,
+		DeviceID:             testDeviceID,
+		PeerConfigPath:       paths.configPath,
+		DelegationBinary:     paths.delegationBinary,
+		CLILaunch:            directWorkerCLILaunch(symlink),
+		CLIRuntimeExecutable: symlink,
+		GitBinary:            paths.codexBinary,
+		CodexHome:            paths.codexHome,
+		WorkspaceRoot:        filepath.Join(filepath.Dir(paths.configPath), "workspaces"),
+		MaxWorkerSlots:       1,
+		Store:                state,
+		ResultPackages:       fixtureHost.resultPackages,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -75,8 +76,12 @@ func TestHostCanonicalizesSymlinkedCodexBinaryWithoutGrantingEitherDirectory(t *
 			t.Errorf("close symlink host: %v", err)
 		}
 	})
-	if host.codexBinary != resolvedTarget {
-		t.Fatalf("canonical Codex binary = %q, want %q", host.codexBinary, resolvedTarget)
+	if host.cliRuntimeExecutable != resolvedTarget {
+		t.Fatalf(
+			"canonical CLI runtime = %q, want %q",
+			host.cliRuntimeExecutable,
+			resolvedTarget,
+		)
 	}
 	filesystem := managedFilesystemPermissions(t, host.managedConfig(store.WorkerReservation{
 		WorkerKey: store.WorkerKey{
@@ -100,6 +105,56 @@ func TestHostCanonicalizesSymlinkedCodexBinaryWithoutGrantingEitherDirectory(t *
 	assertCodexRuntimeFilesystemPermission(t, filesystem, resolvedTarget)
 }
 
+func TestHostRejectsManagedCLIExecutableAliases(t *testing.T) {
+	fixtureHost, state, paths := newTestHost(t, 1)
+	workspaceRoot := fixtureHost.workspaceRoot.Name()
+	tests := map[string]struct {
+		targetDirectory string
+		mutate          func(*Options, string)
+		want            string
+	}{
+		"launcher inside CODEX_HOME": {
+			targetDirectory: paths.codexHome,
+			mutate: func(options *Options, alias string) {
+				options.CLILaunch = directWorkerCLILaunch(alias)
+			},
+			want: "CLI launcher must not be inside worker CODEX_HOME",
+		},
+		"runtime inside workspace root": {
+			targetDirectory: workspaceRoot,
+			mutate: func(options *Options, alias string) {
+				options.CLIRuntimeExecutable = alias
+			},
+			want: "CLI runtime must not be inside worker workspace root",
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			target := filepath.Join(test.targetDirectory, "managed-cli")
+			if err := os.WriteFile(target, []byte("test"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			alias := filepath.Join(t.TempDir(), "cli-alias")
+			if err := os.Symlink(target, alias); err != nil {
+				t.Fatal(err)
+			}
+			options := Options{
+				ControllerID: testControllerID, DeviceID: testDeviceID,
+				PeerConfigPath: paths.configPath, DelegationBinary: paths.delegationBinary,
+				CLILaunch:            directWorkerCLILaunch(paths.codexBinary),
+				CLIRuntimeExecutable: paths.codexBinary, GitBinary: paths.gitBinary,
+				CodexHome: paths.codexHome, WorkspaceRoot: workspaceRoot,
+				MaxWorkerSlots: 1, Store: state, ResultPackages: fixtureHost.resultPackages,
+			}
+			test.mutate(&options, alias)
+			if _, err := New(context.Background(), options); err == nil ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("New() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestHostCanonicalizesCodexHomeThroughSymlinkedParent(t *testing.T) {
 	fixtureHost, state, paths := newTestHost(t, 1)
 	aliasParent := filepath.Join(t.TempDir(), "runtime-link")
@@ -113,17 +168,18 @@ func TestHostCanonicalizesCodexHomeThroughSymlinkedParent(t *testing.T) {
 	}
 
 	host, err := New(context.Background(), Options{
-		ControllerID:     testControllerID,
-		DeviceID:         testDeviceID,
-		PeerConfigPath:   paths.configPath,
-		DelegationBinary: paths.delegationBinary,
-		CodexBinary:      paths.codexBinary,
-		GitBinary:        paths.gitBinary,
-		CodexHome:        aliasCodexHome,
-		WorkspaceRoot:    filepath.Join(filepath.Dir(paths.configPath), "workspaces"),
-		MaxWorkerSlots:   1,
-		Store:            state,
-		ResultPackages:   fixtureHost.resultPackages,
+		ControllerID:         testControllerID,
+		DeviceID:             testDeviceID,
+		PeerConfigPath:       paths.configPath,
+		DelegationBinary:     paths.delegationBinary,
+		CLILaunch:            directWorkerCLILaunch(paths.codexBinary),
+		CLIRuntimeExecutable: paths.codexBinary,
+		GitBinary:            paths.gitBinary,
+		CodexHome:            aliasCodexHome,
+		WorkspaceRoot:        filepath.Join(filepath.Dir(paths.configPath), "workspaces"),
+		MaxWorkerSlots:       1,
+		Store:                state,
+		ResultPackages:       fixtureHost.resultPackages,
 	})
 	if err != nil {
 		t.Fatal(err)

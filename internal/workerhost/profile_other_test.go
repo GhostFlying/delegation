@@ -7,10 +7,10 @@ import "testing"
 func assertCodexRuntimeFilesystemPermission(
 	t *testing.T,
 	filesystem map[string]any,
-	codexBinary string,
+	runtimeExecutable string,
 ) {
 	t.Helper()
-	if _, found := filesystem[codexBinary]; found {
-		t.Fatalf("managed non-Linux profile grants the Codex executable: %#v", filesystem)
+	if _, found := filesystem[runtimeExecutable]; found {
+		t.Fatalf("managed non-Linux profile grants the CLI runtime executable: %#v", filesystem)
 	}
 }

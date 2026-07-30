@@ -2,4 +2,4 @@
 
 package workerhost
 
-func addCodexRuntimeFilesystemPermission(map[string]any, string) {}
+func addCLIRuntimeFilesystemPermission(map[string]any, string) {}

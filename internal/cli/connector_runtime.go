@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 	"github.com/GhostFlying/delegation/internal/codexcommand"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
@@ -151,7 +152,11 @@ func runConnectorServiceWithProviderEnvironment(
 	workers, err := workerhost.New(ctx, workerhost.Options{
 		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
 		PeerConfigPath: configPath, DelegationBinary: runtimeBinary,
-		CodexBinary: codexLaunch.NativePath, GitBinary: cfg.Peer.GitBinary,
+		CLILaunch: clilaunch.Spec{
+			Executable: codexLaunch.NativePath,
+		},
+		CLIRuntimeExecutable:    codexLaunch.NativePath,
+		GitBinary:               cfg.Peer.GitBinary,
 		CodexHome:               cfg.Peer.CodexHome,
 		CodexEnvironment:        codexEnvironment,
 		CodexUnsetEnvironment:   codexLaunch.UnsetEnvironment,

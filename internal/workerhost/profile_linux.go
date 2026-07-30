@@ -2,6 +2,6 @@
 
 package workerhost
 
-func addCodexRuntimeFilesystemPermission(filesystem map[string]any, codexBinary string) {
-	filesystem[codexBinary] = "read"
+func addCLIRuntimeFilesystemPermission(filesystem map[string]any, runtimeExecutable string) {
+	filesystem[runtimeExecutable] = "read"
 }

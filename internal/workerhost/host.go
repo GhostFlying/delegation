@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GhostFlying/delegation/internal/appserver"
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
@@ -75,7 +76,8 @@ type Options struct {
 	DeviceID                string
 	PeerConfigPath          string
 	DelegationBinary        string
-	CodexBinary             string
+	CLILaunch               clilaunch.Spec
+	CLIRuntimeExecutable    string
 	GitBinary               string
 	CodexEnvironment        map[string]string
 	CodexUnsetEnvironment   []string
@@ -148,7 +150,8 @@ type Host struct {
 	deviceID                 string
 	peerConfigPath           string
 	delegationBinary         string
-	codexBinary              string
+	cliLaunch                clilaunch.Spec
+	cliRuntimeExecutable     string
 	git                      gitworkspace.Runner
 	workerGitBinary          string
 	codexEnvironment         map[string]string
@@ -224,7 +227,6 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	for name, path := range map[string]string{
 		"peer config":       options.PeerConfigPath,
 		"delegation binary": options.DelegationBinary,
-		"Codex binary":      options.CodexBinary,
 		"Git binary":        options.GitBinary,
 		"Codex home":        options.CodexHome,
 		"workspace root":    options.WorkspaceRoot,
@@ -239,15 +241,20 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	for name, path := range map[string]string{
 		"peer config":       options.PeerConfigPath,
 		"delegation binary": options.DelegationBinary,
-		"Codex binary":      options.CodexBinary,
 	} {
 		if err := requireRegularFile(path, name); err != nil {
 			return nil, err
 		}
 	}
-	codexBinary, err := filepath.EvalSymlinks(options.CodexBinary)
+	cliLaunch, err := clilaunch.Resolve(options.CLILaunch)
 	if err != nil {
-		return nil, fmt.Errorf("resolve Codex binary: %w", err)
+		return nil, err
+	}
+	cliRuntimeExecutable, err := clilaunch.ResolveRuntimeExecutable(
+		options.CLIRuntimeExecutable,
+	)
+	if err != nil {
+		return nil, err
 	}
 	credentialEnvironment := codexconfig.CredentialEnvironmentVariables(options.CodexConfig)
 	gitExcludedEnvironment := append(append([]string(nil), hostAuthEnvironment...), credentialEnvironment...)
@@ -261,7 +268,8 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	}
 	for name, executable := range map[string]string{
 		"delegation binary": options.DelegationBinary,
-		"Codex binary":      codexBinary,
+		"CLI launcher":      cliLaunch.Executable,
+		"CLI runtime":       cliRuntimeExecutable,
 		"Git binary":        gitRunner.Binary,
 		"worker Git binary": workerGitBinary,
 	} {
@@ -347,7 +355,8 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	host := &Host{
 		controllerID: options.ControllerID, deviceID: options.DeviceID,
 		peerConfigPath: options.PeerConfigPath, delegationBinary: options.DelegationBinary,
-		codexBinary: codexBinary, git: gitRunner, workerGitBinary: workerGitBinary,
+		cliLaunch: cliLaunch, cliRuntimeExecutable: cliRuntimeExecutable,
+		git: gitRunner, workerGitBinary: workerGitBinary,
 		codexHome:                codexHome,
 		codexEnvironment:         codexEnvironment,
 		codexUnsetEnvironment:    uniqueEnvironmentNames(appServerUnsetEnvironment),

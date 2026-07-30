@@ -40,7 +40,7 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 			".git": "write",
 		},
 	}
-	addCodexRuntimeFilesystemPermission(filesystem, h.codexBinary)
+	addCLIRuntimeFilesystemPermission(filesystem, h.cliRuntimeExecutable)
 	if runtime.GOOS != "windows" {
 		filesystem[h.workerGitBinary] = "read"
 	}

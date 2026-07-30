@@ -19,14 +19,18 @@ func TestDarwinAppServerRequiresExplicitSupervisorBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = validateOptions(Options{Binary: executable, CodexHome: t.TempDir()})
+	_, err = validateOptions(Options{Launch: directLaunch(executable), CodexHome: t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "supervisor binary") {
 		t.Fatalf("validateOptions() error = %v", err)
 	}
 }
 
 func TestDarwinAppServerUsesExplicitSupervisorBinary(t *testing.T) {
-	command := exec.Command("/usr/bin/true", "app-server", "--listen", "stdio://")
+	command := exec.Command(
+		"/usr/bin/true",
+		"run", "--", "traex;not-a-shell", "-p", "ultra",
+		"app-server", "--listen", "stdio://",
+	)
 	const supervisor = "/explicit/delegation"
 	owner, err := preparePlatformOwnedProcess(command, supervisor, time.Second)
 	if err != nil {
@@ -66,7 +70,10 @@ func TestDarwinAppServerUsesExplicitSupervisorBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	if target.Binary != "/usr/bin/true" ||
-		!slices.Equal(target.Args, []string{"app-server", "--listen", "stdio://"}) {
+		!slices.Equal(target.Args, []string{
+			"run", "--", "traex;not-a-shell", "-p", "ultra",
+			"app-server", "--listen", "stdio://",
+		}) {
 		t.Fatalf("supervisor target = %#v", target)
 	}
 }

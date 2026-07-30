@@ -375,7 +375,7 @@ func (h *Host) ensureClientOwned(
 			return nil, err
 		}
 		client, err := h.startApplication(ctx, appserver.Options{
-			Binary: h.codexBinary, SupervisorBinary: h.delegationBinary,
+			Launch: h.cliLaunch, SupervisorBinary: h.delegationBinary,
 			CodexHome:   h.codexHome,
 			Environment: h.codexEnvironment, UnsetEnvironment: h.codexUnsetEnvironment,
 		})
