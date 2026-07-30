@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/appserver"
-	"github.com/GhostFlying/delegation/internal/codexconfig"
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/store"
@@ -450,8 +449,8 @@ func (h *Host) shouldRetire(client application, err error) bool {
 }
 
 func (h *Host) validateRuntimeDirectories() error {
-	if err := config.ValidatePrivateDirectory(h.codexHome); err != nil {
-		return fmt.Errorf("validate managed CODEX_HOME: %w", err)
+	if err := validateManagedRuntimeHome(h.hostKind, h.codexHome); err != nil {
+		return err
 	}
 	for name, path := range h.runtimeHomeEnvironment {
 		if path == h.codexHome {
@@ -460,9 +459,6 @@ func (h *Host) validateRuntimeDirectories() error {
 		if err := config.ValidatePrivateDirectory(path); err != nil {
 			return fmt.Errorf("validate managed %s: %w", name, err)
 		}
-	}
-	if err := codexconfig.ValidateManagedHome(h.codexHome); err != nil {
-		return err
 	}
 	workspacePath := h.workspaceRoot.Name()
 	if err := config.ValidatePrivateDirectory(workspacePath); err != nil {

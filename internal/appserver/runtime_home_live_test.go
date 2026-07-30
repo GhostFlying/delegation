@@ -5,6 +5,7 @@ package appserver
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -76,7 +77,11 @@ func liveExecutable(t *testing.T, name string) string {
 	if path == "" {
 		t.Skipf("%s is not set", name)
 	}
-	resolved, err := filepath.Abs(path)
+	resolved, err := exec.LookPath(path)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", name, err)
+	}
+	resolved, err = filepath.Abs(resolved)
 	if err != nil {
 		t.Fatal(err)
 	}
