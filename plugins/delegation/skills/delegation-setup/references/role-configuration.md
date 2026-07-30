@@ -48,7 +48,9 @@ must remain attached and must not daemonize or detach. The connector assembles
 
 `--codex-home` and `peer.codexHome` keep their version-3 compatibility names. They are the managed
 CLI home: Codex receives the path as `CODEX_HOME`; TraeX receives it as `TRAE_HOME` and uses its
-`cli` child as `TRAECLI_HOME`. Setup and doctor validate the command, launcher, paths, and protected
+`cli` child as `TRAECLI_HOME`. Never point this field at the user's normal CLI home: setup, doctor,
+and worker launch reject user authentication, instructions, profiles, plugins, hooks, model
+providers, and non-system skills. Setup and doctor validate the command, launcher, paths, and protected
 configuration without starting the CLI.
 
 For token authentication, enroll every peer from the configured broker:

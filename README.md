@@ -148,7 +148,9 @@ begins with `-`.
 The existing `--codex-home` flag and `peer.codexHome` JSON field retain their names for version-3
 configuration compatibility. They identify the managed CLI home, not the product identity. Codex
 maps the path to `CODEX_HOME`; TraeX maps it to `TRAE_HOME` and uses `<peer.codexHome>/cli` as
-`TRAECLI_HOME`. These directories remain isolated from the user's normal CLI homes.
+`TRAECLI_HOME`. These directories must not reuse the user's normal CLI homes; setup, doctor, and
+worker launch reject user authentication, instructions, profiles, plugins, hooks, model providers,
+and non-system skills in a managed TraeX home.
 
 The `default` instance keeps the existing `~/.delegation/broker.json`,
 `~/.delegation/peer.json`, local bridge, and native service identities. A named instance uses

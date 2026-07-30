@@ -153,6 +153,54 @@ func TestDoctorRejectsMissingCLILauncher(t *testing.T) {
 	}
 }
 
+func TestDoctorRejectsPrepopulatedManagedTraeXHome(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		relative string
+		want     string
+	}{
+		{name: "instructions", relative: "AGENTS.md", want: "AGENTS.md"},
+		{name: "CLI authentication", relative: filepath.Join("cli", "auth.json"), want: "auth.json"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := privateTestDirectory(t)
+			configPath := filepath.Join(root, "peer.json")
+			managedHome := filepath.Join(root, "managed-trae")
+			executable := testCodexBinary(t)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if code := Run([]string{
+				"setup", "peer",
+				"--config", configPath,
+				"--instance", "traex-main",
+				"--host-kind", "traex",
+				"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+				"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+				"--broker-url", "wss://broker.example.test",
+				"--auth-mode", "none",
+				"--cli-command", executable,
+				"--cli-launcher", executable,
+				"--codex-home", managedHome,
+			}, &stdout, &stderr); code != 0 {
+				t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+			}
+			artifact := filepath.Join(managedHome, test.relative)
+			if err := os.MkdirAll(filepath.Dir(artifact), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(artifact, []byte("ambient"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stdout.Reset()
+			stderr.Reset()
+			code := Run([]string{"doctor", "--config", configPath}, &stdout, &stderr)
+			if code == 0 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("doctor code = %d, stderr = %q", code, stderr.String())
+			}
+		})
+	}
+}
+
 func TestDoctorRejectsMismatchedBrokerStateHostKind(t *testing.T) {
 	environment := setupCredentialTestBroker(t, "token")
 	setCredentialTestHostKind(t, environment.configPath, hostkind.TraeX)

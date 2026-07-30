@@ -2299,24 +2299,37 @@ func TestHostRejectsManagedCodexConfigurationBeforeLaunch(t *testing.T) {
 	}
 }
 
-func TestHostAllowsTraeXRuntimeConfigurationBeforeLaunch(t *testing.T) {
-	application := newFakeApplication()
-	host, _, paths := newTestHostForKind(t, hostkind.TraeX, 1, application)
-	if err := os.WriteFile(
-		filepath.Join(paths.codexHome, "config.toml"),
-		[]byte("model = \"managed\"\n"),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	spawnTestWorker(
-		t,
-		host,
-		"123e4567-e89b-42d3-a456-426614174417",
-		"TraeX managed configuration",
-	)
-	if got := application.snapshot(); len(got.starts) != 1 {
-		t.Fatalf("app-server starts = %d, want 1", len(got.starts))
+func TestHostRejectsTraeXRuntimeConfigurationBeforeLaunch(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		relative string
+		want     string
+	}{
+		{name: "instructions", relative: "AGENTS.md", want: "AGENTS.md"},
+		{name: "CLI authentication", relative: filepath.Join("cli", "auth.json"), want: "auth.json"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			application := newFakeApplication()
+			host, _, paths := newTestHostForKind(t, hostkind.TraeX, 1, application)
+			artifact := filepath.Join(paths.codexHome, test.relative)
+			if err := os.MkdirAll(filepath.Dir(artifact), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(artifact, []byte("managed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := host.Spawn(context.Background(), SpawnRequest{
+				TreeID: testTreeID, AgentID: "123e4567-e89b-42d3-a456-426614174417",
+				ParentAgentID: testParentID, TaskName: "TraeX managed configuration",
+				Prompt: "TraeX managed configuration",
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Spawn() error = %v", err)
+			}
+			if got := application.snapshot(); len(got.starts) != 0 {
+				t.Fatalf("app-server started with managed TraeX config present: %#v", got)
+			}
+		})
 	}
 }
 
