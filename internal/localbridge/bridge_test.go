@@ -190,8 +190,29 @@ func TestBridgeProbeRequiresExactServiceIdentity(t *testing.T) {
 	if err := Probe(context.Background(), client.endpoint, wrong); err == nil {
 		t.Fatal("Probe accepted a bridge from another controller")
 	}
+	wrong = expected
+	wrong.InstanceID = "second"
+	if err := Probe(context.Background(), client.endpoint, wrong); err == nil {
+		t.Fatal("Probe accepted a bridge from another instance")
+	}
 	if calls := backend.snapshot(); len(calls) != 0 {
 		t.Fatalf("identity probes reached broker backend: %#v", calls)
+	}
+}
+
+func TestDefaultServiceIdentityOmitsInstanceAndMatchesLegacyIdentity(t *testing.T) {
+	legacy := testServiceIdentity()
+	explicit := legacy
+	explicit.InstanceID = "default"
+	if !legacy.Equal(explicit) {
+		t.Fatal("default instance does not match legacy identity")
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("instanceId")) {
+		t.Fatalf("legacy identity JSON contains instanceId: %s", data)
 	}
 }
 
@@ -803,6 +824,46 @@ func TestEndpointIsStableAndControllerDeviceScoped(t *testing.T) {
 	if err != nil || otherDevice == first {
 		t.Fatalf("device-scoped endpoint = %q, error %v", otherDevice, err)
 	}
+	defaultInstance, err := EndpointForInstance(
+		"default", bridgeTestControllerID, bridgeTestDeviceID,
+	)
+	if err != nil || defaultInstance != first {
+		t.Fatalf("default instance endpoint = %q, error %v; want %q", defaultInstance, err, first)
+	}
+	namedInstance, err := EndpointForInstance(
+		"second", bridgeTestControllerID, bridgeTestDeviceID,
+	)
+	if err != nil || namedInstance == first {
+		t.Fatalf("named instance endpoint = %q, error %v", namedInstance, err)
+	}
+	if _, err := EndpointForInstance("Invalid", bridgeTestControllerID, bridgeTestDeviceID); err == nil {
+		t.Fatal("EndpointForInstance accepted an invalid instance")
+	}
+}
+
+func TestNamedInstanceEndpointsCanListenConcurrently(t *testing.T) {
+	firstEndpoint, err := EndpointForInstance(
+		"first", bridgeTestControllerID, bridgeTestDeviceID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondEndpoint, err := EndpointForInstance(
+		"second", bridgeTestControllerID, bridgeTestDeviceID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := listen(firstEndpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := listen(secondEndpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
 }
 
 func TestServerCloseReturnsListenerCleanupFailure(t *testing.T) {

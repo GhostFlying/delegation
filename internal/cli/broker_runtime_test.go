@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -60,6 +61,88 @@ func TestBrokerServiceRunsConfiguredAuthModes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNamedBrokerInstancesRunConcurrentlyInOneHome(t *testing.T) {
+	home := privateTestDirectory(t)
+	t.Setenv("DELEGATION_HOME", home)
+	t.Setenv("DELEGATION_CONFIG", "")
+	type runningBroker struct {
+		instance   string
+		configPath string
+		cfg        delegationconfig.Config
+		cancel     context.CancelFunc
+		done       chan error
+		address    string
+	}
+	start := func(instance, listen, statusListen string) runningBroker {
+		t.Helper()
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if code := Run([]string{
+			"setup", "broker",
+			"--instance", instance,
+			"--controller-id", runtimeControllerID,
+			"--listen", listen,
+			"--status-listen", statusListen,
+			"--auth-mode", "none",
+			"--json",
+		}, &stdout, &stderr); code != 0 {
+			t.Fatalf("setup %s code = %d, stderr = %q", instance, code, stderr.String())
+		}
+		var result setupResult
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := delegationconfig.Read(result.ConfigPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Broker.StatusListen = ""
+		ctx, cancel := context.WithCancel(context.Background())
+		ready := make(chan string, 1)
+		done := make(chan error, 1)
+		go func() {
+			done <- runBrokerService(ctx, result.ConfigPath, cfg, io.Discard, brokerRuntimeOptions{
+				listen: func(ctx context.Context, network, address string) (net.Listener, error) {
+					if network != "tcp" || address != listen {
+						return nil, fmt.Errorf("%s listen network/address = %q/%q", instance, network, address)
+					}
+					var listenConfig net.ListenConfig
+					listener, err := listenConfig.Listen(ctx, "tcp", "127.0.0.1:0")
+					if err == nil {
+						ready <- listener.Addr().String()
+					}
+					return listener, err
+				},
+			})
+		}()
+		address := waitForBrokerAddress(t, ready, done)
+		waitForBrokerHealth(t, address)
+		return runningBroker{
+			instance: instance, configPath: result.ConfigPath, cfg: cfg,
+			cancel: cancel, done: done, address: address,
+		}
+	}
+
+	alpha := start("alpha", "127.0.0.1:18787", "127.0.0.1:18788")
+	beta := start("beta", "127.0.0.1:28787", "127.0.0.1:28788")
+	if alpha.configPath == beta.configPath || alpha.cfg.Broker.StateFile == beta.cfg.Broker.StateFile {
+		t.Fatalf("named broker resources collide: %#v / %#v", alpha, beta)
+	}
+	for _, broker := range []runningBroker{alpha, beta} {
+		instanceHome := filepath.Join(home, "instances", broker.instance)
+		if broker.configPath != filepath.Join(instanceHome, "broker.json") ||
+			broker.cfg.Broker.StateFile != filepath.Join(instanceHome, "state", "broker.sqlite3") {
+			t.Fatalf("%s resources = %q / %q", broker.instance, broker.configPath, broker.cfg.Broker.StateFile)
+		}
+	}
+
+	alpha.cancel()
+	waitForBrokerStop(t, alpha.done)
+	waitForBrokerHealth(t, beta.address)
+	beta.cancel()
+	waitForBrokerStop(t, beta.done)
 }
 
 func TestBrokerServiceServesIndependentLoopbackStatus(t *testing.T) {

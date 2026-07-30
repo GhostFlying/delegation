@@ -77,6 +77,8 @@ func TestSetupBrokerPersistsInstanceAndTraeXNetworkKind(t *testing.T) {
 		"--config", configPath,
 		"--instance", "traex-main",
 		"--host-kind", "traex",
+		"--listen", "127.0.0.1:18787",
+		"--status-listen", "127.0.0.1:18788",
 		"--auth-mode", "none",
 		"--json",
 	}, &stdout, &stderr)
@@ -89,6 +91,94 @@ func TestSetupBrokerPersistsInstanceAndTraeXNetworkKind(t *testing.T) {
 	}
 	if cfg.InstanceID != "traex-main" || cfg.HostKind != hostkind.TraeX {
 		t.Fatalf("TraeX broker config = %#v", cfg)
+	}
+}
+
+func TestSetupNamedBrokerRequiresExplicitListenersWithoutSideEffects(t *testing.T) {
+	home := privateTestDirectory(t)
+	t.Setenv("DELEGATION_HOME", home)
+	t.Setenv("DELEGATION_CONFIG", "")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run([]string{
+		"setup", "broker",
+		"--instance", "second",
+	}, &stdout, &stderr)
+
+	if code == 0 || !strings.Contains(stderr.String(), "require explicit --listen and --status-listen") {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	configPath := filepath.Join(home, "instances", "second", "broker.json")
+	if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("setup created named broker config: %v", err)
+	}
+}
+
+func TestSetupNamedBrokerUsesIsolatedDefaults(t *testing.T) {
+	home := privateTestDirectory(t)
+	t.Setenv("DELEGATION_HOME", home)
+	t.Setenv("DELEGATION_CONFIG", "")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run([]string{
+		"setup", "broker",
+		"--instance", "second",
+		"--listen", "127.0.0.1:18787",
+		"--status-listen", "127.0.0.1:18788",
+		"--json",
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	var result setupResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	instanceHome := filepath.Join(home, "instances", "second")
+	if result.ConfigPath != filepath.Join(instanceHome, "broker.json") ||
+		result.StatePath != filepath.Join(instanceHome, "state", "broker.sqlite3") ||
+		result.TokenFile != filepath.Join(instanceHome, "secrets", "broker.token") {
+		t.Fatalf("named broker result = %#v", result)
+	}
+}
+
+func TestSetupNamedBrokersWithExplicitConfigsIsolateImplicitResources(t *testing.T) {
+	root := privateTestDirectory(t)
+	type configured struct {
+		instance string
+		listen   string
+		status   string
+	}
+	for _, setup := range []configured{
+		{instance: "alpha", listen: "127.0.0.1:18787", status: "127.0.0.1:18788"},
+		{instance: "beta", listen: "127.0.0.1:28787", status: "127.0.0.1:28788"},
+	} {
+		configPath := filepath.Join(root, setup.instance+".json")
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := Run([]string{
+			"setup", "broker",
+			"--config", configPath,
+			"--instance", setup.instance,
+			"--listen", setup.listen,
+			"--status-listen", setup.status,
+			"--json",
+		}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("setup %s code = %d, stderr = %q", setup.instance, code, stderr.String())
+		}
+		cfg, err := delegationconfig.Read(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		instanceRoot := filepath.Join(root, "instances", setup.instance)
+		if cfg.Broker.StateFile != filepath.Join(instanceRoot, "state", "broker.sqlite3") ||
+			cfg.Broker.Auth.TokenFile != filepath.Join(instanceRoot, "secrets", "broker.token") {
+			t.Fatalf("%s resources = %#v", setup.instance, cfg.Broker)
+		}
 	}
 }
 
@@ -316,6 +406,42 @@ func TestSetupPeerWithoutAuthentication(t *testing.T) {
 		if err := delegationconfig.PreparePrivateDirectory(path); err != nil {
 			t.Fatalf("%s is not protected independently: %v", description, err)
 		}
+	}
+}
+
+func TestSetupNamedPeerUsesIsolatedDefaults(t *testing.T) {
+	home := privateTestDirectory(t)
+	t.Setenv("DELEGATION_HOME", home)
+	t.Setenv("DELEGATION_CONFIG", "")
+	codexBinary := testCodexBinary(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run([]string{
+		"setup", "peer",
+		"--instance", "second",
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--device-name", "second-peer",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+		"--codex-binary", codexBinary,
+		"--json",
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	var result setupResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	instanceHome := filepath.Join(home, "instances", "second")
+	if result.ConfigPath != filepath.Join(instanceHome, "peer.json") ||
+		result.StatePath != filepath.Join(instanceHome, "state", "peer.sqlite3") ||
+		result.CodexHome != filepath.Join(instanceHome, "codex") ||
+		result.WorkspaceRoot != filepath.Join(instanceHome, "workspaces") {
+		t.Fatalf("named peer result = %#v", result)
 	}
 }
 

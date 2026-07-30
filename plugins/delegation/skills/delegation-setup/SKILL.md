@@ -33,8 +33,9 @@ launcher for every runtime command below.
 ## Configure The Installation
 
 An installation may host a broker, a peer, or both. Run `setup broker --help` or `setup peer --help`
-before writing configuration. The defaults are separate `broker.json` and `peer.json` files. Before
-setup or issuing/revoking a credential, read
+before writing configuration. The `default` instance keeps the separate top-level `broker.json`
+and `peer.json` files. A named instance defaults under `instances/<instanceId>/`; named brokers
+require explicit broker and status listeners. Before setup or issuing/revoking a credential, read
 [role configuration](references/role-configuration.md) and follow its enrollment and transport
 rules. Token authentication is the default. Never pass token material as a command-line value;
 configuration stores only an absolute token file path and refuses to overwrite an existing config.
@@ -42,6 +43,8 @@ configuration stores only an absolute token file path and refuses to overwrite a
 Before installing or replacing a user service, read
 [native services](references/native-services.md). Install broker and peer processes independently,
 and stop when the native service manager reports a foreign, drifted, or indeterminate definition.
+Named instances currently run in the foreground; do not bypass the runtime's fail-closed rejection
+of native service installation for a named instance.
 
 ## Verify And Hand Off
 
