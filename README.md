@@ -131,6 +131,10 @@ setup requires explicit `--listen` and `--status-listen` addresses because the r
 guess free ports. Explicit `--config`, path, and listener arguments remain authoritative. Named
 instances can run as foreground processes, while native service installation fails closed until
 instance-scoped systemd, LaunchAgent, and Scheduled Task identities land in the next checkpoint.
+Set `DELEGATION_INSTANCE=<instanceId>` in the Codex or TraeX host environment before it loads the
+plugin to make the shipped root MCP select that named peer, or set `DELEGATION_CONFIG` to the exact
+peer config. An explicit instance selector must match the selected config. Named setup refuses an
+inherited `DELEGATION_CONFIG` unless `--config` is also explicit, preventing a split namespace.
 
 Enroll each peer from the broker installation before running peer setup. Choose a new stable UUID
 for the peer and start the broker once so its state is initialized, then run:

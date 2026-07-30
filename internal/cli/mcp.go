@@ -36,17 +36,18 @@ func runMCP(args []string, stderr io.Writer) int {
 }
 
 func runRootMCPCommand(args []string, stderr io.Writer) int {
-	defaultPath, err := delegationconfig.DefaultPeerPath()
-	if err != nil {
-		return writeError(stderr, err)
-	}
 	flags := flag.NewFlagSet("delegation mcp root", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", defaultPath, "peer configuration file path")
+	configPath := flags.String("config", "", "peer configuration file path")
+	instanceID := flags.String(
+		"instance",
+		defaultMCPInstance(),
+		"local Delegation instance name; DELEGATION_INSTANCE when omitted",
+	)
 	if code := parseFlags(flags, args); code >= 0 {
 		return code
 	}
-	resolvedConfig, err := absolutePath(*configPath)
+	resolvedConfig, err := resolveMCPConfig(flags, *configPath, *instanceID)
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -60,13 +61,14 @@ func runRootMCPCommand(args []string, stderr io.Writer) int {
 }
 
 func runWorkerMCPCommand(args []string, stderr io.Writer) int {
-	defaultPath, err := delegationconfig.DefaultPeerPath()
-	if err != nil {
-		return writeError(stderr, err)
-	}
 	flags := flag.NewFlagSet("delegation mcp worker", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", defaultPath, "peer configuration file path")
+	configPath := flags.String("config", "", "peer configuration file path")
+	instanceID := flags.String(
+		"instance",
+		defaultMCPInstance(),
+		"local Delegation instance name; DELEGATION_INSTANCE when omitted",
+	)
 	treeID := flags.String("tree-id", "", "managed worker tree UUID")
 	agentID := flags.String("agent-id", "", "managed worker agent UUID")
 	parentAgentID := flags.String("parent-agent-id", "", "managed worker parent agent UUID")
@@ -85,7 +87,7 @@ func runWorkerMCPCommand(args []string, stderr io.Writer) int {
 			return writeError(stderr, fmt.Errorf("%s is required", required.name))
 		}
 	}
-	resolvedConfig, err := absolutePath(*configPath)
+	resolvedConfig, err := resolveMCPConfig(flags, *configPath, *instanceID)
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -101,6 +103,46 @@ func runWorkerMCPCommand(args []string, stderr io.Writer) int {
 		return writeError(stderr, err)
 	}
 	return 0
+}
+
+func defaultMCPInstance() string {
+	if instanceID := os.Getenv("DELEGATION_INSTANCE"); instanceID != "" {
+		return instanceID
+	}
+	return delegationconfig.DefaultInstanceID
+}
+
+func resolveMCPConfig(flags *flag.FlagSet, configPath, instanceID string) (string, error) {
+	if err := delegationconfig.ValidateInstanceID(instanceID); err != nil {
+		return "", err
+	}
+	selected := os.Getenv("DELEGATION_INSTANCE") != "" || flagWasSet(flags, "instance")
+	if configPath == "" {
+		var err error
+		configPath, err = delegationconfig.DefaultPeerPathForInstance(instanceID)
+		if err != nil {
+			return "", err
+		}
+	}
+	resolvedConfig, err := absolutePath(configPath)
+	if err != nil {
+		return "", err
+	}
+	if !selected {
+		return resolvedConfig, nil
+	}
+	cfg, err := delegationconfig.Read(resolvedConfig)
+	if err != nil {
+		return "", err
+	}
+	if cfg.EffectiveInstanceID() != instanceID {
+		return "", fmt.Errorf(
+			"selected instance %q does not match configuration instance %q",
+			instanceID,
+			cfg.EffectiveInstanceID(),
+		)
+	}
+	return resolvedConfig, nil
 }
 
 func runRootMCP(ctx context.Context, configPath string, transport mcp.Transport) error {

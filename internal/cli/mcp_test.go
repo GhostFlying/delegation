@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -170,6 +171,53 @@ func TestRootMCPStdioProcess(t *testing.T) {
 	}
 }
 
+func TestRootMCPStdioNamedInstanceProcess(t *testing.T) {
+	home := privateTestDirectory(t)
+	configPath := filepath.Join(home, "instances", "alpha", "peer.json")
+	writeRootMCPConfigAt(t, delegationconfig.RolePeer, "alpha", configPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRootMCPStdioHelper$")
+	command.Env = append(os.Environ(),
+		"DELEGATION_TEST_MCP_HELPER=1",
+		"DELEGATION_HOME="+home,
+		"DELEGATION_CONFIG=",
+		"DELEGATION_INSTANCE=alpha",
+	)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	client := mcp.NewClient(&mcp.Implementation{Name: "named-process-test", Version: "1"}, nil)
+	session, err := client.Connect(ctx, &mcp.CommandTransport{
+		Command: command, TerminateDuration: 5 * time.Second,
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect named root MCP process: %v; stderr = %q", err, stderr.String())
+	}
+	tools, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list named root MCP process tools: %v; stderr = %q", err, stderr.String())
+	}
+	if len(tools.Tools) != 10 {
+		t.Fatalf("named root MCP process tools = %#v", tools.Tools)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("close named root MCP process: %v; stderr = %q", err, stderr.String())
+	}
+}
+
+func TestRootMCPRejectsSelectedInstanceConfigMismatch(t *testing.T) {
+	configPath := writeRootMCPConfig(t, delegationconfig.RolePeer)
+	t.Setenv("DELEGATION_INSTANCE", "alpha")
+	t.Setenv("DELEGATION_CONFIG", configPath)
+	var stderr bytes.Buffer
+
+	code := Run([]string{"mcp", "root"}, io.Discard, &stderr)
+
+	if code == 0 || !strings.Contains(stderr.String(), "does not match configuration instance") {
+		t.Fatalf("root MCP code = %d, stderr = %q", code, stderr.String())
+	}
+}
+
 func TestRootMCPStdioHelper(t *testing.T) {
 	if os.Getenv("DELEGATION_TEST_MCP_HELPER") != "1" {
 		return
@@ -181,8 +229,16 @@ func writeRootMCPConfig(t *testing.T, role delegationconfig.Role) string {
 	t.Helper()
 	directory := privateTestDirectory(t)
 	configPath := filepath.Join(directory, "config.json")
+	writeRootMCPConfigAt(t, role, "", configPath)
+	return configPath
+}
+
+func writeRootMCPConfigAt(t *testing.T, role delegationconfig.Role, instanceID, configPath string) {
+	t.Helper()
+	directory := filepath.Dir(configPath)
 	cfg := delegationconfig.Config{
 		SchemaVersion: delegationconfig.CurrentSchemaVersion,
+		InstanceID:    instanceID,
 		Role:          role,
 		ControllerID:  mcpTestControllerID,
 		DeviceID:      mcpTestDeviceID,
@@ -219,5 +275,4 @@ func writeRootMCPConfig(t *testing.T, role delegationconfig.Role) string {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	return configPath
 }

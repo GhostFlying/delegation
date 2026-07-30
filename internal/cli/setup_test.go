@@ -115,6 +115,61 @@ func TestSetupNamedBrokerRequiresExplicitListenersWithoutSideEffects(t *testing.
 	}
 }
 
+func TestSetupNamedInstanceRejectsImplicitDelegationConfig(t *testing.T) {
+	for _, role := range []string{"broker", "peer"} {
+		t.Run(role, func(t *testing.T) {
+			override := privateTestPath(t, role+".json")
+			t.Setenv("DELEGATION_CONFIG", override)
+			args := []string{"setup", role, "--instance", "second"}
+			if role == "broker" {
+				args = append(args,
+					"--listen", "127.0.0.1:18787",
+					"--status-listen", "127.0.0.1:18788",
+				)
+			}
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			code := Run(args, &stdout, &stderr)
+
+			if code == 0 || !strings.Contains(stderr.String(), "requires an explicit --config path") {
+				t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+			}
+			if _, err := os.Lstat(override); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("setup created implicit override config: %v", err)
+			}
+		})
+	}
+}
+
+func TestSetupNamedBrokerRejectsEmptyStatusListenerWithoutSideEffects(t *testing.T) {
+	home := privateTestDirectory(t)
+	t.Setenv("DELEGATION_HOME", home)
+	t.Setenv("DELEGATION_CONFIG", "")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run([]string{
+		"setup", "broker",
+		"--instance", "second",
+		"--listen", "127.0.0.1:18787",
+		"--status-listen=",
+	}, &stdout, &stderr)
+
+	if code == 0 || !strings.Contains(stderr.String(), "require a status listener") {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	instanceHome := filepath.Join(home, "instances", "second")
+	for _, path := range []string{
+		filepath.Join(instanceHome, "broker.json"),
+		filepath.Join(instanceHome, "secrets", "broker.token"),
+	} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("setup created %s: %v", path, err)
+		}
+	}
+}
+
 func TestSetupNamedBrokerUsesIsolatedDefaults(t *testing.T) {
 	home := privateTestDirectory(t)
 	t.Setenv("DELEGATION_HOME", home)

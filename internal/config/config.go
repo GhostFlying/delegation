@@ -186,6 +186,9 @@ func (c Config) Validate() error {
 		if !filepath.IsAbs(c.Broker.StateFile) {
 			return errors.New("broker stateFile must be an absolute path")
 		}
+		if c.EffectiveInstanceID() != DefaultInstanceID && c.Broker.StatusListen == "" {
+			return errors.New("named broker instances require a status listener")
+		}
 		if err := validateListen(c.Broker.Listen, c.Broker.AllowInsecureNonLoopback); err != nil {
 			return err
 		}
