@@ -864,7 +864,47 @@ func TestHeartbeatTimeoutAndBrokerEpochMarkDevicesOffline(t *testing.T) {
 	}
 }
 
+func TestBrokerHealthReportsInstanceWithoutChangingDefaultResponse(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		instanceID string
+		wantHeader string
+	}{
+		{name: "default", instanceID: config.DefaultInstanceID},
+		{name: "named", instanceID: "alpha", wantHeader: "alpha"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newBrokerHarnessForInstance(
+				t,
+				config.AuthModeNone,
+				time.Second,
+				test.instanceID,
+			)
+			response, err := http.Get(harness.httpServer.URL + "/healthz")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusOK ||
+				response.Header.Get(HealthServiceHeader) != "broker" ||
+				response.Header.Get(HealthControllerHeader) != brokerTestControllerID ||
+				response.Header.Get(HealthInstanceHeader) != test.wantHeader {
+				t.Fatalf("health response headers = %#v", response.Header)
+			}
+		})
+	}
+}
+
 func newBrokerHarness(t *testing.T, authMode config.AuthMode, interval time.Duration) brokerHarness {
+	return newBrokerHarnessForInstance(t, authMode, interval, config.DefaultInstanceID)
+}
+
+func newBrokerHarnessForInstance(
+	t *testing.T,
+	authMode config.AuthMode,
+	interval time.Duration,
+	instanceID string,
+) brokerHarness {
 	t.Helper()
 	registry, err := store.Open(
 		context.Background(), filepath.Join(t.TempDir(), "state", "broker.sqlite3"),
@@ -898,6 +938,7 @@ func newBrokerHarness(t *testing.T, authMode config.AuthMode, interval time.Dura
 	var tick atomic.Int64
 	server, err := New(Options{
 		ControllerID:      brokerTestControllerID,
+		InstanceID:        instanceID,
 		AuthMode:          authMode,
 		MasterToken:       master,
 		Registry:          registry,

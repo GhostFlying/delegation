@@ -60,10 +60,14 @@ func probeService(ctx context.Context, cfg delegationconfig.Config) error {
 		if err != nil {
 			return err
 		}
-		return localbridge.Probe(ctx, endpoint, localbridge.ServiceIdentity{
+		expectedIdentity := localbridge.ServiceIdentity{
 			ControllerID: cfg.ControllerID,
 			DeviceID:     cfg.DeviceID,
-		})
+		}
+		if cfg.EffectiveInstanceID() != delegationconfig.DefaultInstanceID {
+			expectedIdentity.InstanceID = cfg.EffectiveInstanceID()
+		}
+		return localbridge.Probe(ctx, endpoint, expectedIdentity)
 	case delegationconfig.RoleBroker:
 		host, port, err := net.SplitHostPort(cfg.Broker.Listen)
 		if err != nil {
@@ -93,10 +97,19 @@ func probeService(ctx context.Context, cfg delegationconfig.Config) error {
 		if err != nil {
 			return err
 		}
+		responseInstanceID := response.Header.Get(broker.HealthInstanceHeader)
+		if responseInstanceID == "" {
+			responseInstanceID = delegationconfig.DefaultInstanceID
+		}
 		if response.StatusCode != http.StatusOK || string(body) != "ok\n" ||
 			response.Header.Get(broker.HealthServiceHeader) != "broker" ||
-			response.Header.Get(broker.HealthControllerHeader) != cfg.ControllerID {
-			return fmt.Errorf("broker health check did not match controller %s", cfg.ControllerID)
+			response.Header.Get(broker.HealthControllerHeader) != cfg.ControllerID ||
+			responseInstanceID != cfg.EffectiveInstanceID() {
+			return fmt.Errorf(
+				"broker health check did not match controller %s instance %s",
+				cfg.ControllerID,
+				cfg.EffectiveInstanceID(),
+			)
 		}
 		return nil
 	default:

@@ -3,10 +3,8 @@
 Run the plugin launcher with `setup broker --help` or `setup peer --help` before writing
 configuration. One device may host multiple isolated instances. The `default` instance preserves
 the legacy top-level paths and service identities; named instances default under
-`instances/<instanceId>/` and use distinct local bridges. Supply explicit `--listen` and
-`--status-listen` values for every named broker. Use `service run --config <path>` for a named
-instance; native service installation remains disabled until instance-scoped definitions are
-available.
+`instances/<instanceId>/` and use distinct local bridges and native services. Supply explicit
+`--listen` and `--status-listen` values for every named broker.
 
 Set `DELEGATION_INSTANCE=<instanceId>` in the CLI host environment before loading the plugin so its
 root MCP uses that named peer. `DELEGATION_CONFIG` may instead select an exact config path; when

@@ -27,10 +27,19 @@ The native identities are:
   `com.github.ghostflying.delegation.peer`.
 - Windows: `Delegation Broker` and `Delegation Peer` Scheduled Tasks.
 
+Those names remain exact for the `default` instance. A named config selects:
+
+- Linux: `delegation-<instanceId>-broker.service` or
+  `delegation-<instanceId>-peer.service`.
+- macOS: `com.github.ghostflying.delegation.<instanceId>.broker` or
+  `com.github.ghostflying.delegation.<instanceId>.peer`.
+- Windows: `Delegation <instanceId> Broker` or `Delegation <instanceId> Peer`.
+
 Installation writes a disabled definition before enabling, starting, and verifying it. It refuses
-foreign definitions and managed definitions whose executable or configuration path differs. Treat
-`indeterminate` as partial activation that requires inspection through the native service manager;
-do not overwrite or delete the definition automatically.
+foreign definitions, definitions owned by another instance, and managed definitions whose
+executable or configuration path differs. Treat `indeterminate` as partial activation that requires
+inspection through the native service manager; do not overwrite or delete the definition
+automatically.
 
 Linux requires a working systemd user manager. macOS needs the current user's GUI launchd domain.
 Windows needs an interactive login. A nonzero Windows service exit is retried once per minute for
