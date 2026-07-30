@@ -76,16 +76,17 @@ type Options struct {
 	// SupervisorBinary is required on macOS and must dispatch
 	// RunDarwinSupervisorIfRequested before normal command handling. Other
 	// platforms ignore it.
-	SupervisorBinary   string
-	CodexHome          string
-	Environment        map[string]string
-	UnsetEnvironment   []string
-	ClientVersion      string
-	HandshakeTimeout   time.Duration
-	CloseTimeout       time.Duration
-	StderrLimit        int
-	NotificationBuffer int
-	MaxPendingCalls    int
+	SupervisorBinary       string
+	CodexHome              string
+	RuntimeHomeEnvironment map[string]string
+	Environment            map[string]string
+	UnsetEnvironment       []string
+	ClientVersion          string
+	HandshakeTimeout       time.Duration
+	CloseTimeout           time.Duration
+	StderrLimit            int
+	NotificationBuffer     int
+	MaxPendingCalls        int
 }
 
 // ProcessError reports an unexpected child exit without including stderr in its Error string.
@@ -172,7 +173,7 @@ func Start(ctx context.Context, options Options) (*Client, error) {
 	command.Env = buildEnvironment(
 		validated.Environment,
 		validated.UnsetEnvironment,
-		validated.CodexHome,
+		validated.RuntimeHomeEnvironment,
 	)
 	processOwner, err := prepareOwnedProcess(
 		command,
@@ -952,6 +953,23 @@ func validateOptions(options Options) (Options, error) {
 	if !homeInfo.IsDir() {
 		return Options{}, errors.New("app-server CODEX_HOME must be a directory")
 	}
+	options.CodexHome, err = filepath.EvalSymlinks(options.CodexHome)
+	if err != nil {
+		return Options{}, fmt.Errorf("resolve app-server CODEX_HOME: %w", err)
+	}
+	if len(options.RuntimeHomeEnvironment) == 0 {
+		options.RuntimeHomeEnvironment = map[string]string{
+			"CODEX_HOME": options.CodexHome,
+		}
+	}
+	runtimeHomeEnvironment, err := validateRuntimeHomeEnvironment(
+		options.RuntimeHomeEnvironment,
+		options.CodexHome,
+	)
+	if err != nil {
+		return Options{}, err
+	}
+	options.RuntimeHomeEnvironment = runtimeHomeEnvironment
 	if runtime.GOOS == "darwin" {
 		if options.SupervisorBinary == "" || !filepath.IsAbs(options.SupervisorBinary) {
 			return Options{}, errors.New("app-server supervisor binary must be an absolute path on macOS")
@@ -968,16 +986,20 @@ func validateOptions(options Options) (Options, error) {
 		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
 			return Options{}, fmt.Errorf("app-server environment contains invalid key %q", key)
 		}
-		if environmentKeyEqual(key, "CODEX_HOME") && !samePath(value, options.CodexHome) {
-			return Options{}, errors.New("app-server Environment CODEX_HOME conflicts with CodexHome")
+		if homeValue, found := lookupEnvironmentValue(runtimeHomeEnvironment, key); found &&
+			!samePath(value, homeValue) {
+			return Options{}, fmt.Errorf(
+				"app-server Environment %s conflicts with runtime home environment",
+				key,
+			)
 		}
 	}
 	for _, key := range options.UnsetEnvironment {
 		if key == "" || strings.ContainsAny(key, "=\x00") {
 			return Options{}, fmt.Errorf("app-server unset environment contains invalid key %q", key)
 		}
-		if environmentKeyEqual(key, "CODEX_HOME") {
-			return Options{}, errors.New("app-server cannot unset CODEX_HOME")
+		if _, found := lookupEnvironmentValue(runtimeHomeEnvironment, key); found {
+			return Options{}, fmt.Errorf("app-server cannot unset runtime home environment %s", key)
 		}
 	}
 	if options.ClientVersion == "" {
@@ -1016,7 +1038,48 @@ func validateOptions(options Options) (Options, error) {
 	return options, nil
 }
 
-func buildEnvironment(overrides map[string]string, unset []string, codexHome string) []string {
+func validateRuntimeHomeEnvironment(
+	environment map[string]string,
+	codexHome string,
+) (map[string]string, error) {
+	validated := make(map[string]string, len(environment))
+	for key, value := range environment {
+		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
+			return nil, fmt.Errorf("app-server runtime home environment contains invalid key %q", key)
+		}
+		if _, duplicate := lookupEnvironmentValue(validated, key); duplicate {
+			return nil, fmt.Errorf("app-server runtime home environment repeats key %q", key)
+		}
+		if !filepath.IsAbs(value) {
+			return nil, fmt.Errorf("app-server runtime home environment %s must be an absolute path", key)
+		}
+		info, err := os.Stat(value)
+		if err != nil {
+			return nil, fmt.Errorf("inspect app-server runtime home environment %s: %w", key, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("app-server runtime home environment %s must be a directory", key)
+		}
+		resolved, err := filepath.EvalSymlinks(value)
+		if err != nil {
+			return nil, fmt.Errorf("resolve app-server runtime home environment %s: %w", key, err)
+		}
+		if !pathWithin(resolved, codexHome) {
+			return nil, fmt.Errorf(
+				"app-server runtime home environment %s must be inside managed home",
+				key,
+			)
+		}
+		validated[key] = resolved
+	}
+	return validated, nil
+}
+
+func buildEnvironment(
+	overrides map[string]string,
+	unset []string,
+	runtimeHomeEnvironment map[string]string,
+) []string {
 	environment := append([]string(nil), os.Environ()...)
 	for _, key := range unset {
 		environment = removeEnvironment(environment, key)
@@ -1029,7 +1092,15 @@ func buildEnvironment(overrides map[string]string, unset []string, codexHome str
 	for _, key := range keys {
 		environment = setEnvironment(environment, key, overrides[key])
 	}
-	return setEnvironment(environment, "CODEX_HOME", codexHome)
+	keys = keys[:0]
+	for key := range runtimeHomeEnvironment {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		environment = setEnvironment(environment, key, runtimeHomeEnvironment[key])
+	}
+	return environment
 }
 
 func setEnvironment(environment []string, key, value string) []string {
@@ -1051,6 +1122,15 @@ func environmentKeyEqual(left, right string) bool {
 	return left == right
 }
 
+func lookupEnvironmentValue(environment map[string]string, key string) (string, bool) {
+	for candidate, value := range environment {
+		if environmentKeyEqual(candidate, key) {
+			return value, true
+		}
+	}
+	return "", false
+}
+
 func samePath(left, right string) bool {
 	left = filepath.Clean(left)
 	right = filepath.Clean(right)
@@ -1058,4 +1138,12 @@ func samePath(left, right string) bool {
 		return strings.EqualFold(left, right)
 	}
 	return left == right
+}
+
+func pathWithin(candidate, directory string) bool {
+	relative, err := filepath.Rel(directory, candidate)
+	if err != nil || filepath.IsAbs(relative) {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
