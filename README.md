@@ -123,7 +123,13 @@ plugins/delegation/scripts/delegation-mcp setup broker \
 ```
 
 TraeX peer setup remains disabled until the configurable non-shell CLI launch specification is
-available. The `default` instance keeps the existing `~/.delegation/broker.json`,
+available through peer setup. Current Codex peer setup persists its resolved command under
+`peer.cli.command`; the runtime also accepts legacy version-3 configs that use `peer.codexBinary`.
+The structured `peer.cli` form can additionally carry exact `arguments` and an optional
+shell-free `launcher` with `executable` and `prefixArguments`; these values are argv elements, not
+shell text. A launcher must preserve stdio; on Linux it must `exec` the target CLI, while on macOS
+and Windows it must remain attached and must not daemonize or detach. The `default` instance keeps
+the existing `~/.delegation/broker.json`,
 `~/.delegation/peer.json`, local bridge, and native service identities. A named instance uses
 `~/.delegation/instances/<instanceId>/` for its default broker and peer configuration, state,
 secrets, managed Codex home, and workspaces. Its local bridge and native service identities are

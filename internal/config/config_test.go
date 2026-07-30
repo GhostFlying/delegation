@@ -3,9 +3,11 @@ package config
 import (
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 	"github.com/GhostFlying/delegation/internal/hostkind"
 )
 
@@ -48,6 +50,139 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 	if got != cfg {
 		t.Fatalf("Read() = %#v, want %#v", got, cfg)
+	}
+	if got.Peer.EffectiveCLI().Command != cfg.Peer.CodexBinary {
+		t.Fatalf("legacy effective CLI = %#v", got.Peer.EffectiveCLI())
+	}
+}
+
+func TestStructuredCLIConfigRoundTrip(t *testing.T) {
+	cfg := testPeerConfig(t)
+	command := cfg.Peer.CodexBinary
+	cfg.Peer.CodexBinary = ""
+	cfg.Peer.CLI = &CLIConfig{
+		Command:   command,
+		Arguments: []string{"-p", "profile with spaces"},
+		Launcher: &clilaunch.Spec{
+			Executable:      filepath.Join(filepath.Dir(command), "launcher"),
+			PrefixArguments: []string{"run", "--"},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "private", "config.json")
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProtectedConfigFixture(t, path, data)
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, cfg) {
+		t.Fatalf("Read() = %#v, want %#v", got, cfg)
+	}
+}
+
+func TestPeerCLIConfigValidation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*PeerConfig)
+		want   string
+	}{
+		{
+			name: "missing legacy and structured configuration",
+			mutate: func(peer *PeerConfig) {
+				peer.CodexBinary = ""
+			},
+			want: "exactly one",
+		},
+		{
+			name: "legacy and structured configuration",
+			mutate: func(peer *PeerConfig) {
+				peer.CLI = &CLIConfig{Command: peer.CodexBinary}
+			},
+			want: "exactly one",
+		},
+		{
+			name: "relative command",
+			mutate: func(peer *PeerConfig) {
+				peer.CodexBinary = ""
+				peer.CLI = &CLIConfig{Command: "codex"}
+			},
+			want: "command must be an absolute path",
+		},
+		{
+			name: "command with NUL",
+			mutate: func(peer *PeerConfig) {
+				peer.CodexBinary = ""
+				peer.CLI = &CLIConfig{Command: filepath.Join(t.TempDir(), "codex") + "\x00"}
+			},
+			want: "must not contain NUL",
+		},
+		{
+			name: "relative launcher",
+			mutate: func(peer *PeerConfig) {
+				command := peer.CodexBinary
+				peer.CodexBinary = ""
+				peer.CLI = &CLIConfig{
+					Command:  command,
+					Launcher: &clilaunch.Spec{Executable: "warmpool"},
+				}
+			},
+			want: "launcher executable must be an absolute path",
+		},
+		{
+			name: "NUL argument",
+			mutate: func(peer *PeerConfig) {
+				command := peer.CodexBinary
+				peer.CodexBinary = ""
+				peer.CLI = &CLIConfig{
+					Command:   command,
+					Arguments: []string{"profile\x00name"},
+				}
+			},
+			want: "must not contain NUL",
+		},
+		{
+			name: "combined argument count",
+			mutate: func(peer *PeerConfig) {
+				command := peer.CodexBinary
+				peer.CodexBinary = ""
+				peer.CLI = &CLIConfig{
+					Command:   command,
+					Arguments: make([]string, clilaunch.MaximumPrefixArguments-1),
+					Launcher: &clilaunch.Spec{
+						Executable:      filepath.Join(filepath.Dir(command), "launcher"),
+						PrefixArguments: []string{"run"},
+					},
+				}
+			},
+			want: "at most",
+		},
+		{
+			name: "combined argument bytes",
+			mutate: func(peer *PeerConfig) {
+				command := peer.CodexBinary
+				peer.CodexBinary = ""
+				peer.CLI = &CLIConfig{
+					Command:   command,
+					Arguments: []string{strings.Repeat("x", clilaunch.MaximumPrefixBytes)},
+					Launcher: &clilaunch.Spec{
+						Executable: filepath.Join(filepath.Dir(command), "launcher"),
+					},
+				}
+			},
+			want: "bytes",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testPeerConfig(t)
+			test.mutate(&cfg.Peer)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -565,6 +700,24 @@ func testPeerRuntime(t *testing.T) PeerConfig {
 		WorkspaceRoot:  filepath.Join(root, "workspaces"),
 		StateFile:      filepath.Join(root, "peer.sqlite3"),
 		MaxWorkerSlots: 4,
+	}
+}
+
+func testPeerConfig(t *testing.T) Config {
+	t.Helper()
+	return Config{
+		SchemaVersion: CurrentSchemaVersion,
+		InstanceID:    DefaultInstanceID,
+		HostKind:      hostkind.Codex,
+		Role:          RolePeer,
+		ControllerID:  testID,
+		DeviceID:      "123e4567-e89b-42d3-a456-426614174001",
+		DeviceName:    "builder",
+		Broker: BrokerConfig{
+			URL:  "wss://broker.example.test",
+			Auth: AuthConfig{Mode: AuthModeNone},
+		},
+		Peer: testPeerRuntime(t),
 	}
 }
 

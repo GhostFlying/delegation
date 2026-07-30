@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -70,7 +71,7 @@ func runConnectorServiceWithProviderEnvironment(
 	loadProviderEnvironment func() (serviceenv.Resolved, error),
 	stderr io.Writer,
 ) (resultErr error) {
-	token, err := loadConnectorAuthority(configPath, cfg)
+	authority, err := loadConnectorAuthority(configPath, cfg)
 	if err != nil {
 		return err
 	}
@@ -106,10 +107,8 @@ func runConnectorServiceWithProviderEnvironment(
 	defer func() {
 		resultErr = errors.Join(resultErr, closeResources())
 	}()
-	codexLaunch, err := codexcommand.Resolve(cfg.Peer.CodexBinary)
-	if err != nil {
-		return fmt.Errorf("resolve configured Codex command: %w", err)
-	}
+	codexLaunch := authority.codexLaunch
+	appServerLaunch := authority.appServerLaunch
 	codexEnvironment := make(map[string]string, len(codexLaunch.Environment)+len(providerEnvironment.Environment))
 	for name, value := range codexLaunch.Environment {
 		codexEnvironment[name] = value
@@ -152,9 +151,7 @@ func runConnectorServiceWithProviderEnvironment(
 	workers, err := workerhost.New(ctx, workerhost.Options{
 		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
 		PeerConfigPath: configPath, DelegationBinary: runtimeBinary,
-		CLILaunch: clilaunch.Spec{
-			Executable: codexLaunch.NativePath,
-		},
+		CLILaunch:               appServerLaunch,
 		CLIRuntimeExecutable:    codexLaunch.NativePath,
 		GitBinary:               cfg.Peer.GitBinary,
 		CodexHome:               cfg.Peer.CodexHome,
@@ -219,7 +216,7 @@ func runConnectorServiceWithProviderEnvironment(
 		DeviceName:               cfg.DeviceName,
 		HostKind:                 cfg.EffectiveHostKind(),
 		AuthMode:                 cfg.Broker.Auth.Mode,
-		Token:                    token,
+		Token:                    authority.token,
 		WorkerSpawner:            workerManager,
 		WorkerController:         workerManager,
 		WorkerLifecycleSource: managedWorkerLifecycleSource{
@@ -326,6 +323,29 @@ func reportConnectorError(writeStderr func(string, ...any) error, err error) err
 	return writeStderr("delegation: connector reconnecting: %v\n", err)
 }
 
+func resolveConfiguredCLILaunch(
+	configured delegationconfig.CLIConfig,
+	runtimeExecutable string,
+) (clilaunch.Spec, error) {
+	launch := clilaunch.Spec{
+		Executable:      runtimeExecutable,
+		PrefixArguments: slices.Clone(configured.Arguments),
+	}
+	if configured.Launcher != nil {
+		launch.Executable = configured.Launcher.Executable
+		launch.PrefixArguments = append(
+			slices.Clone(configured.Launcher.PrefixArguments),
+			runtimeExecutable,
+		)
+		launch.PrefixArguments = append(launch.PrefixArguments, configured.Arguments...)
+	}
+	resolved, err := clilaunch.Resolve(launch)
+	if err != nil {
+		return clilaunch.Spec{}, fmt.Errorf("resolve configured CLI launch: %w", err)
+	}
+	return resolved, nil
+}
+
 type workerHostCloser interface {
 	Close(context.Context) error
 }
@@ -399,12 +419,18 @@ func (a peerAuthorizer) AuthorizeWorker(
 	}
 }
 
+type connectorAuthority struct {
+	token           *tokenfile.Token
+	codexLaunch     codexcommand.Launch
+	appServerLaunch clilaunch.Spec
+}
+
 func loadConnectorAuthority(
 	configPath string,
 	cfg delegationconfig.Config,
-) (*tokenfile.Token, error) {
+) (connectorAuthority, error) {
 	if cfg.Role != delegationconfig.RolePeer {
-		return nil, errors.New("connector runtime requires a peer configuration")
+		return connectorAuthority{}, errors.New("connector runtime requires a peer configuration")
 	}
 	if err := pathguard.ValidatePeerRuntimeAuthority(
 		configPath,
@@ -413,33 +439,68 @@ func loadConnectorAuthority(
 		cfg.Peer.CodexHome,
 		cfg.Peer.WorkspaceRoot,
 	); err != nil {
-		return nil, err
+		return connectorAuthority{}, err
 	}
+	configuredCLI := cfg.Peer.EffectiveCLI()
 	for name, executable := range map[string]string{
-		"Codex binary": cfg.Peer.CodexBinary,
-		"Git binary":   cfg.Peer.GitBinary,
+		"CLI command": configuredCLI.Command,
+		"Git binary":  cfg.Peer.GitBinary,
 	} {
 		if err := pathguard.ValidateManagedExecutable(
 			name, executable, cfg.Peer.CodexHome, cfg.Peer.WorkspaceRoot,
 		); err != nil {
-			return nil, err
+			return connectorAuthority{}, err
+		}
+	}
+	if configuredCLI.Launcher != nil {
+		if err := pathguard.ValidateManagedExecutable(
+			"CLI launcher",
+			configuredCLI.Launcher.Executable,
+			cfg.Peer.CodexHome,
+			cfg.Peer.WorkspaceRoot,
+		); err != nil {
+			return connectorAuthority{}, err
+		}
+	}
+	codexLaunch, err := codexcommand.Resolve(configuredCLI.Command)
+	if err != nil {
+		return connectorAuthority{}, fmt.Errorf("resolve configured CLI command: %w", err)
+	}
+	appServerLaunch, err := resolveConfiguredCLILaunch(configuredCLI, codexLaunch.NativePath)
+	if err != nil {
+		return connectorAuthority{}, err
+	}
+	for name, executable := range map[string]string{
+		"resolved CLI command":  codexLaunch.CommandPath,
+		"CLI runtime":           codexLaunch.NativePath,
+		"resolved CLI launcher": appServerLaunch.Executable,
+	} {
+		if err := pathguard.ValidateManagedExecutable(
+			name, executable, cfg.Peer.CodexHome, cfg.Peer.WorkspaceRoot,
+		); err != nil {
+			return connectorAuthority{}, err
 		}
 	}
 	if err := delegationconfig.ValidatePrivateDirectory(cfg.Peer.CodexHome); err != nil {
-		return nil, fmt.Errorf("validate managed CODEX_HOME: %w", err)
+		return connectorAuthority{}, fmt.Errorf("validate managed CODEX_HOME: %w", err)
 	}
 	if err := codexconfig.ValidateManagedHome(cfg.Peer.CodexHome); err != nil {
-		return nil, err
+		return connectorAuthority{}, err
 	}
 	if err := delegationconfig.ValidatePrivateDirectory(cfg.Peer.WorkspaceRoot); err != nil {
-		return nil, fmt.Errorf("validate managed workspace root: %w", err)
+		return connectorAuthority{}, fmt.Errorf("validate managed workspace root: %w", err)
+	}
+	authority := connectorAuthority{
+		codexLaunch:     codexLaunch,
+		appServerLaunch: appServerLaunch,
 	}
 	if cfg.Broker.Auth.Mode == delegationconfig.AuthModeNone {
-		return nil, nil
+		return authority, nil
 	}
 	token, err := tokenfile.Read(cfg.Broker.Auth.TokenFile)
 	if err != nil {
-		return nil, fmt.Errorf("read peer token: %w", err)
+		return connectorAuthority{}, fmt.Errorf("read peer token: %w", err)
 	}
-	return &token, nil
+	authority.token = &token
+	return authority, nil
 }

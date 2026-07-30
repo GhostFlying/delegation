@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -440,7 +441,9 @@ func TestSetupPeerWithoutAuthentication(t *testing.T) {
 			Auth: delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
 		},
 		Peer: delegationconfig.PeerConfig{
-			CodexBinary:    codexBinary,
+			CLI: &delegationconfig.CLIConfig{
+				Command: codexBinary,
+			},
 			GitBinary:      gitBinary,
 			CodexHome:      codexHome,
 			WorkspaceRoot:  workspaceRoot,
@@ -448,7 +451,7 @@ func TestSetupPeerWithoutAuthentication(t *testing.T) {
 			MaxWorkerSlots: 4,
 		},
 	}
-	if cfg != want {
+	if !reflect.DeepEqual(cfg, want) {
 		t.Fatalf("config = %#v, want %#v", cfg, want)
 	}
 	if _, err := os.Stat(filepath.Join(codexHome, "config.toml")); !errors.Is(err, os.ErrNotExist) {

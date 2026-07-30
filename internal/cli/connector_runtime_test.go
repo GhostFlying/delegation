@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/broker"
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
@@ -62,6 +63,68 @@ func TestReportConnectorErrorDistinguishesTerminalStateRecovery(t *testing.T) {
 			if !strings.Contains(output.String(), test.want) ||
 				strings.Contains(output.String(), test.doNotWant) {
 				t.Fatalf("connector error output = %q", output.String())
+			}
+		})
+	}
+}
+
+func TestResolveConfiguredCLILaunchPreservesArgumentBoundaries(t *testing.T) {
+	root := t.TempDir()
+	runtimeExecutable := filepath.Join(root, "runtime")
+	launcherExecutable := filepath.Join(root, "launcher")
+	for _, path := range []string{runtimeExecutable, launcherExecutable} {
+		if err := os.WriteFile(path, []byte("test"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, test := range []struct {
+		name       string
+		configured delegationconfig.CLIConfig
+		want       clilaunch.Spec
+	}{
+		{
+			name: "direct",
+			configured: delegationconfig.CLIConfig{
+				Arguments: []string{"-p", "profile with spaces", "semi;colon"},
+			},
+			want: clilaunch.Spec{
+				Executable:      runtimeExecutable,
+				PrefixArguments: []string{"-p", "profile with spaces", "semi;colon"},
+			},
+		},
+		{
+			name: "wrapped",
+			configured: delegationconfig.CLIConfig{
+				Arguments: []string{"-p", "profile with spaces", "semi;colon"},
+				Launcher: &clilaunch.Spec{
+					Executable:      launcherExecutable,
+					PrefixArguments: []string{"run", "--"},
+				},
+			},
+			want: clilaunch.Spec{
+				Executable: launcherExecutable,
+				PrefixArguments: []string{
+					"run", "--", runtimeExecutable,
+					"-p", "profile with spaces", "semi;colon",
+				},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := resolveConfiguredCLILaunch(test.configured, runtimeExecutable)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("resolved CLI launch = %#v, want %#v", got, test.want)
+			}
+			got.PrefixArguments[0] = "changed"
+			if test.configured.Arguments[0] != "-p" {
+				t.Fatalf("resolved CLI launch retained caller arguments: %#v", test.configured)
+			}
+			if test.configured.Launcher != nil &&
+				test.configured.Launcher.PrefixArguments[0] != "run" {
+				t.Fatalf("resolved CLI launch retained launcher arguments: %#v", test.configured)
 			}
 		})
 	}

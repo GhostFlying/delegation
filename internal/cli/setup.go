@@ -308,7 +308,9 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 			AllowInsecureNonLoopback: *allowInsecure,
 		},
 		Peer: delegationconfig.PeerConfig{
-			CodexBinary:    resolvedCodexBinary,
+			CLI: &delegationconfig.CLIConfig{
+				Command: resolvedCodexBinary,
+			},
 			GitBinary:      resolvedGitBinary,
 			CodexHome:      resolvedCodexHome,
 			WorkspaceRoot:  resolvedWorkspaceRoot,
@@ -332,8 +334,8 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		return writeError(stderr, err)
 	}
 	for name, executable := range map[string]string{
-		"Codex binary": resolvedCodexBinary,
-		"Git binary":   resolvedGitBinary,
+		"CLI command": resolvedCodexBinary,
+		"Git binary":  resolvedGitBinary,
 	} {
 		if err := pathguard.ValidateManagedExecutable(
 			name, executable, resolvedCodexHome, resolvedWorkspaceRoot,
