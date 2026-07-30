@@ -139,6 +139,9 @@ plugins/delegation/scripts/delegation-mcp setup peer \
   --cli-launcher-prefix-argument=--
 ```
 
+This checkpoint configures and validates TraeX launch only. Managed TraeX worker execution remains
+unavailable until the TraeX app-server protocol adaptation lands.
+
 This persists `peer.cli.command`, exact `arguments`, and a shell-free `launcher` with `executable`
 and `prefixArguments`; legacy version-3 Codex configs using `peer.codexBinary` remain readable. A
 launcher must preserve stdio; on Linux it must `exec` the target CLI, while on macOS and Windows it
@@ -150,7 +153,7 @@ configuration compatibility. They identify the managed CLI home, not the product
 maps the path to `CODEX_HOME`; TraeX maps it to `TRAE_HOME` and uses `<peer.codexHome>/cli` as
 `TRAECLI_HOME`. These directories must not reuse the user's normal CLI homes; setup, doctor, and
 worker launch reject user authentication, instructions, profiles, plugins, hooks, model providers,
-and non-system skills in a managed TraeX home.
+execution rules, and non-system skills in a managed TraeX home.
 
 The `default` instance keeps the existing `~/.delegation/broker.json`,
 `~/.delegation/peer.json`, local bridge, and native service identities. A named instance uses

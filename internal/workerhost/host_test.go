@@ -2307,6 +2307,9 @@ func TestHostRejectsTraeXRuntimeConfigurationBeforeLaunch(t *testing.T) {
 	}{
 		{name: "instructions", relative: "AGENTS.md", want: "AGENTS.md"},
 		{name: "CLI authentication", relative: filepath.Join("cli", "auth.json"), want: "auth.json"},
+		{name: "CLI hooks", relative: filepath.Join("cli", "hooks.json"), want: "hooks.json"},
+		{name: "CLI plugins", relative: filepath.Join("cli", "plugins"), want: "plugins"},
+		{name: "CLI rules", relative: filepath.Join("cli", "rules"), want: "rules"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			application := newFakeApplication()
