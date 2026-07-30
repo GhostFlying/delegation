@@ -21,16 +21,16 @@ const (
 // app-server. On macOS and Windows, it must remain attached to the target
 // process and must not daemonize or detach.
 type Spec struct {
-	Executable      string
-	PrefixArguments []string
+	Executable      string   `json:"executable"`
+	PrefixArguments []string `json:"prefixArguments,omitempty"`
 }
 
-func Resolve(spec Spec) (Spec, error) {
+func Validate(spec Spec) error {
 	if err := validatePath(spec.Executable, "CLI launcher executable"); err != nil {
-		return Spec{}, err
+		return err
 	}
 	if len(spec.PrefixArguments) > MaximumPrefixArguments {
-		return Spec{}, fmt.Errorf(
+		return fmt.Errorf(
 			"CLI launch prefix must contain at most %d arguments",
 			MaximumPrefixArguments,
 		)
@@ -38,15 +38,22 @@ func Resolve(spec Spec) (Spec, error) {
 	prefixBytes := 0
 	for _, argument := range spec.PrefixArguments {
 		if strings.ContainsRune(argument, '\x00') {
-			return Spec{}, errors.New("CLI launch prefix arguments must not contain NUL")
+			return errors.New("CLI launch prefix arguments must not contain NUL")
 		}
 		prefixBytes += len(argument)
 		if prefixBytes > MaximumPrefixBytes {
-			return Spec{}, fmt.Errorf(
+			return fmt.Errorf(
 				"CLI launch prefix must contain at most %d bytes",
 				MaximumPrefixBytes,
 			)
 		}
+	}
+	return nil
+}
+
+func Resolve(spec Spec) (Spec, error) {
+	if err := Validate(spec); err != nil {
+		return Spec{}, err
 	}
 	executable, err := resolveExecutable(spec.Executable, "CLI launcher executable")
 	if err != nil {
@@ -79,6 +86,12 @@ func resolveExecutable(path, name string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve %s: %w", name, err)
+	}
+	if runtime.GOOS == "windows" {
+		switch strings.ToLower(filepath.Ext(resolved)) {
+		case ".bat", ".cmd", ".ps1":
+			return "", fmt.Errorf("%s must be a native executable on Windows", name)
+		}
 	}
 	info, err := os.Stat(resolved)
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
@@ -68,12 +69,26 @@ type AuthConfig struct {
 }
 
 type PeerConfig struct {
-	CodexBinary    string `json:"codexBinary,omitempty"`
-	GitBinary      string `json:"gitBinary,omitempty"`
-	CodexHome      string `json:"codexHome,omitempty"`
-	WorkspaceRoot  string `json:"workspaceRoot,omitempty"`
-	StateFile      string `json:"stateFile,omitempty"`
-	MaxWorkerSlots int    `json:"maxWorkerSlots,omitempty"`
+	CLI            *CLIConfig `json:"cli,omitempty"`
+	CodexBinary    string     `json:"codexBinary,omitempty"`
+	GitBinary      string     `json:"gitBinary,omitempty"`
+	CodexHome      string     `json:"codexHome,omitempty"`
+	WorkspaceRoot  string     `json:"workspaceRoot,omitempty"`
+	StateFile      string     `json:"stateFile,omitempty"`
+	MaxWorkerSlots int        `json:"maxWorkerSlots,omitempty"`
+}
+
+type CLIConfig struct {
+	Command   string          `json:"command,omitempty"`
+	Arguments []string        `json:"arguments,omitempty"`
+	Launcher  *clilaunch.Spec `json:"launcher,omitempty"`
+}
+
+func (p PeerConfig) EffectiveCLI() CLIConfig {
+	if p.CLI != nil {
+		return *p.CLI
+	}
+	return CLIConfig{Command: p.CodexBinary}
 }
 
 func DefaultHome() (string, error) {
@@ -216,8 +231,8 @@ func (c Config) Validate() error {
 		if _, err := NormalizeBrokerURL(c.Broker.URL, c.Broker.AllowInsecureNonLoopback); err != nil {
 			return err
 		}
-		if !filepath.IsAbs(c.Peer.CodexBinary) {
-			return errors.New("peer codexBinary must be an absolute path")
+		if err := c.Peer.validateCLI(); err != nil {
+			return err
 		}
 		if !filepath.IsAbs(c.Peer.GitBinary) {
 			return errors.New("peer gitBinary must be an absolute path")
@@ -239,6 +254,42 @@ func (c Config) Validate() error {
 	}
 
 	return c.Broker.Auth.validate()
+}
+
+func (p PeerConfig) validateCLI() error {
+	legacy := p.CodexBinary != ""
+	structured := p.CLI != nil
+	if legacy == structured {
+		return errors.New("peer must configure exactly one of cli or codexBinary")
+	}
+	if legacy {
+		if !filepath.IsAbs(p.CodexBinary) {
+			return errors.New("peer codexBinary must be an absolute path")
+		}
+		return nil
+	}
+	if !filepath.IsAbs(p.CLI.Command) {
+		return errors.New("peer cli command must be an absolute path")
+	}
+	launch := clilaunch.Spec{
+		Executable:      p.CLI.Command,
+		PrefixArguments: p.CLI.Arguments,
+	}
+	if p.CLI.Launcher != nil {
+		launch.Executable = p.CLI.Launcher.Executable
+		launch.PrefixArguments = make(
+			[]string,
+			0,
+			len(p.CLI.Launcher.PrefixArguments)+1+len(p.CLI.Arguments),
+		)
+		launch.PrefixArguments = append(
+			launch.PrefixArguments,
+			p.CLI.Launcher.PrefixArguments...,
+		)
+		launch.PrefixArguments = append(launch.PrefixArguments, p.CLI.Command)
+		launch.PrefixArguments = append(launch.PrefixArguments, p.CLI.Arguments...)
+	}
+	return clilaunch.Validate(launch)
 }
 
 func unsupportedSchemaVersion(version int) error {

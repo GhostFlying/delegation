@@ -21,7 +21,10 @@ default resource namespace.
 - `setup peer` joins a physical device to that network. Every peer can host user-created root tasks
   and receive managed workers. Supply the broker URL, network `controllerId`, broker-bound
   `deviceId`, display name, and protected peer-token path. Setup generates a device ID only in
-  `none` auth mode.
+  `none` auth mode. Codex setup writes the resolved command to `peer.cli.command`; legacy
+  version-3 configs using `peer.codexBinary` remain readable. Structured `peer.cli.arguments` and
+  `peer.cli.launcher` values are exact shell-free argv elements. TraeX setup does not expose these
+  fields yet.
 
 For token authentication, enroll every peer from the configured broker:
 
