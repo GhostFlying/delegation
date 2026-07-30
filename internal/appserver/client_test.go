@@ -767,12 +767,79 @@ func TestEnvironmentCODEXHOMEConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	codexHome := t.TempDir()
 	_, err = validateOptions(Options{
 		Launch: directLaunch(executable), SupervisorBinary: executable,
-		CodexHome: t.TempDir(), Environment: map[string]string{"CODEX_HOME": t.TempDir()},
+		CodexHome: codexHome,
+		RuntimeHomeEnvironment: map[string]string{
+			"CODEX_HOME": codexHome,
+		},
+		Environment: map[string]string{"CODEX_HOME": t.TempDir()},
 	})
 	if err == nil || !strings.Contains(err.Error(), "conflicts") {
 		t.Fatalf("validateOptions() error = %v", err)
+	}
+}
+
+func TestRuntimeHomeEnvironmentMustRemainInsideManagedHome(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexHome := t.TempDir()
+	_, err = validateOptions(Options{
+		Launch: directLaunch(executable), SupervisorBinary: executable,
+		CodexHome: codexHome,
+		RuntimeHomeEnvironment: map[string]string{
+			"TRAE_HOME": t.TempDir(),
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "inside managed home") {
+		t.Fatalf("validateOptions() error = %v", err)
+	}
+}
+
+func TestRuntimeHomeEnvironmentCannotBeUnset(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexHome := t.TempDir()
+	_, err = validateOptions(Options{
+		Launch: directLaunch(executable), SupervisorBinary: executable,
+		CodexHome: codexHome,
+		RuntimeHomeEnvironment: map[string]string{
+			"TRAE_HOME": codexHome,
+		},
+		UnsetEnvironment: []string{"TRAE_HOME"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot unset") {
+		t.Fatalf("validateOptions() error = %v", err)
+	}
+}
+
+func TestRuntimeHomeEnvironmentOverridesAmbientValues(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("TRAE_HOME", t.TempDir())
+	t.Setenv("TRAECLI_HOME", t.TempDir())
+	managedHome := t.TempDir()
+	managedCLIHome := filepath.Join(managedHome, "cli")
+	if err := os.Mkdir(managedCLIHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeHomes := map[string]string{
+		"TRAE_HOME":    managedHome,
+		"TRAECLI_HOME": managedCLIHome,
+	}
+	environment := buildEnvironment(nil, nil, runtimeHomes)
+	for name, want := range runtimeHomes {
+		got, found := environmentValue(environment, name)
+		if !found || !samePath(got, want) {
+			t.Fatalf("runtime home %s = %q, %v, want %q", name, got, found, want)
+		}
+	}
+	if got, found := environmentValue(environment, "CODEX_HOME"); !found || got == managedHome {
+		t.Fatalf("unrelated CODEX_HOME = %q, %v", got, found)
 	}
 }
 
@@ -795,7 +862,7 @@ func TestEnvironmentOverrideWinsOverUnsetOfSameKey(t *testing.T) {
 	environment := buildEnvironment(
 		map[string]string{helperUnsetEnvironment: "override"},
 		[]string{helperUnsetEnvironment},
-		t.TempDir(),
+		map[string]string{"CODEX_HOME": t.TempDir()},
 	)
 	for _, entry := range environment {
 		if entry == helperUnsetEnvironment+"=override" {
@@ -818,7 +885,11 @@ func startHelperClient(t *testing.T, mode string, overrides Options) *Client {
 	}
 	options := Options{
 		Launch: directLaunch(executable), SupervisorBinary: executable,
-		CodexHome: codexHome, Environment: environment,
+		CodexHome: codexHome,
+		RuntimeHomeEnvironment: map[string]string{
+			"CODEX_HOME": codexHome,
+		},
+		Environment:      environment,
 		UnsetEnvironment: overrides.UnsetEnvironment,
 		ClientVersion:    "test", HandshakeTimeout: 2 * time.Second,
 		CloseTimeout: overrides.CloseTimeout, StderrLimit: overrides.StderrLimit,
@@ -839,6 +910,16 @@ func startHelperClient(t *testing.T, mode string, overrides Options) *Client {
 		_ = client.Close(ctx)
 	})
 	return client
+}
+
+func environmentValue(environment []string, key string) (string, bool) {
+	for _, entry := range environment {
+		entryKey, value, found := strings.Cut(entry, "=")
+		if found && environmentKeyEqual(entryKey, key) {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 func directLaunch(executable string) clilaunch.Spec {

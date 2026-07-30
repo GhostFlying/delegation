@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -29,6 +30,49 @@ func TestHostRejectsManagedDirectoryPermissionDriftBeforeLaunch(t *testing.T) {
 	}
 	if got := application.snapshot(); len(got.starts) != 0 {
 		t.Fatalf("app-server started after permission drift: %#v", got)
+	}
+}
+
+func TestHostRejectsTraeCLIHomePermissionDriftBeforeLaunch(t *testing.T) {
+	application := newFakeApplication()
+	host, _, _ := newTestHostForKind(t, hostkind.TraeX, 1, application)
+	cliHome := host.runtimeHomeEnvironment["TRAECLI_HOME"]
+	if err := os.Chmod(cliHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cliHome, 0o700) })
+	_, err := host.Spawn(context.Background(), SpawnRequest{
+		TreeID: testTreeID, AgentID: "123e4567-e89b-42d3-a456-426614174416",
+		ParentAgentID: testParentID, TaskName: "TraeX home drift", Prompt: "TraeX home drift",
+	})
+	if err == nil || !strings.Contains(err.Error(), "TRAECLI_HOME") ||
+		!strings.Contains(err.Error(), "mode 0700") {
+		t.Fatalf("Spawn() error = %v", err)
+	}
+	if got := application.snapshot(); len(got.starts) != 0 {
+		t.Fatalf("app-server started after TRAECLI_HOME permission drift: %#v", got)
+	}
+}
+
+func TestRuntimeHomeEnvironmentRejectsTraeCLIHomeSymlinkWithoutProtectingTarget(t *testing.T) {
+	managedHome := t.TempDir()
+	target := t.TempDir()
+	if err := os.Chmod(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(managedHome, "cli")); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+	_, _, err := runtimeHomeEnvironment(hostkind.TraeX, managedHome)
+	if err == nil || !strings.Contains(err.Error(), "must not be a symbolic link") {
+		t.Fatalf("runtimeHomeEnvironment() error = %v", err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("external TRAECLI_HOME target mode = %v, want 0755", info.Mode())
 	}
 }
 

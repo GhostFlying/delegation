@@ -21,6 +21,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/gitworkspace"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
@@ -74,6 +75,7 @@ type startApplication func(context.Context, appserver.Options) (application, err
 type Options struct {
 	ControllerID            string
 	DeviceID                string
+	HostKind                hostkind.Kind
 	PeerConfigPath          string
 	DelegationBinary        string
 	CLILaunch               clilaunch.Spec
@@ -156,6 +158,7 @@ type Host struct {
 	workerGitBinary          string
 	codexEnvironment         map[string]string
 	codexUnsetEnvironment    []string
+	runtimeHomeEnvironment   map[string]string
 	shellExcludedEnvironment []string
 	providerEnvironmentFile  string
 	codexHome                string
@@ -223,6 +226,12 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	}
 	if err := identity.ValidateID(options.DeviceID); err != nil {
 		return nil, fmt.Errorf("deviceId %w", err)
+	}
+	if options.HostKind == "" {
+		options.HostKind = hostkind.Codex
+	}
+	if err := options.HostKind.Validate(); err != nil {
+		return nil, err
 	}
 	for name, path := range map[string]string{
 		"peer config":       options.PeerConfigPath,
@@ -343,10 +352,27 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		codexconfig.EnvironmentVariable, "CODEX_SQLITE_HOME",
 	)
 	codexEnvironment := cloneStringMap(options.CodexEnvironment)
-	removeEnvironmentName(codexEnvironment, "CODEX_SQLITE_HOME")
+	for _, name := range []string{
+		"CODEX_HOME", "CODEX_SQLITE_HOME", "TRAE_HOME", "TRAECLI_HOME",
+	} {
+		removeEnvironmentName(codexEnvironment, name)
+	}
+	runtimeHomeEnvironment, runtimeHomeUnsetEnvironment, err := runtimeHomeEnvironment(
+		options.HostKind,
+		codexHome,
+	)
+	if err != nil {
+		_ = artifactRoot.Close()
+		_ = root.Close()
+		return nil, err
+	}
+	appServerUnsetEnvironment = append(
+		appServerUnsetEnvironment,
+		runtimeHomeUnsetEnvironment...,
+	)
 	shellExcludedEnvironment := append(
 		append([]string(nil), hostAuthEnvironment...),
-		codexconfig.EnvironmentVariable,
+		codexconfig.EnvironmentVariable, "CODEX_HOME", "TRAE_HOME", "TRAECLI_HOME",
 	)
 	shellExcludedEnvironment = append(
 		shellExcludedEnvironment,
@@ -360,6 +386,7 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		codexHome:                codexHome,
 		codexEnvironment:         codexEnvironment,
 		codexUnsetEnvironment:    uniqueEnvironmentNames(appServerUnsetEnvironment),
+		runtimeHomeEnvironment:   runtimeHomeEnvironment,
 		shellExcludedEnvironment: uniqueEnvironmentNames(shellExcludedEnvironment),
 		providerEnvironmentFile:  providerEnvironmentFile,
 		workspaceRoot:            root, artifactRoot: artifactRoot,
@@ -421,6 +448,58 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		return nil, errors.Join(fmt.Errorf("recover managed turn intents: %w", err), closeErr)
 	}
 	return host, nil
+}
+
+func runtimeHomeEnvironment(
+	kind hostkind.Kind,
+	managedHome string,
+) (map[string]string, []string, error) {
+	switch kind {
+	case hostkind.Codex:
+		return map[string]string{"CODEX_HOME": managedHome},
+			[]string{"TRAE_HOME", "TRAECLI_HOME"}, nil
+	case hostkind.TraeX:
+		cliHome := filepath.Join(managedHome, "cli")
+		created := false
+		if err := os.Mkdir(cliHome, 0o700); err == nil {
+			created = true
+		} else if !errors.Is(err, os.ErrExist) {
+			return nil, nil, fmt.Errorf("create managed TRAECLI_HOME: %w", err)
+		}
+		resolvedCLIHome, err := filepath.EvalSymlinks(cliHome)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve managed TRAECLI_HOME: %w", err)
+		}
+		if !sameCanonicalPath(resolvedCLIHome, cliHome) {
+			return nil, nil, errors.New("managed TRAECLI_HOME must not be a symbolic link")
+		}
+		if created {
+			if err := config.PreparePrivateDirectory(cliHome); err != nil {
+				return nil, nil, fmt.Errorf("prepare managed TRAECLI_HOME: %w", err)
+			}
+		} else if err := config.ValidatePrivateDirectory(cliHome); err != nil {
+			return nil, nil, fmt.Errorf("validate managed TRAECLI_HOME: %w", err)
+		}
+		resolvedCLIHome, err = filepath.EvalSymlinks(cliHome)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve managed TRAECLI_HOME: %w", err)
+		}
+		return map[string]string{
+			"TRAE_HOME":    managedHome,
+			"TRAECLI_HOME": resolvedCLIHome,
+		}, []string{"CODEX_HOME"}, nil
+	default:
+		return nil, nil, fmt.Errorf("unsupported host kind %q", kind)
+	}
+}
+
+func sameCanonicalPath(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 func cloneStringMap(source map[string]string) map[string]string {

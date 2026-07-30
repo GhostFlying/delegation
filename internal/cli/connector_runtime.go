@@ -150,6 +150,7 @@ func runConnectorServiceWithProviderEnvironment(
 	}()
 	workers, err := workerhost.New(ctx, workerhost.Options{
 		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
+		HostKind:       cfg.EffectiveHostKind(),
 		PeerConfigPath: configPath, DelegationBinary: runtimeBinary,
 		CLILaunch:               appServerLaunch,
 		CLIRuntimeExecutable:    codexLaunch.NativePath,

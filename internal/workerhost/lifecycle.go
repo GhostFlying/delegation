@@ -376,8 +376,10 @@ func (h *Host) ensureClientOwned(
 		}
 		client, err := h.startApplication(ctx, appserver.Options{
 			Launch: h.cliLaunch, SupervisorBinary: h.delegationBinary,
-			CodexHome:   h.codexHome,
-			Environment: h.codexEnvironment, UnsetEnvironment: h.codexUnsetEnvironment,
+			CodexHome:              h.codexHome,
+			RuntimeHomeEnvironment: cloneStringMap(h.runtimeHomeEnvironment),
+			Environment:            h.codexEnvironment,
+			UnsetEnvironment:       h.codexUnsetEnvironment,
 		})
 		h.clientMu.Lock()
 		if err != nil {
@@ -450,6 +452,14 @@ func (h *Host) shouldRetire(client application, err error) bool {
 func (h *Host) validateRuntimeDirectories() error {
 	if err := config.ValidatePrivateDirectory(h.codexHome); err != nil {
 		return fmt.Errorf("validate managed CODEX_HOME: %w", err)
+	}
+	for name, path := range h.runtimeHomeEnvironment {
+		if path == h.codexHome {
+			continue
+		}
+		if err := config.ValidatePrivateDirectory(path); err != nil {
+			return fmt.Errorf("validate managed %s: %w", name, err)
+		}
 	}
 	if err := codexconfig.ValidateManagedHome(h.codexHome); err != nil {
 		return err

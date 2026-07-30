@@ -23,6 +23,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
@@ -132,6 +133,93 @@ func TestHostPassesStructuredCLILaunchToAppServer(t *testing.T) {
 		if _, found := filesystem[resolved.Executable]; found {
 			t.Fatalf("managed profile grants launcher wrapper to worker shell: %#v", filesystem)
 		}
+	}
+}
+
+func TestHostIsolatesRuntimeHomeForHostKind(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		hostKind      hostkind.Kind
+		wantHomes     func(string) map[string]string
+		wantUnset     []string
+		wantShellHome []string
+	}{
+		{
+			name:     "codex",
+			hostKind: hostkind.Codex,
+			wantHomes: func(home string) map[string]string {
+				return map[string]string{"CODEX_HOME": home}
+			},
+			wantUnset:     []string{"TRAE_HOME", "TRAECLI_HOME"},
+			wantShellHome: []string{"CODEX_HOME", "TRAE_HOME", "TRAECLI_HOME"},
+		},
+		{
+			name:     "traex",
+			hostKind: hostkind.TraeX,
+			wantHomes: func(home string) map[string]string {
+				return map[string]string{
+					"TRAE_HOME":    home,
+					"TRAECLI_HOME": filepath.Join(home, "cli"),
+				}
+			},
+			wantUnset:     []string{"CODEX_HOME"},
+			wantShellHome: []string{"CODEX_HOME", "TRAE_HOME", "TRAECLI_HOME"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			application := newFakeApplication()
+			host, _, paths := newTestHostForKind(t, test.hostKind, 1, application)
+			spawnTestWorker(
+				t,
+				host,
+				"123e4567-e89b-42d3-a456-426614174415",
+				test.name+" runtime home",
+			)
+
+			wantHomes := test.wantHomes(host.codexHome)
+			if !reflect.DeepEqual(paths.launchOptions.RuntimeHomeEnvironment, wantHomes) {
+				t.Fatalf(
+					"runtime home environment = %#v, want %#v",
+					paths.launchOptions.RuntimeHomeEnvironment,
+					wantHomes,
+				)
+			}
+			for _, name := range test.wantUnset {
+				if !slices.Contains(paths.launchOptions.UnsetEnvironment, name) {
+					t.Fatalf(
+						"app-server does not unset ambient %s: %#v",
+						name,
+						paths.launchOptions.UnsetEnvironment,
+					)
+				}
+			}
+			for _, name := range []string{"CODEX_HOME", "TRAE_HOME", "TRAECLI_HOME"} {
+				if _, found := paths.launchOptions.Environment[name]; found {
+					t.Fatalf(
+						"managed app-server environment retains untrusted %s: %#v",
+						name,
+						paths.launchOptions.Environment,
+					)
+				}
+			}
+			if test.hostKind == hostkind.TraeX {
+				info, err := os.Stat(wantHomes["TRAECLI_HOME"])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+					t.Fatalf("managed TRAECLI_HOME mode = %v", info.Mode())
+				}
+			}
+			config := application.snapshot().starts[0].Config
+			policy := config["shell_environment_policy"].(map[string]any)
+			excluded := policy["exclude"].([]string)
+			for _, name := range test.wantShellHome {
+				if !slices.Contains(excluded, name) {
+					t.Fatalf("managed worker shell does not exclude %s: %#v", name, excluded)
+				}
+			}
+		})
 	}
 }
 
@@ -2295,7 +2383,18 @@ func newTestHost(
 	maxSlots int,
 	applications ...*fakeApplication,
 ) (*Host, *store.PeerStore, testHostPaths) {
-	return newTestHostWithWorkspaceRoot(t, maxSlots, "", applications...)
+	return newTestHostForKind(t, hostkind.Codex, maxSlots, applications...)
+}
+
+func newTestHostForKind(
+	t *testing.T,
+	hostKind hostkind.Kind,
+	maxSlots int,
+	applications ...*fakeApplication,
+) (*Host, *store.PeerStore, testHostPaths) {
+	return newTestHostWithStateSetupAndResultPublisherForKind(
+		t, hostKind, maxSlots, "", nil, nil, applications...,
+	)
 }
 
 func newTestHostWithWorkspaceRoot(
@@ -2321,6 +2420,20 @@ func newTestHostWithStateSetup(
 
 func newTestHostWithStateSetupAndResultPublisher(
 	t *testing.T,
+	maxSlots int,
+	workspaceRoot string,
+	setup func(*store.PeerStore, string),
+	publisherFactory func(*resultpackagefiles.Manager) resultPackagePublisher,
+	applications ...*fakeApplication,
+) (*Host, *store.PeerStore, testHostPaths) {
+	return newTestHostWithStateSetupAndResultPublisherForKind(
+		t, hostkind.Codex, maxSlots, workspaceRoot, setup, publisherFactory, applications...,
+	)
+}
+
+func newTestHostWithStateSetupAndResultPublisherForKind(
+	t *testing.T,
+	hostKind hostkind.Kind,
 	maxSlots int,
 	workspaceRoot string,
 	setup func(*store.PeerStore, string),
@@ -2395,7 +2508,7 @@ func newTestHostWithStateSetupAndResultPublisher(
 	var factoryMu sync.Mutex
 	applicationIndex := 0
 	host, err := New(context.Background(), Options{
-		ControllerID: testControllerID, DeviceID: testDeviceID,
+		ControllerID: testControllerID, DeviceID: testDeviceID, HostKind: hostKind,
 		PeerConfigPath: paths.configPath, DelegationBinary: paths.delegationBinary,
 		CLILaunch:            directWorkerCLILaunch(paths.codexBinary),
 		CLIRuntimeExecutable: paths.codexBinary, GitBinary: paths.gitBinary,
@@ -2403,9 +2516,12 @@ func newTestHostWithStateSetupAndResultPublisher(
 		CodexEnvironment: map[string]string{
 			"CODEX_ACCESS_TOKEN":  "host-auth",
 			"CODEX_API_KEY":       "ambient-codex-auth",
+			"CODEX_HOME":          filepath.Join(root, "ambient-codex-home"),
 			"OPENAI_API_KEY":      "ambient-openai-auth",
 			"CODEX_SQLITE_HOME":   filepath.Join(root, "ambient-sqlite"),
 			"TEST_PROVIDER_VALUE": "provider-auth",
+			"TRAECLI_HOME":        filepath.Join(root, "ambient-trae-cli-home"),
+			"TRAE_HOME":           filepath.Join(root, "ambient-trae-home"),
 		},
 		CodexUnsetEnvironment:   []string{"CODEX_MANAGED_BY_NPM"},
 		ProviderEnvironmentFile: paths.providerEnvironmentFile,
@@ -2596,8 +2712,9 @@ func assertManagedProfile(
 	wantShellEnvironment := map[string]any{
 		"inherit": "core", "ignore_default_excludes": false,
 		"exclude": []string{
-			"CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "DELEGATION_CODEX_CONFIG_JSON",
-			"OPENAI_API_KEY", "TEST_PROVIDER_VALUE",
+			"CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "CODEX_HOME",
+			"DELEGATION_CODEX_CONFIG_JSON", "OPENAI_API_KEY", "TEST_PROVIDER_VALUE",
+			"TRAECLI_HOME", "TRAE_HOME",
 		},
 		"set": wantShellSet,
 	}
