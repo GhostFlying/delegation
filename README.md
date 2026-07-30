@@ -122,17 +122,38 @@ plugins/delegation/scripts/delegation-mcp setup broker \
   --host-kind <codex-or-traex>
 ```
 
-TraeX peer setup remains disabled until the configurable non-shell CLI launch specification is
-available through peer setup. Current Codex peer setup persists its resolved command under
-`peer.cli.command`; the runtime also accepts legacy version-3 configs that use `peer.codexBinary`.
-The structured `peer.cli` form can additionally carry exact `arguments` and an optional
-shell-free `launcher` with `executable` and `prefixArguments`; these values are argv elements, not
-shell text. A launcher must preserve stdio; on Linux it must `exec` the target CLI, while on macOS
-and Windows it must remain attached and must not daemonize or detach. The `default` instance keeps
-the existing `~/.delegation/broker.json`,
+Codex peer setup keeps `--codex-binary` as a compatible shorthand. Both Codex and TraeX may instead
+use `--cli-command`, repeatable `--cli-argument`, `--cli-launcher`, and repeatable
+`--cli-launcher-prefix-argument`. Each repeated value is one exact argv element; setup performs no
+shell parsing or expansion. TraeX requires the structured form and a launcher. For example:
+
+```bash
+plugins/delegation/scripts/delegation-mcp setup peer \
+  --instance traex-main \
+  --host-kind traex \
+  --cli-command /absolute/path/to/traex \
+  --cli-argument=-p \
+  --cli-argument=ultra \
+  --cli-launcher /absolute/path/to/warmpool \
+  --cli-launcher-prefix-argument=run \
+  --cli-launcher-prefix-argument=--
+```
+
+This persists `peer.cli.command`, exact `arguments`, and a shell-free `launcher` with `executable`
+and `prefixArguments`; legacy version-3 Codex configs using `peer.codexBinary` remain readable. A
+launcher must preserve stdio; on Linux it must `exec` the target CLI, while on macOS and Windows it
+must remain attached and must not daemonize or detach. Use `--flag=-value` for an argv element that
+begins with `-`.
+
+The existing `--codex-home` flag and `peer.codexHome` JSON field retain their names for version-3
+configuration compatibility. They identify the managed CLI home, not the product identity. Codex
+maps the path to `CODEX_HOME`; TraeX maps it to `TRAE_HOME` and uses `<peer.codexHome>/cli` as
+`TRAECLI_HOME`. These directories remain isolated from the user's normal CLI homes.
+
+The `default` instance keeps the existing `~/.delegation/broker.json`,
 `~/.delegation/peer.json`, local bridge, and native service identities. A named instance uses
 `~/.delegation/instances/<instanceId>/` for its default broker and peer configuration, state,
-secrets, managed Codex home, and workspaces. Its local bridge and native service identities are
+secrets, managed CLI home, and workspaces. Its local bridge and native service identities are
 also instance-scoped. Named broker setup requires explicit `--listen` and `--status-listen`
 addresses because the runtime does not guess free ports. Explicit `--config`, path, and listener
 arguments remain authoritative.

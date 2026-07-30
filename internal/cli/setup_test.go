@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
@@ -238,7 +239,7 @@ func TestSetupNamedBrokersWithExplicitConfigsIsolateImplicitResources(t *testing
 	}
 }
 
-func TestSetupPeerRejectsTraeXBeforeLaunchSupportWithoutSideEffects(t *testing.T) {
+func TestSetupPeerRejectsTraeXWithoutStructuredLaunchWithoutSideEffects(t *testing.T) {
 	configPath := privateTestPath(t, "traex-peer.json")
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -252,11 +253,221 @@ func TestSetupPeerRejectsTraeXBeforeLaunchSupportWithoutSideEffects(t *testing.T
 		"--broker-url", "wss://broker.example.test",
 		"--auth-mode", "none",
 	}, &stdout, &stderr)
-	if code == 0 || !strings.Contains(stderr.String(), "requires configurable CLI launch support") {
+	if code == 0 || !strings.Contains(stderr.String(), "requires --cli-command and --cli-launcher") {
 		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
 	}
 	if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("setup created unsupported TraeX peer config: %v", err)
+	}
+}
+
+func TestSetupTraeXPeerPersistsExactStructuredLaunchAndPassesDoctor(t *testing.T) {
+	root := privateTestDirectory(t)
+	configPath := filepath.Join(root, "traex-peer.json")
+	managedHome := filepath.Join(root, "managed-home")
+	workspaceRoot := filepath.Join(root, "workspaces")
+	statePath := filepath.Join(root, "state", "peer.sqlite3")
+	command := testCodexBinary(t)
+	launcher := testCodexBinary(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "peer",
+		"--config", configPath,
+		"--instance", "traex-main",
+		"--host-kind", "traex",
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--device-name", "traex-builder",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+		"--cli-command", command,
+		"--cli-argument=-p",
+		"--cli-argument=profile with spaces",
+		"--cli-argument=",
+		"--cli-launcher", launcher,
+		"--cli-launcher-prefix-argument=run",
+		"--cli-launcher-prefix-argument=--",
+		"--codex-home", managedHome,
+		"--workspace-root", workspaceRoot,
+		"--state", statePath,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "managed TRAE_HOME: "+managedHome) {
+		t.Fatalf("setup output = %q", stdout.String())
+	}
+	cfg, err := delegationconfig.Read(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCLI := &delegationconfig.CLIConfig{
+		Command:   command,
+		Arguments: []string{"-p", "profile with spaces", ""},
+		Launcher: &clilaunch.Spec{
+			Executable:      launcher,
+			PrefixArguments: []string{"run", "--"},
+		},
+	}
+	if cfg.HostKind != hostkind.TraeX || !reflect.DeepEqual(cfg.Peer.CLI, wantCLI) ||
+		cfg.Peer.CodexBinary != "" {
+		t.Fatalf("TraeX peer config = %#v", cfg)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run(
+		[]string{"doctor", "--config", configPath, "--json"},
+		&stdout,
+		&stderr,
+	); code != 0 {
+		t.Fatalf("doctor code = %d, stderr = %q", code, stderr.String())
+	}
+}
+
+func TestSetupCodexPeerAcceptsDirectStructuredCommand(t *testing.T) {
+	configPath := privateTestPath(t, "codex-structured.json")
+	command := testCodexBinary(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "peer",
+		"--config", configPath,
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--device-name", "codex-builder",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+		"--cli-command", command,
+		"--cli-argument=-p",
+		"--cli-argument=ultra",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	cfg, err := delegationconfig.Read(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &delegationconfig.CLIConfig{
+		Command:   command,
+		Arguments: []string{"-p", "ultra"},
+	}
+	if cfg.HostKind != hostkind.Codex || !reflect.DeepEqual(cfg.Peer.CLI, want) {
+		t.Fatalf("Codex structured config = %#v", cfg)
+	}
+}
+
+func TestSetupNamedTraeXPeerUsesIsolatedTraeHomeDefault(t *testing.T) {
+	home := privateTestDirectory(t)
+	t.Setenv("DELEGATION_HOME", home)
+	t.Setenv("DELEGATION_CONFIG", "")
+	executable := testCodexBinary(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{
+		"setup", "peer",
+		"--instance", "traex-main",
+		"--host-kind", "traex",
+		"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+		"--device-name", "traex-builder",
+		"--broker-url", "wss://broker.example.test",
+		"--auth-mode", "none",
+		"--cli-command", executable,
+		"--cli-launcher", executable,
+		"--json",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	var result setupResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	instanceHome := filepath.Join(home, "instances", "traex-main")
+	if result.CodexHome != filepath.Join(instanceHome, "trae") {
+		t.Fatalf("TraeX managed home = %q", result.CodexHome)
+	}
+}
+
+func TestSetupPeerRejectsInvalidStructuredCLIFlagsWithoutSideEffects(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		hostKind string
+		extra    func(*testing.T) []string
+		want     string
+	}{
+		{
+			name:     "TraeX explicit Codex shorthand",
+			hostKind: "traex",
+			extra: func(t *testing.T) []string {
+				return []string{"--codex-binary", testCodexBinary(t)}
+			},
+			want: "supported only for Codex peers",
+		},
+		{
+			name:     "TraeX command without launcher",
+			hostKind: "traex",
+			extra: func(t *testing.T) []string {
+				return []string{"--cli-command", testCodexBinary(t)}
+			},
+			want: "requires --cli-launcher",
+		},
+		{
+			name:     "argument without command",
+			hostKind: "codex",
+			extra: func(*testing.T) []string {
+				return []string{"--cli-argument=-p"}
+			},
+			want: "--cli-command is required",
+		},
+		{
+			name:     "prefix without launcher",
+			hostKind: "codex",
+			extra: func(t *testing.T) []string {
+				return []string{
+					"--cli-command", testCodexBinary(t),
+					"--cli-launcher-prefix-argument=run",
+				}
+			},
+			want: "requires --cli-launcher",
+		},
+		{
+			name:     "legacy and structured flags",
+			hostKind: "codex",
+			extra: func(t *testing.T) []string {
+				return []string{
+					"--codex-binary", testCodexBinary(t),
+					"--cli-command", testCodexBinary(t),
+				}
+			},
+			want: "cannot be combined",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			configPath := filepath.Join(root, "peer.json")
+			args := []string{
+				"setup", "peer",
+				"--config", configPath,
+				"--host-kind", test.hostKind,
+				"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+				"--device-id", "123e4567-e89b-42d3-a456-426614174001",
+				"--broker-url", "wss://broker.example.test",
+				"--auth-mode", "none",
+			}
+			args = append(args, test.extra(t)...)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Run(args, &stdout, &stderr)
+			if code == 0 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("setup code = %d, stderr = %q, want %q", code, stderr.String(), test.want)
+			}
+			if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("setup created invalid structured config: %v", err)
+			}
+		})
 	}
 }
 

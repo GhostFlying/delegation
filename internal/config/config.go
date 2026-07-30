@@ -216,9 +216,6 @@ func (c Config) Validate() error {
 			}
 		}
 	case RolePeer:
-		if c.EffectiveHostKind() == hostkind.TraeX {
-			return errors.New("TraeX peer configuration requires configurable CLI launch support")
-		}
 		if identity.ValidateID(c.DeviceID) != nil {
 			return errors.New("deviceId must be a UUID")
 		}
@@ -233,6 +230,14 @@ func (c Config) Validate() error {
 		}
 		if err := c.Peer.validateCLI(); err != nil {
 			return err
+		}
+		if c.EffectiveHostKind() == hostkind.TraeX {
+			if c.Peer.CLI == nil {
+				return errors.New("TraeX peer requires structured cli configuration")
+			}
+			if c.Peer.CLI.Launcher == nil {
+				return errors.New("TraeX peer requires a CLI launcher")
+			}
 		}
 		if !filepath.IsAbs(c.Peer.GitBinary) {
 			return errors.New("peer gitBinary must be an absolute path")
