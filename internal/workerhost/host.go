@@ -495,10 +495,7 @@ func validateManagedRuntimeHome(kind hostkind.Kind, path string) error {
 	if err := config.ValidatePrivateDirectory(path); err != nil {
 		return fmt.Errorf("validate managed %s: %w", name, err)
 	}
-	if kind == hostkind.Codex {
-		return codexconfig.ValidateManagedHome(path)
-	}
-	return nil
+	return codexconfig.ValidateManagedRuntimeHome(kind, path)
 }
 
 func sameCanonicalPath(left, right string) bool {

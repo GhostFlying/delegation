@@ -485,7 +485,10 @@ func loadConnectorAuthority(
 	if err := delegationconfig.ValidatePrivateDirectory(cfg.Peer.CodexHome); err != nil {
 		return connectorAuthority{}, fmt.Errorf("validate managed CODEX_HOME: %w", err)
 	}
-	if err := codexconfig.ValidateManagedHome(cfg.Peer.CodexHome); err != nil {
+	if err := codexconfig.ValidateManagedRuntimeHome(
+		cfg.EffectiveHostKind(),
+		cfg.Peer.CodexHome,
+	); err != nil {
 		return connectorAuthority{}, err
 	}
 	if err := delegationconfig.ValidatePrivateDirectory(cfg.Peer.WorkspaceRoot); err != nil {
