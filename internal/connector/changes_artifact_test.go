@@ -510,9 +510,14 @@ func TestConnectorTreatsClosedChangesNotificationChannelAsSessionFailure(t *test
 	source := newChangesArtifactTestSource()
 	close(source.changes)
 	holdConnection := make(chan struct{})
+	connectionStarted := make(chan struct{}, 1)
 	var connections atomic.Int64
 	server := newFakeBroker(t, func(*websocket.Conn) {
 		connections.Add(1)
+		select {
+		case connectionStarted <- struct{}{}:
+		default:
+		}
 		<-holdConnection
 	})
 	defer server.Close()
@@ -537,6 +542,7 @@ func TestConnectorTreatsClosedChangesNotificationChannelAsSessionFailure(t *test
 	case <-time.After(2 * time.Second):
 		t.Fatal("connector did not fail after the changes notification channel closed")
 	}
+	waitSignal(t, connectionStarted, "changes artifact connector session")
 	if client.Status().Connected {
 		t.Fatalf("connector remained ready after changes notification channel closed: %#v", client.Status())
 	}
