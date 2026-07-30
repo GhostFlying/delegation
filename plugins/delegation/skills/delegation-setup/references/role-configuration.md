@@ -21,10 +21,35 @@ default resource namespace.
 - `setup peer` joins a physical device to that network. Every peer can host user-created root tasks
   and receive managed workers. Supply the broker URL, network `controllerId`, broker-bound
   `deviceId`, display name, and protected peer-token path. Setup generates a device ID only in
-  `none` auth mode. Codex setup writes the resolved command to `peer.cli.command`; legacy
-  version-3 configs using `peer.codexBinary` remain readable. Structured `peer.cli.arguments` and
-  `peer.cli.launcher` values are exact shell-free argv elements. TraeX setup does not expose these
-  fields yet.
+  `none` auth mode. Codex keeps `--codex-binary` as a compatible shorthand; both Codex and TraeX
+  accept `--cli-command`, repeatable `--cli-argument`, `--cli-launcher`, and repeatable
+  `--cli-launcher-prefix-argument`. TraeX requires the structured command and launcher. Every
+  repeated value becomes one exact shell-free argv element; setup performs no shell parsing or
+  expansion. Use `--flag=-value` for values beginning with `-`. Legacy version-3 Codex configs
+  using `peer.codexBinary` remain readable.
+
+For a TraeX peer launched through warmpool:
+
+```text
+setup peer
+  --instance traex-main
+  --host-kind traex
+  --cli-command /absolute/path/to/traex
+  --cli-argument=-p
+  --cli-argument=ultra
+  --cli-launcher /absolute/path/to/warmpool
+  --cli-launcher-prefix-argument=run
+  --cli-launcher-prefix-argument=--
+```
+
+The launcher must preserve stdio. On Linux it must `exec` the target CLI; on macOS and Windows it
+must remain attached and must not daemonize or detach. The connector assembles
+`warmpool run -- traex -p ultra app-server --listen stdio://` without invoking a shell.
+
+`--codex-home` and `peer.codexHome` keep their version-3 compatibility names. They are the managed
+CLI home: Codex receives the path as `CODEX_HOME`; TraeX receives it as `TRAE_HOME` and uses its
+`cli` child as `TRAECLI_HOME`. Setup and doctor validate the command, launcher, paths, and protected
+configuration without starting the CLI.
 
 For token authentication, enroll every peer from the configured broker:
 

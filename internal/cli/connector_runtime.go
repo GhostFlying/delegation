@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GhostFlying/delegation/internal/clicommand"
 	"github.com/GhostFlying/delegation/internal/clilaunch"
-	"github.com/GhostFlying/delegation/internal/codexcommand"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
@@ -107,10 +107,10 @@ func runConnectorServiceWithProviderEnvironment(
 	defer func() {
 		resultErr = errors.Join(resultErr, closeResources())
 	}()
-	codexLaunch := authority.codexLaunch
+	cliLaunch := authority.cliLaunch
 	appServerLaunch := authority.appServerLaunch
-	codexEnvironment := make(map[string]string, len(codexLaunch.Environment)+len(providerEnvironment.Environment))
-	for name, value := range codexLaunch.Environment {
+	codexEnvironment := make(map[string]string, len(cliLaunch.Environment)+len(providerEnvironment.Environment))
+	for name, value := range cliLaunch.Environment {
 		codexEnvironment[name] = value
 	}
 	for name, value := range providerEnvironment.Environment {
@@ -153,11 +153,11 @@ func runConnectorServiceWithProviderEnvironment(
 		HostKind:       cfg.EffectiveHostKind(),
 		PeerConfigPath: configPath, DelegationBinary: runtimeBinary,
 		CLILaunch:               appServerLaunch,
-		CLIRuntimeExecutable:    codexLaunch.NativePath,
+		CLIRuntimeExecutable:    cliLaunch.RuntimePath,
 		GitBinary:               cfg.Peer.GitBinary,
 		CodexHome:               cfg.Peer.CodexHome,
 		CodexEnvironment:        codexEnvironment,
-		CodexUnsetEnvironment:   codexLaunch.UnsetEnvironment,
+		CodexUnsetEnvironment:   cliLaunch.UnsetEnvironment,
 		ProviderEnvironmentFile: environmentFile,
 		WorkspaceRoot:           cfg.Peer.WorkspaceRoot, MaxWorkerSlots: cfg.Peer.MaxWorkerSlots,
 		CodexConfig: providerEnvironment.Config, Store: peerState,
@@ -422,7 +422,7 @@ func (a peerAuthorizer) AuthorizeWorker(
 
 type connectorAuthority struct {
 	token           *tokenfile.Token
-	codexLaunch     codexcommand.Launch
+	cliLaunch       clicommand.Launch
 	appServerLaunch clilaunch.Spec
 }
 
@@ -463,17 +463,17 @@ func loadConnectorAuthority(
 			return connectorAuthority{}, err
 		}
 	}
-	codexLaunch, err := codexcommand.Resolve(configuredCLI.Command)
+	cliLaunch, err := clicommand.Resolve(cfg.EffectiveHostKind(), configuredCLI.Command)
 	if err != nil {
 		return connectorAuthority{}, fmt.Errorf("resolve configured CLI command: %w", err)
 	}
-	appServerLaunch, err := resolveConfiguredCLILaunch(configuredCLI, codexLaunch.NativePath)
+	appServerLaunch, err := resolveConfiguredCLILaunch(configuredCLI, cliLaunch.RuntimePath)
 	if err != nil {
 		return connectorAuthority{}, err
 	}
 	for name, executable := range map[string]string{
-		"resolved CLI command":  codexLaunch.CommandPath,
-		"CLI runtime":           codexLaunch.NativePath,
+		"resolved CLI command":  cliLaunch.CommandPath,
+		"CLI runtime":           cliLaunch.RuntimePath,
 		"resolved CLI launcher": appServerLaunch.Executable,
 	} {
 		if err := pathguard.ValidateManagedExecutable(
@@ -483,7 +483,7 @@ func loadConnectorAuthority(
 		}
 	}
 	if err := delegationconfig.ValidatePrivateDirectory(cfg.Peer.CodexHome); err != nil {
-		return connectorAuthority{}, fmt.Errorf("validate managed CODEX_HOME: %w", err)
+		return connectorAuthority{}, fmt.Errorf("validate managed CLI home: %w", err)
 	}
 	if err := codexconfig.ValidateManagedRuntimeHome(
 		cfg.EffectiveHostKind(),
@@ -495,7 +495,7 @@ func loadConnectorAuthority(
 		return connectorAuthority{}, fmt.Errorf("validate managed workspace root: %w", err)
 	}
 	authority := connectorAuthority{
-		codexLaunch:     codexLaunch,
+		cliLaunch:       cliLaunch,
 		appServerLaunch: appServerLaunch,
 	}
 	if cfg.Broker.Auth.Mode == delegationconfig.AuthModeNone {

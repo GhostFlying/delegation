@@ -11,7 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/GhostFlying/delegation/internal/codexcommand"
+	"github.com/GhostFlying/delegation/internal/clicommand"
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/gitworkspace"
@@ -35,6 +36,17 @@ type setupResult struct {
 	WorkspaceRoot string                `json:"workspaceRoot,omitempty"`
 	TokenFile     string                `json:"tokenFile,omitempty"`
 	StatusListen  string                `json:"statusListen,omitempty"`
+}
+
+type repeatedStringFlag []string
+
+func (values *repeatedStringFlag) Set(value string) error {
+	*values = append(*values, value)
+	return nil
+}
+
+func (values *repeatedStringFlag) String() string {
+	return strings.Join(*values, ",")
 }
 
 func runSetup(args []string, stdout, stderr io.Writer) int {
@@ -187,8 +199,22 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	authMode := flags.String("auth-mode", string(delegationconfig.AuthModeToken), "authentication mode: token or none")
 	tokenFile := flags.String("token-file", "", "existing peer token file path")
 	codexBinary := flags.String("codex-binary", "codex", "Codex executable path or name")
+	cliCommand := flags.String("cli-command", "", "CLI executable path or name")
+	var cliArguments repeatedStringFlag
+	flags.Var(&cliArguments, "cli-argument", "exact CLI argument; repeat for each argv element")
+	cliLauncher := flags.String("cli-launcher", "", "shell-free CLI launcher executable path or name")
+	var cliLauncherPrefixArguments repeatedStringFlag
+	flags.Var(
+		&cliLauncherPrefixArguments,
+		"cli-launcher-prefix-argument",
+		"exact launcher prefix argument; repeat for each argv element",
+	)
 	gitBinary := flags.String("git-binary", "git", "Git executable path or name")
-	codexHome := flags.String("codex-home", "", "managed worker CODEX_HOME; defaults beside the peer config")
+	codexHome := flags.String(
+		"codex-home",
+		"",
+		"managed CLI home; compatibility flag persisted as peer.codexHome",
+	)
 	workspaceRoot := flags.String("workspace-root", "", "managed worker workspace root; defaults beside the peer config")
 	statePath := flags.String("state", "", "peer reservation database path; defaults beside the peer config")
 	maxWorkerSlots := flags.Int(
@@ -228,8 +254,33 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if *brokerURL == "" {
 		return writeError(stderr, errors.New("--broker-url is required"))
 	}
+	structuredCLI := flagWasSet(flags, "cli-command") ||
+		flagWasSet(flags, "cli-argument") ||
+		flagWasSet(flags, "cli-launcher") ||
+		flagWasSet(flags, "cli-launcher-prefix-argument")
+	if networkHostKind == hostkind.TraeX && flagWasSet(flags, "codex-binary") {
+		return writeError(stderr, errors.New("--codex-binary is supported only for Codex peers"))
+	}
+	if structuredCLI && flagWasSet(flags, "codex-binary") {
+		return writeError(stderr, errors.New("--codex-binary cannot be combined with structured CLI flags"))
+	}
+	if structuredCLI && (!flagWasSet(flags, "cli-command") || strings.TrimSpace(*cliCommand) == "") {
+		return writeError(stderr, errors.New("--cli-command is required with structured CLI flags"))
+	}
+	if flagWasSet(flags, "cli-launcher-prefix-argument") &&
+		(!flagWasSet(flags, "cli-launcher") || strings.TrimSpace(*cliLauncher) == "") {
+		return writeError(
+			stderr,
+			errors.New("--cli-launcher-prefix-argument requires --cli-launcher"),
+		)
+	}
 	if networkHostKind == hostkind.TraeX {
-		return writeError(stderr, errors.New("TraeX peer setup requires configurable CLI launch support"))
+		if !structuredCLI {
+			return writeError(stderr, errors.New("TraeX peer setup requires --cli-command and --cli-launcher"))
+		}
+		if !flagWasSet(flags, "cli-launcher") || strings.TrimSpace(*cliLauncher) == "" {
+			return writeError(stderr, errors.New("TraeX peer setup requires --cli-launcher"))
+		}
 	}
 	resolvedConfig, err := absolutePath(*configPath)
 	if err != nil {
@@ -240,16 +291,40 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
-	resolvedCodexBinary, err := resolveCodexExecutable(*codexBinary)
-	if err != nil {
-		return writeError(stderr, fmt.Errorf("resolve Codex executable: %w", err))
+	configuredCLI := delegationconfig.CLIConfig{
+		Arguments: append([]string(nil), cliArguments...),
+	}
+	if structuredCLI {
+		configuredCLI.Command, err = resolveCLIExecutable(networkHostKind, *cliCommand)
+		if err != nil {
+			return writeError(stderr, fmt.Errorf("resolve CLI command: %w", err))
+		}
+		if flagWasSet(flags, "cli-launcher") {
+			launcher, resolveErr := resolveCLILauncher(
+				*cliLauncher,
+				cliLauncherPrefixArguments,
+			)
+			if resolveErr != nil {
+				return writeError(stderr, fmt.Errorf("resolve CLI launcher: %w", resolveErr))
+			}
+			configuredCLI.Launcher = &launcher
+		}
+	} else {
+		configuredCLI.Command, err = resolveCodexExecutable(*codexBinary)
+		if err != nil {
+			return writeError(stderr, fmt.Errorf("resolve Codex executable: %w", err))
+		}
 	}
 	resolvedGitBinary, err := resolveGitExecutable(*gitBinary)
 	if err != nil {
 		return writeError(stderr, fmt.Errorf("resolve Git executable: %w", err))
 	}
 	if *codexHome == "" {
-		*codexHome = filepath.Join(resourceRoot, "codex")
+		homeDirectory := "codex"
+		if networkHostKind == hostkind.TraeX {
+			homeDirectory = "trae"
+		}
+		*codexHome = filepath.Join(resourceRoot, homeDirectory)
 	}
 	resolvedCodexHome, err := absolutePath(*codexHome)
 	if err != nil {
@@ -258,7 +333,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if target, evalErr := filepath.EvalSymlinks(resolvedCodexHome); evalErr == nil {
 		resolvedCodexHome = target
 	} else if !errors.Is(evalErr, os.ErrNotExist) {
-		return writeError(stderr, fmt.Errorf("resolve worker CODEX_HOME: %w", evalErr))
+		return writeError(stderr, fmt.Errorf("resolve managed CLI home: %w", evalErr))
 	}
 	if *workspaceRoot == "" {
 		*workspaceRoot = filepath.Join(resourceRoot, "workspaces")
@@ -308,9 +383,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 			AllowInsecureNonLoopback: *allowInsecure,
 		},
 		Peer: delegationconfig.PeerConfig{
-			CLI: &delegationconfig.CLIConfig{
-				Command: resolvedCodexBinary,
-			},
+			CLI:            &configuredCLI,
 			GitBinary:      resolvedGitBinary,
 			CodexHome:      resolvedCodexHome,
 			WorkspaceRoot:  resolvedWorkspaceRoot,
@@ -334,11 +407,21 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		return writeError(stderr, err)
 	}
 	for name, executable := range map[string]string{
-		"CLI command": resolvedCodexBinary,
+		"CLI command": configuredCLI.Command,
 		"Git binary":  resolvedGitBinary,
 	} {
 		if err := pathguard.ValidateManagedExecutable(
 			name, executable, resolvedCodexHome, resolvedWorkspaceRoot,
+		); err != nil {
+			return writeError(stderr, err)
+		}
+	}
+	if configuredCLI.Launcher != nil {
+		if err := pathguard.ValidateManagedExecutable(
+			"CLI launcher",
+			configuredCLI.Launcher.Executable,
+			resolvedCodexHome,
+			resolvedWorkspaceRoot,
 		); err != nil {
 			return writeError(stderr, err)
 		}
@@ -354,10 +437,10 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if err := writeInsecureTransportWarning(stderr, cfg); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := delegationconfig.PrepareWrite(resolvedConfig); err != nil {
+	if err := codexconfig.ValidateManagedRuntimeHome(networkHostKind, resolvedCodexHome); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := codexconfig.ValidateManagedRuntimeHome(networkHostKind, resolvedCodexHome); err != nil {
+	if err := delegationconfig.PrepareWrite(resolvedConfig); err != nil {
 		return writeError(stderr, err)
 	}
 	var preparedDirectories []string
@@ -370,7 +453,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 			_ = os.Remove(preparedDirectories[index])
 		}
 	}()
-	codexHomeCreated, err := prepareManagedDirectory(resolvedCodexHome, "worker CODEX_HOME")
+	codexHomeCreated, err := prepareManagedDirectory(resolvedCodexHome, "managed CLI home")
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -535,7 +618,11 @@ func writeSetupResult(stdout, stderr io.Writer, result setupResult, jsonOutput b
 		fmt.Fprintf(stdout, "state: %s\n", result.StatePath)
 	}
 	if result.CodexHome != "" {
-		fmt.Fprintf(stdout, "managed CODEX_HOME: %s\n", result.CodexHome)
+		homeName := "CODEX_HOME"
+		if result.HostKind == hostkind.TraeX {
+			homeName = "TRAE_HOME"
+		}
+		fmt.Fprintf(stdout, "managed %s: %s\n", homeName, result.CodexHome)
 	}
 	if result.GitBinary != "" {
 		fmt.Fprintf(stdout, "Git binary: %s\n", result.GitBinary)
@@ -553,11 +640,37 @@ func writeSetupResult(stdout, stderr io.Writer, result setupResult, jsonOutput b
 }
 
 func resolveCodexExecutable(name string) (string, error) {
-	resolved, err := codexcommand.Resolve(name)
+	resolved, err := clicommand.Resolve(hostkind.Codex, name)
 	if err != nil {
 		return "", err
 	}
 	return resolved.CommandPath, nil
+}
+
+func resolveCLIExecutable(kind hostkind.Kind, name string) (string, error) {
+	resolved, err := clicommand.Resolve(kind, name)
+	if err != nil {
+		return "", err
+	}
+	return resolved.CommandPath, nil
+}
+
+func resolveCLILauncher(name string, prefixArguments []string) (clilaunch.Spec, error) {
+	if strings.TrimSpace(name) == "" {
+		return clilaunch.Spec{}, errors.New("CLI launcher executable is required")
+	}
+	executable, err := exec.LookPath(name)
+	if err != nil {
+		return clilaunch.Spec{}, err
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		return clilaunch.Spec{}, fmt.Errorf("resolve CLI launcher path: %w", err)
+	}
+	return clilaunch.Resolve(clilaunch.Spec{
+		Executable:      executable,
+		PrefixArguments: append([]string(nil), prefixArguments...),
+	})
 }
 
 func resolveGitExecutable(name string) (string, error) {

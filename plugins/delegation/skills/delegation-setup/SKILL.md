@@ -6,7 +6,8 @@ description: Install, update, configure, or diagnose the Delegation native runti
 # Delegation Setup
 
 Set up the native runtime that matches this plugin version.
-Never download `latest`, skip checksum verification, or expose a broker token to a Codex child process.
+Never download `latest`, skip checksum verification, or expose a broker token to a managed CLI
+child process.
 
 ## Resolve The Plugin
 
@@ -58,5 +59,5 @@ configured processes, configuration paths, and checks without printing credentia
 endpoint and loopback-only `/status` page without printing or transmitting the master token. Keep
 the status listener on loopback; use an authenticated tunnel for remote inspection.
 
-After a plugin or runtime update, tell the user to start a new Codex task so the updated skills and
-MCP configuration are loaded. Do not attempt to reload a managed worker in place.
+After a plugin or runtime update, tell the user to start a new task in the configured CLI so the
+updated skills and MCP configuration are loaded. Do not attempt to reload a managed worker in place.

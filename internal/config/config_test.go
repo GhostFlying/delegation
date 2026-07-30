@@ -223,21 +223,57 @@ func TestInstanceAndHostKindValidation(t *testing.T) {
 	}
 }
 
-func TestTraeXPeerConfigRequiresLaunchSupport(t *testing.T) {
-	cfg := protectedTestConfig(t)
-	cfg.Role = RolePeer
-	cfg.DeviceID = "123e4567-e89b-42d3-a456-426614174001"
-	cfg.DeviceName = "traex-peer"
-	cfg.HostKind = hostkind.TraeX
-	cfg.Broker = BrokerConfig{
-		URL:  "wss://broker.example.test/v1/connect",
-		Auth: AuthConfig{Mode: AuthModeNone},
-	}
-	cfg.Peer = testPeerRuntime(t)
-
-	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "requires configurable CLI launch support") {
-		t.Fatalf("TraeX peer validation error = %v", err)
+func TestTraeXPeerConfigRequiresStructuredLauncher(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*PeerConfig)
+		want   string
+	}{
+		{
+			name:   "legacy command",
+			mutate: func(*PeerConfig) {},
+			want:   "requires structured cli configuration",
+		},
+		{
+			name: "direct structured command",
+			mutate: func(peer *PeerConfig) {
+				command := peer.CodexBinary
+				peer.CodexBinary = ""
+				peer.CLI = &CLIConfig{Command: command}
+			},
+			want: "requires a CLI launcher",
+		},
+		{
+			name: "structured launcher",
+			mutate: func(peer *PeerConfig) {
+				command := peer.CodexBinary
+				peer.CodexBinary = ""
+				peer.CLI = &CLIConfig{
+					Command:   command,
+					Arguments: []string{"-p", "ultra"},
+					Launcher: &clilaunch.Spec{
+						Executable:      filepath.Join(filepath.Dir(command), "warmpool"),
+						PrefixArguments: []string{"run", "--"},
+					},
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testPeerConfig(t)
+			cfg.HostKind = hostkind.TraeX
+			test.mutate(&cfg.Peer)
+			err := cfg.Validate()
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
