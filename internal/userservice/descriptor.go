@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/GhostFlying/delegation/internal/instanceid"
 )
 
 const (
@@ -41,9 +43,16 @@ type serviceSpec struct {
 	description string
 }
 
-func specFor(role ServiceRole) (serviceSpec, error) {
+func specFor(role ServiceRole, instanceID string) (serviceSpec, error) {
+	instanceID, err := normalizeInstanceID(instanceID)
+	if err != nil {
+		return serviceSpec{}, err
+	}
 	switch role {
 	case ServiceRoleBroker:
+		if instanceID != "" {
+			return namedServiceSpec(role, instanceID, "Broker"), nil
+		}
 		return serviceSpec{
 			role: role, marker: MarkerBroker,
 			systemdUnit: SystemdBrokerUnitName,
@@ -51,6 +60,9 @@ func specFor(role ServiceRole) (serviceSpec, error) {
 			scheduled:   ScheduledTaskBroker, description: "Delegation broker",
 		}, nil
 	case ServiceRolePeer:
+		if instanceID != "" {
+			return namedServiceSpec(role, instanceID, "Peer"), nil
+		}
 		return serviceSpec{
 			role: role, marker: MarkerPeer,
 			systemdUnit: SystemdPeerUnitName,
@@ -60,6 +72,27 @@ func specFor(role ServiceRole) (serviceSpec, error) {
 	default:
 		return serviceSpec{}, fmt.Errorf("unsupported service role %q", role)
 	}
+}
+
+func namedServiceSpec(role ServiceRole, instanceID, roleTitle string) serviceSpec {
+	return serviceSpec{
+		role:        role,
+		marker:      markerPrefix + instanceID + ":" + string(role),
+		systemdUnit: "delegation-" + instanceID + "-" + string(role) + ".service",
+		launchAgent: "com.github.ghostflying.delegation." + instanceID + "." + string(role),
+		scheduled:   `\Delegation ` + instanceID + " " + roleTitle,
+		description: "Delegation " + instanceID + " " + string(role),
+	}
+}
+
+func normalizeInstanceID(instanceID string) (string, error) {
+	if instanceID == "" || instanceID == "default" {
+		return "", nil
+	}
+	if err := instanceid.Validate(instanceID); err != nil {
+		return "", fmt.Errorf("invalid service instance ID %q: %w", instanceID, err)
+	}
+	return instanceID, nil
 }
 
 type Kind string
@@ -80,10 +113,11 @@ type Invocation struct {
 	BinaryPath      string
 	ConfigPath      string
 	EnvironmentFile string
+	InstanceID      string
 }
 
 func RenderSystemd(role ServiceRole, invocation Invocation) (Descriptor, error) {
-	spec, err := specFor(role)
+	spec, err := specFor(role, invocation.InstanceID)
 	if err != nil {
 		return Descriptor{}, err
 	}
@@ -112,7 +146,7 @@ WantedBy=default.target
 }
 
 func RenderLaunchAgent(role ServiceRole, invocation Invocation) (Descriptor, error) {
-	spec, err := specFor(role)
+	spec, err := specFor(role, invocation.InstanceID)
 	if err != nil {
 		return Descriptor{}, err
 	}
@@ -175,7 +209,7 @@ func RenderScheduledTask(
 	userSID string,
 	escapeArg func(string) string,
 ) (Descriptor, error) {
-	spec, err := specFor(role)
+	spec, err := specFor(role, invocation.InstanceID)
 	if err != nil {
 		return Descriptor{}, err
 	}

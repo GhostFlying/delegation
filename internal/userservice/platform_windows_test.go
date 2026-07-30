@@ -29,7 +29,7 @@ func TestWindowsInstallCreatesTaskWithoutForce(t *testing.T) {
 		}
 		definition, err := parseTaskDefinition(data)
 		document, normalizeErr := normalizeTaskXML(data)
-		if err != nil || normalizeErr != nil || !taskOwned(definition, ServiceRolePeer) ||
+		if err != nil || normalizeErr != nil || !taskOwned(definition, ServiceRolePeer, "") ||
 			!bytes.HasPrefix(data, []byte{0xff, 0xfe}) || !strings.Contains(string(document), "<Enabled>false</Enabled>") {
 			t.Fatalf("generated task = %#v, %v", definition, err)
 		}
@@ -127,6 +127,79 @@ func TestWindowsInstallEnablesAndRunsTask(t *testing.T) {
 	}
 }
 
+func TestWindowsNamedInstanceLifecycleTargetsNamedTask(t *testing.T) {
+	stubScheduledTaskReadiness(t, nil)
+	var runningInstanceID string
+	scheduledTaskRunning = func(_ ServiceRole, instanceID string) (bool, error) {
+		runningInstanceID = instanceID
+		return true, nil
+	}
+	originalRunner := runTaskCommand
+	t.Cleanup(func() { runTaskCommand = originalRunner })
+	invocation := testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	)
+	invocation.InstanceID = "alpha-2"
+	taskName := `\Delegation alpha-2 Peer`
+	var calls [][]string
+	var active []byte
+	runTaskCommand = func(args ...string) (taskCommandResult, error) {
+		calls = append(calls, slices.Clone(args))
+		if args[0] == "/Create" {
+			data, err := os.ReadFile(args[4])
+			if err != nil {
+				t.Fatal(err)
+			}
+			active, err = encodeTaskXMLUTF16LE(strings.Replace(
+				taskXMLText(t, data), "<Enabled>false</Enabled>", "<Enabled>true</Enabled>", 1,
+			))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if args[0] == "/Query" {
+			return taskCommandResult{Output: active}, nil
+		}
+		return taskCommandResult{}, nil
+	}
+	result, err := Install(ServiceRolePeer, invocation)
+	if err != nil || result.State != StateActive || result.Artifact != taskName {
+		t.Fatalf("Install() = %#v, %v", result, err)
+	}
+	if runningInstanceID != invocation.InstanceID {
+		t.Fatalf("running-state query instance = %q, want %q", runningInstanceID, invocation.InstanceID)
+	}
+	for _, call := range calls {
+		taskIndex := slices.Index(call, "/TN")
+		if taskIndex < 0 || taskIndex+1 >= len(call) || call[taskIndex+1] != taskName {
+			t.Fatalf("named lifecycle targeted wrong task: %q", calls)
+		}
+		if slices.Contains(call, ScheduledTaskPeer) {
+			t.Fatalf("named lifecycle targeted legacy task: %q", calls)
+		}
+	}
+}
+
+func TestWindowsPrepareRejectsInvalidInstanceWithoutSideEffects(t *testing.T) {
+	originalRunner := runTaskCommand
+	t.Cleanup(func() { runTaskCommand = originalRunner })
+	called := false
+	runTaskCommand = func(...string) (taskCommandResult, error) {
+		called = true
+		return taskCommandResult{}, nil
+	}
+	invocation := testInvocation(
+		ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`,
+	)
+	invocation.InstanceID = "unsafe/instance"
+	if _, err := platformPrepare(ServiceRolePeer, invocation); err == nil {
+		t.Fatal("platformPrepare() accepted invalid instance ID")
+	}
+	if called {
+		t.Fatal("invalid instance invoked Task Scheduler")
+	}
+}
+
 func TestWindowsInstallReconcilesLostEnableResponse(t *testing.T) {
 	stubScheduledTaskReadiness(t, nil)
 	originalRunner := runTaskCommand
@@ -194,7 +267,7 @@ func TestWindowsInstallRejectsTaskThatNeverBecomesReady(t *testing.T) {
 
 func TestWindowsInstallRejectsReadyEndpointWithoutRunningTask(t *testing.T) {
 	stubScheduledTaskReadiness(t, nil)
-	scheduledTaskRunning = func(ServiceRole) (bool, error) { return false, nil }
+	scheduledTaskRunning = func(ServiceRole, string) (bool, error) { return false, nil }
 	originalRunner := runTaskCommand
 	t.Cleanup(func() { runTaskCommand = originalRunner })
 	var active []byte
@@ -422,7 +495,7 @@ func stubScheduledTaskReadiness(t *testing.T, err error) {
 	originalReadiness := waitForScheduledTaskReady
 	originalRunning := scheduledTaskRunning
 	waitForScheduledTaskReady = func(string) error { return err }
-	scheduledTaskRunning = func(ServiceRole) (bool, error) { return true, nil }
+	scheduledTaskRunning = func(ServiceRole, string) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		waitForScheduledTaskReady = originalReadiness
 		scheduledTaskRunning = originalRunning
@@ -588,7 +661,7 @@ type windowsIntegrationTaskFixture struct {
 
 func (f *windowsIntegrationTaskFixture) requireAbsent(t *testing.T) {
 	t.Helper()
-	spec, err := specFor(f.role)
+	spec, err := specFor(f.role, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -621,7 +694,7 @@ func (f *windowsIntegrationTaskFixture) cleanup() error {
 	if !matches {
 		return errors.New("refusing to delete a Scheduled Task that does not match the integration fixture")
 	}
-	spec, err := specFor(f.role)
+	spec, err := specFor(f.role, "")
 	if err != nil {
 		return err
 	}
@@ -641,7 +714,7 @@ func windowsIntegrationTaskMatches(
 	role ServiceRole,
 	binaryPath, configPath string,
 ) (bool, bool, error) {
-	spec, err := specFor(role)
+	spec, err := specFor(role, "")
 	if err != nil {
 		return false, false, err
 	}
@@ -673,7 +746,7 @@ func windowsIntegrationTaskMatches(
 	if err != nil {
 		return true, false, err
 	}
-	return true, taskOwned(existing, role) && equivalent, nil
+	return true, taskOwned(existing, role, "") && equivalent, nil
 }
 
 func windowsIntegrationBrokerConfig(t *testing.T, root string) delegationconfig.Config {

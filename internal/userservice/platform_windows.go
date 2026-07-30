@@ -33,7 +33,7 @@ var (
 )
 
 func platformPrepare(role ServiceRole, invocation Invocation) (Result, error) {
-	spec, err := specFor(role)
+	spec, err := specFor(role, invocation.InstanceID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -89,7 +89,7 @@ func platformPrepare(role ServiceRole, invocation Invocation) (Result, error) {
 	if err != nil {
 		return indeterminate, errors.Join(createFailure, fmt.Errorf("parse existing scheduled task: %w", err))
 	}
-	if !taskOwned(existing, role) {
+	if !taskOwned(existing, role, invocation.InstanceID) {
 		return Result{State: StateForeignConflict, Kind: descriptor.Kind, Artifact: spec.scheduled, Role: role}, errors.New("scheduled task name is occupied by an unmanaged task")
 	}
 	equivalent, err := taskDefinitionsEquivalent(desired, existing, windowsTaskUserIDsEqual)
@@ -114,7 +114,7 @@ func platformActivate(result Result, invocation Invocation) (Result, error) {
 	if result.State != StatePrepared && result.State != StateActive {
 		return result, fmt.Errorf("cannot activate scheduled task from state %s", result.State)
 	}
-	spec, err := specFor(result.Role)
+	spec, err := specFor(result.Role, invocation.InstanceID)
 	if err != nil {
 		return result, err
 	}
@@ -142,7 +142,7 @@ func platformActivate(result Result, invocation Invocation) (Result, error) {
 		result.State = StateIndeterminate
 		return result, errors.Join(verifyErr, errors.New("scheduled task changed after it was started"))
 	}
-	running, runningErr := scheduledTaskRunning(result.Role)
+	running, runningErr := scheduledTaskRunning(result.Role, invocation.InstanceID)
 	if runningErr != nil || !running {
 		result.State = StateIndeterminate
 		return result, errors.Join(runningErr, errors.New("scheduled task has no running managed instance"))
@@ -151,8 +151,8 @@ func platformActivate(result Result, invocation Invocation) (Result, error) {
 	return result, nil
 }
 
-func queryScheduledTaskRunning(role ServiceRole) (bool, error) {
-	spec, err := specFor(role)
+func queryScheduledTaskRunning(role ServiceRole, instanceID string) (bool, error) {
+	spec, err := specFor(role, instanceID)
 	if err != nil {
 		return false, err
 	}
@@ -181,7 +181,7 @@ func queryScheduledTaskRunning(role ServiceRole) (bool, error) {
 }
 
 func scheduledTaskEnabled(role ServiceRole, invocation Invocation) (bool, error) {
-	spec, err := specFor(role)
+	spec, err := specFor(role, invocation.InstanceID)
 	if err != nil {
 		return false, err
 	}
@@ -211,7 +211,7 @@ func scheduledTaskEnabled(role ServiceRole, invocation Invocation) (bool, error)
 	if err != nil {
 		return false, fmt.Errorf("parse activated scheduled task: %w", err)
 	}
-	if !taskOwned(existing, role) {
+	if !taskOwned(existing, role, invocation.InstanceID) {
 		return false, errors.New("scheduled task changed ownership during activation")
 	}
 	equivalent, err := taskDefinitionsEquivalent(desired, existing, windowsTaskUserIDsEqual)

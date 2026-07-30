@@ -275,7 +275,7 @@ func TestTaskOwnershipRequiresExactDescriptionAndURI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if taskOwned(definition, ServiceRolePeer) {
+	if taskOwned(definition, ServiceRolePeer, "") {
 		t.Fatal("taskOwned() accepted a marker substring")
 	}
 }

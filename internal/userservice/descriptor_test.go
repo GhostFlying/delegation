@@ -193,6 +193,162 @@ func TestRoleSpecificServiceDescriptorsDoNotCollide(t *testing.T) {
 	}
 }
 
+func TestDefaultInstanceDescriptorsMatchLegacyIdentity(t *testing.T) {
+	for _, render := range []struct {
+		name string
+		call func(Invocation) (Descriptor, error)
+	}{
+		{
+			name: "systemd",
+			call: func(invocation Invocation) (Descriptor, error) {
+				return RenderSystemd(ServiceRolePeer, invocation)
+			},
+		},
+		{
+			name: "launchd",
+			call: func(invocation Invocation) (Descriptor, error) {
+				return RenderLaunchAgent(ServiceRolePeer, invocation)
+			},
+		},
+		{
+			name: "scheduled task",
+			call: func(invocation Invocation) (Descriptor, error) {
+				return RenderScheduledTask(
+					ServiceRolePeer, invocation, "S-1-5-21-1000",
+					func(value string) string { return value },
+				)
+			},
+		},
+	} {
+		t.Run(render.name, func(t *testing.T) {
+			legacy := testInvocation(ServiceRolePeer, platformTestBinary(render.name), platformTestConfig(render.name))
+			explicitDefault := legacy
+			explicitDefault.InstanceID = "default"
+			legacyDescriptor, err := render.call(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defaultDescriptor, err := render.call(explicitDefault)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if legacyDescriptor.Name != defaultDescriptor.Name ||
+				!bytes.Equal(legacyDescriptor.Content, defaultDescriptor.Content) {
+				t.Fatalf("default instance changed legacy descriptor:\n%#v\n%#v", legacyDescriptor, defaultDescriptor)
+			}
+		})
+	}
+}
+
+func TestNamedInstanceDescriptorsDoNotCollide(t *testing.T) {
+	for _, render := range []struct {
+		name      string
+		scheduled bool
+		call      func(ServiceRole, Invocation) (Descriptor, error)
+	}{
+		{
+			name: "systemd",
+			call: func(role ServiceRole, invocation Invocation) (Descriptor, error) {
+				return RenderSystemd(role, invocation)
+			},
+		},
+		{
+			name: "launchd",
+			call: func(role ServiceRole, invocation Invocation) (Descriptor, error) {
+				return RenderLaunchAgent(role, invocation)
+			},
+		},
+		{
+			name: "scheduled task", scheduled: true,
+			call: func(role ServiceRole, invocation Invocation) (Descriptor, error) {
+				return RenderScheduledTask(
+					role, invocation, "S-1-5-21-1000",
+					func(value string) string { return value },
+				)
+			},
+		},
+	} {
+		t.Run(render.name, func(t *testing.T) {
+			descriptors := make(map[string]Descriptor)
+			for _, role := range []ServiceRole{ServiceRoleBroker, ServiceRolePeer} {
+				for _, instanceID := range []string{"alpha", "beta-2"} {
+					invocation := testInvocation(role, platformTestBinary(render.name), platformTestConfig(render.name))
+					invocation.InstanceID = instanceID
+					descriptor, err := render.call(role, invocation)
+					if err != nil {
+						t.Fatal(err)
+					}
+					key := instanceID + ":" + string(role)
+					for otherKey, other := range descriptors {
+						if descriptor.Name == other.Name || bytes.Equal(descriptor.Content, other.Content) {
+							t.Fatalf("%s collides with %s: %#v / %#v", key, otherKey, descriptor, other)
+						}
+					}
+					text := string(descriptor.Content)
+					if render.scheduled {
+						text = taskXMLText(t, descriptor.Content)
+					}
+					spec, err := specFor(role, instanceID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if descriptor.Name != platformSpecName(render.name, spec) || !strings.Contains(text, spec.marker) {
+						t.Fatalf("%s descriptor has wrong identity: %#v\n%s", key, descriptor, text)
+					}
+					descriptors[key] = descriptor
+				}
+			}
+		})
+	}
+}
+
+func TestNamedInstanceOwnershipRejectsOtherInstance(t *testing.T) {
+	alphaWindows := testInvocation(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+	alphaWindows.InstanceID = "alpha"
+	betaWindows := alphaWindows
+	betaWindows.InstanceID = "beta"
+	betaTask, err := RenderScheduledTask(
+		ServiceRolePeer, betaWindows, "S-1-5-21-1000",
+		func(value string) string { return value },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	betaDefinition, err := parseTaskDefinition(betaTask.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskOwned(betaDefinition, ServiceRolePeer, alphaWindows.InstanceID) {
+		t.Fatal("scheduled task ownership accepted another instance")
+	}
+}
+
+func TestRenderersRejectInvalidInstanceID(t *testing.T) {
+	for _, instanceID := range []string{
+		"Default", "1alpha", "alpha_", "alpha-", "alpha.beta",
+		"abcdefghijklmnopqrstuvwxyz1234567",
+	} {
+		t.Run(instanceID, func(t *testing.T) {
+			posix := testInvocation(ServiceRolePeer, "/opt/delegation", "/home/test/config.json")
+			posix.InstanceID = instanceID
+			if _, err := RenderSystemd(ServiceRolePeer, posix); err == nil {
+				t.Fatal("RenderSystemd() accepted invalid instance ID")
+			}
+			if _, err := RenderLaunchAgent(ServiceRolePeer, posix); err == nil {
+				t.Fatal("RenderLaunchAgent() accepted invalid instance ID")
+			}
+			windows := testInvocation(ServiceRolePeer, `C:\Delegation\delegation.exe`, `C:\Users\test\config.json`)
+			windows.InstanceID = instanceID
+			if _, err := RenderScheduledTask(
+				ServiceRolePeer, windows, "S-1-5-21-1000",
+				func(value string) string { return value },
+			); err == nil {
+				t.Fatal("RenderScheduledTask() accepted invalid instance ID")
+			}
+		})
+	}
+}
+
 func TestRenderersRejectUnsafePaths(t *testing.T) {
 	if _, err := RenderSystemd(ServiceRolePeer, Invocation{
 		BinaryPath: "/binary",
@@ -227,6 +383,33 @@ func TestRenderersRejectUnsafePaths(t *testing.T) {
 	}
 	if _, err := RenderScheduledTask(ServiceRole("custom"), testInvocation(ServiceRole("custom"), `C:\binary.exe`, `C:\config`), "S-1-5-21", func(value string) string { return value }); err == nil {
 		t.Fatal("RenderScheduledTask() accepted an arbitrary service role")
+	}
+}
+
+func platformTestBinary(platform string) string {
+	if platform == "scheduled task" {
+		return `C:\Delegation\delegation.exe`
+	}
+	return "/opt/delegation/delegation"
+}
+
+func platformTestConfig(platform string) string {
+	if platform == "scheduled task" {
+		return `C:\Users\test\.delegation\config.json`
+	}
+	return "/home/test/.delegation/config.json"
+}
+
+func platformSpecName(platform string, spec serviceSpec) string {
+	switch platform {
+	case "systemd":
+		return spec.systemdUnit
+	case "launchd":
+		return spec.launchAgent
+	case "scheduled task":
+		return spec.scheduled
+	default:
+		return ""
 	}
 }
 

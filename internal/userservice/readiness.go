@@ -54,7 +54,9 @@ func waitForServiceReady(configPath string) error {
 func probeService(ctx context.Context, cfg delegationconfig.Config) error {
 	switch cfg.Role {
 	case delegationconfig.RolePeer:
-		endpoint, err := localbridge.Endpoint(cfg.ControllerID, cfg.DeviceID)
+		endpoint, err := localbridge.EndpointForInstance(
+			cfg.EffectiveInstanceID(), cfg.ControllerID, cfg.DeviceID,
+		)
 		if err != nil {
 			return err
 		}
