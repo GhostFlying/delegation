@@ -39,6 +39,9 @@ require explicit broker and status listeners. Before setup or issuing/revoking a
 [role configuration](references/role-configuration.md) and follow its enrollment and transport
 rules. Token authentication is the default. Never pass token material as a command-line value;
 configuration stores only an absolute token file path and refuses to overwrite an existing config.
+Set `DELEGATION_INSTANCE` in the CLI host environment before plugin startup to select a named
+peer's root MCP; an explicit `DELEGATION_CONFIG` remains authoritative and must identify the same
+instance.
 
 Before installing or replacing a user service, read
 [native services](references/native-services.md). Install broker and peer processes independently,

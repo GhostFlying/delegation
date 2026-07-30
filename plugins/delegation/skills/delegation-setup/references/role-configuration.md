@@ -8,6 +8,12 @@ the legacy top-level paths and service identities; named instances default under
 instance; native service installation remains disabled until instance-scoped definitions are
 available.
 
+Set `DELEGATION_INSTANCE=<instanceId>` in the CLI host environment before loading the plugin so its
+root MCP uses that named peer. `DELEGATION_CONFIG` may instead select an exact config path; when
+both selectors are present, the config's `instanceId` must match. Named setup requires an explicit
+`--config` when `DELEGATION_CONFIG` is inherited, so setup never splits a named config from its
+default resource namespace.
+
 - `setup broker` creates or joins the authority for one Delegation network. The wire field
   `controllerId` is the stable network or trust-domain ID, not a controller device role. Token
   authentication is the default. Keep plaintext listeners on loopback unless the user explicitly

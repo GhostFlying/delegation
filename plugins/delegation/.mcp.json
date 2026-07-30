@@ -10,7 +10,8 @@
       "env_vars": [
         "DELEGATION_BINARY",
         "DELEGATION_CONFIG",
-        "DELEGATION_HOME"
+        "DELEGATION_HOME",
+        "DELEGATION_INSTANCE"
       ]
     }
   }

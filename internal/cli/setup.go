@@ -74,6 +74,13 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	if err := delegationconfig.ValidateInstanceID(*instanceID); err != nil {
 		return writeError(stderr, err)
 	}
+	if *instanceID != delegationconfig.DefaultInstanceID &&
+		*configPath == "" && os.Getenv("DELEGATION_CONFIG") != "" {
+		return writeError(
+			stderr,
+			errors.New("named setup with DELEGATION_CONFIG requires an explicit --config path"),
+		)
+	}
 	if *configPath == "" {
 		var err error
 		*configPath, err = delegationconfig.DefaultBrokerPathForInstance(*instanceID)
@@ -196,6 +203,13 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := delegationconfig.ValidateInstanceID(*instanceID); err != nil {
 		return writeError(stderr, err)
+	}
+	if *instanceID != delegationconfig.DefaultInstanceID &&
+		*configPath == "" && os.Getenv("DELEGATION_CONFIG") != "" {
+		return writeError(
+			stderr,
+			errors.New("named setup with DELEGATION_CONFIG requires an explicit --config path"),
+		)
 	}
 	if *configPath == "" {
 		var err error

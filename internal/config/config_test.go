@@ -478,6 +478,23 @@ func TestBrokerStatusListenMustBeLoopbackAndDistinct(t *testing.T) {
 	}
 }
 
+func TestNamedBrokerRequiresStatusListener(t *testing.T) {
+	cfg := protectedTestConfig(t)
+	cfg.InstanceID = "second"
+	cfg.Role = RoleBroker
+	cfg.Broker = BrokerConfig{
+		Listen:    "127.0.0.1:18787",
+		StateFile: testStateFile(t),
+		Auth:      AuthConfig{Mode: AuthModeNone},
+	}
+
+	err := cfg.Validate()
+
+	if err == nil || !strings.Contains(err.Error(), "require a status listener") {
+		t.Fatalf("named broker validation error = %v", err)
+	}
+}
+
 func TestBrokerStatusListenRejectsSameNumericPort(t *testing.T) {
 	for _, primaryListen := range []string{
 		"0.0.0.0:8788",
