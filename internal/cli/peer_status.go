@@ -181,7 +181,9 @@ func runStatusWithReaders(
 	if cfg.Role != delegationconfig.RolePeer {
 		return writeFixedStatusError(stderr, peerStatusUnavailableError, exitUnavailable)
 	}
-	endpoint, err := localbridge.Endpoint(cfg.ControllerID, cfg.DeviceID)
+	endpoint, err := localbridge.EndpointForInstance(
+		cfg.EffectiveInstanceID(), cfg.ControllerID, cfg.DeviceID,
+	)
 	if err != nil || readPeer == nil {
 		return writeFixedStatusError(stderr, peerStatusUnavailableError, exitUnavailable)
 	}

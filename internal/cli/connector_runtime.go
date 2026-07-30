@@ -231,16 +231,22 @@ func runConnectorServiceWithProviderEnvironment(
 	if err != nil {
 		return err
 	}
-	endpoint, err := localbridge.Endpoint(cfg.ControllerID, cfg.DeviceID)
+	endpoint, err := localbridge.EndpointForInstance(
+		cfg.EffectiveInstanceID(), cfg.ControllerID, cfg.DeviceID,
+	)
 	if err != nil {
 		return err
 	}
+	bridgeIdentity := localbridge.ServiceIdentity{
+		ControllerID: cfg.ControllerID,
+		DeviceID:     cfg.DeviceID,
+	}
+	if cfg.EffectiveInstanceID() != delegationconfig.DefaultInstanceID {
+		bridgeIdentity.InstanceID = cfg.EffectiveInstanceID()
+	}
 	bridge, err := localbridge.ListenWithResultApply(
 		endpoint,
-		localbridge.ServiceIdentity{
-			ControllerID: cfg.ControllerID,
-			DeviceID:     cfg.DeviceID,
-		},
+		bridgeIdentity,
 		client,
 		peerAuthorizer{
 			state: peerState, controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,

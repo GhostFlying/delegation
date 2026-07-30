@@ -55,13 +55,9 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 }
 
 func runSetupBroker(args []string, stdout, stderr io.Writer) int {
-	defaultPath, err := delegationconfig.DefaultBrokerPath()
-	if err != nil {
-		return writeError(stderr, err)
-	}
 	flags := flag.NewFlagSet("delegation setup broker", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", defaultPath, "configuration file path")
+	configPath := flags.String("config", "", "configuration file path; defaults under the selected instance")
 	instanceID := flags.String("instance", delegationconfig.DefaultInstanceID, "local Delegation instance name")
 	hostKind := flags.String("host-kind", string(hostkind.Codex), "network host kind: codex or traex")
 	controllerID := flags.String("controller-id", "", "stable Delegation network UUID; generated when omitted")
@@ -78,6 +74,21 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	if err := delegationconfig.ValidateInstanceID(*instanceID); err != nil {
 		return writeError(stderr, err)
 	}
+	if *configPath == "" {
+		var err error
+		*configPath, err = delegationconfig.DefaultBrokerPathForInstance(*instanceID)
+		if err != nil {
+			return writeError(stderr, err)
+		}
+	}
+	if *instanceID != delegationconfig.DefaultInstanceID {
+		if !flagWasSet(flags, "listen") || !flagWasSet(flags, "status-listen") {
+			return writeError(
+				stderr,
+				errors.New("named broker instances require explicit --listen and --status-listen addresses"),
+			)
+		}
+	}
 	networkHostKind := hostkind.Kind(*hostKind)
 	if err := networkHostKind.Validate(); err != nil {
 		return writeError(stderr, err)
@@ -86,8 +97,9 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
+	resourceRoot := setupResourceRoot(resolvedConfig, *instanceID)
 	if *statePath == "" {
-		*statePath = filepath.Join(filepath.Dir(resolvedConfig), "state", "broker.sqlite3")
+		*statePath = filepath.Join(resourceRoot, "state", "broker.sqlite3")
 	}
 	resolvedState, err := absolutePath(*statePath)
 	if err != nil {
@@ -99,7 +111,7 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 			return writeError(stderr, err)
 		}
 	}
-	auth, err := resolveAuth(*authMode, *tokenFile, filepath.Join(filepath.Dir(resolvedConfig), "secrets", "broker.token"))
+	auth, err := resolveAuth(*authMode, *tokenFile, filepath.Join(resourceRoot, "secrets", "broker.token"))
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -156,13 +168,9 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 }
 
 func runSetupPeer(args []string, stdout, stderr io.Writer) int {
-	defaultPath, err := delegationconfig.DefaultPeerPath()
-	if err != nil {
-		return writeError(stderr, err)
-	}
 	flags := flag.NewFlagSet("delegation setup peer", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", defaultPath, "configuration file path")
+	configPath := flags.String("config", "", "configuration file path; defaults under the selected instance")
 	instanceID := flags.String("instance", delegationconfig.DefaultInstanceID, "local Delegation instance name")
 	hostKind := flags.String("host-kind", string(hostkind.Codex), "network host kind: codex or traex")
 	controllerID := flags.String("controller-id", "", "Delegation network UUID")
@@ -189,6 +197,13 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if err := delegationconfig.ValidateInstanceID(*instanceID); err != nil {
 		return writeError(stderr, err)
 	}
+	if *configPath == "" {
+		var err error
+		*configPath, err = delegationconfig.DefaultPeerPathForInstance(*instanceID)
+		if err != nil {
+			return writeError(stderr, err)
+		}
+	}
 	networkHostKind := hostkind.Kind(*hostKind)
 	if err := networkHostKind.Validate(); err != nil {
 		return writeError(stderr, err)
@@ -206,6 +221,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
+	resourceRoot := setupResourceRoot(resolvedConfig, *instanceID)
 	auth, err := resolveAuth(*authMode, *tokenFile, "")
 	if err != nil {
 		return writeError(stderr, err)
@@ -219,7 +235,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		return writeError(stderr, fmt.Errorf("resolve Git executable: %w", err))
 	}
 	if *codexHome == "" {
-		*codexHome = filepath.Join(filepath.Dir(resolvedConfig), "codex")
+		*codexHome = filepath.Join(resourceRoot, "codex")
 	}
 	resolvedCodexHome, err := absolutePath(*codexHome)
 	if err != nil {
@@ -231,7 +247,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		return writeError(stderr, fmt.Errorf("resolve worker CODEX_HOME: %w", evalErr))
 	}
 	if *workspaceRoot == "" {
-		*workspaceRoot = filepath.Join(filepath.Dir(resolvedConfig), "workspaces")
+		*workspaceRoot = filepath.Join(resourceRoot, "workspaces")
 	}
 	resolvedWorkspaceRoot, err := absolutePath(*workspaceRoot)
 	if err != nil {
@@ -243,7 +259,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		return writeError(stderr, fmt.Errorf("resolve worker workspace root: %w", evalErr))
 	}
 	if *statePath == "" {
-		*statePath = filepath.Join(filepath.Dir(resolvedConfig), "state", "peer.sqlite3")
+		*statePath = filepath.Join(resourceRoot, "state", "peer.sqlite3")
 	}
 	resolvedState, err := absolutePath(*statePath)
 	if err != nil {
@@ -460,6 +476,28 @@ func parseFlags(flags *flag.FlagSet, args []string) int {
 		return exitUsage
 	}
 	return -1
+}
+
+func flagWasSet(flags *flag.FlagSet, name string) bool {
+	found := false
+	flags.Visit(func(flag *flag.Flag) {
+		if flag.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+func setupResourceRoot(configPath, instanceID string) string {
+	configDirectory := filepath.Dir(configPath)
+	if instanceID == delegationconfig.DefaultInstanceID {
+		return configDirectory
+	}
+	if filepath.Base(configDirectory) == instanceID &&
+		filepath.Base(filepath.Dir(configDirectory)) == "instances" {
+		return configDirectory
+	}
+	return filepath.Join(configDirectory, "instances", instanceID)
 }
 
 func writeSetupResult(stdout, stderr io.Writer, result setupResult, jsonOutput bool) int {

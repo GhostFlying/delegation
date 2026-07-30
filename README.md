@@ -122,9 +122,15 @@ plugins/delegation/scripts/delegation-mcp setup broker \
   --host-kind <codex-or-traex>
 ```
 
-The current checkpoint establishes instance and network identity only. TraeX peer setup remains
-disabled until the configurable non-shell CLI launch specification is available, and default
-paths, sockets, and native service names are not yet isolated by `instanceId`.
+TraeX peer setup remains disabled until the configurable non-shell CLI launch specification is
+available. The `default` instance keeps the existing `~/.delegation/broker.json`,
+`~/.delegation/peer.json`, local bridge, and native service identities. A named instance uses
+`~/.delegation/instances/<instanceId>/` for its default broker and peer configuration, state,
+secrets, managed Codex home, and workspaces. Its local bridge is also instance-scoped. Named broker
+setup requires explicit `--listen` and `--status-listen` addresses because the runtime does not
+guess free ports. Explicit `--config`, path, and listener arguments remain authoritative. Named
+instances can run as foreground processes, while native service installation fails closed until
+instance-scoped systemd, LaunchAgent, and Scheduled Task identities land in the next checkpoint.
 
 Enroll each peer from the broker installation before running peer setup. Choose a new stable UUID
 for the peer and start the broker once so its state is initialized, then run:
@@ -180,9 +186,10 @@ native-service source directly.
 Installation writes a disabled definition first, then enables, starts, and verifies it through the
 native service manager. The definitions are `delegation-broker.service` and
 `delegation-peer.service` on Linux, matching `.broker` and `.peer` LaunchAgents on macOS, and
-`Delegation Broker` and `Delegation Peer` Scheduled Tasks on Windows. Installation refuses foreign
-definitions and managed definitions whose executable or configuration path has drifted. A command
-whose effect cannot be reconciled returns
+`Delegation Broker` and `Delegation Peer` Scheduled Tasks on Windows. They are currently reserved
+for the `default` instance; named installation is rejected before writing an artifact. Installation
+refuses foreign definitions and managed definitions whose executable or configuration path has
+drifted. A command whose effect cannot be reconciled returns
 `indeterminate` and leaves the definition in place for inspection.
 
 Linux requires a working systemd user manager. macOS uses the current GUI launchd domain and thus

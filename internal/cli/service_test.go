@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,5 +52,45 @@ func TestServiceRunRejectsInvalidConfiguration(t *testing.T) {
 
 	if code == exitUnavailable || code == 0 {
 		t.Fatalf("service run code = %d, want configuration failure", code)
+	}
+}
+
+func TestNamedInstanceServiceInstallFailsClosedWithoutArtifact(t *testing.T) {
+	home := privateTestDirectory(t)
+	configPath := filepath.Join(home, "instances", "second", "broker.json")
+	cfg := delegationconfig.Config{
+		SchemaVersion: delegationconfig.CurrentSchemaVersion,
+		InstanceID:    "second",
+		HostKind:      "codex",
+		Role:          delegationconfig.RoleBroker,
+		ControllerID:  "123e4567-e89b-42d3-a456-426614174000",
+		Broker: delegationconfig.BrokerConfig{
+			Listen:       "127.0.0.1:18787",
+			StatusListen: "127.0.0.1:18788",
+			StateFile:    filepath.Join(home, "instances", "second", "state", "broker.sqlite3"),
+			Auth:         delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "systemd"))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run([]string{"service", "install", "--config", configPath}, &stdout, &stderr)
+
+	if code == 0 || !strings.Contains(stderr.String(), "requires instance-scoped native service support") {
+		t.Fatalf("service install code = %d, stderr = %q", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, "systemd", "systemd", "user", "delegation-broker.service")); !os.IsNotExist(err) {
+		t.Fatalf("service install created a fixed-name artifact: %v", err)
 	}
 }

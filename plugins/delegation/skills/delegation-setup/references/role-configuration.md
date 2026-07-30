@@ -1,8 +1,12 @@
 # Network Configuration
 
 Run the plugin launcher with `setup broker --help` or `setup peer --help` before writing
-configuration. One device may host both processes. Their default configs and native services are
-separate.
+configuration. One device may host multiple isolated instances. The `default` instance preserves
+the legacy top-level paths and service identities; named instances default under
+`instances/<instanceId>/` and use distinct local bridges. Supply explicit `--listen` and
+`--status-listen` values for every named broker. Use `service run --config <path>` for a named
+instance; native service installation remains disabled until instance-scoped definitions are
+available.
 
 - `setup broker` creates or joins the authority for one Delegation network. The wire field
   `controllerId` is the stable network or trust-domain ID, not a controller device role. Token

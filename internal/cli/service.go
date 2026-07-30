@@ -66,6 +66,12 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
+	if cfg.EffectiveInstanceID() != delegationconfig.DefaultInstanceID {
+		return writeError(
+			stderr,
+			errors.New("named instance service installation requires instance-scoped native service support"),
+		)
+	}
 	resolvedEnvironment := ""
 	if *environmentFile != "" {
 		resolvedEnvironment, err = absolutePath(*environmentFile)

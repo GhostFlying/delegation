@@ -36,9 +36,10 @@ func Probe(ctx context.Context, endpoint string, expected ServiceIdentity) error
 	if err := actual.Validate(); err != nil {
 		return fmt.Errorf("invalid local bridge identity: %w", err)
 	}
-	if actual != expected {
+	if !actual.Equal(expected) {
 		return fmt.Errorf(
-			"local bridge identity mismatch: got controller %s device %s",
+			"local bridge identity mismatch: got instance %s controller %s device %s",
+			actual.EffectiveInstanceID(),
 			actual.ControllerID,
 			actual.DeviceID,
 		)

@@ -16,6 +16,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/instanceid"
 )
 
 const (
@@ -87,20 +88,34 @@ func DefaultHome() (string, error) {
 }
 
 func DefaultBrokerPath() (string, error) {
-	return defaultPath("broker.json")
+	return DefaultBrokerPathForInstance(DefaultInstanceID)
 }
 
 func DefaultPeerPath() (string, error) {
-	return defaultPath("peer.json")
+	return DefaultPeerPathForInstance(DefaultInstanceID)
 }
 
-func defaultPath(name string) (string, error) {
+func DefaultBrokerPathForInstance(instanceID string) (string, error) {
+	return defaultPath(instanceID, "broker.json")
+}
+
+func DefaultPeerPathForInstance(instanceID string) (string, error) {
+	return defaultPath(instanceID, "peer.json")
+}
+
+func defaultPath(instanceID, name string) (string, error) {
+	if err := ValidateInstanceID(instanceID); err != nil {
+		return "", err
+	}
 	if path := os.Getenv("DELEGATION_CONFIG"); path != "" {
 		return filepath.Abs(path)
 	}
 	home, err := DefaultHome()
 	if err != nil {
 		return "", err
+	}
+	if instanceID != DefaultInstanceID {
+		home = filepath.Join(home, "instances", instanceID)
 	}
 	return filepath.Join(home, name), nil
 }
@@ -246,22 +261,7 @@ func (c Config) EffectiveHostKind() hostkind.Kind {
 }
 
 func ValidateInstanceID(value string) error {
-	if len(value) < 1 || len(value) > 32 {
-		return errors.New("instanceId must contain 1 through 32 characters")
-	}
-	for index, character := range value {
-		valid := character >= 'a' && character <= 'z'
-		if index > 0 {
-			valid = valid || character >= '0' && character <= '9' || character == '-'
-		}
-		if !valid {
-			return errors.New("instanceId must start with a lowercase letter and use only lowercase letters, digits, or hyphens")
-		}
-	}
-	if value[len(value)-1] == '-' {
-		return errors.New("instanceId must not end with a hyphen")
-	}
-	return nil
+	return instanceid.Validate(value)
 }
 
 func (a AuthConfig) validate() error {

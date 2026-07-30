@@ -147,7 +147,9 @@ func loadRootMCPServer(configPath string) (*mcp.Server, error) {
 	if err := pathguard.ValidatePeerAuthority(configPath, cfg.Peer.StateFile, cfg.Broker.Auth.TokenFile); err != nil {
 		return nil, err
 	}
-	endpoint, err := localbridge.Endpoint(cfg.ControllerID, cfg.DeviceID)
+	endpoint, err := localbridge.EndpointForInstance(
+		cfg.EffectiveInstanceID(), cfg.ControllerID, cfg.DeviceID,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +182,9 @@ func loadWorkerMCPServer(
 	if principal.ParentAgentID == "" {
 		return nil, errors.New("managed worker parentAgentId is required")
 	}
-	endpoint, err := localbridge.Endpoint(cfg.ControllerID, cfg.DeviceID)
+	endpoint, err := localbridge.EndpointForInstance(
+		cfg.EffectiveInstanceID(), cfg.ControllerID, cfg.DeviceID,
+	)
 	if err != nil {
 		return nil, err
 	}

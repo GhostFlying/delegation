@@ -137,6 +137,36 @@ func TestRoleSpecificDefaultPathsAndExplicitOverride(t *testing.T) {
 	}
 }
 
+func TestNamedInstanceDefaultPathsUseIsolatedNamespace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DELEGATION_HOME", home)
+	t.Setenv("DELEGATION_CONFIG", "")
+
+	brokerPath, err := DefaultBrokerPathForInstance("traex-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerPath, err := DefaultPeerPathForInstance("traex-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instanceHome := filepath.Join(home, "instances", "traex-main")
+	if brokerPath != filepath.Join(instanceHome, "broker.json") ||
+		peerPath != filepath.Join(instanceHome, "peer.json") {
+		t.Fatalf("named instance paths = %q / %q", brokerPath, peerPath)
+	}
+	defaultBroker, err := DefaultBrokerPathForInstance(DefaultInstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultBroker != filepath.Join(home, "broker.json") {
+		t.Fatalf("default broker path = %q", defaultBroker)
+	}
+	if _, err := DefaultPeerPathForInstance("Invalid"); err == nil {
+		t.Fatal("named default path accepted invalid instance")
+	}
+}
+
 func TestBrokerNonLoopbackRequiresAcknowledgement(t *testing.T) {
 	for _, auth := range []AuthConfig{
 		{Mode: AuthModeNone},
