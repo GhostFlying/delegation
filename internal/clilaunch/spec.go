@@ -16,7 +16,10 @@ const (
 )
 
 // Spec describes a shell-free CLI launcher prefix. The launcher must preserve
-// stdio and remain attached to the app-server process tree until it exits.
+// stdio. On Linux, it must replace itself with the target CLI process rather
+// than spawn and wait for it, so parent-death ownership remains attached to the
+// app-server. On macOS and Windows, it must remain attached to the target
+// process and must not daemonize or detach.
 type Spec struct {
 	Executable      string
 	PrefixArguments []string

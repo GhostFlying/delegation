@@ -15,17 +15,25 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 )
 
 const (
-	parentDeathHelperEnvironment  = "DELEGATION_APP_SERVER_PARENT_DEATH_HELPER"
-	parentDeathHomeEnvironment    = "DELEGATION_APP_SERVER_PARENT_DEATH_HOME"
-	parentDeathPIDFileEnvironment = "DELEGATION_APP_SERVER_PARENT_DEATH_PID_FILE"
-	parentDeathConnectorHelper    = "connector"
-	parentDeathAppServerHelper    = "app-server"
+	parentDeathHelperEnvironment   = "DELEGATION_APP_SERVER_PARENT_DEATH_HELPER"
+	parentDeathHomeEnvironment     = "DELEGATION_APP_SERVER_PARENT_DEATH_HOME"
+	parentDeathPIDFileEnvironment  = "DELEGATION_APP_SERVER_PARENT_DEATH_PID_FILE"
+	parentDeathLauncherEnvironment = "DELEGATION_APP_SERVER_PARENT_DEATH_LAUNCHER"
+	parentDeathConnectorHelper     = "connector"
+	parentDeathAppServerHelper     = "app-server"
 )
 
 func TestPlatformOwnerKillsAppServerAfterConnectorHardDeath(t *testing.T) {
+	testPlatformOwnerKillsAppServerAfterConnectorHardDeath(t, "")
+}
+
+func testPlatformOwnerKillsAppServerAfterConnectorHardDeath(t *testing.T, launcher string) {
+	t.Helper()
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +45,7 @@ func TestPlatformOwnerKillsAppServerAfterConnectorHardDeath(t *testing.T) {
 	command.Env = setEnvironment(command.Env, parentDeathHomeEnvironment, t.TempDir())
 	command.Env = setEnvironment(command.Env, helperFileEnvironment, heartbeat)
 	command.Env = setEnvironment(command.Env, parentDeathPIDFileEnvironment, pidFile)
+	command.Env = setEnvironment(command.Env, parentDeathLauncherEnvironment, launcher)
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
@@ -88,7 +97,7 @@ func runParentDeathConnectorHelper() int {
 		return parentDeathHelperFailure("resolve app-server helper: %v", err)
 	}
 	client, err := Start(context.Background(), Options{
-		Launch: directLaunch(executable), CodexHome: os.Getenv(parentDeathHomeEnvironment),
+		Launch: parentDeathLaunch(executable), CodexHome: os.Getenv(parentDeathHomeEnvironment),
 		Environment: map[string]string{
 			parentDeathHelperEnvironment:  parentDeathAppServerHelper,
 			helperFileEnvironment:         os.Getenv(helperFileEnvironment),
@@ -101,6 +110,17 @@ func runParentDeathConnectorHelper() int {
 	defer client.Close(context.Background())
 	for {
 		time.Sleep(time.Hour)
+	}
+}
+
+func parentDeathLaunch(executable string) clilaunch.Spec {
+	launcher := os.Getenv(parentDeathLauncherEnvironment)
+	if launcher == "" {
+		return directLaunch(executable)
+	}
+	return clilaunch.Spec{
+		Executable:      launcher,
+		PrefixArguments: []string{executable},
 	}
 }
 
