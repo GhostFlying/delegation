@@ -19,6 +19,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/credential"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
@@ -254,6 +255,26 @@ func TestUnsupportedProtocolHelloFailsBeforeRegistryMutation(t *testing.T) {
 		context.Background(), brokerTestControllerID, brokerTestDeviceID,
 	); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unsupported protocol hello changed registry: %v", err)
+	}
+}
+
+func TestTraeXBrokerRejectsCodexPeerBeforeRegistryMutation(t *testing.T) {
+	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	harness.server.hostKind = hostkind.TraeX
+	connection, _, err := dialBroker(harness, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+
+	response := writeAndRead(t, connection, helloRequest(t))
+	if response.Error == nil || response.Error.Code != protocol.ErrorInvalidParams {
+		t.Fatalf("mismatched host hello response = %#v", response)
+	}
+	if _, err := harness.registry.DescribeDevice(
+		context.Background(), brokerTestControllerID, brokerTestDeviceID,
+	); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("mismatched host hello changed registry: %v", err)
 	}
 }
 
@@ -941,6 +962,7 @@ func hello() protocol.Hello {
 		ControllerID:   brokerTestControllerID,
 		DeviceID:       brokerTestDeviceID,
 		DeviceName:     "builder",
+		HostKind:       hostkind.Codex,
 		OS:             "linux",
 		Arch:           "amd64",
 		RuntimeVersion: "0.1.0-alpha.0.m1.1",

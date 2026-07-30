@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/coder/websocket"
 )
@@ -421,6 +422,7 @@ func writeLifecycleHello(
 ) {
 	writeTestResult(t, connection, request, protocol.HelloResult{
 		ConnectionID: connectorTestConnectionID,
+		HostKind:     hostkind.Codex,
 		Features: []string{
 			protocol.FeatureChangesArtifact,
 			protocol.FeatureDeviceRegistry,

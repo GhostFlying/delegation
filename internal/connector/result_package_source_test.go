@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/coder/websocket"
 )
@@ -136,6 +137,7 @@ func TestConnectorRejectsResultPackageManifestOutsideWorkerAuthority(t *testing.
 	}
 	s := &session{client: &Client{hello: protocol.Hello{
 		ControllerID: connectorTestControllerID, DeviceID: connectorTestDeviceID,
+		HostKind: hostkind.Codex,
 	}}}
 	if _, err := s.validateResultPackagePublication(publication); err == nil {
 		t.Fatal("connector accepted result metadata outside the worker principal")

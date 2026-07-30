@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 )
 
 const (
@@ -137,7 +138,7 @@ func TestBrokerEpochExpiryAndControllerIsolation(t *testing.T) {
 	if persisted, err := queryDevice(ctx, registry.db, testControllerID, testDeviceID); err != nil || !persisted.Online {
 		t.Fatalf("device after Store.Open = %#v, error %v", persisted, err)
 	}
-	transition, err := registry.BeginBrokerEpoch(ctx, testControllerID)
+	transition, err := registry.BeginBrokerEpoch(ctx, testControllerID, hostkind.Codex)
 	if err != nil || transition != (PresenceTransition{Revision: 3, Count: 2}) {
 		t.Fatalf("broker epoch = %#v, error %v", transition, err)
 	}
@@ -151,7 +152,7 @@ func TestBrokerEpochExpiryAndControllerIsolation(t *testing.T) {
 		!device.Online || device.Revision != 1 {
 		t.Fatalf("other controller device = %#v, error %v", device, err)
 	}
-	transition, err = registry.BeginBrokerEpoch(ctx, testControllerID)
+	transition, err = registry.BeginBrokerEpoch(ctx, testControllerID, hostkind.Codex)
 	if err != nil || transition != (PresenceTransition{Revision: 3}) {
 		t.Fatalf("empty broker epoch = %#v, error %v", transition, err)
 	}
@@ -169,6 +170,32 @@ func TestBrokerEpochExpiryAndControllerIsolation(t *testing.T) {
 	secondDevice, _ := queryDevice(ctx, registry.db, testControllerID, deviceSecondID)
 	if firstDevice.Online || firstDevice.Revision != 6 || !secondDevice.Online || secondDevice.Revision != 5 {
 		t.Fatalf("expired devices = %#v, %#v", firstDevice, secondDevice)
+	}
+}
+
+func TestBrokerEpochBindsStateHostKind(t *testing.T) {
+	registry := openTestStore(t)
+	ctx := context.Background()
+	if _, err := registry.BeginBrokerEpoch(ctx, testControllerID, hostkind.Codex); err != nil {
+		t.Fatal(err)
+	}
+	for _, controllerID := range []string{testControllerID, deviceSecondControllerID} {
+		if _, err := registry.BeginBrokerEpoch(ctx, controllerID, hostkind.TraeX); err == nil ||
+			!strings.Contains(err.Error(), "does not match state host kind") {
+			t.Fatalf("mismatched host kind for controller %s error = %v", controllerID, err)
+		}
+	}
+	var mismatchedRegistryCount int
+	if err := registry.db.QueryRow(`
+SELECT count(*) FROM controller_registries WHERE controller_id = ?
+`, deviceSecondControllerID).Scan(&mismatchedRegistryCount); err != nil {
+		t.Fatal(err)
+	}
+	if mismatchedRegistryCount != 0 {
+		t.Fatal("mismatched host kind created a controller registry")
+	}
+	if _, err := registry.BeginBrokerEpoch(ctx, testControllerID, hostkind.Codex); err != nil {
+		t.Fatalf("matching host kind after rejection: %v", err)
 	}
 }
 

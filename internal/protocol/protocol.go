@@ -11,11 +11,12 @@ import (
 	"strings"
 
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 )
 
 const (
-	Version        = 3
+	Version        = 4
 	MaxMessageSize = 256 * 1024
 )
 
@@ -302,16 +303,17 @@ func validateRequestID(value string) error {
 }
 
 type Hello struct {
-	ControllerID           string   `json:"controllerId"`
-	DeviceID               string   `json:"deviceId"`
-	DeviceName             string   `json:"deviceName"`
-	OS                     string   `json:"os"`
-	Arch                   string   `json:"arch"`
-	RuntimeVersion         string   `json:"runtimeVersion"`
-	Features               []string `json:"features"`
-	Cursor                 uint64   `json:"cursor"`
-	WorkerBaselineRevision uint64   `json:"workerBaselineRevision"`
-	WorkerRevision         uint64   `json:"workerRevision"`
+	ControllerID           string        `json:"controllerId"`
+	DeviceID               string        `json:"deviceId"`
+	DeviceName             string        `json:"deviceName"`
+	HostKind               hostkind.Kind `json:"hostKind"`
+	OS                     string        `json:"os"`
+	Arch                   string        `json:"arch"`
+	RuntimeVersion         string        `json:"runtimeVersion"`
+	Features               []string      `json:"features"`
+	Cursor                 uint64        `json:"cursor"`
+	WorkerBaselineRevision uint64        `json:"workerBaselineRevision"`
+	WorkerRevision         uint64        `json:"workerRevision"`
 }
 
 func (h Hello) Descriptor() control.DeviceDescriptor {
@@ -328,6 +330,9 @@ func (h Hello) Descriptor() control.DeviceDescriptor {
 }
 
 func (h Hello) Validate() error {
+	if err := h.HostKind.Validate(); err != nil {
+		return err
+	}
 	if err := h.Descriptor().Validate(); err != nil {
 		return err
 	}
@@ -341,11 +346,12 @@ func (h Hello) Validate() error {
 }
 
 type HelloResult struct {
-	ConnectionID          string   `json:"connectionId"`
-	Features              []string `json:"features"`
-	HeartbeatIntervalMS   int64    `json:"heartbeatIntervalMs"`
-	Revision              uint64   `json:"revision"`
-	WorkerAppliedRevision uint64   `json:"workerAppliedRevision"`
+	ConnectionID          string        `json:"connectionId"`
+	HostKind              hostkind.Kind `json:"hostKind"`
+	Features              []string      `json:"features"`
+	HeartbeatIntervalMS   int64         `json:"heartbeatIntervalMs"`
+	Revision              uint64        `json:"revision"`
+	WorkerAppliedRevision uint64        `json:"workerAppliedRevision"`
 }
 
 type Heartbeat struct{}

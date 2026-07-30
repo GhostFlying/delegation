@@ -14,11 +14,13 @@ import (
 	"strings"
 
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 )
 
 const (
 	CurrentSchemaVersion = 3
+	DefaultInstanceID    = "default"
 	brokerConnectPath    = "/v1/connect"
 	maximumConfigSize    = 1024 * 1024
 	MaximumWorkerSlots   = 64
@@ -39,13 +41,15 @@ const (
 )
 
 type Config struct {
-	SchemaVersion int          `json:"schemaVersion"`
-	Role          Role         `json:"role"`
-	ControllerID  string       `json:"controllerId"`
-	DeviceID      string       `json:"deviceId,omitempty"`
-	DeviceName    string       `json:"deviceName,omitempty"`
-	Broker        BrokerConfig `json:"broker"`
-	Peer          PeerConfig   `json:"peer"`
+	SchemaVersion int           `json:"schemaVersion"`
+	InstanceID    string        `json:"instanceId,omitempty"`
+	HostKind      hostkind.Kind `json:"hostKind,omitempty"`
+	Role          Role          `json:"role"`
+	ControllerID  string        `json:"controllerId"`
+	DeviceID      string        `json:"deviceId,omitempty"`
+	DeviceName    string        `json:"deviceName,omitempty"`
+	Broker        BrokerConfig  `json:"broker"`
+	Peer          PeerConfig    `json:"peer"`
 }
 
 type BrokerConfig struct {
@@ -145,6 +149,16 @@ func (c Config) Validate() error {
 	if c.SchemaVersion != CurrentSchemaVersion {
 		return unsupportedSchemaVersion(c.SchemaVersion)
 	}
+	if c.InstanceID != "" {
+		if err := ValidateInstanceID(c.InstanceID); err != nil {
+			return err
+		}
+	}
+	if c.HostKind != "" {
+		if err := c.HostKind.Validate(); err != nil {
+			return err
+		}
+	}
 	if identity.ValidateID(c.ControllerID) != nil {
 		return errors.New("controllerId must be a UUID")
 	}
@@ -169,6 +183,9 @@ func (c Config) Validate() error {
 			}
 		}
 	case RolePeer:
+		if c.EffectiveHostKind() == hostkind.TraeX {
+			return errors.New("TraeX peer configuration requires configurable CLI launch support")
+		}
 		if identity.ValidateID(c.DeviceID) != nil {
 			return errors.New("deviceId must be a UUID")
 		}
@@ -212,6 +229,39 @@ func unsupportedSchemaVersion(version int) error {
 		version,
 		CurrentSchemaVersion,
 	)
+}
+
+func (c Config) EffectiveInstanceID() string {
+	if c.InstanceID == "" {
+		return DefaultInstanceID
+	}
+	return c.InstanceID
+}
+
+func (c Config) EffectiveHostKind() hostkind.Kind {
+	if c.HostKind == "" {
+		return hostkind.Codex
+	}
+	return c.HostKind
+}
+
+func ValidateInstanceID(value string) error {
+	if len(value) < 1 || len(value) > 32 {
+		return errors.New("instanceId must contain 1 through 32 characters")
+	}
+	for index, character := range value {
+		valid := character >= 'a' && character <= 'z'
+		if index > 0 {
+			valid = valid || character >= '0' && character <= '9' || character == '-'
+		}
+		if !valid {
+			return errors.New("instanceId must start with a lowercase letter and use only lowercase letters, digits, or hyphens")
+		}
+	}
+	if value[len(value)-1] == '-' {
+		return errors.New("instanceId must not end with a hyphen")
+	}
+	return nil
 }
 
 func (a AuthConfig) validate() error {

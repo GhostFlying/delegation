@@ -19,6 +19,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/broker"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
@@ -565,6 +566,7 @@ func sendRuntimeHello(t *testing.T, connection *websocket.Conn, deviceID string)
 		ControllerID:   runtimeControllerID,
 		DeviceID:       deviceID,
 		DeviceName:     "runtime-worker",
+		HostKind:       hostkind.Codex,
 		OS:             "linux",
 		Arch:           "amd64",
 		RuntimeVersion: "0.1.0-alpha.0.m1.1",

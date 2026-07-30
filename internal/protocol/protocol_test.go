@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 )
 
 const (
@@ -179,6 +180,7 @@ func TestHelloDescriptorExcludesBrokerPresence(t *testing.T) {
 		ControllerID:   testControllerID,
 		DeviceID:       testDeviceID,
 		DeviceName:     "builder",
+		HostKind:       hostkind.Codex,
 		OS:             "windows",
 		Arch:           "amd64",
 		RuntimeVersion: "0.1.0-alpha.0.m1.1",

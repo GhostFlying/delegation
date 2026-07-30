@@ -109,6 +109,23 @@ the token itself is never accepted as a command-line value. Pass the same `--dev
 the broker issued that token. Setup validates the complete peer configuration before creating
 local credentials and never overwrites an existing configuration.
 
+`instanceId` names one local Delegation deployment. It is not a principal, credential, protocol
+target, or network identity. `hostKind` identifies the CLI family hosted by one homogeneous network
+and currently accepts only `codex` or `traex`; a broker rejects peers from the other family before
+registry mutation, and broker state is permanently bound to its first host family. Existing
+version-3 configs that omit both fields are interpreted as the `default` Codex instance. New setup
+commands persist both fields explicitly:
+
+```bash
+plugins/delegation/scripts/delegation-mcp setup broker \
+  --instance <local-instance-name> \
+  --host-kind <codex-or-traex>
+```
+
+The current checkpoint establishes instance and network identity only. TraeX peer setup remains
+disabled until the configurable non-shell CLI launch specification is available, and default
+paths, sockets, and native service names are not yet isolated by `instanceId`.
+
 Enroll each peer from the broker installation before running peer setup. Choose a new stable UUID
 for the peer and start the broker once so its state is initialized, then run:
 
@@ -185,11 +202,12 @@ plugins/delegation/scripts/delegation-mcp status --config <peer.json> --json
 Peer status is read from the same-user local connector bridge and distinguishes local worker state
 from the revision acknowledged by the broker. A successful status read proves the peer service is
 running; `connectionState=ready` separately proves that its broker connection and worker lifecycle
-sync are usable. Protocol v3 sends both the pre-recovery startup baseline and the current worker
-revision: the broker uses the baseline for rollback detection but does not make the peer
-dispatchable until it has acknowledged the current revision. A replaced peer database is reported
-as `stateRecoveryRequired` with `peer_worker_revision_rollback` and both the local and broker worker
-revisions instead of as a generic disconnect. Broker status combines durable network counters with
+sync are usable. Protocol v4 identifies the CLI host family and sends both the pre-recovery startup
+baseline and the current worker revision: the broker uses the baseline for rollback detection but
+does not make the peer dispatchable until it has acknowledged the current revision. A replaced peer
+database is reported as `stateRecoveryRequired` with `peer_worker_revision_rollback` and both the
+local and broker worker revisions instead of as a generic disconnect. Broker status combines
+durable network counters with
 the current synchronized connection set. It includes registered/online/connected/sync-ready device
 counts, current and lifetime dispatch/turn counts, occupied worker slots, and bounded artifact
 counts. Broker result status separates current delivery/detail retention from lifetime delivered,

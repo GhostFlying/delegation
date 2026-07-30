@@ -20,6 +20,11 @@ CREATE TABLE credentials (
     PRIMARY KEY (controller_id, device_id)
 ) STRICT;
 
+CREATE TABLE broker_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    host_kind TEXT NOT NULL CHECK (host_kind IN ('codex', 'traex'))
+) STRICT;
+
 CREATE TABLE controller_registries (
     controller_id TEXT PRIMARY KEY,
     revision INTEGER NOT NULL CHECK (revision >= 0)
