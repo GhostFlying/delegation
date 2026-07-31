@@ -65,7 +65,11 @@ func TestClientRoutesConcurrentResponsesAndNotifications(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedArguments := []string{filepath.Clean(executable), "app-server", "--listen", "stdio://"}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedArguments := []string{executable, "app-server", "--listen", "stdio://"}
 	if len(inspect.Arguments) != len(expectedArguments) {
 		t.Fatalf("helper arguments = %q, want %q", inspect.Arguments, expectedArguments)
 	}
@@ -161,7 +165,11 @@ func TestClientPreservesStructuredLaunchPrefixArguments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := append([]string{filepath.Clean(executable)}, prefix...)
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append([]string{executable}, prefix...)
 	want = append(want, "app-server", "--listen", "stdio://")
 	if !slices.Equal(inspect.Arguments, want) {
 		t.Fatalf("helper arguments = %q, want %q", inspect.Arguments, want)

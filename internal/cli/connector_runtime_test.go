@@ -78,6 +78,14 @@ func TestResolveConfiguredCLILaunchPreservesArgumentBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	resolvedRuntime, err := filepath.EvalSymlinks(runtimeExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedLauncher, err := filepath.EvalSymlinks(launcherExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		name       string
 		configured delegationconfig.CLIConfig
@@ -89,7 +97,7 @@ func TestResolveConfiguredCLILaunchPreservesArgumentBoundaries(t *testing.T) {
 				Arguments: []string{"-p", "profile with spaces", "semi;colon"},
 			},
 			want: clilaunch.Spec{
-				Executable:      runtimeExecutable,
+				Executable:      resolvedRuntime,
 				PrefixArguments: []string{"-p", "profile with spaces", "semi;colon"},
 			},
 		},
@@ -103,7 +111,7 @@ func TestResolveConfiguredCLILaunchPreservesArgumentBoundaries(t *testing.T) {
 				},
 			},
 			want: clilaunch.Spec{
-				Executable: launcherExecutable,
+				Executable: resolvedLauncher,
 				PrefixArguments: []string{
 					"run", "--", runtimeExecutable,
 					"-p", "profile with spaces", "semi;colon",

@@ -39,7 +39,15 @@ func TestResolveCanonicalizesStructuredLaunch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Executable != launcher || resolvedRuntime != runtimeExecutable ||
+	wantLauncher, err := filepath.EvalSymlinks(launcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRuntime, err := filepath.EvalSymlinks(runtimeExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Executable != wantLauncher || resolvedRuntime != wantRuntime ||
 		!slices.Equal(resolved.PrefixArguments, prefix) {
 		t.Fatalf("resolved launch = %#v", resolved)
 	}
