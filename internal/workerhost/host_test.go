@@ -211,11 +211,18 @@ func TestHostIsolatesRuntimeHomeForHostKind(t *testing.T) {
 				}
 			}
 			if test.hostKind == hostkind.TraeX {
-				info, err := os.Stat(wantHomes["TRAECLI_HOME"])
+				cliHome := wantHomes["TRAECLI_HOME"]
+				info, err := os.Stat(cliHome)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+				if !info.IsDir() {
+					t.Fatalf("managed TRAECLI_HOME mode = %v", info.Mode())
+				}
+				if err := config.ValidatePrivateDirectory(cliHome); err != nil {
+					t.Fatalf("managed TRAECLI_HOME is not private: %v", err)
+				}
+				if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 					t.Fatalf("managed TRAECLI_HOME mode = %v", info.Mode())
 				}
 			}
