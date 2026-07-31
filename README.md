@@ -139,8 +139,10 @@ plugins/delegation/scripts/delegation-mcp setup peer \
   --cli-launcher-prefix-argument=--
 ```
 
-This checkpoint configures and validates TraeX launch only. Managed TraeX worker execution remains
-unavailable until the TraeX app-server protocol adaptation lands.
+Managed TraeX workers use this exact shell-free launch. The connector adapts TraeX's app-server
+thread source, workspace-root response, idle completion, and `TRAECLI_HOME` rollout layout while
+preserving the same isolated worker profile and worker-only MCP authority as Codex. Codex and TraeX
+remain separate deployments; this does not enable cross-CLI dispatch or mixed-CLI networks.
 
 This persists `peer.cli.command`, exact `arguments`, and a shell-free `launcher` with `executable`
 and `prefixArguments`; legacy version-3 Codex configs using `peer.codexBinary` remain readable. A

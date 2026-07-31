@@ -3,6 +3,7 @@ package rolloutcapture
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +17,52 @@ import (
 type Locator struct {
 	Path   string
 	Offset int64
+}
+
+// Find locates the one active managed rollout whose filename identifies
+// threadID. It does not follow symbolic links and validates the selected file
+// through the same anchored checks as Locate.
+func Find(codexHome, threadID string) (Locator, error) {
+	if err := identity.ValidateID(threadID); err != nil {
+		return Locator{}, fmt.Errorf("threadId %w", err)
+	}
+	if !filepath.IsAbs(codexHome) {
+		return Locator{}, errors.New("Codex home must be absolute")
+	}
+	resolvedHome, err := filepath.EvalSymlinks(filepath.Clean(codexHome))
+	if err != nil {
+		return Locator{}, fmt.Errorf("resolve managed Codex home: %w", err)
+	}
+	root, err := os.OpenRoot(resolvedHome)
+	if err != nil {
+		return Locator{}, fmt.Errorf("open managed Codex home: %w", err)
+	}
+	defer root.Close()
+
+	expectedSuffix := "-" + threadID + ".jsonl"
+	var match string
+	err = fs.WalkDir(root.FS(), "sessions", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 ||
+			!strings.HasPrefix(entry.Name(), "rollout-") ||
+			!strings.HasSuffix(entry.Name(), expectedSuffix) {
+			return nil
+		}
+		if match != "" {
+			return errors.New("managed thread has multiple active rollout files")
+		}
+		match = path
+		return nil
+	})
+	if err != nil {
+		return Locator{}, fmt.Errorf("find managed rollout: %w", err)
+	}
+	if match == "" {
+		return Locator{}, errors.New("managed rollout was not found")
+	}
+	return Locate(resolvedHome, threadID, filepath.Join(resolvedHome, match))
 }
 
 // Locate validates an app-server Thread.path without searching for a newer

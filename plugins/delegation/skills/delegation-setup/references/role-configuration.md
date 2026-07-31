@@ -42,8 +42,10 @@ setup peer
   --cli-launcher-prefix-argument=--
 ```
 
-This configures and validates TraeX launch only. Managed TraeX worker execution remains unavailable
-until the TraeX app-server protocol adaptation lands.
+Managed TraeX workers use this exact shell-free launch. The connector adapts TraeX's app-server
+thread source, workspace-root response, idle completion, and `TRAECLI_HOME` rollout layout while
+preserving the isolated worker profile and worker-only MCP authority. Keep Codex and TraeX in
+separate instances; cross-CLI dispatch and mixed-CLI networks are not supported.
 
 The launcher must preserve stdio. On Linux it must `exec` the target CLI; on macOS and Windows it
 must remain attached and must not daemonize or detach. The connector assembles

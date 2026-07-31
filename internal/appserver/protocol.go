@@ -14,6 +14,7 @@ const (
 	MethodThreadResume        = "thread/resume"
 	MethodThreadRead          = "thread/read"
 	MethodMCPServerStatusList = "mcpServerStatus/list"
+	MethodMCPServerToolCall   = "mcpServer/tool/call"
 	MethodTurnStart           = "turn/start"
 	MethodTurnSteer           = "turn/steer"
 	MethodTurnInterrupt       = "turn/interrupt"

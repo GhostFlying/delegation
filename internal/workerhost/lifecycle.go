@@ -27,7 +27,7 @@ func (h *Host) startNewThread(
 		CWD: h.workerCWD(worker), RuntimeWorkspaceRoots: []string{worker.WorkspacePath},
 		ApprovalPolicy: "never",
 		Config:         h.managedConfig(worker), ServiceName: "delegation",
-		ThreadSource: workerSource, DeveloperMessage: workerInstructions,
+		ThreadSource: h.workerSource(), DeveloperMessage: workerInstructions,
 	}, &result)
 	if err != nil {
 		if errors.Is(err, appserver.ErrRequestNotWritten) {
@@ -82,14 +82,12 @@ func (h *Host) resumeThread(
 	worker store.WorkerReservation,
 	retryStatus store.WorkerStatus,
 ) (store.WorkerReservation, <-chan struct{}, error) {
+	params, err := h.threadResumeParams(ctx, worker, nil)
+	if err != nil {
+		return worker, nil, h.failWorker(worker.WorkerKey, "thread_resume_failed", err)
+	}
 	var result threadResult
-	err := client.ThreadResume(ctx, threadResumeParams{
-		ThreadID: worker.CodexThreadID, CWD: h.workerCWD(worker),
-		RuntimeWorkspaceRoots: []string{worker.WorkspacePath},
-		ApprovalPolicy:        "never",
-		Config:                h.managedConfig(worker), DeveloperMessage: workerInstructions,
-		ExcludeTurns: true,
-	}, &result)
+	err = client.ThreadResume(ctx, params, &result)
 	if err != nil {
 		if errors.Is(err, appserver.ErrRequestNotWritten) {
 			restored, restoreErr := h.restoreWorkerAfterUnsent(worker, retryStatus, err)

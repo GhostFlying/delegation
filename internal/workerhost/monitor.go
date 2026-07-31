@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/appserver"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/rolloutcapture"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -57,15 +60,29 @@ func (h *Host) handleNotification(client application, notification appserver.Not
 		if err := identity.ValidateID(completed.Turn.ID); err != nil {
 			return errors.Join(errInvalidLifecycleNotification, fmt.Errorf("turnId %w", err))
 		}
-		select {
-		case h.completionEvents <- queuedCompletion{client: client, completed: completed}:
+		return h.enqueueCompletion(client, completed)
+	case "thread/status/changed":
+		if h.hostKind != hostkind.TraeX {
 			return nil
-		default:
-			return errors.Join(
-				errInvalidLifecycleNotification,
-				errors.New("managed completion queue is full"),
-			)
 		}
+		var changed threadStatusChangedNotification
+		if err := decodeNotification(notification.Params, &changed); err != nil {
+			return errors.Join(errInvalidLifecycleNotification, err)
+		}
+		if err := identity.ValidateID(changed.ThreadID); err != nil {
+			return errors.Join(errInvalidLifecycleNotification, fmt.Errorf("threadId %w", err))
+		}
+		if changed.Status.Type != "idle" {
+			return nil
+		}
+		completed, err := h.readTraeXCompletion(client, changed.ThreadID)
+		if err != nil {
+			return errors.Join(errInvalidLifecycleNotification, err)
+		}
+		if completed == nil {
+			return nil
+		}
+		return h.enqueueCompletion(client, *completed)
 	case "thread/closed":
 		var closed struct {
 			ThreadID string `json:"threadId"`
@@ -83,9 +100,132 @@ func (h *Host) handleNotification(client application, notification appserver.Not
 		)
 	case "error":
 		h.reportError(errors.New("managed app-server reported a thread error"))
-	case "mcpServer/startupStatus/updated", "thread/started", "thread/status/changed", "turn/started":
+	case "mcpServer/startupStatus/updated", "thread/started", "turn/started":
 		// These bounded lifecycle notifications are useful diagnostics, but the
 		// persisted worker state is driven by RPC responses and turn completion.
+	}
+	return nil
+}
+
+func (h *Host) enqueueCompletion(
+	client application,
+	completed turnCompletedNotification,
+) error {
+	select {
+	case h.completionEvents <- queuedCompletion{client: client, completed: completed}:
+		return nil
+	default:
+		return errors.Join(
+			errInvalidLifecycleNotification,
+			errors.New("managed completion queue is full"),
+		)
+	}
+}
+
+func (h *Host) readTraeXCompletion(
+	client application,
+	threadID string,
+) (*turnCompletedNotification, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), stateTimeout)
+	defer cancel()
+	worker, err := h.state.WorkerForThread(ctx, h.controllerID, threadID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find idle TraeX worker: %w", err)
+	}
+	var expectedTurnID string
+	var previousTurnID string
+	preparedInitial := false
+	switch worker.Status {
+	case store.WorkerRunning, store.WorkerInterrupted:
+		expectedTurnID = worker.ActiveTurnID
+	case store.WorkerReady:
+		intent, err := h.state.GetPreparedWorkerTurnStartIntent(ctx, worker.WorkerKey)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load idle TraeX turn intent: %w", err)
+		}
+		previousTurnID = intent.PreviousTurnID
+		preparedInitial = intent.PreviousTurnID == "" &&
+			intent.Rollout.Status == store.WorkerRolloutUnavailable
+	case store.WorkerIdle, store.WorkerFinalizing, store.WorkerFailed:
+		return nil, nil
+	default:
+		return nil, nil
+	}
+	var read threadResult
+	if err := client.ThreadRead(ctx, threadReadParams{
+		ThreadID: threadID, IncludeTurns: true,
+	}, &read); err != nil {
+		return nil, fmt.Errorf("read idle TraeX thread: %w", err)
+	}
+	if read.Thread.ID != threadID {
+		return nil, errors.New("app-server read an unexpected idle TraeX thread")
+	}
+	h.markLoaded(client, worker.WorkerKey, threadID, read.Thread.Path)
+	var completed turn
+	if expectedTurnID != "" {
+		for _, candidate := range read.Thread.Turns {
+			if candidate.ID == expectedTurnID {
+				completed = candidate
+				break
+			}
+		}
+		if completed.ID == "" {
+			return nil, errors.New("idle TraeX thread is missing its active turn")
+		}
+	} else {
+		candidates, err := turnsAfter(read.Thread.Turns, previousTurnID)
+		if err != nil {
+			return nil, err
+		}
+		if len(candidates) != 1 {
+			return nil, errors.New("idle TraeX thread does not contain one prepared turn")
+		}
+		completed = candidates[0]
+	}
+	if err := identity.ValidateID(completed.ID); err != nil {
+		return nil, fmt.Errorf("idle TraeX turnId %w", err)
+	}
+	switch completed.Status {
+	case "completed", "failed", "interrupted":
+	default:
+		return nil, fmt.Errorf(
+			"idle TraeX thread returned non-terminal turn status %q",
+			completed.Status,
+		)
+	}
+	notification := &turnCompletedNotification{ThreadID: threadID, Turn: completed}
+	if preparedInitial && read.Thread.Path != nil {
+		notification.Rollout = h.locateInitialTraeXRollout(ctx, threadID, *read.Thread.Path)
+	}
+	return notification, nil
+}
+
+func (h *Host) locateInitialTraeXRollout(
+	ctx context.Context,
+	threadID, path string,
+) *store.WorkerRolloutLocator {
+	retryDelay := rolloutFlushRetryMin
+	for attempt := range rolloutFlushAttempts {
+		locator, err := rolloutcapture.Locate(h.rolloutHome, threadID, path)
+		if err == nil {
+			return &store.WorkerRolloutLocator{
+				Status: store.WorkerRolloutAvailable, CodexHome: h.rolloutHome,
+				Path: locator.Path, Offset: 0,
+			}
+		}
+		if !errors.Is(err, os.ErrNotExist) || attempt == rolloutFlushAttempts-1 {
+			return nil
+		}
+		if err := h.waitForRolloutFlush(ctx, retryDelay); err != nil {
+			return nil
+		}
+		retryDelay = min(retryDelay*2, rolloutFlushRetryMax)
 	}
 	return nil
 }
@@ -173,9 +313,24 @@ func (h *Host) completeTurn(completed turnCompletedNotification) error {
 		if intentErr != nil {
 			return fmt.Errorf("load completed worker turn intent: %w", intentErr)
 		}
-		resolution, bindErr := h.state.BindWorkerTurnStartIntent(
-			ctx, worker.WorkerKey, intent.IntentID, completed.Turn.ID, time.Now(),
+		var (
+			resolution store.WorkerTurnStartResolution
+			bindErr    error
 		)
+		if completed.Rollout != nil {
+			resolution, bindErr = h.state.BindInitialWorkerTurnStartIntent(
+				ctx,
+				worker.WorkerKey,
+				intent.IntentID,
+				completed.Turn.ID,
+				*completed.Rollout,
+				time.Now(),
+			)
+		} else {
+			resolution, bindErr = h.state.BindWorkerTurnStartIntent(
+				ctx, worker.WorkerKey, intent.IntentID, completed.Turn.ID, time.Now(),
+			)
+		}
 		worker, bindErr = h.recordWorkerChange(resolution.Worker, bindErr)
 		if bindErr != nil {
 			return fmt.Errorf("bind completed worker turn intent: %w", bindErr)

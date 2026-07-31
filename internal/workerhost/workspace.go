@@ -13,6 +13,7 @@ import (
 
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/gitworkspace"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/store"
 )
@@ -280,8 +281,14 @@ func (h *Host) validateThreadWorkspace(result threadResult, worker store.WorkerR
 	if !sameNativePath(result.CWD, h.workerCWD(worker)) {
 		return errors.New("managed app-server returned an unexpected thread cwd")
 	}
-	if len(result.RuntimeWorkspaceRoots) != 1 ||
-		!sameNativePath(result.RuntimeWorkspaceRoots[0], worker.WorkspacePath) {
+	if h.hostKind == hostkind.Codex &&
+		(len(result.RuntimeWorkspaceRoots) != 1 ||
+			!sameNativePath(result.RuntimeWorkspaceRoots[0], worker.WorkspacePath)) {
+		return errors.New("managed app-server returned unexpected runtime workspace roots")
+	}
+	if h.hostKind == hostkind.TraeX && len(result.RuntimeWorkspaceRoots) != 0 &&
+		(len(result.RuntimeWorkspaceRoots) != 1 ||
+			!sameNativePath(result.RuntimeWorkspaceRoots[0], worker.WorkspacePath)) {
 		return errors.New("managed app-server returned unexpected runtime workspace roots")
 	}
 	expectedProfile := workerPermissionProfile

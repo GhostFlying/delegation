@@ -416,6 +416,10 @@ func (c *Client) MCPServerStatusList(ctx context.Context, params, result any) er
 	return c.Call(ctx, MethodMCPServerStatusList, params, result)
 }
 
+func (c *Client) MCPServerToolCall(ctx context.Context, params, result any) error {
+	return c.Call(ctx, MethodMCPServerToolCall, params, result)
+}
+
 func (c *Client) TurnStart(ctx context.Context, params, result any) error {
 	return c.Call(ctx, MethodTurnStart, params, result)
 }

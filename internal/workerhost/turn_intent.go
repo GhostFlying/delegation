@@ -60,13 +60,12 @@ func (h *Host) reconcilePreparedTurnIntent(
 		return StartedTurn{Worker: worker}, nil, err
 	}
 	if !h.isLoaded(client, worker.WorkerKey, worker.CodexThreadID) {
+		params, err := h.threadResumeParams(ctx, worker, &intent)
+		if err != nil {
+			return StartedTurn{Worker: worker}, nil, err
+		}
 		var result threadResult
-		err := client.ThreadResume(ctx, threadResumeParams{
-			ThreadID: worker.CodexThreadID, CWD: h.workerCWD(worker),
-			RuntimeWorkspaceRoots: []string{worker.WorkspacePath}, ApprovalPolicy: "never",
-			Config: h.managedConfig(worker), DeveloperMessage: workerInstructions,
-			ExcludeTurns: true,
-		}, &result)
+		err = client.ThreadResume(ctx, params, &result)
 		if err != nil {
 			if h.shouldRetire(client, err) {
 				return StartedTurn{Worker: worker}, h.retireClient(client, err), err
@@ -272,13 +271,12 @@ func (h *Host) recoverBoundTurnIntent(
 		return store.ErrWorkerTurnStartIntentConflict
 	}
 	if !h.isLoaded(client, worker.WorkerKey, worker.CodexThreadID) {
+		params, err := h.threadResumeParams(ctx, worker, &intent)
+		if err != nil {
+			return err
+		}
 		var result threadResult
-		if err := client.ThreadResume(ctx, threadResumeParams{
-			ThreadID: worker.CodexThreadID, CWD: h.workerCWD(worker),
-			RuntimeWorkspaceRoots: []string{worker.WorkspacePath}, ApprovalPolicy: "never",
-			Config: h.managedConfig(worker), DeveloperMessage: workerInstructions,
-			ExcludeTurns: true,
-		}, &result); err != nil {
+		if err := client.ThreadResume(ctx, params, &result); err != nil {
 			return err
 		}
 		if result.Thread.ID != worker.CodexThreadID {
@@ -392,7 +390,7 @@ func (h *Host) refreshInitialRolloutPathAfterTurnStart(
 			h.markLoaded(client, worker.WorkerKey, worker.CodexThreadID, read.Thread.Path)
 			if read.Thread.Path != nil {
 				if _, err := rolloutcapture.Locate(
-					h.codexHome, worker.CodexThreadID, *read.Thread.Path,
+					h.rolloutHome, worker.CodexThreadID, *read.Thread.Path,
 				); err == nil {
 					return nil
 				}
@@ -471,9 +469,9 @@ func (h *Host) rolloutLocator(
 			Status: store.WorkerRolloutUnavailable, FailureCode: rolloutLocatorFailureCode,
 		}
 	}
-	locator, err := rolloutcapture.Locate(h.codexHome, worker.CodexThreadID, loaded.Path)
+	locator, err := rolloutcapture.Locate(h.rolloutHome, worker.CodexThreadID, loaded.Path)
 	if err != nil {
-		home, homeErr := os.Stat(h.codexHome)
+		home, homeErr := os.Stat(h.rolloutHome)
 		if worker.LastBoundTurnID != "" || !errors.Is(err, os.ErrNotExist) ||
 			homeErr != nil || !home.IsDir() {
 			h.reportError(fmt.Errorf("locate managed rollout before turn start: %w", err))
@@ -483,7 +481,7 @@ func (h *Host) rolloutLocator(
 		}
 	}
 	return store.WorkerRolloutLocator{
-		Status: store.WorkerRolloutAvailable, CodexHome: h.codexHome,
+		Status: store.WorkerRolloutAvailable, CodexHome: h.rolloutHome,
 		Path: locator.Path, Offset: locator.Offset,
 	}
 }
