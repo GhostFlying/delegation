@@ -15,13 +15,17 @@ func TestResolveTraeXCommandDoesNotAddCodexEnvironment(t *testing.T) {
 	if err := os.WriteFile(runtimePath, []byte("test"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	commandPath := filepath.Join(root, "traex")
+	commandName := "traex"
+	if os.PathSeparator == '\\' {
+		commandName += ".exe"
+	}
+	commandPath := filepath.Join(root, commandName)
 	if err := os.Symlink(runtimePath, commandPath); err != nil {
 		t.Skipf("symbolic links are unavailable: %v", err)
 	}
 	t.Setenv("PATH", root)
 
-	got, err := Resolve(hostkind.TraeX, "traex")
+	got, err := Resolve(hostkind.TraeX, commandName)
 	if err != nil {
 		t.Fatal(err)
 	}

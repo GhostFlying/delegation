@@ -135,7 +135,11 @@ func TestResolveConfiguredCLILaunchFollowsUpdatedLauncherSymlink(t *testing.T) {
 	root := t.TempDir()
 	firstTarget := filepath.Join(root, "warmpool-first")
 	secondTarget := filepath.Join(root, "warmpool-second")
-	launcher := filepath.Join(root, "warmpool")
+	launcherName := "warmpool"
+	if os.PathSeparator == '\\' {
+		launcherName += ".exe"
+	}
+	launcher := filepath.Join(root, launcherName)
 	runtimeExecutable := filepath.Join(root, "traex")
 	for _, path := range []string{firstTarget, secondTarget, runtimeExecutable} {
 		if err := os.WriteFile(path, []byte("test"), 0o700); err != nil {

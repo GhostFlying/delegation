@@ -330,6 +330,15 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
+	if networkHostKind == hostkind.TraeX {
+		info, statErr := os.Lstat(resolvedCodexHome)
+		if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return writeError(stderr, errors.New("managed TRAE_HOME must not be a symbolic link"))
+		}
+		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+			return writeError(stderr, fmt.Errorf("inspect managed TRAE_HOME: %w", statErr))
+		}
+	}
 	if target, evalErr := filepath.EvalSymlinks(resolvedCodexHome); evalErr == nil {
 		resolvedCodexHome = target
 	} else if !errors.Is(evalErr, os.ErrNotExist) {

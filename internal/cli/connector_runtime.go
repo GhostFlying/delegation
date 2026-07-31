@@ -18,6 +18,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/gitworkspace"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
@@ -490,6 +491,16 @@ func loadConnectorAuthority(
 		cfg.Peer.CodexHome,
 	); err != nil {
 		return connectorAuthority{}, err
+	}
+	if cfg.EffectiveHostKind() == hostkind.TraeX {
+		cliHome := filepath.Join(cfg.Peer.CodexHome, "cli")
+		if _, err := os.Lstat(cliHome); err == nil {
+			if err := delegationconfig.ValidatePrivateDirectory(cliHome); err != nil {
+				return connectorAuthority{}, fmt.Errorf("validate managed TRAECLI_HOME: %w", err)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return connectorAuthority{}, fmt.Errorf("inspect managed TRAECLI_HOME: %w", err)
+		}
 	}
 	if err := delegationconfig.ValidatePrivateDirectory(cfg.Peer.WorkspaceRoot); err != nil {
 		return connectorAuthority{}, fmt.Errorf("validate managed workspace root: %w", err)
