@@ -35,6 +35,90 @@ func TestLocateManagedRollout(t *testing.T) {
 	}
 }
 
+func TestFindManagedRollout(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(
+		home, "sessions", "2026", "07", "26", "rollout-2026-07-26T00-00-00-"+testThreadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("rollout\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Find(home, testThreadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != (Locator{Path: resolvedPath, Offset: 8}) {
+		t.Fatalf("locator = %#v", got)
+	}
+}
+
+func TestFindRequiresOneActiveManagedRollout(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		paths []string
+	}{
+		{name: "missing"},
+		{
+			name: "multiple",
+			paths: []string{
+				filepath.Join("sessions", "2026", "07", "26",
+					"rollout-2026-07-26T00-00-00-"+testThreadID+".jsonl"),
+				filepath.Join("sessions", "2026", "07", "27",
+					"rollout-2026-07-27T00-00-00-"+testThreadID+".jsonl"),
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(home, "sessions"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, relative := range test.paths {
+				path := filepath.Join(home, relative)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := Find(home, testThreadID); err == nil {
+				t.Fatal("Find accepted a non-unique managed rollout")
+			}
+		})
+	}
+}
+
+func TestFindDoesNotFollowSymbolicLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires optional Windows privileges")
+	}
+	home := t.TempDir()
+	outside := t.TempDir()
+	path := filepath.Join(
+		outside, "rollout-2026-07-26T00-00-00-"+testThreadID+".jsonl",
+	)
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(home, "sessions", "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Find(home, testThreadID); err == nil {
+		t.Fatal("Find followed a symbolic-link directory")
+	}
+}
+
 func TestOpenValidatedKeepsValidatedHandleAfterPathReplacement(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(

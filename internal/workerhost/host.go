@@ -61,6 +61,7 @@ type application interface {
 	ThreadResume(context.Context, any, any) error
 	ThreadRead(context.Context, any, any) error
 	MCPServerStatusList(context.Context, any, any) error
+	MCPServerToolCall(context.Context, any, any) error
 	TurnStart(context.Context, any, any) error
 	TurnSteer(context.Context, any, any) error
 	TurnInterrupt(context.Context, any, any) error
@@ -163,6 +164,7 @@ type Host struct {
 	shellExcludedEnvironment []string
 	providerEnvironmentFile  string
 	codexHome                string
+	rolloutHome              string
 	workspaceRoot            *os.Root
 	artifactRoot             *os.Root
 	removeWorkspaceTransfer  func(string) error
@@ -368,6 +370,10 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		appServerUnsetEnvironment,
 		runtimeHomeUnsetEnvironment...,
 	)
+	rolloutHome := codexHome
+	if options.HostKind == hostkind.TraeX {
+		rolloutHome = runtimeHomeEnvironment["TRAECLI_HOME"]
+	}
 	shellExcludedEnvironment := append(
 		append([]string(nil), hostAuthEnvironment...),
 		codexconfig.EnvironmentVariable, "CODEX_HOME", "TRAE_HOME", "TRAECLI_HOME",
@@ -387,6 +393,7 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		runtimeHomeEnvironment:   runtimeHomeEnvironment,
 		shellExcludedEnvironment: uniqueEnvironmentNames(shellExcludedEnvironment),
 		providerEnvironmentFile:  providerEnvironmentFile,
+		rolloutHome:              rolloutHome,
 		workspaceRoot:            root, artifactRoot: artifactRoot,
 		maxWorkerSlots:          options.MaxWorkerSlots,
 		removeWorkspaceTransfer: root.RemoveAll,

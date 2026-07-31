@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -184,6 +185,13 @@ func TestHostIsolatesRuntimeHomeForHostKind(t *testing.T) {
 					wantHomes,
 				)
 			}
+			wantRolloutHome := host.codexHome
+			if test.hostKind == hostkind.TraeX {
+				wantRolloutHome = wantHomes["TRAECLI_HOME"]
+			}
+			if host.rolloutHome != wantRolloutHome {
+				t.Fatalf("rollout home = %q, want %q", host.rolloutHome, wantRolloutHome)
+			}
 			for _, name := range test.wantUnset {
 				if !slices.Contains(paths.launchOptions.UnsetEnvironment, name) {
 					t.Fatalf(
@@ -220,6 +228,287 @@ func TestHostIsolatesRuntimeHomeForHostKind(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHostAdaptsThreadStartProtocolByHostKind(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		hostKind   hostkind.Kind
+		wantSource string
+		omitRoots  bool
+	}{
+		{name: "codex", hostKind: hostkind.Codex, wantSource: codexWorkerSource},
+		{name: "traex", hostKind: hostkind.TraeX, wantSource: traeXWorkerSource, omitRoots: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			application := newFakeApplication()
+			if test.omitRoots {
+				application.threadStartResultHook = func(result *threadResult) {
+					result.RuntimeWorkspaceRoots = nil
+				}
+			}
+			host, _, _ := newTestHostForKind(t, test.hostKind, 1, application)
+			spawnTestWorker(t, host, newTestID(), test.name+" thread protocol")
+			record := application.snapshot()
+			if len(record.starts) != 1 || record.starts[0].ThreadSource != test.wantSource {
+				t.Fatalf("thread starts = %#v, want source %q", record.starts, test.wantSource)
+			}
+			if len(record.starts[0].RuntimeWorkspaceRoots) != 1 {
+				t.Fatalf("thread request omitted runtime workspace roots: %#v", record.starts[0])
+			}
+		})
+	}
+}
+
+func TestTraeXWorkerMCPPreflightProbesOnlyRequiredTools(t *testing.T) {
+	application := newFakeApplication()
+	host, _, _ := newTestHostForKind(t, hostkind.TraeX, 1, application)
+	started := spawnTestWorker(t, host, newTestID(), "TraeX MCP preflight")
+
+	record := application.snapshot()
+	want := []mcpToolCallParams{
+		{
+			ThreadID: started.Worker.CodexThreadID,
+			Server:   workerServerName,
+			Tool:     "send_upstream_message",
+			Arguments: map[string]any{
+				"messageId": "invalid",
+				"message":   "MCP availability probe",
+			},
+		},
+		{
+			ThreadID: started.Worker.CodexThreadID,
+			Server:   workerServerName,
+			Tool:     "wait_for_upstream_message",
+			Arguments: map[string]any{
+				"timeoutSeconds": -1,
+			},
+		},
+	}
+	if record.preflights != 0 || !reflect.DeepEqual(record.mcpTools, want) {
+		t.Fatalf("TraeX MCP preflight = %#v, inventory calls = %d", record.mcpTools, record.preflights)
+	}
+}
+
+func TestTraeXWorkerMCPPreflightFailsClosed(t *testing.T) {
+	falseValue := false
+	tests := map[string]func(*fakeApplication){
+		"missing tool": func(application *fakeApplication) {
+			application.mcpToolErrors["wait_for_upstream_message"] = &appserver.RPCError{
+				Code: -32602, Message: "unknown tool",
+			}
+		},
+		"successful execution": func(application *fakeApplication) {
+			application.mcpToolResults["send_upstream_message"] = mcpToolCallResult{
+				Content: []json.RawMessage{json.RawMessage(`{"type":"text","text":"unexpected"}`)},
+				IsError: &falseValue,
+			}
+		},
+		"empty error": func(application *fakeApplication) {
+			trueValue := true
+			application.mcpToolResults["send_upstream_message"] = mcpToolCallResult{
+				IsError: &trueValue,
+			}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			application := newFakeApplication()
+			mutate(application)
+			host, state, _ := newTestHostForKind(t, hostkind.TraeX, 1, application)
+			started, err := host.Spawn(context.Background(), SpawnRequest{
+				TreeID: testTreeID, AgentID: newTestID(), ParentAgentID: testParentID,
+				TaskName: name, Prompt: name,
+			})
+			if !errors.Is(err, ErrMCPInjectionBlocked) {
+				t.Fatalf("Spawn() error = %v, want ErrMCPInjectionBlocked", err)
+			}
+			failed, stateErr := state.GetWorker(context.Background(), started.Worker.WorkerKey)
+			if stateErr != nil {
+				t.Fatal(stateErr)
+			}
+			if failed.Status != store.WorkerFailed || failed.FailureCode != "mcp_injection_blocked" {
+				t.Fatalf("failed worker = %#v", failed)
+			}
+			if len(application.snapshot().turns) != 0 {
+				t.Fatal("TraeX worker started a turn after failed MCP preflight")
+			}
+		})
+	}
+}
+
+func TestTraeXWorkerMCPPreflightPreservesUnsentRequest(t *testing.T) {
+	application := newFakeApplication()
+	application.mcpToolErrors["send_upstream_message"] = errors.Join(
+		appserver.ErrRequestNotWritten,
+		context.Canceled,
+	)
+	host, state, _ := newTestHostForKind(t, hostkind.TraeX, 1, application)
+	started, err := host.Spawn(context.Background(), SpawnRequest{
+		TreeID: testTreeID, AgentID: newTestID(), ParentAgentID: testParentID,
+		TaskName: "unsent TraeX MCP preflight", Prompt: "unsent TraeX MCP preflight",
+	})
+	if !errors.Is(err, appserver.ErrRequestNotWritten) ||
+		errors.Is(err, ErrMCPInjectionBlocked) {
+		t.Fatalf("Spawn() error = %v", err)
+	}
+	restored, stateErr := state.GetWorker(context.Background(), started.Worker.WorkerKey)
+	if stateErr != nil {
+		t.Fatal(stateErr)
+	}
+	if restored.Status != store.WorkerPending || restored.FailureCode != "" {
+		t.Fatalf("restored worker = %#v", restored)
+	}
+}
+
+func TestTraeXRejectsMismatchedReturnedWorkspaceRoot(t *testing.T) {
+	application := newFakeApplication()
+	application.threadStartResultHook = func(result *threadResult) {
+		result.RuntimeWorkspaceRoots = []string{t.TempDir()}
+	}
+	host, _, _ := newTestHostForKind(t, hostkind.TraeX, 1, application)
+	_, err := host.Spawn(context.Background(), SpawnRequest{
+		TreeID: testTreeID, AgentID: newTestID(), ParentAgentID: testParentID,
+		TaskName: "mismatched TraeX root", Prompt: "mismatched TraeX root",
+	})
+	if err == nil || !strings.Contains(err.Error(), "runtime workspace roots") {
+		t.Fatalf("Spawn() error = %v", err)
+	}
+}
+
+func TestTraeXIdleCompletesTurnBeforeStartResponse(t *testing.T) {
+	application := newFakeApplication()
+	application.idleBeforeReturn = true
+	application.idleReadStarted = make(chan struct{})
+	host, state, _ := newTestHostForKind(t, hostkind.TraeX, 1, application)
+	started := spawnTestWorker(t, host, newTestID(), "TraeX early idle")
+	waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerIdle)
+
+	record := application.snapshot()
+	if len(record.reads) == 0 || !record.reads[len(record.reads)-1].IncludeTurns {
+		t.Fatalf("TraeX idle reads = %#v", record.reads)
+	}
+	reads := len(record.reads)
+	payload, err := json.Marshal(map[string]any{
+		"threadId": started.Worker.CodexThreadID,
+		"status":   map[string]string{"type": "idle"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.notifications <- appserver.Notification{
+		Method: "thread/status/changed", Params: payload,
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := len(application.snapshot().reads); got != reads {
+		t.Fatalf("duplicate TraeX idle triggered %d reads, want %d", got, reads)
+	}
+}
+
+func TestTraeXIdleResponseLossPreservesInitialRollout(t *testing.T) {
+	application := newFakeApplication()
+	application.threadID = newTestID()
+	application.idleBeforeReturn = true
+	application.idleReadStarted = make(chan struct{})
+	application.turnStartErr = context.DeadlineExceeded
+	application.turnStartResponseLost = true
+	application.completeThenLose = true
+	host, state, _ := newTestHostForKind(t, hostkind.TraeX, 1, application)
+	rolloutPath := filepath.Join(
+		host.rolloutHome,
+		"sessions",
+		"2026",
+		"07",
+		"31",
+		"rollout-2026-07-31T00-00-00-"+application.threadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(rolloutPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var (
+		rolloutSegment string
+		materialize    sync.Once
+		retries        int
+	)
+	application.threadReadHook = func(read threadReadParams, result *threadResult) {
+		if !read.IncludeTurns || len(result.Thread.Turns) != 1 {
+			return
+		}
+		rolloutSegment = testManagedRolloutLine("task_started", result.Thread.Turns[0].ID) +
+			testManagedRolloutLine("task_complete", result.Thread.Turns[0].ID)
+		result.Thread.Path = &rolloutPath
+	}
+	host.waitForRolloutFlush = func(_ context.Context, _ time.Duration) error {
+		retries++
+		materialize.Do(func() {
+			if err := os.WriteFile(rolloutPath, []byte(rolloutSegment), 0o600); err != nil {
+				t.Error(err)
+			}
+		})
+		return nil
+	}
+	agentID := newTestID()
+	started, err := host.Spawn(context.Background(), SpawnRequest{
+		TreeID: testTreeID, AgentID: agentID, ParentAgentID: testParentID,
+		TaskName: "TraeX early idle", Prompt: "TraeX early idle prompt",
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("early-idle response loss error = %v", err)
+	}
+	key := store.WorkerKey{
+		ControllerID: testControllerID, TreeID: testTreeID, AgentID: agentID,
+	}
+	outbox := waitResultPublication(t, state, key)
+	if retries != 1 {
+		t.Fatalf("early-idle rollout retries = %d, want 1", retries)
+	}
+	if outbox.Manifest.Rollout.Status != protocol.ResultRolloutAvailable {
+		t.Fatalf("early-idle result rollout = %#v", outbox.Manifest.Rollout)
+	}
+	intent, err := state.GetWorkerTurnStartIntentByTurn(
+		context.Background(), key, outbox.Manifest.TurnID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.Rollout.Status != store.WorkerRolloutAvailable ||
+		intent.Rollout.Path != rolloutPath || intent.Rollout.Offset != 0 {
+		t.Fatalf("early-idle intent rollout = %#v", intent.Rollout)
+	}
+	if _, err := resultManager(host).AcknowledgeResultPackageMetadata(
+		context.Background(), outbox.ResultOutboxKey, outbox.Metadata,
+	); err != nil {
+		t.Fatal(err)
+	}
+	waitWorkerStatus(t, state, key, store.WorkerIdle)
+	if started.Worker.WorkerKey != key {
+		t.Fatalf("response-loss worker key = %#v, want %#v", started.Worker.WorkerKey, key)
+	}
+}
+
+func TestCodexIgnoresThreadIdleAsCompletion(t *testing.T) {
+	application := newFakeApplication()
+	host, state, _ := newTestHost(t, 1, application)
+	started := spawnTestWorker(t, host, newTestID(), "Codex idle diagnostic")
+	reads := len(application.snapshot().reads)
+	payload, err := json.Marshal(map[string]any{
+		"threadId": started.Worker.CodexThreadID,
+		"status":   map[string]string{"type": "idle"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.notifications <- appserver.Notification{
+		Method: "thread/status/changed", Params: payload,
+	}
+	time.Sleep(20 * time.Millisecond)
+	worker, err := state.GetWorker(context.Background(), started.Worker.WorkerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.Status != store.WorkerRunning || len(application.snapshot().reads) != reads {
+		t.Fatalf("Codex idle changed worker = %#v, reads = %#v", worker, application.snapshot().reads)
 	}
 }
 
@@ -569,12 +858,113 @@ func TestHostSerializesEarlyCompletionAndColdResumesAfterCrash(t *testing.T) {
 	}
 	record := secondApplication.snapshot()
 	if len(record.resumes) != 1 || record.resumes[0].ThreadID != started.Worker.CodexThreadID ||
-		!record.resumes[0].ExcludeTurns || record.preflights != 1 || len(record.turns) != 1 {
+		record.resumes[0].Path != "" || !record.resumes[0].ExcludeTurns ||
+		record.preflights != 1 || len(record.turns) != 1 {
 		t.Fatalf("cold-resume calls = %#v", record)
 	}
 	assertManagedProfile(t, record.resumes[0].Config, paths, followup.Worker)
 	if _, err := os.Stat(filepath.Join(paths.codexHome, "config.toml")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("managed Codex config.toml exists: %v", err)
+	}
+}
+
+func TestTraeXColdResumeUsesManagedRolloutPath(t *testing.T) {
+	firstApplication := newFakeApplication()
+	firstApplication.threadID = newTestID()
+	secondApplication := newFakeApplication()
+	host, state, _ := newTestHostForKind(
+		t, hostkind.TraeX, 1, firstApplication, secondApplication,
+	)
+	rolloutPath := writeTestManagedRollout(t, host.rolloutHome, firstApplication.threadID)
+	firstApplication.threadPath = rolloutPath
+	secondApplication.threadPath = rolloutPath
+
+	started := spawnTestWorker(t, host, newTestID(), "TraeX cold resume")
+	firstApplication.notifyCompletion(
+		started.Worker.CodexThreadID, started.Worker.ActiveTurnID, "completed",
+	)
+	waitWorkerStatus(t, state, started.Worker.WorkerKey, store.WorkerIdle)
+	firstApplication.crash(errors.New("force TraeX cold resume"))
+	waitForClientRetirement(t, host, firstApplication)
+
+	followup, err := host.Followup(context.Background(), FollowupRequest{
+		OperationID: newTestID(), Key: started.Worker.WorkerKey,
+		Message: "resume from the managed TraeX rollout",
+	})
+	if err != nil || followup.Worker.Status != store.WorkerRunning {
+		t.Fatalf("TraeX cold Followup() = %#v, %v", followup, err)
+	}
+	record := secondApplication.snapshot()
+	if len(record.resumes) != 1 || record.resumes[0].Path != rolloutPath {
+		t.Fatalf("TraeX cold-resume calls = %#v, want path %q", record.resumes, rolloutPath)
+	}
+}
+
+func TestTraeXPreparedIntentReconciliationUsesManagedRolloutPath(t *testing.T) {
+	firstApplication := newFakeApplication()
+	firstApplication.threadID = newTestID()
+	firstApplication.turnStartErr = context.DeadlineExceeded
+	secondApplication := newFakeApplication()
+	host, state, paths := newTestHostForKind(
+		t, hostkind.TraeX, 1, firstApplication, secondApplication,
+	)
+	paths.allowCloseError.Store(true)
+	rolloutPath := writeTestManagedRollout(t, host.rolloutHome, firstApplication.threadID)
+	firstApplication.threadPath = rolloutPath
+	secondApplication.threadPath = rolloutPath
+
+	started, err := host.Spawn(context.Background(), SpawnRequest{
+		TreeID: testTreeID, AgentID: newTestID(), ParentAgentID: testParentID,
+		TaskName: "TraeX prepared reconciliation", Prompt: "prepare then lose the response",
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ambiguous TraeX Spawn() error = %v", err)
+	}
+	intent, err := state.GetPreparedWorkerTurnStartIntent(
+		context.Background(), started.Worker.WorkerKey,
+	)
+	if err != nil || intent.Rollout.Path != rolloutPath {
+		t.Fatalf("prepared TraeX intent = %#v, %v", intent, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(secondApplication.snapshot().resumes) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	record := secondApplication.snapshot()
+	if len(record.resumes) != 1 || record.resumes[0].Path != rolloutPath {
+		t.Fatalf(
+			"TraeX prepared reconciliation resumes = %#v, want path %q",
+			record.resumes,
+			rolloutPath,
+		)
+	}
+}
+
+func TestTraeXBoundIntentRecoveryUsesManagedRolloutPath(t *testing.T) {
+	firstApplication := newFakeApplication()
+	firstApplication.threadID = newTestID()
+	host, state, _ := newTestHostForKind(t, hostkind.TraeX, 1, firstApplication)
+	rolloutPath := writeTestManagedRollout(t, host.rolloutHome, firstApplication.threadID)
+	firstApplication.threadPath = rolloutPath
+	started := spawnTestWorker(t, host, newTestID(), "TraeX bound recovery")
+	intent, err := state.GetWorkerTurnStartIntentByTurn(
+		context.Background(), started.Worker.WorkerKey, started.Worker.ActiveTurnID,
+	)
+	if err != nil || intent.Rollout.Path != rolloutPath {
+		t.Fatalf("bound TraeX intent = %#v, %v", intent, err)
+	}
+
+	replacement := newFakeApplication()
+	replacement.threadPath = rolloutPath
+	replacement.threadReadHook = mirrorFakeThreadTurns(firstApplication, nil)
+	if err := host.recoverBoundTurnIntent(
+		context.Background(), replacement, intent, started.Worker,
+	); err != nil {
+		t.Fatal(err)
+	}
+	record := replacement.snapshot()
+	if len(record.resumes) != 1 || record.resumes[0].Path != rolloutPath {
+		t.Fatalf("TraeX bound recovery resumes = %#v, want path %q", record.resumes, rolloutPath)
 	}
 }
 
@@ -2767,8 +3157,23 @@ func assertManagedProfile(
 		},
 		"required": true, "startup_timeout_sec": workerMCPTimeout,
 	}
-	if !reflect.DeepEqual(config["mcp_servers."+workerServerName], wantMCP) {
-		t.Fatalf("worker MCP config = %#v, want %#v", config["mcp_servers."+workerServerName], wantMCP)
+	if _, found := config["mcp_servers."+workerServerName+".command"]; found {
+		for key, value := range wantMCP {
+			if !reflect.DeepEqual(config["mcp_servers."+workerServerName+"."+key], value) {
+				t.Fatalf(
+					"worker MCP config %s = %#v, want %#v",
+					key,
+					config["mcp_servers."+workerServerName+"."+key],
+					value,
+				)
+			}
+		}
+	} else if !reflect.DeepEqual(config["mcp_servers."+workerServerName], wantMCP) {
+		t.Fatalf(
+			"worker MCP config = %#v, want %#v",
+			config["mcp_servers."+workerServerName],
+			wantMCP,
+		)
 	}
 	if paths.launchOptions.Environment["CODEX_ACCESS_TOKEN"] != "host-auth" ||
 		paths.launchOptions.Environment["CODEX_API_KEY"] != "ambient-codex-auth" ||
@@ -2874,6 +3279,7 @@ type fakeRecord struct {
 	starts     []threadStartParams
 	resumes    []threadResumeParams
 	reads      []threadReadParams
+	mcpTools   []mcpToolCallParams
 	turns      []turnStartParams
 	steers     []turnSteerParams
 	interrupts []turnInterruptParams
@@ -2888,7 +3294,10 @@ type fakeApplication struct {
 	resourceTemplates     []json.RawMessage
 	extraServers          []mcpServerStatus
 	authStatus            string
+	mcpToolErrors         map[string]error
+	mcpToolResults        map[string]mcpToolCallResult
 	threadStartHook       func() error
+	threadStartResultHook func(*threadResult)
 	threadStartErr        error
 	threadID              string
 	threadStartPath       string
@@ -2910,6 +3319,9 @@ type fakeApplication struct {
 	turnSteerHook         func(turnSteerParams)
 	steerResponseTurnID   string
 	completeBeforeReturn  bool
+	idleBeforeReturn      bool
+	idleReadStarted       chan struct{}
+	idleReadStartedOnce   sync.Once
 	completionStatus      string
 	crashAfterComplete    bool
 	notifications         chan appserver.Notification
@@ -2931,10 +3343,12 @@ type fakeApplication struct {
 
 func newFakeApplication() *fakeApplication {
 	return &fakeApplication{
-		tools:         []string{"send_upstream_message", "wait_for_upstream_message"},
-		authStatus:    "unsupported",
-		threadTurns:   make(map[string][]turn),
-		notifications: make(chan appserver.Notification, 16), done: make(chan struct{}),
+		tools:          []string{"send_upstream_message", "wait_for_upstream_message"},
+		authStatus:     "unsupported",
+		mcpToolErrors:  make(map[string]error),
+		mcpToolResults: make(map[string]mcpToolCallResult),
+		threadTurns:    make(map[string][]turn),
+		notifications:  make(chan appserver.Notification, 16), done: make(chan struct{}),
 	}
 }
 
@@ -2958,6 +3372,9 @@ func (a *fakeApplication) ThreadStart(_ context.Context, params, result any) err
 		threadID = newTestID()
 	}
 	setFakeThreadResult(result.(*threadResult), threadID, start.CWD, start.RuntimeWorkspaceRoots)
+	if a.threadStartResultHook != nil {
+		a.threadStartResultHook(result.(*threadResult))
+	}
 	if a.threadStartPath != "" {
 		path := a.threadStartPath
 		result.(*threadResult).Thread.Path = &path
@@ -3014,6 +3431,7 @@ func (a *fakeApplication) ThreadRead(ctx context.Context, params, result any) er
 		a.readAfterTurnErrors = a.readAfterTurnErrors[1:]
 	}
 	readAfterTurnGate := a.readAfterTurnGate
+	idleReadStarted := a.idleReadStarted
 	a.mu.Unlock()
 	if readErr != nil {
 		return readErr
@@ -3038,6 +3456,9 @@ func (a *fakeApplication) ThreadRead(ctx context.Context, params, result any) er
 	}
 	if readHook != nil {
 		readHook(read, response)
+	}
+	if read.IncludeTurns && idleReadStarted != nil {
+		a.idleReadStartedOnce.Do(func() { close(idleReadStarted) })
 	}
 	return nil
 }
@@ -3097,12 +3518,46 @@ func (a *fakeApplication) MCPServerStatusList(_ context.Context, params, result 
 	return nil
 }
 
+func (a *fakeApplication) MCPServerToolCall(_ context.Context, params, result any) error {
+	call := params.(mcpToolCallParams)
+	a.mu.Lock()
+	a.record.mcpTools = append(a.record.mcpTools, call)
+	callErr := a.mcpToolErrors[call.Tool]
+	callResult, configured := a.mcpToolResults[call.Tool]
+	a.mu.Unlock()
+	if callErr != nil {
+		return callErr
+	}
+	if !configured {
+		isError := true
+		field := "messageId"
+		if call.Tool == "wait_for_upstream_message" {
+			field = "timeoutSeconds"
+		}
+		callResult = mcpToolCallResult{
+			Content: []json.RawMessage{
+				json.RawMessage(
+					fmt.Sprintf(
+						`{"type":"text","text":"validating \"arguments\": %s is invalid"}`,
+						field,
+					),
+				),
+			},
+			IsError: &isError,
+		}
+	}
+	*result.(*mcpToolCallResult) = callResult
+	return nil
+}
+
 func (a *fakeApplication) TurnStart(ctx context.Context, params, result any) error {
 	turnParams := params.(turnStartParams)
 	turnID := newTestID()
 	a.mu.Lock()
 	a.record.turns = append(a.record.turns, turnParams)
 	complete := a.completeBeforeReturn
+	idleBeforeReturn := a.idleBeforeReturn
+	idleReadStarted := a.idleReadStarted
 	completeThenLose := a.completeThenLose
 	completionStatus := a.completionStatus
 	crashAfterComplete := a.crashAfterComplete
@@ -3133,18 +3588,35 @@ func (a *fakeApplication) TurnStart(ctx context.Context, params, result any) err
 	if turnStartResponseLost && !completeThenLose {
 		return turnStartErr
 	}
-	if complete {
+	if complete || idleBeforeReturn {
 		if completionStatus == "" {
 			completionStatus = "completed"
 		}
 		a.mu.Lock()
 		a.threadTurns[turnParams.ThreadID][len(a.threadTurns[turnParams.ThreadID])-1].Status = completionStatus
 		a.mu.Unlock()
-		payload, _ := json.Marshal(turnCompletedNotification{
-			ThreadID: turnParams.ThreadID,
-			Turn:     turn{ID: turnID, Status: completionStatus, Error: json.RawMessage("null")},
-		})
-		a.notifications <- appserver.Notification{Method: "turn/completed", Params: payload}
+		if idleBeforeReturn {
+			payload, _ := json.Marshal(map[string]any{
+				"threadId": turnParams.ThreadID,
+				"status":   map[string]string{"type": "idle"},
+			})
+			a.notifications <- appserver.Notification{
+				Method: "thread/status/changed", Params: payload,
+			}
+			if idleReadStarted != nil {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-idleReadStarted:
+				}
+			}
+		} else {
+			payload, _ := json.Marshal(turnCompletedNotification{
+				ThreadID: turnParams.ThreadID,
+				Turn:     turn{ID: turnID, Status: completionStatus, Error: json.RawMessage("null")},
+			})
+			a.notifications <- appserver.Notification{Method: "turn/completed", Params: payload}
+		}
 		if crashAfterComplete {
 			a.crash(errors.New("test crash after buffered completion"))
 		}
@@ -3267,6 +3739,7 @@ func (a *fakeApplication) snapshot() fakeRecord {
 		starts:     append([]threadStartParams(nil), a.record.starts...),
 		resumes:    append([]threadResumeParams(nil), a.record.resumes...),
 		reads:      append([]threadReadParams(nil), a.record.reads...),
+		mcpTools:   append([]mcpToolCallParams(nil), a.record.mcpTools...),
 		turns:      append([]turnStartParams(nil), a.record.turns...),
 		steers:     append([]turnSteerParams(nil), a.record.steers...),
 		interrupts: append([]turnInterruptParams(nil), a.record.interrupts...),
@@ -3280,6 +3753,29 @@ func newTestID() string {
 		panic(err)
 	}
 	return id
+}
+
+func writeTestManagedRollout(t *testing.T, home, threadID string) string {
+	t.Helper()
+	path := filepath.Join(
+		home,
+		"sessions",
+		"2026",
+		"07",
+		"31",
+		"rollout-2026-07-31T00-00-00-"+threadID+".jsonl",
+	)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("thread metadata\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }
 
 func initializeTestRepository(t *testing.T, repositoryPath string) string {

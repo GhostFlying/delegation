@@ -2,6 +2,8 @@ package workerhost
 
 import (
 	"encoding/json"
+
+	"github.com/GhostFlying/delegation/internal/store"
 )
 
 type threadStartParams struct {
@@ -16,6 +18,7 @@ type threadStartParams struct {
 
 type threadResumeParams struct {
 	ThreadID              string         `json:"threadId"`
+	Path                  string         `json:"path,omitempty"`
 	CWD                   string         `json:"cwd"`
 	RuntimeWorkspaceRoots []string       `json:"runtimeWorkspaceRoots"`
 	ApprovalPolicy        string         `json:"approvalPolicy"`
@@ -62,6 +65,19 @@ type mcpServerStatus struct {
 	AuthStatus        string                     `json:"authStatus"`
 }
 
+type mcpToolCallParams struct {
+	ThreadID  string         `json:"threadId"`
+	Server    string         `json:"server"`
+	Tool      string         `json:"tool"`
+	Arguments map[string]any `json:"arguments"`
+}
+
+type mcpToolCallResult struct {
+	Content           []json.RawMessage `json:"content"`
+	StructuredContent json.RawMessage   `json:"structuredContent"`
+	IsError           *bool             `json:"isError"`
+}
+
 type turnStartParams struct {
 	ThreadID string      `json:"threadId"`
 	Input    []textInput `json:"input"`
@@ -84,6 +100,14 @@ type turn struct {
 }
 
 type turnCompletedNotification struct {
+	ThreadID string                      `json:"threadId"`
+	Turn     turn                        `json:"turn"`
+	Rollout  *store.WorkerRolloutLocator `json:"-"`
+}
+
+type threadStatusChangedNotification struct {
 	ThreadID string `json:"threadId"`
-	Turn     turn   `json:"turn"`
+	Status   struct {
+		Type string `json:"type"`
+	} `json:"status"`
 }

@@ -2,13 +2,18 @@ package workerhost
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 
+	"github.com/GhostFlying/delegation/internal/appserver"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -18,13 +23,21 @@ const (
 	windowsWorkerProfile    = ":danger-full-access"
 	rootPluginEnabledConfig = "plugins.delegation@delegation.enabled"
 	workerServerName        = "delegation_worker"
-	workerSource            = "delegation_worker"
+	codexWorkerSource       = "delegation_worker"
+	traeXWorkerSource       = "subagent"
 	workerMCPTimeout        = 10
 	maximumMCPPages         = 16
 	mcpPageSize             = 100
 )
 
 var requiredWorkerTools = []string{"send_upstream_message", "wait_for_upstream_message"}
+
+func (h *Host) workerSource() string {
+	if h.hostKind == hostkind.TraeX {
+		return traeXWorkerSource
+	}
+	return codexWorkerSource
+}
 
 func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 	config := codexconfig.Clone(h.codexConfig)
@@ -110,6 +123,85 @@ func prependExecutableDirectory(path, directory string) string {
 }
 
 func (h *Host) verifyWorkerMCP(
+	ctx context.Context,
+	client application,
+	threadID string,
+) error {
+	if h.hostKind == hostkind.TraeX {
+		return verifyTraeXWorkerMCP(ctx, client, threadID)
+	}
+	return verifyWorkerMCPInventory(ctx, client, threadID)
+}
+
+func verifyTraeXWorkerMCP(
+	ctx context.Context,
+	client application,
+	threadID string,
+) error {
+	probes := []struct {
+		tool      string
+		arguments map[string]any
+		field     string
+	}{
+		{
+			tool: "send_upstream_message",
+			arguments: map[string]any{
+				"messageId": "invalid",
+				"message":   "MCP availability probe",
+			},
+			field: "messageId",
+		},
+		{
+			tool: "wait_for_upstream_message",
+			arguments: map[string]any{
+				"timeoutSeconds": -1,
+			},
+			field: "timeoutSeconds",
+		},
+	}
+	for _, probe := range probes {
+		var result mcpToolCallResult
+		if err := client.MCPServerToolCall(ctx, mcpToolCallParams{
+			ThreadID:  threadID,
+			Server:    workerServerName,
+			Tool:      probe.tool,
+			Arguments: probe.arguments,
+		}, &result); err != nil {
+			var rpcError *appserver.RPCError
+			if errors.As(err, &rpcError) {
+				return blockedMCPError("probe %s: %v", probe.tool, err)
+			}
+			return fmt.Errorf("probe managed MCP tool %s: %w", probe.tool, err)
+		}
+		errorText := mcpToolCallErrorText(result)
+		if result.IsError == nil || !*result.IsError ||
+			!strings.Contains(errorText, `validating "arguments"`) ||
+			!strings.Contains(errorText, probe.field) {
+			return blockedMCPError("probe %s returned an unexpected result", probe.tool)
+		}
+	}
+	return nil
+}
+
+func mcpToolCallErrorText(result mcpToolCallResult) string {
+	var text strings.Builder
+	for _, content := range result.Content {
+		var item struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(content, &item) != nil || item.Type != "text" || item.Text == "" {
+			continue
+		}
+		if text.Len() != 0 {
+			text.WriteByte('\n')
+		}
+		text.WriteString(item.Text)
+	}
+	return text.String()
+}
+
+func verifyWorkerMCPInventory(
 	ctx context.Context,
 	client application,
 	threadID string,
