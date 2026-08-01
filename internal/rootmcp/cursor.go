@@ -107,7 +107,7 @@ func decodeAgentCursor(value, treeID string) (uint64, error) {
 		return 0, errors.New("agent cursor is invalid")
 	}
 	if cursor.validate() != nil || cursor.TreeID != treeID {
-		return 0, errors.New("agent cursor does not belong to this Codex task")
+		return 0, errors.New("agent cursor does not belong to this host task")
 	}
 	return cursor.AfterSequence, nil
 }

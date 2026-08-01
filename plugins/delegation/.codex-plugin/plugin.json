@@ -1,7 +1,7 @@
 {
   "name": "delegation",
-  "version": "0.1.0-alpha.3",
-  "description": "Delegate bounded Codex work across trusted peers with synchronized Git workspaces.",
+  "version": "0.1.0-alpha.4",
+  "description": "Delegate bounded Codex or TraeX work across trusted peers with synchronized Git workspaces.",
   "author": {
     "name": "GhostFlying",
     "url": "https://github.com/GhostFlying"
@@ -9,12 +9,12 @@
   "homepage": "https://github.com/GhostFlying/delegation",
   "repository": "https://github.com/GhostFlying/delegation",
   "license": "Apache-2.0",
-  "keywords": ["codex", "delegation", "remote", "cross-platform"],
+  "keywords": ["codex", "traex", "delegation", "remote", "cross-platform"],
   "skills": "./skills/",
   "interface": {
     "displayName": "Delegation",
-    "shortDescription": "Delegate Codex work across trusted peers",
-    "longDescription": "Discover equal peers, synchronize an explicit Git HEAD plus dirty state, dispatch isolated managed Codex workers, collaborate through messages and lifecycle controls, and inspect target-retained changes-artifact metadata. Worker changes are never applied to the root workspace automatically.",
+    "shortDescription": "Delegate Codex or TraeX work across trusted peers",
+    "longDescription": "Discover equal peers, synchronize an explicit Git HEAD plus dirty state, dispatch isolated managed Codex or TraeX workers, collaborate through messages and lifecycle controls, and inspect target-retained changes-artifact metadata. Worker changes are never applied to the root workspace automatically.",
     "developerName": "GhostFlying",
     "category": "Developer Tools",
     "capabilities": [

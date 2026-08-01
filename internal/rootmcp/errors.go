@@ -21,7 +21,7 @@ func explainBridgeError(err error) error {
 		case protocol.ErrorNotFound:
 			return errors.New("the requested delegation device was not found")
 		case protocol.ErrorForbidden, protocol.ErrorUnauthenticated:
-			return errors.New("this Codex task is not authorized to read the delegation device registry")
+			return errors.New("this host task is not authorized to read the delegation device registry")
 		case protocol.ErrorUnavailable:
 			return errors.New("the delegation connector is offline or cannot reach the broker")
 		default:
@@ -37,7 +37,7 @@ func explainEnsureRootError(err error) error {
 	}
 	var rpcError *localbridge.RPCError
 	if errors.As(err, &rpcError) && rpcError.Code == protocol.ErrorConflict {
-		return errors.New("this Codex task is already bound to another delegation root device and cannot be rebound")
+		return errors.New("this host task is already bound to another delegation root device and cannot be rebound")
 	}
 	return explainBridgeError(err)
 }
@@ -54,7 +54,7 @@ func explainAgentError(err error) error {
 		case protocol.ErrorNotFound:
 			return errors.New("the requested delegation agent or target device was not found")
 		case protocol.ErrorForbidden, protocol.ErrorUnauthenticated:
-			return errors.New("this Codex task is not authorized to manage delegation agents")
+			return errors.New("this host task is not authorized to manage delegation agents")
 		case protocol.ErrorUnavailable:
 			return errors.New("the delegation connector, broker, or target peer is temporarily unavailable")
 		default:
@@ -76,7 +76,7 @@ func explainWorkspaceError(err error) error {
 		case protocol.ErrorNotFound:
 			return errors.New("the requested delegation target or workspace was not found")
 		case protocol.ErrorForbidden, protocol.ErrorUnauthenticated:
-			return errors.New("this Codex task is not authorized to synchronize delegation workspaces")
+			return errors.New("this host task is not authorized to synchronize delegation workspaces")
 		case protocol.ErrorUnavailable:
 			return errors.New("the delegation connector, broker, or target peer is temporarily unavailable")
 		default:
@@ -98,7 +98,7 @@ func explainResultApplyError(err error) error {
 		case protocol.ErrorNotFound:
 			return errors.New("the requested result package was not found")
 		case protocol.ErrorForbidden, protocol.ErrorUnauthenticated:
-			return errors.New("this Codex task is not authorized to apply that result package")
+			return errors.New("this host task is not authorized to apply that result package")
 		case protocol.ErrorUnavailable:
 			return errors.New("the local result package or delegation connector is temporarily unavailable")
 		default:

@@ -35,7 +35,7 @@ delegation_home=${DELEGATION_HOME:-"$HOME/.delegation"}
 binary="$delegation_home/bin/$version/$os-$arch/delegation"
 if [ ! -x "$binary" ]; then
   printf '%s\n' "delegation: runtime $version is not installed for $os-$arch" >&2
-  printf '%s\n' 'delegation: run $delegation-setup in a new Codex task or set DELEGATION_BINARY' >&2
+  printf '%s\n' 'delegation: run $delegation-setup in a new Codex or TraeX task, or set DELEGATION_BINARY' >&2
   exit 127
 fi
 

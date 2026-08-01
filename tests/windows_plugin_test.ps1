@@ -160,9 +160,11 @@ try {
     $missingPS = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", $launcherPS, "mcp", "root") $missingEnvironment
     Assert-True ($missingPS.ExitCode -eq 127) "PowerShell launcher missing-runtime exit was $($missingPS.ExitCode)"
     Assert-True ($missingPS.Stderr.Contains("runtime $version is not installed")) "PowerShell launcher missing-runtime error was unclear"
+    Assert-True ($missingPS.Stderr.Contains('run $delegation-setup in a new Codex or TraeX task')) "PowerShell launcher setup hint was host-specific"
 
     $missingCmd = Invoke-BatchFile -Path $launcherCmd -ScriptArguments @("mcp", "root") -Environment $missingEnvironment
     Assert-True ($missingCmd.ExitCode -eq 127) "cmd launcher missing-runtime exit was $($missingCmd.ExitCode); stdout: $($missingCmd.Stdout); stderr: $($missingCmd.Stderr)"
+    Assert-True ($missingCmd.Stderr.Contains('run $delegation-setup in a new Codex or TraeX task')) "cmd launcher setup hint was host-specific"
 
     $overrideEnvironment = @{
         DELEGATION_BINARY = $runtime

@@ -166,7 +166,7 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        ToolSpawnAgent,
 		Title:       "Spawn delegation agent",
-		Description: "Start one managed Codex agent on an explicitly selected peer.",
+		Description: "Start one managed agent on an explicitly selected peer.",
 		Annotations: mutatingAnnotations(),
 		InputSchema: spawnInputSchema,
 	}, root.spawnAgent)
