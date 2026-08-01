@@ -137,11 +137,13 @@ func (h *Host) readTraeXCompletion(
 	}
 	var expectedTurnID string
 	var previousTurnID string
+	preparedTurn := false
 	preparedInitial := false
 	switch worker.Status {
 	case store.WorkerRunning, store.WorkerInterrupted:
 		expectedTurnID = worker.ActiveTurnID
 	case store.WorkerReady:
+		preparedTurn = true
 		intent, err := h.state.GetPreparedWorkerTurnStartIntent(ctx, worker.WorkerKey)
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, nil
@@ -183,6 +185,9 @@ func (h *Host) readTraeXCompletion(
 		if err != nil {
 			return nil, err
 		}
+		if len(candidates) == 0 && preparedTurn {
+			return nil, nil
+		}
 		if len(candidates) != 1 {
 			return nil, errors.New("idle TraeX thread does not contain one prepared turn")
 		}
@@ -193,6 +198,11 @@ func (h *Host) readTraeXCompletion(
 	}
 	switch completed.Status {
 	case "completed", "failed", "interrupted":
+	case "inProgress":
+		if preparedTurn {
+			return nil, nil
+		}
+		fallthrough
 	default:
 		return nil, fmt.Errorf(
 			"idle TraeX thread returned non-terminal turn status %q",

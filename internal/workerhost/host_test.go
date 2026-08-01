@@ -413,6 +413,119 @@ func TestTraeXIdleCompletesTurnBeforeStartResponse(t *testing.T) {
 	}
 }
 
+func TestTraeXStaleIdleAroundTurnStartDoesNotRetireClient(t *testing.T) {
+	tests := map[string]func(*fakeApplication) (<-chan struct{}, func()){
+		"before turn creation": func(application *fakeApplication) (<-chan struct{}, func()) {
+			application.turnStartGate = make(chan struct{})
+			application.turnStartStarted = make(chan struct{})
+			return application.turnStartStarted, func() { close(application.turnStartGate) }
+		},
+		"after turn creation": func(application *fakeApplication) (<-chan struct{}, func()) {
+			application.turnStartResponseGate = make(chan struct{})
+			application.turnStartCreated = make(chan struct{})
+			return application.turnStartCreated, func() { close(application.turnStartResponseGate) }
+		},
+	}
+	for name, arrange := range tests {
+		t.Run(name, func(t *testing.T) {
+			application := newFakeApplication()
+			ready, release := arrange(application)
+			var releaseOnce sync.Once
+			releaseTurnStart := func() { releaseOnce.Do(release) }
+			t.Cleanup(releaseTurnStart)
+			host, state, _ := newTestHostForKind(t, hostkind.TraeX, 1, application)
+			agentID := newTestID()
+			key := store.WorkerKey{
+				ControllerID: testControllerID,
+				TreeID:       testTreeID,
+				AgentID:      agentID,
+			}
+			type spawnResult struct {
+				started StartedTurn
+				err     error
+			}
+			spawnDone := make(chan spawnResult, 1)
+			go func() {
+				started, err := host.Spawn(context.Background(), SpawnRequest{
+					TreeID: testTreeID, AgentID: agentID, ParentAgentID: testParentID,
+					TaskName: "TraeX stale idle", Prompt: "TraeX stale idle prompt",
+				})
+				spawnDone <- spawnResult{started: started, err: err}
+			}()
+			select {
+			case <-ready:
+			case <-time.After(time.Second):
+				t.Fatal("turn/start did not reach the prepared window")
+			}
+			worker, err := state.GetWorker(context.Background(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if worker.Status != store.WorkerReady {
+				t.Fatalf("worker status = %s, want ready", worker.Status)
+			}
+			if _, err := state.GetPreparedWorkerTurnStartIntent(context.Background(), key); err != nil {
+				t.Fatalf("prepared turn intent = %v", err)
+			}
+			payload, err := json.Marshal(map[string]any{
+				"threadId": worker.CodexThreadID,
+				"status":   map[string]string{"type": "idle"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := host.handleNotification(application, appserver.Notification{
+				Method: "thread/status/changed", Params: payload,
+			}); err != nil {
+				t.Fatalf("stale TraeX idle = %v", err)
+			}
+			if got := application.closeCount(); got != 0 {
+				t.Fatalf("stale TraeX idle retired healthy app-server %d times", got)
+			}
+			releaseTurnStart()
+			select {
+			case result := <-spawnDone:
+				if result.err != nil || result.started.Worker.Status != store.WorkerRunning {
+					t.Fatalf("Spawn() after stale idle = %#v, %v", result.started, result.err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Spawn did not finish after stale idle")
+			}
+		})
+	}
+}
+
+func TestTraeXStaleIdleExceptionRequiresPreparedTurn(t *testing.T) {
+	application := newFakeApplication()
+	application.completeBeforeReturn = true
+	application.completionStatus = "interrupted"
+	host, state, _ := newTestHostForKind(t, hostkind.TraeX, 1, application)
+	started := spawnTestWorker(t, host, newTestID(), "TraeX interrupted idle")
+	interrupted := waitWorkerStatus(
+		t, state, started.Worker.WorkerKey, store.WorkerInterrupted,
+	)
+	if interrupted.ActiveTurnID != "" || interrupted.LastBoundTurnID == "" {
+		t.Fatalf("interrupted worker = %#v", interrupted)
+	}
+	application.mu.Lock()
+	delete(application.threadTurns, interrupted.CodexThreadID)
+	application.mu.Unlock()
+	payload, err := json.Marshal(map[string]any{
+		"threadId": interrupted.CodexThreadID,
+		"status":   map[string]string{"type": "idle"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = host.handleNotification(application, appserver.Notification{
+		Method: "thread/status/changed", Params: payload,
+	})
+	if !errors.Is(err, errInvalidLifecycleNotification) ||
+		!strings.Contains(err.Error(), "does not contain one prepared turn") {
+		t.Fatalf("interrupted TraeX idle error = %v", err)
+	}
+}
+
 func TestTraeXIdleResponseLossPreservesInitialRollout(t *testing.T) {
 	application := newFakeApplication()
 	application.threadID = newTestID()
@@ -3337,10 +3450,13 @@ type fakeApplication struct {
 	closeStartedOnce      sync.Once
 	startStartedOnce      sync.Once
 	turnStartStartedOnce  sync.Once
+	turnStartCreatedOnce  sync.Once
 	startGate             chan struct{}
 	startStarted          chan struct{}
 	turnStartGate         chan struct{}
 	turnStartStarted      chan struct{}
+	turnStartResponseGate chan struct{}
+	turnStartCreated      chan struct{}
 	closeGate             chan struct{}
 	closeStarted          chan struct{}
 	closeCalls            int
@@ -3572,6 +3688,8 @@ func (a *fakeApplication) TurnStart(ctx context.Context, params, result any) err
 	turnStartResponseLost := a.turnStartResponseLost
 	turnStartGate := a.turnStartGate
 	turnStartStarted := a.turnStartStarted
+	turnStartResponseGate := a.turnStartResponseGate
+	turnStartCreated := a.turnStartCreated
 	a.mu.Unlock()
 	complete = complete || turnStartResponseLost && completeThenLose
 	if turnStartStarted != nil {
@@ -3592,6 +3710,16 @@ func (a *fakeApplication) TurnStart(ctx context.Context, params, result any) err
 	a.mu.Lock()
 	a.threadTurns[turnParams.ThreadID] = append(a.threadTurns[turnParams.ThreadID], started)
 	a.mu.Unlock()
+	if turnStartCreated != nil {
+		a.turnStartCreatedOnce.Do(func() { close(turnStartCreated) })
+	}
+	if turnStartResponseGate != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-turnStartResponseGate:
+		}
+	}
 	if turnStartResponseLost && !completeThenLose {
 		return turnStartErr
 	}
