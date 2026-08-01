@@ -240,7 +240,7 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		"peer config":       options.PeerConfigPath,
 		"delegation binary": options.DelegationBinary,
 		"Git binary":        options.GitBinary,
-		"Codex home":        options.CodexHome,
+		"managed CLI home":  options.CodexHome,
 		"workspace root":    options.WorkspaceRoot,
 	} {
 		if !filepath.IsAbs(path) {

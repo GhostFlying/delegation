@@ -12,7 +12,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/identity"
 )
 
-// Locator identifies one validated managed Codex rollout and the byte offset
+// Locator identifies one validated managed CLI rollout and the byte offset
 // immediately before a turn/start request.
 type Locator struct {
 	Path   string
@@ -27,15 +27,15 @@ func Find(codexHome, threadID string) (Locator, error) {
 		return Locator{}, fmt.Errorf("threadId %w", err)
 	}
 	if !filepath.IsAbs(codexHome) {
-		return Locator{}, errors.New("Codex home must be absolute")
+		return Locator{}, errors.New("managed CLI home must be absolute")
 	}
 	resolvedHome, err := filepath.EvalSymlinks(filepath.Clean(codexHome))
 	if err != nil {
-		return Locator{}, fmt.Errorf("resolve managed Codex home: %w", err)
+		return Locator{}, fmt.Errorf("resolve managed CLI home: %w", err)
 	}
 	root, err := os.OpenRoot(resolvedHome)
 	if err != nil {
-		return Locator{}, fmt.Errorf("open managed Codex home: %w", err)
+		return Locator{}, fmt.Errorf("open managed CLI home: %w", err)
 	}
 	defer root.Close()
 
@@ -87,19 +87,19 @@ func OpenValidated(codexHome, threadID, path string) (*os.File, Locator, error) 
 		return nil, Locator{}, fmt.Errorf("threadId %w", err)
 	}
 	if !filepath.IsAbs(codexHome) || !filepath.IsAbs(path) {
-		return nil, Locator{}, errors.New("Codex home and rollout path must be absolute")
+		return nil, Locator{}, errors.New("managed CLI home and rollout path must be absolute")
 	}
 	cleanPath := filepath.Clean(path)
 	resolvedHome, err := filepath.EvalSymlinks(filepath.Clean(codexHome))
 	if err != nil {
-		return nil, Locator{}, fmt.Errorf("resolve managed Codex home: %w", err)
+		return nil, Locator{}, fmt.Errorf("resolve managed CLI home: %w", err)
 	}
 	homeInfo, err := os.Stat(resolvedHome)
 	if err != nil {
-		return nil, Locator{}, fmt.Errorf("inspect managed Codex home: %w", err)
+		return nil, Locator{}, fmt.Errorf("inspect managed CLI home: %w", err)
 	}
 	if !homeInfo.IsDir() {
-		return nil, Locator{}, errors.New("managed Codex home must be a directory")
+		return nil, Locator{}, errors.New("managed CLI home must be a directory")
 	}
 	resolvedPath, err := filepath.EvalSymlinks(cleanPath)
 	if err != nil {
@@ -108,7 +108,7 @@ func OpenValidated(codexHome, threadID, path string) (*os.File, Locator, error) 
 	resolvedRelative, err := filepath.Rel(resolvedHome, resolvedPath)
 	if err != nil || resolvedRelative == "." || filepath.IsAbs(resolvedRelative) || resolvedRelative == ".." ||
 		strings.HasPrefix(resolvedRelative, ".."+string(filepath.Separator)) {
-		return nil, Locator{}, errors.New("managed rollout path is outside Codex home")
+		return nil, Locator{}, errors.New("managed rollout path is outside the managed CLI home")
 	}
 	relative, err := relativeToHomeAlias(homeInfo, cleanPath)
 	if err != nil {
@@ -125,7 +125,7 @@ func OpenValidated(codexHome, threadID, path string) (*os.File, Locator, error) 
 	}
 	root, err := os.OpenRoot(resolvedHome)
 	if err != nil {
-		return nil, Locator{}, fmt.Errorf("open managed Codex home: %w", err)
+		return nil, Locator{}, fmt.Errorf("open managed CLI home: %w", err)
 	}
 	defer root.Close()
 	before, err := inspectNoSymlink(root, components)
@@ -164,7 +164,7 @@ func relativeToHomeAlias(homeInfo os.FileInfo, path string) (string, error) {
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return "", errors.New("managed rollout path is outside Codex home")
+			return "", errors.New("managed rollout path is outside the managed CLI home")
 		}
 		components = append(components, filepath.Base(current))
 		current = parent

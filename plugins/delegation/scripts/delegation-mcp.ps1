@@ -30,7 +30,7 @@ $delegationHome = if ($env:DELEGATION_HOME) {
 $binary = Join-Path $delegationHome "bin\$version\windows-$arch\delegation.exe"
 if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
     [Console]::Error.WriteLine("delegation: runtime $version is not installed for windows-$arch")
-    [Console]::Error.WriteLine('delegation: run $delegation-setup in a new Codex task or set DELEGATION_BINARY')
+    [Console]::Error.WriteLine('delegation: run $delegation-setup in a new Codex or TraeX task, or set DELEGATION_BINARY')
     exit 127
 }
 

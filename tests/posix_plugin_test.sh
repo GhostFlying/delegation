@@ -28,6 +28,7 @@ if DELEGATION_HOME="$tmp/missing" "$plugin_root/scripts/delegation-mcp" mcp root
   exit 1
 fi
 grep -F "runtime $version is not installed" "$tmp/err" >/dev/null
+grep -F 'run $delegation-setup in a new Codex or TraeX task' "$tmp/err" >/dev/null
 
 DELEGATION_BINARY="$tmp/delegation" "$plugin_root/scripts/delegation-mcp" version --json >"$tmp/version"
 grep -F "\"version\":\"$version\"" "$tmp/version" >/dev/null

@@ -1,29 +1,37 @@
 # Delegation
 
-Delegation is a Codex plugin for assigning bounded work across trusted peers with different operating
-systems, toolchains, or local capabilities. Every participating device can host user-created root
-tasks and managed workers.
+Delegation is a plugin for assigning bounded Codex or TraeX work across trusted peers with different
+operating systems, toolchains, or local capabilities. Every participating device can host
+user-created root tasks and managed workers.
 
-The project is delivered in reviewed milestones. The current M4 checkpoint includes the plugin and
-runtime bootstrap, a broker-backed equal-peer registry, isolated managed Codex workers with durable
-lifecycle and messaging controls, Git workspace synchronization, and operational status surfaces.
-It synchronizes an exact Git HEAD plus the root task's dirty index and worktree state, then reliably
-returns each terminal rollout and Git result package to the originating root peer. The root agent can
-explicitly apply a selected package without moving HEAD: descendant commits become staged changes,
-dirty state is preserved, and conflicts stop before mutation. Result relay, replay, deduplication,
-garbage collection, safe apply recovery, and the future signed release-candidate design are covered
-by the M4 contracts.
+The project is delivered in reviewed milestones. The current M5 checkpoint includes the M4
+reliability and safe-apply contracts plus named local instances, isolated state and native services,
+structured shell-free CLI launch specifications, and managed TraeX workers launched through an
+explicit warmpool wrapper. Codex and TraeX deployments may coexist on one device with independent
+credentials, homes, workspaces, sockets, services, and recovery state. Each Delegation network
+remains homogeneous by host kind; M5 does not enable cross-CLI dispatch or mixed-CLI networks.
+Managed workers synchronize an exact Git HEAD plus the root task's dirty index and worktree state,
+then reliably return terminal rollouts and Git result packages for explicit safe application.
 
 ## Install The Plugin
+
+For Codex:
 
 ```bash
 codex plugin marketplace add GhostFlying/delegation
 codex plugin add delegation@delegation
 ```
 
-Start a new Codex task after installation, then invoke `$delegation-setup`. The plugin does not
-silently download native code from its MCP launcher: setup installs the exact runtime version after
-verifying the SHA-256 pinned in the plugin.
+For TraeX:
+
+```bash
+traecli plugin marketplace add GhostFlying/delegation
+traecli plugin install delegation@delegation
+```
+
+Start a new Codex or TraeX task after installation, then invoke `$delegation-setup`. The plugin does
+not silently download native code from its MCP launcher: setup installs the exact runtime version
+after verifying the SHA-256 pinned in the plugin.
 
 The marketplace snapshot from `main` is the source of truth for the rolling plugin control plane;
 GitHub Releases distribute only immutable native runtime archives. Each tagged release is a
@@ -180,11 +188,11 @@ plugins/delegation/scripts/delegation-mcp credential issue \
 ```
 
 Transfer that file over an authenticated encrypted channel and preserve or re-establish
-current-user-only file protection on the target. Never paste its contents into a Codex task, shell
-argument, config file, or broker URL. Run `setup peer` with the network's `controllerId`, the exact
-issued `deviceId`, and the protected token path. Run `doctor --config <peer.json>` and remove any
-intermediate transfer copy after verification. Revoke a lost or retired credential only from the
-broker installation:
+current-user-only file protection on the target. Never paste its contents into a Codex or TraeX
+task, shell argument, config file, or broker URL. Run `setup peer` with the network's `controllerId`,
+the exact issued `deviceId`, and the protected token path. Run `doctor --config <peer.json>` and
+remove any intermediate transfer copy after verification. Revoke a lost or retired credential only
+from the broker installation:
 
 ```bash
 plugins/delegation/scripts/delegation-mcp credential revoke \
@@ -299,11 +307,11 @@ features, online state, and last-seen time. It does not expose a device role or 
 hardware, tag, or capacity metadata; do not infer those properties from a peer name.
 
 The root MCP talks only to the same-user local connector bridge. It neither reads the connector's
-broker token nor opens a broker connection itself. Device calls lazily bind the Codex task's
+broker token nor opens a broker connection itself. Device calls lazily bind the host task's
 `_meta.threadId` to a Delegation tree and the broker validates the resulting root principal and
-capabilities. Any non-managed, user-created Codex task on any peer may become a root when it first
-uses a Delegation tool. Trees remain bound to the originating peer. A managed worker thread will
-remain a worker; opening its history does not promote it.
+capabilities. Any non-managed, user-created Codex or TraeX task on any peer may become a root when
+it first uses a Delegation tool. Trees remain bound to the originating peer. A managed worker thread
+will remain a worker; opening its history does not promote it.
 
 ## Dispatch Managed Workers
 
@@ -326,9 +334,9 @@ warning.
 Call `spawn_agent` with a fresh `spawn_id` UUID, the same target, the returned `workspace_id`, a
 unique lowercase `task_name`, and a self-contained `message`. Tasks that do not need repository
 state may omit `workspace_id`. The target may be the current peer: self-targeting still creates a
-separate managed Codex thread in the connector's app-server. The broker persists the worker
-principal and dispatch receipt before contacting the target, so a lost response can be retried with
-the same spawn ID and exactly the same arguments.
+separate managed thread in the connector's Codex or TraeX app-server. The broker persists the
+worker principal and dispatch receipt before contacting the target, so a lost response can be
+retried with the same spawn ID and exactly the same arguments.
 
 The returned durable status is `started`, `failed`, or `pending`, and the dispatch attempt also has
 an `outcome`. `busy` means the target had no worker slot. `indeterminate` means no definitive target

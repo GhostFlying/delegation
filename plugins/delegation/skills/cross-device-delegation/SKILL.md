@@ -1,13 +1,14 @@
 ---
 name: cross-device-delegation
-description: Delegate a bounded Codex subtask to an appropriate trusted peer and collaborate with the resulting managed worker. Use for platform-specific builds or validation, advertised runtime features, self-targeted isolation, or any task whose required operating system or environment differs from the root task.
+description: Delegate a bounded Codex or TraeX subtask to an appropriate trusted peer and collaborate with the resulting managed worker. Use for platform-specific builds or validation, advertised runtime features, self-targeted isolation, or any task whose required operating system or environment differs from the root task.
 ---
 
 # Cross-device Delegation
 
-Every non-managed, user-created Codex task on a configured peer may become a temporary root when it
-first uses Delegation. Keep that root task on its originating peer. Delegate only bounded work that
-benefits from another environment; do not fork the root conversation onto the target peer.
+Every non-managed, user-created Codex or TraeX task on a configured peer may become a temporary root
+when it first uses Delegation. Keep that root task on its originating peer. Delegate only bounded
+work that benefits from another environment; do not fork the root conversation onto the target
+peer.
 
 ## Select A Peer
 
@@ -61,8 +62,8 @@ same logical action.
 
 Remote workers do not receive the peer roster and cannot recursively delegate in v0. A managed
 worker thread permanently remains a worker; opening its history does not promote it to a root. Start
-a separate normal Codex task on that peer when the user wants a new root. Answer a worker's
-environment question from the root or change the target from the root tools.
+a separate normal Codex or TraeX task on that peer when the user wants a new root. Answer a
+worker's environment question from the root or change the target from the root tools.
 
 ## Review Results
 

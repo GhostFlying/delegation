@@ -651,7 +651,7 @@ func (l WorkerRolloutLocator) Validate(threadID string) error {
 		relative, err := filepath.Rel(l.CodexHome, l.Path)
 		if err != nil || relative == "." || filepath.IsAbs(relative) || relative == ".." ||
 			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return errors.New("worker rollout path is outside managed Codex home")
+			return errors.New("worker rollout path is outside the managed CLI home")
 		}
 		components := strings.Split(relative, string(filepath.Separator))
 		if len(components) < 2 || !sameManagedPathComponent(components[0], "sessions") {

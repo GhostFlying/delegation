@@ -21,18 +21,18 @@ type codexToolMetadata struct {
 
 func toolMetadata(request *mcp.CallToolRequest, requireCWD bool) (codexToolMetadata, error) {
 	if request == nil || request.Params == nil {
-		return codexToolMetadata{}, errors.New("Codex did not provide tool-call metadata")
+		return codexToolMetadata{}, errors.New("the host did not provide tool-call metadata")
 	}
 	threadValue, found := request.Params.Meta["threadId"]
 	if !found {
-		return codexToolMetadata{}, errors.New("Codex did not provide _meta.threadId; start a new Codex task and retry")
+		return codexToolMetadata{}, errors.New("the host did not provide _meta.threadId; start a new host task and retry")
 	}
 	threadID, ok := threadValue.(string)
 	if !ok {
-		return codexToolMetadata{}, errors.New("Codex provided a non-string _meta.threadId")
+		return codexToolMetadata{}, errors.New("the host provided a non-string _meta.threadId")
 	}
 	if err := identity.ValidateID(threadID); err != nil {
-		return codexToolMetadata{}, fmt.Errorf("Codex _meta.threadId %w", err)
+		return codexToolMetadata{}, fmt.Errorf("host _meta.threadId %w", err)
 	}
 	metadata := codexToolMetadata{ThreadID: threadID}
 	if !requireCWD {
@@ -40,23 +40,23 @@ func toolMetadata(request *mcp.CallToolRequest, requireCWD bool) (codexToolMetad
 	}
 	sandboxValue, found := request.Params.Meta[sandboxStateMetaCapability]
 	if !found {
-		return codexToolMetadata{}, errors.New("Codex did not provide trusted sandbox cwd metadata; update Codex, start a new task, and retry")
+		return codexToolMetadata{}, errors.New("the host did not provide trusted sandbox cwd metadata; update the host CLI, start a new task, and retry")
 	}
 	sandbox, ok := sandboxValue.(map[string]any)
 	if !ok {
-		return codexToolMetadata{}, errors.New("Codex provided malformed sandbox cwd metadata")
+		return codexToolMetadata{}, errors.New("the host provided malformed sandbox cwd metadata")
 	}
 	cwdValue, found := sandbox["sandboxCwd"]
 	if !found {
-		return codexToolMetadata{}, errors.New("Codex sandbox metadata did not contain sandboxCwd")
+		return codexToolMetadata{}, errors.New("host sandbox metadata did not contain sandboxCwd")
 	}
 	cwdURI, ok := cwdValue.(string)
 	if !ok {
-		return codexToolMetadata{}, errors.New("Codex provided a non-string sandboxCwd")
+		return codexToolMetadata{}, errors.New("the host provided a non-string sandboxCwd")
 	}
 	cwd, err := localPathFromFileURI(cwdURI)
 	if err != nil {
-		return codexToolMetadata{}, fmt.Errorf("Codex sandboxCwd: %w", err)
+		return codexToolMetadata{}, fmt.Errorf("host sandboxCwd: %w", err)
 	}
 	metadata.CWD = cwd
 	return metadata, nil
