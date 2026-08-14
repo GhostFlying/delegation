@@ -32,19 +32,18 @@ Any tracked fix creates a new frozen revision and consumes another review round.
 
 ## 3. Review The Frozen Revision
 
-In each round, an independent read-only agent and local Claude Code review the same complete
-checkpoint range and frozen tree. Neither reviewer edits the worktree, delegates review, or follows
-a branch that can move.
+In each round, an independent read-only agent reviews the complete checkpoint range and frozen
+tree. The reviewer does not edit the worktree, delegate review, or follow a branch that can move.
 
 A finding is actionable only when it includes an ordinary supported user path and a material
 correctness, security, data-loss, compatibility, or operability impact. Record contrived invariant
 violations as residual risk unless they cross a promised security boundary or have a real
 reproduction.
 
-Accept when both reviewers are clean and executable acceptance passes. After any tracked fix, review
-the new frozen revision. Do not start round four: after three non-converged rounds, stop and request
-a human decision to accept, defer, or rescope. Use the same human path when a later rebase would
-require review after the checkpoint has exhausted its three-round budget.
+Accept when the independent review is clean and executable acceptance passes. After any tracked
+fix, review the new frozen revision. Do not start round four: after three non-converged rounds, stop
+and request a human decision to accept, defer, or rescope. Use the same human path when a later
+rebase would require review after the checkpoint has exhausted its three-round budget.
 
 ## 4. Rebase And Integrate
 
@@ -63,8 +62,8 @@ combined-tree validation before integrating the next checkpoint.
 ## 5. Review The Milestone
 
 After all checkpoints integrate and combined validation passes, freeze the milestone commit and
-tree. Review that exact tree once with both reviewers for cross-checkpoint interactions and
-end-to-end behavior.
+tree. Review that exact tree once with an independent read-only agent for cross-checkpoint
+interactions and end-to-end behavior.
 
 Turn actionable holistic findings into new small checkpoints with their own implementation,
 acceptance, and frozen review. Do not edit the frozen milestone review worktree. If three milestone

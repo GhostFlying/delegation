@@ -22,17 +22,12 @@
   serialize updates to the integration branch.
 - Freeze each checkpoint at an exact commit and tree before review. Obtain an independent,
   read-only agent review of the complete checkpoint range in a clean detached worktree. Reviewers
-  must not edit the reviewed worktree or review a moving branch. Accept only when both reviews are
-  clean and executable acceptance passes; any tracked fix requires a new frozen revision and review
-  round.
-- Also run a read-only local Claude Code review of each frozen checkpoint with `claude -p` and
-  `claude-opus-5`. Use the highest available effort, trying `--effort max` first and `xhigh` only
-  when the installed CLI rejects `max`. Record the exact model, effort, unavailable model, failed
-  invocation, or fallback explicitly; this supplements rather than replaces the independent agent
-  review.
-- Treat one review round as one frozen checkpoint submitted to both the independent agent and
-  Claude review, followed by disposition of that round's findings. Record the round number and the
-  exact frozen diff or commit range.
+  must not edit the reviewed worktree or review a moving branch. Accept only when the independent
+  review is clean and executable acceptance passes; any tracked fix requires a new frozen revision
+  and review round.
+- Treat one review round as one frozen checkpoint submitted to the independent reviewer, followed
+  by disposition of that round's findings. Record the round number and the exact frozen diff or
+  commit range.
 - Do not start a fourth review round for the same checkpoint. If actionable findings, recurring
   findings, or reviewer disagreement remain after three rounds, stop automated review and request
   human intervention with the unresolved findings, risk assessment, and concrete accept, defer,
