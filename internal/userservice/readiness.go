@@ -20,11 +20,12 @@ import (
 )
 
 const (
-	serviceReadinessTimeout       = 10 * time.Second
-	serviceReadinessPoll          = 200 * time.Millisecond
-	serviceReadinessConfirmations = 2
-	maximumHealthBody             = 128
-	maximumStatusBody             = 16 * 1024
+	serviceReadinessTimeout          = 10 * time.Second
+	tailscaleServiceReadinessTimeout = 6 * time.Minute
+	serviceReadinessPoll             = 200 * time.Millisecond
+	serviceReadinessConfirmations    = 2
+	maximumHealthBody                = 128
+	maximumStatusBody                = 16 * 1024
 )
 
 func waitForServiceReady(configPath string) error {
@@ -32,12 +33,27 @@ func waitForServiceReady(configPath string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), serviceReadinessTimeout)
+	return waitForServiceReadyConfig(context.Background(), cfg, probeService)
+}
+
+func serviceReadinessTimeoutFor(cfg delegationconfig.Config) time.Duration {
+	if cfg.Transport.Mode == delegationconfig.TransportModeTailscale {
+		return tailscaleServiceReadinessTimeout
+	}
+	return serviceReadinessTimeout
+}
+
+func waitForServiceReadyConfig(
+	parent context.Context,
+	cfg delegationconfig.Config,
+	probe func(context.Context, delegationconfig.Config) error,
+) error {
+	ctx, cancel := context.WithTimeout(parent, serviceReadinessTimeoutFor(cfg))
 	defer cancel()
 	confirmations := 0
 	var lastErr error
 	for {
-		lastErr = probeService(ctx, cfg)
+		lastErr = probe(ctx, cfg)
 		if lastErr == nil {
 			confirmations++
 			if confirmations == serviceReadinessConfirmations {
