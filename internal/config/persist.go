@@ -31,7 +31,17 @@ func IsCommitted(err error) bool {
 }
 
 func WriteNew(path string, cfg Config) error {
-	if err := cfg.Validate(); err != nil {
+	return writeNewForRuntime(path, cfg, RuntimeCapabilities{})
+}
+
+// WriteNewForRuntime atomically writes a new configuration after validating it
+// against explicitly available runtime transport capabilities.
+func WriteNewForRuntime(path string, cfg Config, capabilities RuntimeCapabilities) error {
+	return writeNewForRuntime(path, cfg, capabilities)
+}
+
+func writeNewForRuntime(path string, cfg Config, capabilities RuntimeCapabilities) error {
+	if err := cfg.ValidateForRuntime(capabilities); err != nil {
 		return err
 	}
 	directoryLease, name, err := prepareWrite(path)

@@ -2,8 +2,11 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
+	"maps"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -53,6 +56,468 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 	if got.Peer.EffectiveCLI().Command != cfg.Peer.CodexBinary {
 		t.Fatalf("legacy effective CLI = %#v", got.Peer.EffectiveCLI())
+	}
+}
+
+func TestTransportConfigRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  func(*testing.T) Config
+	}{
+		{
+			name: "tcp broker",
+			cfg:  protectedTestConfig,
+		},
+		{
+			name: "tcp peer",
+			cfg:  testPeerConfig,
+		},
+		{
+			name: "tailscale broker",
+			cfg: func(t *testing.T) Config {
+				cfg := protectedTestConfig(t)
+				cfg.Transport = testTailscaleTransport(t)
+				cfg.Broker.Listen = ":8787"
+				cfg.Broker.StatusListen = "127.0.0.1:8788"
+				return cfg
+			},
+		},
+		{
+			name: "tailscale peer",
+			cfg: func(t *testing.T) Config {
+				cfg := testPeerConfig(t)
+				cfg.Transport = testTailscaleTransport(t)
+				cfg.Broker.URL = "ws://broker.tailnet.test:8787/v1/connect"
+				return cfg
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := test.cfg(t)
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), `"transport":{"mode":"`) {
+				t.Fatalf("encoded config does not explicitly select transport: %s", data)
+			}
+			path := filepath.Join(t.TempDir(), "private", "config.json")
+			writeProtectedConfigFixture(t, path, data)
+			var got Config
+			if cfg.Transport.Mode == TransportModeTailscale {
+				got, err = ReadForRuntime(path, tailscaleRuntimeCapabilities())
+			} else {
+				got, err = Read(path)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, cfg) {
+				t.Fatalf("Read() = %#v, want %#v", got, cfg)
+			}
+		})
+	}
+}
+
+func TestTransportModeValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		cfg    func(*testing.T) Config
+		mutate func(*Config)
+		want   string
+	}{
+		{
+			name: "tcp rejects tailscale object",
+			cfg:  protectedTestConfig,
+			mutate: func(cfg *Config) {
+				tailscale := testTailscaleTransport(t).Tailscale
+				cfg.Transport.Tailscale = tailscale
+			},
+			want: "must be absent",
+		},
+		{
+			name: "tailscale requires object",
+			cfg:  protectedTestConfig,
+			mutate: func(cfg *Config) {
+				cfg.Transport.Mode = TransportModeTailscale
+			},
+			want: "is required",
+		},
+		{
+			name: "unknown mode",
+			cfg:  protectedTestConfig,
+			mutate: func(cfg *Config) {
+				cfg.Transport.Mode = TransportMode(2)
+			},
+			want: "unsupported transport mode",
+		},
+		{
+			name: "tailscale broker rejects tcp listen",
+			cfg:  protectedTestConfig,
+			mutate: func(cfg *Config) {
+				cfg.Transport = testTailscaleTransport(t)
+				cfg.Broker.Listen = "127.0.0.1:8787"
+			},
+			want: "empty host",
+		},
+		{
+			name: "tailscale peer rejects wss",
+			cfg:  testPeerConfig,
+			mutate: func(cfg *Config) {
+				cfg.Transport = testTailscaleTransport(t)
+				cfg.Broker.URL = "wss://broker.tailnet.test/v1/connect"
+			},
+			want: "must use ws://",
+		},
+		{
+			name: "tailscale broker rejects insecure acknowledgement",
+			cfg:  protectedTestConfig,
+			mutate: func(cfg *Config) {
+				cfg.Transport = testTailscaleTransport(t)
+				cfg.Broker.Listen = ":8787"
+				cfg.Broker.AllowInsecureNonLoopback = true
+			},
+			want: "must be false",
+		},
+		{
+			name: "tailscale peer rejects insecure acknowledgement",
+			cfg:  testPeerConfig,
+			mutate: func(cfg *Config) {
+				cfg.Transport = testTailscaleTransport(t)
+				cfg.Broker.URL = "ws://broker.tailnet.test/v1/connect"
+				cfg.Broker.AllowInsecureNonLoopback = true
+			},
+			want: "must be false",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := test.cfg(t)
+			test.mutate(&cfg)
+			err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities())
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestTransportModeCanonicalRoundTrip(t *testing.T) {
+	for _, mode := range []TransportMode{TransportModeTCP, TransportModeTailscale} {
+		data, err := json.Marshal(mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got TransportMode
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got != mode {
+			t.Fatalf("transport mode round-trip = %v, want %v", got, mode)
+		}
+	}
+}
+
+func TestTailscaleRuntimeActivationGate(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  func(*testing.T) Config
+	}{
+		{
+			name: "broker port listener",
+			cfg: func(t *testing.T) Config {
+				cfg := protectedTestConfig(t)
+				cfg.Transport = testTailscaleTransport(t)
+				cfg.Broker.Listen = ":8787"
+				return cfg
+			},
+		},
+		{
+			name: "peer broker endpoint",
+			cfg:  testTailscalePeerConfig,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := test.cfg(t)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "not supported by this runtime") {
+				t.Fatalf("Validate() error = %v, want unsupported runtime", err)
+			}
+			if err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities()); err != nil {
+				t.Fatalf("ValidateForRuntime() with capability error = %v", err)
+			}
+
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "private", "config.json")
+			writeProtectedConfigFixture(t, path, data)
+			if _, err := Read(path); err == nil ||
+				!strings.Contains(err.Error(), "not supported by this runtime") {
+				t.Fatalf("Read() error = %v, want unsupported runtime", err)
+			}
+			if _, err := ReadForRuntime(path, tailscaleRuntimeCapabilities()); err != nil {
+				t.Fatalf("ReadForRuntime() with capability error = %v", err)
+			}
+		})
+	}
+}
+
+func TestReadRequiresExplicitTransportMode(t *testing.T) {
+	valid := protectedTestConfig(t)
+	data, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		transport any
+		remove    bool
+		want      string
+	}{
+		{name: "missing transport", remove: true, want: "transport configuration is required"},
+		{name: "null transport", transport: nil, want: "transport configuration is required"},
+		{name: "missing mode", transport: map[string]any{}, want: "transport mode is required"},
+		{name: "empty mode", transport: map[string]any{"mode": ""}, want: "unsupported transport mode"},
+		{name: "unknown mode", transport: map[string]any{"mode": "wireguard"}, want: "unsupported transport mode"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := maps.Clone(document)
+			if test.remove {
+				delete(candidate, "transport")
+			} else {
+				candidate["transport"] = test.transport
+			}
+			contents, err := json.Marshal(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "private", "config.json")
+			writeProtectedConfigFixture(t, path, contents)
+			_, err = Read(path)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Read() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestTailscaleConfigValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*TailscaleConfig)
+		want   string
+	}{
+		{
+			name: "empty state directory",
+			mutate: func(cfg *TailscaleConfig) {
+				cfg.StateDir = ""
+			},
+			want: "stateDir",
+		},
+		{
+			name: "relative state directory",
+			mutate: func(cfg *TailscaleConfig) {
+				cfg.StateDir = "tailscale-state"
+			},
+			want: "stateDir",
+		},
+		{
+			name: "empty auth key file",
+			mutate: func(cfg *TailscaleConfig) {
+				cfg.AuthKeyFile = ""
+			},
+			want: "authKeyFile",
+		},
+		{
+			name: "relative auth key file",
+			mutate: func(cfg *TailscaleConfig) {
+				cfg.AuthKeyFile = "auth.key"
+			},
+			want: "authKeyFile",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testTailscalePeerConfig(t)
+			test.mutate(cfg.Transport.Tailscale)
+			err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities())
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+
+	for _, hostname := range []string{
+		"",
+		"-broker",
+		"broker-",
+		"Broker",
+		"broker.example",
+		"broker_name",
+		"broker name",
+		strings.Repeat("a", 64),
+		"bröker",
+	} {
+		t.Run("invalid hostname "+hostname, func(t *testing.T) {
+			cfg := testTailscalePeerConfig(t)
+			cfg.Transport.Tailscale.Hostname = hostname
+			err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities())
+			if err == nil || !strings.Contains(err.Error(), "hostname") {
+				t.Fatalf("Validate() error = %v, want hostname error", err)
+			}
+		})
+	}
+	for _, hostname := range []string{"a", "0", "broker", "broker-1", strings.Repeat("a", 63)} {
+		t.Run("valid hostname "+hostname[:min(len(hostname), 16)], func(t *testing.T) {
+			cfg := testTailscalePeerConfig(t)
+			cfg.Transport.Tailscale.Hostname = hostname
+			if err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities()); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestTailscaleBrokerListenValidation(t *testing.T) {
+	for _, listen := range []string{
+		"",
+		"8787",
+		"127.0.0.1:8787",
+		"0.0.0.0:8787",
+		"localhost:8787",
+		"::8787",
+		":not-a-port",
+		":0",
+		":65536",
+	} {
+		t.Run(listen, func(t *testing.T) {
+			cfg := protectedTestConfig(t)
+			cfg.Transport = testTailscaleTransport(t)
+			cfg.Broker.Listen = listen
+			err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities())
+			if err == nil || !strings.Contains(err.Error(), "tailscale broker listen") {
+				t.Fatalf("Validate() error = %v, want tailscale listen error", err)
+			}
+		})
+	}
+
+	cfg := protectedTestConfig(t)
+	cfg.Transport = testTailscaleTransport(t)
+	cfg.Broker.Listen = ":8787"
+	cfg.Broker.StatusListen = "127.0.0.1:8788"
+	if err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities()); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	cfg.Broker.StatusListen = "0.0.0.0:8788"
+	if err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities()); err == nil ||
+		!strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("Validate() status listener error = %v", err)
+	}
+	cfg.Broker.StatusListen = "127.0.0.1:8787"
+	if err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities()); err == nil ||
+		!strings.Contains(err.Error(), "overlap") {
+		t.Fatalf("Validate() overlapping listener error = %v", err)
+	}
+}
+
+func TestTailscaleBrokerURLValidation(t *testing.T) {
+	for _, brokerURL := range []string{
+		"ws://broker.tailnet.test/v1/connect",
+		"ws://broker.tailnet.test:8787/v1/connect",
+	} {
+		t.Run("valid "+brokerURL, func(t *testing.T) {
+			got, err := NormalizeBrokerURLForTransport(brokerURL, TransportModeTailscale, false)
+			if err != nil || got != brokerURL {
+				t.Fatalf("NormalizeBrokerURLForTransport() = %q, %v", got, err)
+			}
+			cfg := testTailscalePeerConfig(t)
+			cfg.Broker.URL = brokerURL
+			if err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities()); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+	for _, brokerURL := range []string{
+		"",
+		"ws:///v1/connect",
+		"wss://broker.tailnet.test/v1/connect",
+		"http://broker.tailnet.test/v1/connect",
+		"ws://token@broker.tailnet.test/v1/connect",
+		"ws://broker.tailnet.test",
+		"ws://broker.tailnet.test/",
+		"ws://broker.tailnet.test/v2/connect",
+		"ws://broker.tailnet.test/%76%31/connect",
+		"ws://broker.tailnet.test/v1/connect?",
+		"ws://broker.tailnet.test/v1/connect?query",
+		"ws://broker.tailnet.test/v1/connect#fragment",
+		"ws://broker.tailnet.test:0/v1/connect",
+		"ws://broker.tailnet.test:65536/v1/connect",
+		"ws://broker.tailnet.test:/v1/connect",
+	} {
+		t.Run(brokerURL, func(t *testing.T) {
+			if _, err := NormalizeBrokerURLForTransport(
+				brokerURL,
+				TransportModeTailscale,
+				false,
+			); err == nil {
+				t.Fatal("NormalizeBrokerURLForTransport() accepted invalid tailscale endpoint")
+			}
+		})
+	}
+}
+
+func TestTransportAwareBrokerURLNormalization(t *testing.T) {
+	const brokerURL = "ws://broker.example.test:8787"
+	want, err := NormalizeBrokerURL(brokerURL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := NormalizeBrokerURLForTransport(brokerURL, TransportModeTCP, true)
+	if err != nil || got != want {
+		t.Fatalf("tcp normalization = %q, %v, want %q", got, err, want)
+	}
+	if _, err := NormalizeBrokerURLForTransport(
+		"ws://broker.tailnet.test/v1/connect",
+		TransportModeTailscale,
+		false,
+	); err != nil {
+		t.Fatalf("tailscale normalization required plaintext acknowledgement: %v", err)
+	}
+}
+
+func TestUsesInsecureNonLoopbackTransportIgnoresTailscale(t *testing.T) {
+	tcpBroker := protectedTestConfig(t)
+	tcpBroker.Broker.Listen = "0.0.0.0:8787"
+	tcpBroker.Broker.AllowInsecureNonLoopback = true
+	if !tcpBroker.UsesInsecureNonLoopbackTransport() {
+		t.Fatal("TCP broker did not report insecure non-loopback transport")
+	}
+	tcpPeer := testPeerConfig(t)
+	tcpPeer.Broker.URL = "ws://broker.example.test:8787"
+	tcpPeer.Broker.AllowInsecureNonLoopback = true
+	if !tcpPeer.UsesInsecureNonLoopbackTransport() {
+		t.Fatal("TCP peer did not report insecure non-loopback transport")
+	}
+
+	tailscaleBroker := protectedTestConfig(t)
+	tailscaleBroker.Transport = testTailscaleTransport(t)
+	tailscaleBroker.Broker.Listen = ":8787"
+	if tailscaleBroker.UsesInsecureNonLoopbackTransport() {
+		t.Fatal("tailscale broker reported insecure non-loopback transport")
+	}
+	tailscalePeer := testTailscalePeerConfig(t)
+	if tailscalePeer.UsesInsecureNonLoopbackTransport() {
+		t.Fatal("tailscale peer reported insecure non-loopback transport")
 	}
 }
 
@@ -693,14 +1158,14 @@ func TestBrokerStatusListenRejectsSameNumericPort(t *testing.T) {
 }
 
 func TestConfigRejectsUnsupportedSchemaVersions(t *testing.T) {
-	for _, version := range []int{0, CurrentSchemaVersion + 1} {
+	for _, version := range []int{0, 3, CurrentSchemaVersion + 1} {
 		cfg := protectedTestConfig(t)
 		cfg.SchemaVersion = version
 		err := cfg.Validate()
 		if err == nil {
 			t.Fatalf("Validate accepted schema version %d", version)
 		}
-		for _, text := range []string{"unsupported config schema version", "supports only version 3", "setup broker or setup peer"} {
+		for _, text := range []string{"unsupported config schema version", "supports only version 4", "setup broker or setup peer"} {
 			if !strings.Contains(err.Error(), text) {
 				t.Fatalf("schema version %d error = %q, want %q", version, err, text)
 			}
@@ -709,20 +1174,27 @@ func TestConfigRejectsUnsupportedSchemaVersions(t *testing.T) {
 }
 
 func TestReadReportsUnsupportedSchemaBeforeUnknownFields(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "private", "unsupported.json")
-	data, err := json.Marshal(map[string]any{
-		"schemaVersion": CurrentSchemaVersion + 1,
-		"role":          "broker",
-		"unknown":       true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeProtectedConfigFixture(t, path, data)
-	_, err = Read(path)
-	if err == nil || !strings.Contains(err.Error(), "unsupported config schema version 4") ||
-		strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("unsupported config read error = %v", err)
+	for _, version := range []int{3, CurrentSchemaVersion + 1} {
+		t.Run(strconv.Itoa(version), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "private", "unsupported.json")
+			data, err := json.Marshal(map[string]any{
+				"schemaVersion": version,
+				"role":          "broker",
+				"unknown":       true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeProtectedConfigFixture(t, path, data)
+			_, err = Read(path)
+			if err == nil ||
+				!strings.Contains(err.Error(), fmt.Sprintf("unsupported config schema version %d", version)) ||
+				!strings.Contains(err.Error(), "supports only version 4") ||
+				strings.Contains(err.Error(), "unknown field") ||
+				strings.Contains(err.Error(), "transport configuration") {
+				t.Fatalf("unsupported config read error = %v", err)
+			}
+		})
 	}
 }
 
@@ -755,6 +1227,31 @@ func testPeerConfig(t *testing.T) Config {
 		},
 		Peer: testPeerRuntime(t),
 	}
+}
+
+func testTailscaleTransport(t *testing.T) TransportConfig {
+	t.Helper()
+	root := t.TempDir()
+	return TransportConfig{
+		Mode: TransportModeTailscale,
+		Tailscale: &TailscaleConfig{
+			StateDir:    filepath.Join(root, "tailscale"),
+			Hostname:    "delegation-node",
+			AuthKeyFile: filepath.Join(root, "auth.key"),
+		},
+	}
+}
+
+func tailscaleRuntimeCapabilities() RuntimeCapabilities {
+	return RuntimeCapabilities{EmbeddedTailscale: true}
+}
+
+func testTailscalePeerConfig(t *testing.T) Config {
+	t.Helper()
+	cfg := testPeerConfig(t)
+	cfg.Transport = testTailscaleTransport(t)
+	cfg.Broker.URL = "ws://broker.tailnet.test:8787/v1/connect"
+	return cfg
 }
 
 func TestReadRejectsOversizedProtectedConfig(t *testing.T) {
