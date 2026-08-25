@@ -15,8 +15,8 @@ or replace an existing deployment. Require `--auth-mode token` for every embedde
 and peer; no unauthenticated Tailscale mode is supported. Keep Codex and TraeX in separate instance,
 broker, controller, token, state, hostname, and service domains.
 
-M6 supports Codex and TraeX on Linux and macOS, and Codex on Windows 11. Windows TraeX is
-unsupported. Stop instead of configuring, qualifying, or installing a Windows TraeX deployment.
+Windows TraeX is unsupported. M6 supports Codex and TraeX on Linux and macOS, and Codex on
+Windows 11. Stop instead of configuring, qualifying, or installing a Windows TraeX deployment.
 
 ## Resolve The Plugin
 
@@ -53,7 +53,7 @@ Set `DELEGATION_INSTANCE` in the CLI host environment before plugin startup to s
 peer's root MCP; an explicit `DELEGATION_CONFIG` remains authoritative and must identify the same
 instance.
 
-Before installing or replacing a user service, read
+Before installing a fresh user service, read
 [native services](references/native-services.md). Install broker and peer processes independently,
 and stop when the native service manager reports a foreign, drifted, or indeterminate definition.
 Use the exact named config when installing a named instance; its `instanceId` selects a distinct

@@ -74,10 +74,9 @@ automatically.
 
 Linux requires a working systemd user manager. macOS needs the current user's GUI launchd domain.
 Windows needs an interactive login. A nonzero Windows service exit is retried once per minute for
-up to 255 attempts; a clean exit is not restarted. Runtime-path changes require explicit native
-service replacement. Restart the peer service after rotating its provider credential or replacing
-the environment file. Changing the environment file path changes the managed service identity and
-requires explicit replacement.
+up to 255 attempts; a clean exit is not restarted. M6 does not define an in-place path for changing
+the runtime or environment-file path. Create and qualify a fresh named deployment instead of
+replacing an existing native service.
 
 Each embedded Tailscale service owns one `tsnet` node and one exclusive Tailscale state-directory
 lease. It does not use system `tailscaled`. Keep broker and peer state directories distinct, and
