@@ -2734,7 +2734,10 @@ func TestHostRejectsStoredWorkerAuthorityDrift(t *testing.T) {
 		"workspace root": func(worker *store.WorkerReservation) {
 			worker.WorkspacePath = filepath.Join(t.TempDir(), "stale-workspace")
 		},
-		"profile version": func(worker *store.WorkerReservation) {
+		"stale profile version": func(worker *store.WorkerReservation) {
+			worker.ProfileVersion = workerProfileVersion - 1
+		},
+		"future profile version": func(worker *store.WorkerReservation) {
 			worker.ProfileVersion = workerProfileVersion + 1
 		},
 	}
@@ -3236,6 +3239,9 @@ func assertManagedProfile(
 		}
 		wantPermissions := map[string]any{
 			"filesystem": filesystem,
+			"network": map[string]any{
+				"enabled": true,
+			},
 		}
 		if !reflect.DeepEqual(config["permissions."+workerPermissionProfile], wantPermissions) {
 			t.Fatalf("worker permissions = %#v, want %#v", config["permissions."+workerPermissionProfile], wantPermissions)
@@ -3322,6 +3328,10 @@ func managedFilesystemPermissions(t *testing.T, config map[string]any) map[strin
 	permissions, ok := config["permissions."+workerPermissionProfile].(map[string]any)
 	if !ok {
 		t.Fatalf("managed permissions = %#v", config["permissions."+workerPermissionProfile])
+	}
+	network, ok := permissions["network"].(map[string]any)
+	if !ok || network["enabled"] != true {
+		t.Fatalf("managed network permissions = %#v", permissions["network"])
 	}
 	filesystem, ok := permissions["filesystem"].(map[string]any)
 	if !ok {

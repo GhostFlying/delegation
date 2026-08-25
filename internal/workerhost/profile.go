@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	workerProfileVersion    = 5
+	workerProfileVersion    = 6
 	workerPermissionProfile = "delegation-worker"
 	windowsWorkerProfile    = ":danger-full-access"
 	rootPluginEnabledConfig = "plugins.delegation@delegation.enabled"
@@ -72,6 +72,9 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 		config["default_permissions"] = workerPermissionProfile
 		config["permissions."+workerPermissionProfile] = map[string]any{
 			"filesystem": filesystem,
+			"network": map[string]any{
+				"enabled": true,
+			},
 		}
 	}
 	config["projects"] = map[string]any{

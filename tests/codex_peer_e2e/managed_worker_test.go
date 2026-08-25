@@ -112,6 +112,8 @@ func TestManagedWorkerUsesEnvOnlyProviderAndColdResume(t *testing.T) {
 		runningStarted:        make(chan struct{}),
 		runningDisconnected:   make(chan struct{}),
 	}
+	modelServer := httptest.NewServer(mock)
+	t.Cleanup(modelServer.Close)
 	mock.probeCommand, mock.probeMarkers = managedSandboxProbe(
 		credentialPath,
 		serviceEnvironmentPath,
@@ -119,6 +121,7 @@ func TestManagedWorkerUsesEnvOnlyProviderAndColdResume(t *testing.T) {
 		managedDelegationBinary,
 		statePath,
 		providerEnvironment,
+		modelServer.URL+"/managed-network-probe",
 	)
 	mock.protectedOutput = []managedProtectedValue{
 		{label: "connector configuration authority path", value: configPath},
@@ -128,8 +131,6 @@ func TestManagedWorkerUsesEnvOnlyProviderAndColdResume(t *testing.T) {
 		{label: "provider credential", value: providerCredential},
 		{label: "external fixture credential", value: "outside-credential-test-value"},
 	}
-	modelServer := httptest.NewServer(mock)
-	t.Cleanup(modelServer.Close)
 	providerJSON := fmt.Sprintf(
 		`{"model":"gpt-5.2","model_provider":"delegation_mock","model_providers.delegation_mock":{"name":"Delegation managed-worker mock","base_url":%q,"wire_api":"responses","env_key":%q,"requires_openai_auth":false}}`,
 		modelServer.URL+"/v1",
@@ -628,18 +629,19 @@ type managedProtectedValue struct {
 }
 
 func managedSandboxProbe(
-	credentialPath, serviceEnvironmentPath, configPath, delegationBinary, statePath, providerEnvironment string,
+	credentialPath, serviceEnvironmentPath, configPath, delegationBinary, statePath, providerEnvironment,
+	networkProbeURL string,
 ) (string, []string) {
 	markers := []string{
 		"WORKSPACE=readable", "OUTSIDE=blocked", "SERVICE_ENV=blocked", "CONNECTOR_CONFIG=blocked",
 		"DELEGATION_BINARY=blocked", "PEER_STATE=blocked", "PROVIDER_ENV=hidden",
-		"CONFIG_ENV=hidden", "SQLITE_ENV=hidden",
+		"CONFIG_ENV=hidden", "SQLITE_ENV=hidden", "NETWORK=reachable",
 	}
 	if runtime.GOOS == "windows" {
 		markers = []string{
 			"WORKSPACE=readable", "OUTSIDE=readable", "SERVICE_ENV=readable", "CONNECTOR_CONFIG=readable",
 			"DELEGATION_BINARY=readable", "PEER_STATE=readable", "PROVIDER_ENV=hidden",
-			"CONFIG_ENV=hidden", "SQLITE_ENV=hidden",
+			"CONFIG_ENV=hidden", "SQLITE_ENV=hidden", "NETWORK=reachable",
 		}
 		literal := managedPowerShellLiteral
 		return fmt.Sprintf(`$ErrorActionPreference = 'Stop'
@@ -659,6 +661,24 @@ function Get-EnvironmentState([string]$Name) {
   }
   return 'hidden'
 }
+function Get-NetworkState([string]$Url) {
+  $handler = [System.Net.Http.HttpClientHandler]::new()
+  $handler.UseProxy = $false
+  $client = [System.Net.Http.HttpClient]::new($handler)
+  $client.Timeout = [TimeSpan]::FromSeconds(5)
+  try {
+    $response = $client.GetAsync($Url).GetAwaiter().GetResult()
+    if ($response.IsSuccessStatusCode -and $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() -eq 'reachable') {
+      return 'reachable'
+    }
+    return 'blocked'
+  } catch {
+    return 'blocked'
+  } finally {
+    $client.Dispose()
+    $handler.Dispose()
+  }
+}
 try {
   $workspace = [System.IO.File]::ReadAllText('workspace-marker.txt').Trim()
 } catch {
@@ -672,7 +692,8 @@ Write-Output ('DELEGATION_BINARY=' + (Get-ReadState %s))
 Write-Output ('PEER_STATE=' + (Get-ReadState %s))
 Write-Output ('PROVIDER_ENV=' + (Get-EnvironmentState %s))
 Write-Output ('CONFIG_ENV=' + (Get-EnvironmentState %s))
-Write-Output ('SQLITE_ENV=' + (Get-EnvironmentState 'CODEX_SQLITE_HOME'))`,
+Write-Output ('SQLITE_ENV=' + (Get-EnvironmentState 'CODEX_SQLITE_HOME'))
+Write-Output ('NETWORK=' + (Get-NetworkState %s))`,
 			literal(credentialPath),
 			literal(serviceEnvironmentPath),
 			literal(configPath),
@@ -680,6 +701,7 @@ Write-Output ('SQLITE_ENV=' + (Get-EnvironmentState 'CODEX_SQLITE_HOME'))`,
 			literal(statePath),
 			literal(providerEnvironment),
 			literal(codexconfig.EnvironmentVariable),
+			literal(networkProbeURL),
 		), markers
 	}
 
@@ -699,7 +721,12 @@ printf 'DELEGATION_BINARY=%%s\n' "$(read_state %s)"
 printf 'PEER_STATE=%%s\n' "$(read_state %s)"
 printf 'PROVIDER_ENV=%%s\n' "$(environment_state %s)"
 printf 'CONFIG_ENV=%%s\n' "$(environment_state %s)"
-printf 'SQLITE_ENV=%%s\n' "$(environment_state CODEX_SQLITE_HOME)"`,
+printf 'SQLITE_ENV=%%s\n' "$(environment_state CODEX_SQLITE_HOME)"
+if test "$(curl --fail --silent --show-error --noproxy '*' --max-time 5 %s)" = reachable; then
+  echo NETWORK=reachable
+else
+  echo NETWORK=blocked
+fi`,
 		literal(credentialPath),
 		literal(serviceEnvironmentPath),
 		literal(configPath),
@@ -707,6 +734,7 @@ printf 'SQLITE_ENV=%%s\n' "$(environment_state CODEX_SQLITE_HOME)"`,
 		literal(statePath),
 		literal(providerEnvironment),
 		literal(codexconfig.EnvironmentVariable),
+		literal(networkProbeURL),
 	)
 	if runtime.GOOS == "linux" {
 		command += fmt.Sprintf(`
@@ -729,6 +757,10 @@ func managedPowerShellLiteral(value string) string {
 }
 
 func (m *managedResponsesMock) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodGet && request.URL.Path == "/managed-network-probe" {
+		_, _ = io.WriteString(writer, "reachable")
+		return
+	}
 	if request.Method != http.MethodPost || request.URL.Path != "/v1/responses" {
 		m.fail(writer, fmt.Errorf("unexpected managed model request %s %s", request.Method, request.URL.Path))
 		return
