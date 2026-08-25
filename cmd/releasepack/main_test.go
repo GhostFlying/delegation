@@ -342,13 +342,7 @@ func TestReleaseNoticeCoversProductionLinkedModuleUnion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const componentPrefix = "Component: "
-	var noticeComponents []string
-	for _, line := range strings.Split(string(notice), "\n") {
-		if component, ok := strings.CutPrefix(line, componentPrefix); ok {
-			noticeComponents = append(noticeComponents, component)
-		}
-	}
+	noticeComponents := releaseNoticeComponents(notice)
 	var linkedComponents []string
 	seen := make(map[string]struct{})
 	for _, target := range releaseTargets {
@@ -382,6 +376,26 @@ func TestReleaseNoticeCoversProductionLinkedModuleUnion(t *testing.T) {
 	want := append([]string{"Go toolchain " + requiredGoVersion}, linkedComponents...)
 	if !reflect.DeepEqual(noticeComponents, want) {
 		t.Fatalf("release notice components differ from linked module union\n got: %q\nwant: %q", noticeComponents, want)
+	}
+}
+
+func releaseNoticeComponents(notice []byte) []string {
+	const componentPrefix = "Component: "
+	var components []string
+	for _, line := range strings.Split(string(notice), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if component, ok := strings.CutPrefix(line, componentPrefix); ok {
+			components = append(components, component)
+		}
+	}
+	return components
+}
+
+func TestReleaseNoticeComponentsAcceptsWindowsLineEndings(t *testing.T) {
+	notice := []byte("Component: Go toolchain go1.26.5\r\n\r\nComponent: example.com/module v1.2.3\r\n")
+	want := []string{"Go toolchain go1.26.5", "example.com/module v1.2.3"}
+	if got := releaseNoticeComponents(notice); !reflect.DeepEqual(got, want) {
+		t.Fatalf("releaseNoticeComponents() = %q, want %q", got, want)
 	}
 }
 

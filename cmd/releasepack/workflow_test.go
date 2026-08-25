@@ -175,5 +175,17 @@ func readWorkflow(t *testing.T, name string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(data)
+	return normalizeTestLineEndings(string(data))
+}
+
+func normalizeTestLineEndings(text string) string {
+	return strings.ReplaceAll(text, "\r\n", "\n")
+}
+
+func TestNormalizeTestLineEndings(t *testing.T) {
+	const input = "first\r\nsecond\r\n"
+	const want = "first\nsecond\n"
+	if got := normalizeTestLineEndings(input); got != want {
+		t.Fatalf("normalizeTestLineEndings() = %q, want %q", got, want)
+	}
 }
