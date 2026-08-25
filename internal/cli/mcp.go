@@ -15,6 +15,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/rootmcp"
+	"github.com/GhostFlying/delegation/internal/runtimeconfig"
 	"github.com/GhostFlying/delegation/internal/workermcp"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -131,7 +132,7 @@ func resolveMCPConfig(flags *flag.FlagSet, configPath, instanceID string) (strin
 	if !selected {
 		return resolvedConfig, nil
 	}
-	cfg, err := delegationconfig.Read(resolvedConfig)
+	cfg, err := runtimeconfig.Read(resolvedConfig)
 	if err != nil {
 		return "", err
 	}
@@ -179,7 +180,7 @@ func runWorkerMCP(
 }
 
 func loadRootMCPServer(configPath string) (*mcp.Server, error) {
-	cfg, err := delegationconfig.Read(configPath)
+	cfg, err := runtimeconfig.Read(configPath)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +207,7 @@ func loadWorkerMCPServer(
 	configPath string,
 	principal control.PrincipalIdentity,
 ) (*mcp.Server, error) {
-	cfg, err := delegationconfig.Read(configPath)
+	cfg, err := runtimeconfig.Read(configPath)
 	if err != nil {
 		return nil, err
 	}

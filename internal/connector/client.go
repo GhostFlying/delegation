@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"runtime"
 	"slices"
@@ -47,6 +48,7 @@ var (
 )
 
 type DialFunc func(context.Context, string, *websocket.DialOptions) (*websocket.Conn, *http.Response, error)
+type DialContextFunc func(context.Context, string, string) (net.Conn, error)
 
 type WorkerSpawnRequest struct {
 	TreeID string
@@ -227,6 +229,8 @@ type ResultPackageManager interface {
 type Options struct {
 	BrokerURL                string
 	AllowInsecureNonLoopback bool
+	TransportMode            config.TransportMode
+	DialContext              DialContextFunc
 	ControllerID             string
 	DeviceID                 string
 	DeviceName               string
@@ -307,9 +311,16 @@ type Client struct {
 }
 
 func New(options Options) (*Client, error) {
-	endpoint, err := config.NormalizeBrokerURL(options.BrokerURL, options.AllowInsecureNonLoopback)
+	endpoint, err := config.NormalizeBrokerURLForTransport(
+		options.BrokerURL,
+		options.TransportMode,
+		options.AllowInsecureNonLoopback,
+	)
 	if err != nil {
 		return nil, err
+	}
+	if options.TransportMode == config.TransportModeTailscale && options.DialContext == nil {
+		return nil, errors.New("tailscale connector requires an embedded dialer")
 	}
 	if options.RuntimeVersion == "" {
 		options.RuntimeVersion = buildinfo.Version
@@ -422,6 +433,9 @@ func New(options Options) (*Client, error) {
 	httpTransport := http.DefaultTransport.(*http.Transport).Clone()
 	if strings.HasPrefix(endpoint, "ws://") {
 		httpTransport.Proxy = nil
+	}
+	if options.DialContext != nil {
+		httpTransport.DialContext = options.DialContext
 	}
 	startupBaselineRevision := options.WorkerLifecycleSource.WorkerRevision()
 	if source, ok := options.WorkerLifecycleSource.(workerLifecycleStartupSource); ok {

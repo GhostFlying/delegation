@@ -14,6 +14,7 @@ import (
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/localbridge"
+	"github.com/GhostFlying/delegation/internal/runtimeconfig"
 	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
 )
@@ -162,7 +163,7 @@ func runStatusWithReaders(
 	if err != nil {
 		return writeError(stderr, err)
 	}
-	cfg, err := delegationconfig.Read(resolvedConfig)
+	cfg, err := runtimeconfig.Read(resolvedConfig)
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -173,7 +174,12 @@ func runStatusWithReaders(
 		ctx, cancel := context.WithTimeout(context.Background(), peerStatusReadTimeout)
 		status, err := readBroker(ctx, cfg.Broker.StatusListen)
 		cancel()
-		if err != nil || status.Validate() != nil || status.ControllerID != cfg.ControllerID {
+		statusInstanceID := status.InstanceID
+		if statusInstanceID == "" {
+			statusInstanceID = delegationconfig.DefaultInstanceID
+		}
+		if err != nil || status.Validate() != nil || status.ControllerID != cfg.ControllerID ||
+			statusInstanceID != cfg.EffectiveInstanceID() {
 			return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
 		}
 		return writeBrokerStatus(stdout, stderr, status, *jsonOutput)

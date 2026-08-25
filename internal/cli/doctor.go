@@ -9,6 +9,7 @@ import (
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/runtimeconfig"
 )
 
 type doctorResult struct {
@@ -34,7 +35,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
-	cfg, err := delegationconfig.Read(resolvedConfig)
+	cfg, err := runtimeconfig.Read(resolvedConfig)
 	if err != nil {
 		return writeError(stderr, err)
 	}

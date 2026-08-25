@@ -18,6 +18,7 @@ type Snapshot struct {
 	Version       string         `json:"version,omitempty"`
 	UptimeSeconds uint64         `json:"uptimeSeconds"`
 	ControllerID  string         `json:"controllerId,omitempty"`
+	InstanceID    string         `json:"instanceId,omitempty"`
 	Devices       DeviceCounts   `json:"devices"`
 	Dispatch      DispatchCounts `json:"dispatch"`
 	RunningTurns  uint64         `json:"runningTurns"`
@@ -69,6 +70,9 @@ func (s Snapshot) Validate() error {
 	}
 	if !validOptionalText(s.ControllerID) {
 		return errors.New("controller ID is not bounded display text")
+	}
+	if !validOptionalText(s.InstanceID) {
+		return errors.New("instance ID is not bounded display text")
 	}
 	if s.Devices.Online > s.Devices.Registered ||
 		s.Devices.Connected > s.Devices.Registered ||

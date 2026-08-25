@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
@@ -1130,6 +1132,138 @@ func TestConnectorAmbientProxyPolicy(t *testing.T) {
 	command.Env = environment
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("proxy policy helper failed: %v\n%s", err, output)
+	}
+}
+
+func TestConnectorTailscaleTransportUsesInjectedDialerWithoutProxy(t *testing.T) {
+	dialContext := func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("injected tailscale dial")
+	}
+	options := Options{
+		BrokerURL:             "ws://broker-node:8787/v1/connect",
+		TransportMode:         config.TransportModeTailscale,
+		DialContext:           dialContext,
+		ControllerID:          connectorTestControllerID,
+		DeviceID:              connectorTestDeviceID,
+		DeviceName:            "builder",
+		AuthMode:              config.AuthModeNone,
+		RuntimeVersion:        "0.1.0-alpha.0.m1.1",
+		OperatingSystem:       "linux",
+		Architecture:          "amd64",
+		WorkerSpawner:         testWorkerSpawner{},
+		WorkerLifecycleSource: testWorkerSpawner{},
+		ChangesArtifactSource: testWorkerSpawner{},
+		WorkspaceManager:      testWorkerSpawner{},
+	}
+	client, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, ok := client.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("tailscale connector transport = %T", client.httpClient.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("tailscale connector retained ambient proxy routing")
+	}
+	if transport.DialContext == nil {
+		t.Fatal("tailscale connector did not install the injected dialer")
+	}
+	if _, err := transport.DialContext(context.Background(), "tcp", "broker-node:8787"); err == nil ||
+		!strings.Contains(err.Error(), "injected tailscale dial") {
+		t.Fatalf("transport DialContext error = %v", err)
+	}
+	if client.endpoint != options.BrokerURL {
+		t.Fatalf("connector endpoint = %q, want %q", client.endpoint, options.BrokerURL)
+	}
+}
+
+func TestConnectorTailscaleDialRejectionDoesNotSendBearerToken(t *testing.T) {
+	var requests atomic.Int64
+	var authorizationHeaders atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		requests.Add(1)
+		if request.Header.Get("Authorization") != "" {
+			authorizationHeaders.Add(1)
+		}
+		http.Error(writer, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(serverURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brokerURL := "ws://" + net.JoinHostPort("localhost", port) + "/v1/connect"
+	var dialCalls atomic.Int64
+	dialContext := func(context.Context, string, string) (net.Conn, error) {
+		dialCalls.Add(1)
+		return nil, errors.New("tailscale peer hostname is not an online peer")
+	}
+	token := tokenfile.Token{9, 8, 7}
+	client, err := New(Options{
+		BrokerURL:             brokerURL,
+		TransportMode:         config.TransportModeTailscale,
+		DialContext:           dialContext,
+		ControllerID:          connectorTestControllerID,
+		DeviceID:              connectorTestDeviceID,
+		DeviceName:            "builder",
+		AuthMode:              config.AuthModeToken,
+		Token:                 &token,
+		RuntimeVersion:        "0.1.0-alpha.0.m1.1",
+		OperatingSystem:       "linux",
+		Architecture:          "amd64",
+		WorkerSpawner:         testWorkerSpawner{},
+		WorkerLifecycleSource: testWorkerSpawner{},
+		ChangesArtifactSource: testWorkerSpawner{},
+		WorkspaceManager:      testWorkerSpawner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, err = client.runSession(ctx)
+	cancel()
+	if err == nil || !strings.Contains(err.Error(), "not an online peer") {
+		t.Fatalf("runSession error = %v, want tailscale peer rejection", err)
+	}
+	if dialCalls.Load() != 1 {
+		t.Fatalf("tailscale dial calls = %d, want 1", dialCalls.Load())
+	}
+	if requests.Load() != 0 || authorizationHeaders.Load() != 0 {
+		t.Fatalf(
+			"rejected tailscale target received %d requests and %d authorization headers",
+			requests.Load(),
+			authorizationHeaders.Load(),
+		)
+	}
+}
+
+func TestConnectorTailscaleTransportRequiresInjectedDialer(t *testing.T) {
+	options := Options{
+		BrokerURL:             "ws://broker-node:8787/v1/connect",
+		TransportMode:         config.TransportModeTailscale,
+		ControllerID:          connectorTestControllerID,
+		DeviceID:              connectorTestDeviceID,
+		DeviceName:            "builder",
+		AuthMode:              config.AuthModeNone,
+		RuntimeVersion:        "0.1.0-alpha.0.m1.1",
+		OperatingSystem:       "linux",
+		Architecture:          "amd64",
+		WorkerSpawner:         testWorkerSpawner{},
+		WorkerLifecycleSource: testWorkerSpawner{},
+		ChangesArtifactSource: testWorkerSpawner{},
+		WorkspaceManager:      testWorkerSpawner{},
+	}
+	if _, err := New(options); err == nil || !strings.Contains(err.Error(), "embedded dialer") {
+		t.Fatalf("New() error = %v, want missing tailscale dialer", err)
 	}
 }
 

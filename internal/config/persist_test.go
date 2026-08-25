@@ -303,6 +303,7 @@ func tailscaleBrokerWriteConfig(t *testing.T) Config {
 	cfg := protectedTestConfig(t)
 	cfg.Transport = testTailscaleTransport(t)
 	cfg.Broker.Listen = ":8787"
+	cfg.Broker.StatusListen = "127.0.0.1:8788"
 	return cfg
 }
 

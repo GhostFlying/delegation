@@ -15,6 +15,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/tailscaleruntime"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
 
@@ -35,6 +36,7 @@ type brokerRuntimeOptions struct {
 	openStore    brokerStoreOpenFunc
 	prepare      func(context.Context, *broker.Server) (store.PresenceTransition, error)
 	reportError  func(error)
+	newTailscale embeddedTailscaleRuntimeFactory
 }
 
 type brokerRuntimeResources struct {
@@ -47,6 +49,7 @@ type brokerRuntimeResources struct {
 	lease            io.Closer
 	serveDone        <-chan error
 	statusServeDone  <-chan error
+	tailscale        embeddedTailscaleRuntime
 }
 
 func runBrokerService(
@@ -75,6 +78,28 @@ func runBrokerService(
 	defer func() {
 		runErr = errors.Join(runErr, resources.close())
 	}()
+	if cfg.Transport.Mode == delegationconfig.TransportModeTailscale {
+		newTailscale := options.newTailscale
+		if newTailscale == nil {
+			newTailscale = newEmbeddedTailscaleRuntime
+		}
+		resources.tailscale = newTailscale()
+		if resources.tailscale == nil {
+			return errors.New("create broker tailscale runtime: runtime is nil")
+		}
+		tailscaleConfig := cfg.Transport.Tailscale
+		if err := resources.tailscale.Start(ctx, tailscaleruntime.Config{
+			Dir:         tailscaleConfig.StateDir,
+			Hostname:    tailscaleConfig.Hostname,
+			AuthKeyFile: tailscaleConfig.AuthKeyFile,
+		}); err != nil {
+			if cleanContextCancellation(ctx, err) {
+				return nil
+			}
+			return fmt.Errorf("start broker tailscale runtime: %w", err)
+		}
+		listen = resources.tailscale.Listen
+	}
 	resources.listener, err = listen(ctx, "tcp", cfg.Broker.Listen)
 	if err != nil {
 		if cleanContextCancellation(ctx, err) {
@@ -299,6 +324,11 @@ func (r *brokerRuntimeResources) close() error {
 	if r.statusServeDone != nil {
 		if err := <-r.statusServeDone; !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			failures = append(failures, fmt.Errorf("stop broker status HTTP: %w", err))
+		}
+	}
+	if r.tailscale != nil {
+		if err := r.tailscale.Close(); !ignorableNetworkClose(err) {
+			failures = append(failures, fmt.Errorf("close broker tailscale runtime: %w", err))
 		}
 	}
 	if r.registry != nil {

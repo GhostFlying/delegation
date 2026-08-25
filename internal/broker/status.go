@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
+	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
 )
@@ -54,7 +55,7 @@ func (s *Server) buildStatusSnapshot(
 	if uptime < 0 {
 		uptime = 0
 	}
-	return statuspage.Snapshot{
+	snapshot := statuspage.Snapshot{
 		Version:       buildinfo.Version,
 		UptimeSeconds: uint64(uptime / time.Second),
 		ControllerID:  s.controllerID,
@@ -88,6 +89,10 @@ func (s *Server) buildStatusSnapshot(
 			DetailsCompacted:   durable.Results.DetailsCompacted,
 		},
 	}
+	if s.instanceID != config.DefaultInstanceID {
+		snapshot.InstanceID = s.instanceID
+	}
+	return snapshot
 }
 
 func (s *Server) captureConnectionStatus() connectionStatusSnapshot {

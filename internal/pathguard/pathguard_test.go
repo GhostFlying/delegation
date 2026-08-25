@@ -19,6 +19,566 @@ func TestValidateBrokerAuthorityAcceptsDistinctPaths(t *testing.T) {
 	}
 }
 
+func TestValidateTailscaleAuthorityAcceptsDefaultLayouts(t *testing.T) {
+	t.Run("broker", func(t *testing.T) {
+		root := t.TempDir()
+		err := ValidateBrokerTailscaleAuthority(
+			filepath.Join(root, "broker.json"),
+			filepath.Join(root, "state", "broker.sqlite3"),
+			filepath.Join(root, "secrets", "broker.token"),
+			filepath.Join(root, "state", "tailscale", "broker"),
+			filepath.Join(root, "secrets", "tailscale-auth.key"),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("peer", func(t *testing.T) {
+		root := t.TempDir()
+		err := ValidatePeerTailscaleAuthority(
+			filepath.Join(root, "peer.json"),
+			filepath.Join(root, "state", "peer.sqlite3"),
+			filepath.Join(root, "secrets", "peer.token"),
+			filepath.Join(root, "cli"),
+			filepath.Join(root, "workspaces"),
+			filepath.Join(root, "state", "tailscale", "peer"),
+			filepath.Join(root, "secrets", "tailscale-auth.key"),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestValidateTailscaleAuthorityAcceptsSiblingNamespaces(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		authorityRoot string
+		tailscaleRoot string
+	}{
+		{name: "instances", authorityRoot: "instances/alpha", tailscaleRoot: "instances/beta"},
+		{name: "host kinds", authorityRoot: "hosts/local", tailscaleRoot: "hosts/remote"},
+		{name: "roles", authorityRoot: "roles/broker", tailscaleRoot: "roles/peer"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			authorityRoot := filepath.Join(root, filepath.FromSlash(test.authorityRoot))
+			tailscaleRoot := filepath.Join(root, filepath.FromSlash(test.tailscaleRoot))
+			err := ValidateBrokerTailscaleAuthority(
+				filepath.Join(authorityRoot, "broker.json"),
+				filepath.Join(authorityRoot, "state", "broker.sqlite3"),
+				filepath.Join(authorityRoot, "secrets", "broker.token"),
+				filepath.Join(tailscaleRoot, "state"),
+				filepath.Join(tailscaleRoot, "secrets", "auth.key"),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestValidateTailscaleAuthorityRejectsEveryAuthorityAlias(t *testing.T) {
+	t.Run("broker", func(t *testing.T) {
+		root := t.TempDir()
+		configPath := filepath.Join(root, "broker.json")
+		statePath := filepath.Join(root, "state", "broker.sqlite3")
+		tokenPath := filepath.Join(root, "secrets", "broker.token")
+		tailscaleStateDir := filepath.Join(root, "state", "tailscale")
+		authKeyPath := filepath.Join(root, "secrets", "tailscale-auth.key")
+		for _, authority := range brokerAuthorityFiles(configPath, statePath, tokenPath) {
+			t.Run(authority.name+" enrollment key", func(t *testing.T) {
+				err := ValidateBrokerTailscaleAuthority(
+					configPath,
+					statePath,
+					tokenPath,
+					tailscaleStateDir,
+					authority.path,
+				)
+				want := "Tailscale enrollment key path conflicts with " + authority.name
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("ValidateBrokerTailscaleAuthority() error = %v, want %q", err, want)
+				}
+			})
+			t.Run(authority.name+" state directory", func(t *testing.T) {
+				err := ValidateBrokerTailscaleAuthority(
+					configPath,
+					statePath,
+					tokenPath,
+					authority.path,
+					authKeyPath,
+				)
+				want := "Tailscale state directory must not be inside " + authority.name
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("ValidateBrokerTailscaleAuthority() error = %v, want %q", err, want)
+				}
+			})
+		}
+	})
+
+	t.Run("peer", func(t *testing.T) {
+		root := t.TempDir()
+		configPath := filepath.Join(root, "peer.json")
+		statePath := filepath.Join(root, "state", "peer.sqlite3")
+		tokenPath := filepath.Join(root, "secrets", "peer.token")
+		codexHome := filepath.Join(root, "cli")
+		workspaceRoot := filepath.Join(root, "workspaces")
+		tailscaleStateDir := filepath.Join(root, "state", "tailscale")
+		authKeyPath := filepath.Join(root, "secrets", "tailscale-auth.key")
+		for _, authority := range peerAuthorityFiles(configPath, statePath, tokenPath) {
+			t.Run(authority.name+" enrollment key", func(t *testing.T) {
+				err := ValidatePeerTailscaleAuthority(
+					configPath,
+					statePath,
+					tokenPath,
+					codexHome,
+					workspaceRoot,
+					tailscaleStateDir,
+					authority.path,
+				)
+				want := "Tailscale enrollment key path conflicts with " + authority.name
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("ValidatePeerTailscaleAuthority() error = %v, want %q", err, want)
+				}
+			})
+			t.Run(authority.name+" state directory", func(t *testing.T) {
+				err := ValidatePeerTailscaleAuthority(
+					configPath,
+					statePath,
+					tokenPath,
+					codexHome,
+					workspaceRoot,
+					authority.path,
+					authKeyPath,
+				)
+				want := "Tailscale state directory must not be inside " + authority.name
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("ValidatePeerTailscaleAuthority() error = %v, want %q", err, want)
+				}
+			})
+		}
+	})
+}
+
+func TestValidateTailscaleAuthorityRejectsCaseFoldedEnrollmentKeyAlias(t *testing.T) {
+	root := t.TempDir()
+	err := ValidateBrokerTailscaleAuthority(
+		filepath.Join(root, "Broker.JSON"),
+		filepath.Join(root, "state", "broker.sqlite3"),
+		filepath.Join(root, "secrets", "broker.token"),
+		filepath.Join(root, "state", "tailscale"),
+		filepath.Join(root, "broker.json"),
+	)
+	if err == nil || !strings.Contains(err.Error(), "Tailscale enrollment key path conflicts with broker configuration") {
+		t.Fatalf("ValidateBrokerTailscaleAuthority() error = %v", err)
+	}
+}
+
+func TestValidateTailscaleAuthorityRejectsExistingFileAliases(t *testing.T) {
+	t.Run("enrollment key aliases authority", func(t *testing.T) {
+		root := t.TempDir()
+		configPath := filepath.Join(root, "broker.json")
+		authKeyPath := filepath.Join(root, "tailscale-auth.key")
+		if err := os.WriteFile(configPath, []byte("config"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(configPath, authKeyPath); err != nil {
+			t.Skipf("creating a hard link is unavailable: %v", err)
+		}
+		err := ValidateBrokerTailscaleAuthority(
+			configPath,
+			filepath.Join(root, "state", "broker.sqlite3"),
+			filepath.Join(root, "secrets", "broker.token"),
+			filepath.Join(root, "state", "tailscale"),
+			authKeyPath,
+		)
+		if err == nil || !strings.Contains(err.Error(), "Tailscale enrollment key path conflicts with broker configuration") {
+			t.Fatalf("ValidateBrokerTailscaleAuthority() error = %v", err)
+		}
+	})
+
+	t.Run("enrollment key has another hard link", func(t *testing.T) {
+		root := t.TempDir()
+		authKeyPath := filepath.Join(root, "tailscale-auth.key")
+		if err := os.WriteFile(authKeyPath, []byte("enrollment key"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(authKeyPath, filepath.Join(root, "second-link")); err != nil {
+			t.Skipf("creating a hard link is unavailable: %v", err)
+		}
+		err := ValidateBrokerTailscaleAuthority(
+			filepath.Join(root, "broker.json"),
+			filepath.Join(root, "state", "broker.sqlite3"),
+			filepath.Join(root, "secrets", "broker.token"),
+			filepath.Join(root, "state", "tailscale"),
+			authKeyPath,
+		)
+		if err == nil || !strings.Contains(err.Error(), "Tailscale enrollment key has unexpected hard-link count 2") {
+			t.Fatalf("ValidateBrokerTailscaleAuthority() error = %v", err)
+		}
+	})
+
+	t.Run("state directory has same file identity as authority", func(t *testing.T) {
+		root := t.TempDir()
+		configPath := filepath.Join(root, "broker.json")
+		tailscaleStateDir := filepath.Join(root, "tailscale-state")
+		if err := os.WriteFile(configPath, []byte("config"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(configPath, tailscaleStateDir); err != nil {
+			t.Skipf("creating a hard link is unavailable: %v", err)
+		}
+		err := ValidateBrokerTailscaleAuthority(
+			configPath,
+			filepath.Join(root, "state", "broker.sqlite3"),
+			filepath.Join(root, "secrets", "broker.token"),
+			tailscaleStateDir,
+			filepath.Join(root, "secrets", "tailscale-auth.key"),
+		)
+		if err == nil || !strings.Contains(err.Error(), "Tailscale state directory path conflicts with broker configuration") {
+			t.Fatalf("ValidateBrokerTailscaleAuthority() error = %v", err)
+		}
+	})
+}
+
+func TestValidateTailscaleAuthorityRejectsSymlinkedFutureAliases(t *testing.T) {
+	targetRoot := t.TempDir()
+	aliasRoot := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(targetRoot, aliasRoot); err != nil {
+		t.Skipf("creating a directory symlink is unavailable: %v", err)
+	}
+
+	t.Run("enrollment key aliases future configuration", func(t *testing.T) {
+		configPath := filepath.Join(targetRoot, "future", "broker.json")
+		err := ValidateBrokerTailscaleAuthority(
+			configPath,
+			filepath.Join(targetRoot, "state", "broker.sqlite3"),
+			filepath.Join(targetRoot, "secrets", "broker.token"),
+			filepath.Join(targetRoot, "state", "tailscale"),
+			filepath.Join(aliasRoot, "future", "broker.json"),
+		)
+		if err == nil || !strings.Contains(err.Error(), "Tailscale enrollment key path conflicts with broker configuration") {
+			t.Fatalf("ValidateBrokerTailscaleAuthority() error = %v", err)
+		}
+	})
+
+	t.Run("future authority is inside state alias", func(t *testing.T) {
+		err := ValidateBrokerTailscaleAuthority(
+			filepath.Join(targetRoot, "future-state", "broker.json"),
+			filepath.Join(targetRoot, "state", "broker.sqlite3"),
+			filepath.Join(targetRoot, "secrets", "broker.token"),
+			filepath.Join(aliasRoot, "future-state"),
+			filepath.Join(targetRoot, "secrets", "tailscale-auth.key"),
+		)
+		if err == nil || !strings.Contains(err.Error(), "broker configuration must not be inside Tailscale state directory") {
+			t.Fatalf("ValidateBrokerTailscaleAuthority() error = %v", err)
+		}
+	})
+}
+
+func TestValidateTailscaleAuthorityRejectsMutualContainment(t *testing.T) {
+	for _, role := range []string{"broker", "peer"} {
+		t.Run(role, func(t *testing.T) {
+			root := t.TempDir()
+			configPath := filepath.Join(root, role+".json")
+			statePath := filepath.Join(root, "state", role+".sqlite3")
+			tokenPath := filepath.Join(root, "secrets", role+".token")
+			codexHome := filepath.Join(root, "cli")
+			workspaceRoot := filepath.Join(root, "workspaces")
+			authKeyPath := filepath.Join(root, "secrets", "tailscale-auth.key")
+			validate := func(
+				configPath, tokenPath, tailscaleStateDir, tailscaleAuthKeyPath string,
+			) error {
+				if role == "broker" {
+					return ValidateBrokerTailscaleAuthority(
+						configPath,
+						statePath,
+						tokenPath,
+						tailscaleStateDir,
+						tailscaleAuthKeyPath,
+					)
+				}
+				return ValidatePeerTailscaleAuthority(
+					configPath,
+					statePath,
+					tokenPath,
+					codexHome,
+					workspaceRoot,
+					tailscaleStateDir,
+					tailscaleAuthKeyPath,
+				)
+			}
+			configurationName := role + " configuration"
+			tokenName := role + " "
+			if role == "broker" {
+				tokenName += "master token"
+			} else {
+				tokenName += "token"
+			}
+			for _, test := range []struct {
+				name              string
+				configPath        string
+				tokenPath         string
+				tailscaleStateDir string
+				authKeyPath       string
+				want              string
+			}{
+				{
+					name:              "state contains authority",
+					configPath:        filepath.Join(root, "tailscale", role+".json"),
+					tokenPath:         tokenPath,
+					tailscaleStateDir: filepath.Join(root, "tailscale"),
+					authKeyPath:       authKeyPath,
+					want:              configurationName + " must not be inside Tailscale state directory",
+				},
+				{
+					name:              "authority path contains state",
+					configPath:        configPath,
+					tokenPath:         filepath.Join(root, "authority"),
+					tailscaleStateDir: filepath.Join(root, "authority", "tailscale"),
+					authKeyPath:       authKeyPath,
+					want:              "Tailscale state directory must not be inside " + tokenName,
+				},
+				{
+					name:              "state contains enrollment key",
+					configPath:        configPath,
+					tokenPath:         tokenPath,
+					tailscaleStateDir: filepath.Join(root, "tailscale"),
+					authKeyPath:       filepath.Join(root, "tailscale", "auth.key"),
+					want:              "Tailscale enrollment key must not be inside Tailscale state directory",
+				},
+				{
+					name:              "enrollment key path contains state",
+					configPath:        configPath,
+					tokenPath:         tokenPath,
+					tailscaleStateDir: filepath.Join(root, "key-path", "tailscale"),
+					authKeyPath:       filepath.Join(root, "key-path"),
+					want:              "Tailscale state directory must not be inside Tailscale enrollment key",
+				},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					err := validate(
+						test.configPath,
+						test.tokenPath,
+						test.tailscaleStateDir,
+						test.authKeyPath,
+					)
+					if err == nil || !strings.Contains(err.Error(), test.want) {
+						t.Fatalf("Tailscale authority validation error = %v, want %q", err, test.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestValidatePeerTailscaleAuthorityRejectsManagedDirectoryRelationships(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "peer.json")
+	statePath := filepath.Join(root, "state", "peer.sqlite3")
+	tokenPath := filepath.Join(root, "secrets", "peer.token")
+	defaultCodexHome := filepath.Join(root, "cli")
+	defaultWorkspaceRoot := filepath.Join(root, "workspaces")
+	defaultTailscaleStateDir := filepath.Join(root, "tailscale")
+	defaultAuthKeyPath := filepath.Join(root, "secrets", "tailscale-auth.key")
+	for _, test := range []struct {
+		name              string
+		codexHome         string
+		workspaceRoot     string
+		tailscaleStateDir string
+		authKeyPath       string
+		want              string
+	}{
+		{
+			name:              "state inside CODEX_HOME",
+			codexHome:         defaultCodexHome,
+			workspaceRoot:     defaultWorkspaceRoot,
+			tailscaleStateDir: filepath.Join(defaultCodexHome, "tailscale"),
+			authKeyPath:       defaultAuthKeyPath,
+			want:              "Tailscale state directory must not be inside worker CODEX_HOME",
+		},
+		{
+			name:              "CODEX_HOME inside state",
+			codexHome:         filepath.Join(defaultTailscaleStateDir, "cli"),
+			workspaceRoot:     defaultWorkspaceRoot,
+			tailscaleStateDir: defaultTailscaleStateDir,
+			authKeyPath:       defaultAuthKeyPath,
+			want:              "worker CODEX_HOME must not be inside Tailscale state directory",
+		},
+		{
+			name:              "state inside workspace",
+			codexHome:         defaultCodexHome,
+			workspaceRoot:     defaultWorkspaceRoot,
+			tailscaleStateDir: filepath.Join(defaultWorkspaceRoot, "tailscale"),
+			authKeyPath:       defaultAuthKeyPath,
+			want:              "Tailscale state directory must not be inside worker workspace root",
+		},
+		{
+			name:              "workspace inside state",
+			codexHome:         defaultCodexHome,
+			workspaceRoot:     filepath.Join(defaultTailscaleStateDir, "workspaces"),
+			tailscaleStateDir: defaultTailscaleStateDir,
+			authKeyPath:       defaultAuthKeyPath,
+			want:              "worker workspace root must not be inside Tailscale state directory",
+		},
+		{
+			name:              "enrollment key inside CODEX_HOME",
+			codexHome:         defaultCodexHome,
+			workspaceRoot:     defaultWorkspaceRoot,
+			tailscaleStateDir: defaultTailscaleStateDir,
+			authKeyPath:       filepath.Join(defaultCodexHome, "auth.key"),
+			want:              "Tailscale enrollment key must not be inside worker CODEX_HOME",
+		},
+		{
+			name:              "enrollment key inside workspace",
+			codexHome:         defaultCodexHome,
+			workspaceRoot:     defaultWorkspaceRoot,
+			tailscaleStateDir: defaultTailscaleStateDir,
+			authKeyPath:       filepath.Join(defaultWorkspaceRoot, "auth.key"),
+			want:              "Tailscale enrollment key must not be inside worker workspace root",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidatePeerTailscaleAuthority(
+				configPath,
+				statePath,
+				tokenPath,
+				test.codexHome,
+				test.workspaceRoot,
+				test.tailscaleStateDir,
+				test.authKeyPath,
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidatePeerTailscaleAuthority() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidatePeerTailscaleAuthorityPreservesRuntimeAuthority(t *testing.T) {
+	root := t.TempDir()
+	codexHome := filepath.Join(root, "cli")
+	workspaceRoot := filepath.Join(root, "workspaces")
+	tailscaleStateDir := filepath.Join(root, "tailscale")
+	authKeyPath := filepath.Join(root, "secrets", "tailscale-auth.key")
+
+	err := ValidatePeerTailscaleAuthority(
+		filepath.Join(codexHome, "peer.json"),
+		filepath.Join(root, "state", "peer.sqlite3"),
+		filepath.Join(root, "secrets", "peer.token"),
+		codexHome,
+		workspaceRoot,
+		tailscaleStateDir,
+		authKeyPath,
+	)
+	if err == nil || !strings.Contains(err.Error(), "peer configuration must not be inside worker CODEX_HOME") {
+		t.Fatalf("ValidatePeerTailscaleAuthority() error = %v", err)
+	}
+
+	err = ValidatePeerTailscaleAuthority(
+		filepath.Join(root, "peer.json"),
+		filepath.Join(root, "state", "peer.sqlite3"),
+		filepath.Join(root, "secrets", "peer.token"),
+		codexHome,
+		filepath.Join(codexHome, "workspaces"),
+		tailscaleStateDir,
+		authKeyPath,
+	)
+	if err == nil || !strings.Contains(err.Error(), "must not contain one another") {
+		t.Fatalf("ValidatePeerTailscaleAuthority() error = %v", err)
+	}
+}
+
+func TestValidateTailscaleAuthorityRejectsRelativeAndParentPaths(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "broker.json")
+	statePath := filepath.Join(root, "state", "broker.sqlite3")
+	tokenPath := filepath.Join(root, "secrets", "broker.token")
+	tailscaleStateDir := filepath.Join(root, "tailscale")
+	authKeyPath := filepath.Join(root, "secrets", "tailscale-auth.key")
+	for _, test := range []struct {
+		name              string
+		tailscaleStateDir string
+		authKeyPath       string
+		want              string
+	}{
+		{
+			name:              "relative state",
+			tailscaleStateDir: "tailscale",
+			authKeyPath:       authKeyPath,
+			want:              "guarded path must be absolute",
+		},
+		{
+			name:              "relative enrollment key",
+			tailscaleStateDir: tailscaleStateDir,
+			authKeyPath:       "auth.key",
+			want:              "guarded path must be absolute",
+		},
+		{
+			name: "parent component in state",
+			tailscaleStateDir: filepath.Join(root, "state") + string(filepath.Separator) +
+				".." + string(filepath.Separator) + "tailscale",
+			authKeyPath: authKeyPath,
+			want:        "parent path components",
+		},
+		{
+			name:              "parent component in enrollment key",
+			tailscaleStateDir: tailscaleStateDir,
+			authKeyPath: filepath.Join(root, "secrets") + string(filepath.Separator) +
+				".." + string(filepath.Separator) + "auth.key",
+			want: "parent path components",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateBrokerTailscaleAuthority(
+				configPath,
+				statePath,
+				tokenPath,
+				test.tailscaleStateDir,
+				test.authKeyPath,
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateBrokerTailscaleAuthority() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateTailscaleAuthorityDoesNotCreateFuturePaths(t *testing.T) {
+	root := t.TempDir()
+	futureRoot := filepath.Join(root, "future")
+	err := ValidateBrokerTailscaleAuthority(
+		filepath.Join(futureRoot, "config", "broker.json"),
+		filepath.Join(futureRoot, "state", "broker.sqlite3"),
+		filepath.Join(futureRoot, "secrets", "broker.token"),
+		filepath.Join(futureRoot, "state", "tailscale"),
+		filepath.Join(futureRoot, "secrets", "tailscale-auth.key"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(futureRoot); !os.IsNotExist(err) {
+		t.Fatalf("future authority root was created: %v", err)
+	}
+}
+
+func TestCanonicalFuturePathRejectsSymbolicLinkLoopAndDepth(t *testing.T) {
+	root := t.TempDir()
+	loopPath := filepath.Join(root, "loop")
+	if err := os.Symlink(filepath.Base(loopPath), loopPath); err != nil {
+		t.Skipf("creating a symbolic-link loop is unavailable: %v", err)
+	}
+	if _, err := canonicalFuturePath(loopPath); err == nil ||
+		!strings.Contains(err.Error(), "too many symbolic links") {
+		t.Fatalf("canonicalFuturePath() error = %v", err)
+	}
+	if _, err := resolveFuturePath(loopPath, 255); err == nil ||
+		!strings.Contains(err.Error(), "too many symbolic links") {
+		t.Fatalf("resolveFuturePath() error = %v", err)
+	}
+}
+
 func TestValidatePeerAuthorityRejectsAliases(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.json")

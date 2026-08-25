@@ -34,9 +34,9 @@ jobs:
       - name: Verify Go toolchain
         run: go env GOVERSION
       - name: Test
-        run: go test -timeout 20m ./...
+        run: go test -tags=ts_omit_logtail -timeout 20m ./...
       - name: Vet
-        run: go vet ./...
+        run: go vet -tags=ts_omit_logtail ./...
       - name: Prepare Linux sandbox
         if: runner.os == 'Linux'
         shell: bash
@@ -61,14 +61,14 @@ jobs:
         run: |
           set -euo pipefail
           codex --version | grep -F 'codex-cli 0.144.1'
-          go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/delegation" ./cmd/delegation
+          go build -tags=ts_omit_logtail -trimpath -buildvcs=false -o "$RUNNER_TEMP/delegation" ./cmd/delegation
           test_pattern='^TestManagedWorker(UsesEnvOnlyProviderAndColdResume|ReturnsResultPackageCrossPlatform)$'
           if [[ "$RUNNER_OS" == 'Linux' ]]; then
             test_pattern='^(TestCodexPeerTopology|TestManagedWorker(UsesEnvOnlyProviderAndColdResume|ReturnsResultPackageCrossPlatform))$'
           fi
           DELEGATION_E2E_BINARY="$RUNNER_TEMP/delegation" \
             CODEX_BINARY="$(command -v codex)" \
-            go test -timeout 20m -tags=integration \
+            go test -timeout 20m -tags='ts_omit_logtail,integration' \
               -run "$test_pattern" \
               -count=1 -v ./tests/codex_peer_e2e
       - name: Test managed worker mock E2E
@@ -81,19 +81,19 @@ jobs:
           if ($versionOutput -notcontains 'codex-cli 0.144.1') {
             throw 'unexpected Codex version'
           }
-          go build -trimpath -buildvcs=false -o $delegation ./cmd/delegation
+          go build -tags=ts_omit_logtail -trimpath -buildvcs=false -o $delegation ./cmd/delegation
           $env:DELEGATION_E2E_BINARY = $delegation
           $env:CODEX_BINARY = $codex
-          go test -timeout 20m -tags=integration -run '^TestManagedWorker(UsesEnvOnlyProviderAndColdResume|ReturnsResultPackageCrossPlatform)$' `
+          go test -timeout 20m -tags='ts_omit_logtail,integration' -run '^TestManagedWorker(UsesEnvOnlyProviderAndColdResume|ReturnsResultPackageCrossPlatform)$' `
             -count=1 -v ./tests/codex_peer_e2e
       - name: Test macOS LaunchAgent round trip
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/delegation" ./cmd/delegation
+          go build -tags=ts_omit_logtail -trimpath -buildvcs=false -o "$RUNNER_TEMP/delegation" ./cmd/delegation
           DELEGATION_DARWIN_INTEGRATION=1 \
             DELEGATION_DARWIN_BINARY="$RUNNER_TEMP/delegation" \
-            go test ./internal/userservice -run '^TestDarwinLaunchAgentRoundTrip$' -count=1
+            go test -tags=ts_omit_logtail ./internal/userservice -run '^TestDarwinLaunchAgentRoundTrip$' -count=1
       - name: Test POSIX launchers and installer
         if: runner.os != 'Windows'
         shell: bash
@@ -109,8 +109,8 @@ jobs:
           DELEGATION_WINDOWS_INTEGRATION: "1"
           DELEGATION_WINDOWS_BINARY: ${{ runner.temp }}/delegation.exe
         run: |
-          go build -o $env:DELEGATION_WINDOWS_BINARY ./cmd/delegation
-          go test ./internal/userservice -run 'TestWindowsTaskScheduler(RoundTrip|RequiresRuntimeReadiness)' -count=1
+          go build -tags=ts_omit_logtail -o $env:DELEGATION_WINDOWS_BINARY ./cmd/delegation
+          go test -tags=ts_omit_logtail ./internal/userservice -run 'TestWindowsTaskScheduler(RoundTrip|RequiresRuntimeReadiness)' -count=1
 
   race:
     name: Race
@@ -124,7 +124,7 @@ jobs:
           go-version: 1.26.5
           check-latest: false
           cache: true
-      - run: go test -race -timeout 20m ./...
+      - run: go test -tags=ts_omit_logtail -race -timeout 20m ./...
 
   cross-compile:
     name: Cross compile (${{ matrix.goos }}-${{ matrix.goarch }})
@@ -159,13 +159,13 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go test -run '^$' -exec /bin/true ./...
+        run: go test -tags=ts_omit_logtail -run '^$' -exec /bin/true ./...
       - name: Compile integration and live tests
         env:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go test -tags='integration live' -run '^$' -exec /bin/true ./...
+        run: go test -tags='ts_omit_logtail,integration,live' -run '^$' -exec /bin/true ./...
 
   plugin-contract:
     name: Plugin contract
@@ -284,10 +284,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/delegation" ./cmd/delegation
+          go build -tags=ts_omit_logtail -trimpath -buildvcs=false -o "$RUNNER_TEMP/delegation" ./cmd/delegation
           DELEGATION_E2E_BINARY="$RUNNER_TEMP/delegation" \
             CODEX_BINARY="$(command -v codex)" \
-            go test -timeout 20m -tags=integration -count=1 -v ./tests/codex_peer_e2e
+            go test -timeout 20m -tags='ts_omit_logtail,integration' -count=1 -v ./tests/codex_peer_e2e
 
   release-package:
     name: Deterministic release package

@@ -112,6 +112,46 @@ func TestOrdinaryCIValidatesUnsignedPackagesWithoutRebindingPublishedManifest(t 
 	assertPinnedActions(t, workflow)
 }
 
+func TestDirectGoBuildTestAndVetPathsUsePrivacyTag(t *testing.T) {
+	workflowPaths, err := filepath.Glob(
+		filepath.Join("..", "..", ".github", "workflows", "*.yml"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workflowPaths) == 0 {
+		t.Fatal("no GitHub workflows found")
+	}
+	paths := append(workflowPaths,
+		filepath.Join("..", "..", "tests", "posix_plugin_test.sh"),
+		filepath.Join("..", "..", "tests", "windows_plugin_test.ps1"),
+	)
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for lineNumber, line := range strings.Split(string(data), "\n") {
+			if !directGoCommandPattern.MatchString(line) {
+				continue
+			}
+			if !strings.Contains(line, "ts_omit_logtail") {
+				t.Errorf("%s:%d direct Go command lacks ts_omit_logtail: %s", path, lineNumber+1, line)
+			}
+		}
+	}
+
+	workflow := readWorkflow(t, "ci.yml")
+	for _, combined := range []string{
+		"-tags='ts_omit_logtail,integration'",
+		"-tags='ts_omit_logtail,integration,live'",
+	} {
+		if !strings.Contains(workflow, combined) {
+			t.Errorf("CI workflow is missing combined build tags %q", combined)
+		}
+	}
+}
+
 func assertPinnedActions(t *testing.T, workflow string) {
 	t.Helper()
 	matches := actionReferencePattern.FindAllStringSubmatch(workflow, -1)
@@ -124,6 +164,10 @@ func assertPinnedActions(t *testing.T, workflow string) {
 		}
 	}
 }
+
+var directGoCommandPattern = regexp.MustCompile(
+	`^\s*(?:&\s+)?(?:go|"\$go_bin")(?:\s+-C\s+\S+)?\s+(?:build|test|vet)\b`,
+)
 
 func readWorkflow(t *testing.T, name string) string {
 	t.Helper()
