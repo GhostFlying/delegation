@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,7 +22,10 @@ const (
 
 var (
 	errLaunchAgentIdentityChangedDuringUnload = errors.New("LaunchAgent identity changed during unload")
+	errLaunchAgentIdentityChangedDuringStart  = errors.New("LaunchAgent identity changed during start")
 	errManagedLaunchAgentRemainedLoaded       = errors.New("managed LaunchAgent remained loaded after bootout")
+	launchAgentStartTimeout                   = 10 * time.Second
+	launchAgentStartPoll                      = 100 * time.Millisecond
 )
 
 var runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
@@ -113,36 +118,34 @@ func platformActivate(result Result, invocation Invocation) (Result, error) {
 		}
 	}
 	kicked, kickErr := runLaunchctl("kickstart", target)
-	status, loaded, printErr := printLaunchAgent(target)
-	if loaded && printErr == nil && filepath.Clean(status.Path) != filepath.Clean(result.Artifact) {
-		result.State = StateForeignConflict
-		return result, errors.Join(kickErr, errors.New("LaunchAgent identity changed during activation"))
-	}
-	if loaded && printErr == nil && filepath.Clean(status.Path) == filepath.Clean(result.Artifact) &&
-		status.State == "running" {
-		matched, definitionErr := launchAgentDefinitionMatches(result, invocation)
-		if definitionErr != nil {
-			result.State = StateIndeterminate
-			return result, definitionErr
-		}
-		if !matched {
+	startErr := waitForLaunchAgentRunning(target, result, invocation)
+	if startErr != nil {
+		if errors.Is(startErr, errLaunchAgentIdentityChangedDuringStart) {
 			result.State = StateForeignConflict
-			return result, errors.New("LaunchAgent definition changed during activation")
-		}
-		if err := waitForDarwinServiceReady(invocation.ConfigPath); err != nil {
+		} else {
 			result.State = StateIndeterminate
-			return result, fmt.Errorf("LaunchAgent did not become ready: %w", err)
 		}
-		result.State = StateActive
-		return result, nil
+		return result, errors.Join(
+			kickErr,
+			commandFailure("start LaunchAgent", kicked),
+			startErr,
+		)
 	}
-	result.State = StateIndeterminate
-	return result, errors.Join(
-		kickErr,
-		commandFailure("start LaunchAgent", kicked),
-		printErr,
-		errors.New("LaunchAgent did not reach the managed running state"),
-	)
+	matched, definitionErr := launchAgentDefinitionMatches(result, invocation)
+	if definitionErr != nil {
+		result.State = StateIndeterminate
+		return result, definitionErr
+	}
+	if !matched {
+		result.State = StateForeignConflict
+		return result, errors.New("LaunchAgent definition changed during activation")
+	}
+	if err := waitForDarwinServiceReady(invocation.ConfigPath); err != nil {
+		result.State = StateIndeterminate
+		return result, fmt.Errorf("LaunchAgent did not become ready: %w", err)
+	}
+	result.State = StateActive
+	return result, nil
 }
 
 func waitForLaunchAgentUnloaded(target, artifact string) error {
@@ -165,6 +168,75 @@ func waitForLaunchAgentUnloaded(target, artifact string) error {
 	}
 }
 
+func waitForLaunchAgentRunning(target string, result Result, invocation Invocation) error {
+	deadline := time.Now().Add(launchAgentStartTimeout)
+	expectedArguments := launchAgentArguments(invocation)
+	var lastErr error
+	var lastStatus launchAgentStatus
+	for {
+		status, loaded, err := printLaunchAgent(target)
+		lastStatus = status
+		lastErr = err
+		if err == nil && loaded {
+			if filepath.Clean(status.Path) != filepath.Clean(result.Artifact) {
+				return fmt.Errorf(
+					"%w: loaded path %q does not match %q",
+					errLaunchAgentIdentityChangedDuringStart,
+					status.Path,
+					result.Artifact,
+				)
+			}
+			if status.Program != "" && filepath.Clean(status.Program) != filepath.Clean(invocation.BinaryPath) {
+				return fmt.Errorf(
+					"%w: loaded program %q does not match %q",
+					errLaunchAgentIdentityChangedDuringStart,
+					status.Program,
+					invocation.BinaryPath,
+				)
+			}
+			if status.ArgumentsPresent && !slices.Equal(status.Arguments, expectedArguments) {
+				return fmt.Errorf(
+					"%w: loaded arguments do not match the managed definition",
+					errLaunchAgentIdentityChangedDuringStart,
+				)
+			}
+			executableConfirmed := filepath.Clean(status.Program) == filepath.Clean(invocation.BinaryPath) ||
+				status.ArgumentsPresent
+			if status.State == "running" && status.PID > 0 &&
+				executableConfirmed {
+				return nil
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return errors.Join(
+				lastErr,
+				fmt.Errorf(
+					"LaunchAgent did not reach the managed running state before timeout "+
+						"(loaded=%t state=%q pid=%d)",
+					loaded,
+					lastStatus.State,
+					lastStatus.PID,
+				),
+			)
+		}
+		time.Sleep(launchAgentStartPoll)
+	}
+}
+
+func launchAgentArguments(invocation Invocation) []string {
+	arguments := []string{
+		invocation.BinaryPath,
+		"service",
+		"run",
+		"--config",
+		invocation.ConfigPath,
+	}
+	if invocation.EnvironmentFile != "" {
+		arguments = append(arguments, "--environment-file", invocation.EnvironmentFile)
+	}
+	return arguments
+}
+
 func launchAgentDefinitionMatches(result Result, invocation Invocation) (bool, error) {
 	descriptor, err := RenderLaunchAgent(result.Role, invocation)
 	if err != nil {
@@ -178,8 +250,12 @@ func launchAgentDefinitionMatches(result Result, invocation Invocation) (bool, e
 }
 
 type launchAgentStatus struct {
-	Path  string
-	State string
+	Path             string
+	State            string
+	Program          string
+	Arguments        []string
+	ArgumentsPresent bool
+	PID              int
 }
 
 func printLaunchAgent(target string) (launchAgentStatus, bool, error) {
@@ -198,59 +274,100 @@ func parseLaunchAgentStatus(result userServiceCommandResult) (launchAgentStatus,
 	if result.Truncated {
 		return launchAgentStatus{}, errors.New("launchctl service description exceeds the output limit")
 	}
-	scanner := bufio.NewScanner(bytes.NewReader(result.Output))
-	type field struct {
+	type line struct {
+		raw    string
+		text   string
+		key    string
 		value  string
 		indent int
 	}
-	var paths []field
-	var states []field
+	scanner := bufio.NewScanner(bytes.NewReader(result.Output))
+	var lines []line
 	for scanner.Scan() {
 		raw := scanner.Text()
-		line := strings.TrimSpace(raw)
-		key, value, found := strings.Cut(line, " = ")
-		if !found || (key != "path" && key != "state") {
-			continue
-		}
-		candidate := field{
+		text := strings.TrimSpace(raw)
+		key, value, _ := strings.Cut(text, " = ")
+		lines = append(lines, line{
+			raw:    raw,
+			text:   text,
+			key:    key,
 			value:  strings.TrimSpace(value),
 			indent: len(raw) - len(strings.TrimLeft(raw, " \t")),
-		}
-		switch key {
-		case "path":
-			paths = append(paths, candidate)
-		case "state":
-			states = append(states, candidate)
-		}
+		})
 	}
 	if err := scanner.Err(); err != nil {
 		return launchAgentStatus{}, fmt.Errorf("parse launchctl service description: %w", err)
 	}
-	if len(paths) == 0 {
+	topLevelIndent := -1
+	for _, candidate := range lines {
+		if candidate.key == "path" && candidate.value != "" &&
+			(topLevelIndent == -1 || candidate.indent < topLevelIndent) {
+			topLevelIndent = candidate.indent
+		}
+	}
+	if topLevelIndent < 0 {
 		return launchAgentStatus{}, errors.New("launchctl service description has no absolute managed path")
 	}
-	topLevelIndent := paths[0].indent
-	for _, candidate := range paths[1:] {
-		topLevelIndent = min(topLevelIndent, candidate.indent)
-	}
 	var status launchAgentStatus
-	for _, candidate := range paths {
+	seen := make(map[string]bool)
+	for index, candidate := range lines {
 		if candidate.indent != topLevelIndent {
 			continue
 		}
-		if status.Path != "" {
-			return launchAgentStatus{}, errors.New("launchctl service description contains duplicate top-level paths")
+		switch candidate.key {
+		case "path":
+			if seen[candidate.key] {
+				return launchAgentStatus{}, errors.New("launchctl service description contains duplicate top-level paths")
+			}
+			seen[candidate.key] = true
+			status.Path = candidate.value
+		case "state":
+			if seen[candidate.key] {
+				return launchAgentStatus{}, errors.New("launchctl service description contains duplicate top-level states")
+			}
+			seen[candidate.key] = true
+			status.State = candidate.value
+		case "program":
+			if seen[candidate.key] {
+				return launchAgentStatus{}, errors.New("launchctl service description contains duplicate top-level programs")
+			}
+			seen[candidate.key] = true
+			status.Program = candidate.value
+		case "pid":
+			if seen[candidate.key] {
+				return launchAgentStatus{}, errors.New("launchctl service description contains duplicate top-level PIDs")
+			}
+			seen[candidate.key] = true
+			pid, err := strconv.Atoi(candidate.value)
+			if err != nil || pid < 0 {
+				return launchAgentStatus{}, errors.New("launchctl service description contains an invalid top-level PID")
+			}
+			status.PID = pid
+		case "arguments":
+			if candidate.value != "{" {
+				continue
+			}
+			if seen[candidate.key] {
+				return launchAgentStatus{}, errors.New("launchctl service description contains duplicate top-level arguments")
+			}
+			seen[candidate.key] = true
+			status.ArgumentsPresent = true
+			closed := false
+			for nested := index + 1; nested < len(lines); nested++ {
+				if lines[nested].indent <= topLevelIndent {
+					if lines[nested].indent == topLevelIndent && lines[nested].text == "}" {
+						closed = true
+					}
+					break
+				}
+				if lines[nested].text != "" {
+					status.Arguments = append(status.Arguments, lines[nested].text)
+				}
+			}
+			if !closed {
+				return launchAgentStatus{}, errors.New("launchctl service description contains unterminated top-level arguments")
+			}
 		}
-		status.Path = candidate.value
-	}
-	for _, candidate := range states {
-		if candidate.indent != topLevelIndent {
-			continue
-		}
-		if status.State != "" {
-			return launchAgentStatus{}, errors.New("launchctl service description contains duplicate top-level states")
-		}
-		status.State = candidate.value
 	}
 	if status.Path == "" || !filepath.IsAbs(status.Path) {
 		return launchAgentStatus{}, errors.New("launchctl service description has no absolute managed path")

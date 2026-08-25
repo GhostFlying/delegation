@@ -62,6 +62,11 @@ func TestDarwinInstallBootstrapsEnablesAndStartsService(t *testing.T) {
 	stubDarwinServiceReadiness(t, nil)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
 	originalRunner := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = originalRunner })
 	var calls [][]string
@@ -75,13 +80,12 @@ func TestDarwinInstallBootstrapsEnablesAndStartsService(t *testing.T) {
 			targetPrints++
 			if targetPrints > 1 {
 				path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
-				return launchctlTestStatus(path, "running"), nil
+				return launchctlTestStatus(path, "running", 123, invocation), nil
 			}
 			return userServiceCommandResult{ExitCode: 113}, nil
 		}
 		return userServiceCommandResult{}, nil
 	}
-	invocation := testInvocation(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
 	result, err := Install(ServiceRolePeer, invocation)
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() = %#v, %v", result, err)
@@ -98,6 +102,281 @@ func TestDarwinInstallBootstrapsEnablesAndStartsService(t *testing.T) {
 	}
 	if !slices.EqualFunc(calls, want, slices.Equal[[]string]) {
 		t.Fatalf("launchctl calls = %q, want %q", calls, want)
+	}
+}
+
+func TestDarwinInstallWaitsForLaunchAgentRunning(t *testing.T) {
+	stubDarwinServiceReadiness(t, nil)
+	stubLaunchAgentStartTiming(t, time.Second, time.Millisecond)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
+	artifact := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
+	originalRunner := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = originalRunner })
+	targetPrints := 0
+	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
+		if args[0] == "print" && len(args) == 2 && args[1] == fmt.Sprintf("gui/%d", os.Geteuid()) {
+			return userServiceCommandResult{}, nil
+		}
+		if args[0] != "print" {
+			return userServiceCommandResult{}, nil
+		}
+		targetPrints++
+		switch targetPrints {
+		case 1:
+			return userServiceCommandResult{ExitCode: 113}, nil
+		case 2, 3:
+			return launchctlTestStatus(artifact, "waiting", 0, invocation), nil
+		default:
+			return launchctlTestStatus(artifact, "running", 123, invocation), nil
+		}
+	}
+	result, err := Install(ServiceRolePeer, invocation)
+	if err != nil || result.State != StateActive || targetPrints != 4 {
+		t.Fatalf("Install() = %#v, %v, target prints = %d", result, err, targetPrints)
+	}
+}
+
+func TestDarwinInstallWaitsForLaunchAgentPID(t *testing.T) {
+	stubDarwinServiceReadiness(t, nil)
+	stubLaunchAgentStartTiming(t, time.Second, time.Millisecond)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
+	artifact := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
+	originalRunner := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = originalRunner })
+	targetPrints := 0
+	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
+		if args[0] == "print" && len(args) == 2 && args[1] == fmt.Sprintf("gui/%d", os.Geteuid()) {
+			return userServiceCommandResult{}, nil
+		}
+		if args[0] != "print" {
+			return userServiceCommandResult{}, nil
+		}
+		targetPrints++
+		if targetPrints == 1 {
+			return userServiceCommandResult{ExitCode: 113}, nil
+		}
+		pid := 0
+		if targetPrints > 2 {
+			pid = 123
+		}
+		return launchctlTestStatus(artifact, "running", pid, invocation), nil
+	}
+	result, err := Install(ServiceRolePeer, invocation)
+	if err != nil || result.State != StateActive || targetPrints != 3 {
+		t.Fatalf("Install() = %#v, %v, target prints = %d", result, err, targetPrints)
+	}
+}
+
+func TestDarwinInstallAcceptsOmittedLaunchctlArguments(t *testing.T) {
+	stubDarwinServiceReadiness(t, nil)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
+	artifact := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
+	originalRunner := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = originalRunner })
+	targetPrints := 0
+	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
+		if args[0] == "print" && len(args) == 2 && args[1] == fmt.Sprintf("gui/%d", os.Geteuid()) {
+			return userServiceCommandResult{}, nil
+		}
+		if args[0] != "print" {
+			return userServiceCommandResult{}, nil
+		}
+		targetPrints++
+		if targetPrints == 1 {
+			return userServiceCommandResult{ExitCode: 113}, nil
+		}
+		return launchctlTestStatusWithoutArguments(artifact, "running", 123, invocation), nil
+	}
+	result, err := Install(ServiceRolePeer, invocation)
+	if err != nil || result.State != StateActive {
+		t.Fatalf("Install() = %#v, %v", result, err)
+	}
+}
+
+func TestDarwinInstallAcceptsOmittedLaunchctlProgram(t *testing.T) {
+	stubDarwinServiceReadiness(t, nil)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
+	artifact := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
+	originalRunner := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = originalRunner })
+	targetPrints := 0
+	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
+		if args[0] == "print" && len(args) == 2 && args[1] == fmt.Sprintf("gui/%d", os.Geteuid()) {
+			return userServiceCommandResult{}, nil
+		}
+		if args[0] != "print" {
+			return userServiceCommandResult{}, nil
+		}
+		targetPrints++
+		if targetPrints == 1 {
+			return userServiceCommandResult{ExitCode: 113}, nil
+		}
+		return launchctlTestStatusWithoutProgram(artifact, "running", 123, invocation), nil
+	}
+	result, err := Install(ServiceRolePeer, invocation)
+	if err != nil || result.State != StateActive {
+		t.Fatalf("Install() = %#v, %v", result, err)
+	}
+}
+
+func TestDarwinInstallRejectsUnconfirmedLaunchctlExecutable(t *testing.T) {
+	stubDarwinServiceReadiness(t, nil)
+	stubLaunchAgentStartTiming(t, 10*time.Millisecond, time.Millisecond)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
+	artifact := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
+	originalRunner := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = originalRunner })
+	targetPrints := 0
+	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
+		if args[0] == "print" && len(args) == 2 && args[1] == fmt.Sprintf("gui/%d", os.Geteuid()) {
+			return userServiceCommandResult{}, nil
+		}
+		if args[0] != "print" {
+			return userServiceCommandResult{}, nil
+		}
+		targetPrints++
+		if targetPrints == 1 {
+			return userServiceCommandResult{ExitCode: 113}, nil
+		}
+		return launchctlTestStatusWithoutProgramOrArguments(artifact, "running", 123), nil
+	}
+	result, err := Install(ServiceRolePeer, invocation)
+	if err == nil || result.State != StateIndeterminate || targetPrints < 3 {
+		t.Fatalf("Install() = %#v, %v, target prints = %d", result, err, targetPrints)
+	}
+}
+
+func TestDarwinInstallTimesOutWhenLaunchAgentNeverRuns(t *testing.T) {
+	stubDarwinServiceReadiness(t, nil)
+	stubLaunchAgentStartTiming(t, 10*time.Millisecond, time.Millisecond)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
+	artifact := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
+	originalRunner := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = originalRunner })
+	targetPrints := 0
+	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
+		if args[0] == "print" && len(args) == 2 && args[1] == fmt.Sprintf("gui/%d", os.Geteuid()) {
+			return userServiceCommandResult{}, nil
+		}
+		if args[0] != "print" {
+			return userServiceCommandResult{}, nil
+		}
+		targetPrints++
+		if targetPrints == 1 {
+			return userServiceCommandResult{ExitCode: 113}, nil
+		}
+		return launchctlTestStatus(artifact, "waiting", 0, invocation), nil
+	}
+	result, err := Install(ServiceRolePeer, invocation)
+	if err == nil || result.State != StateIndeterminate || targetPrints < 3 ||
+		!strings.Contains(err.Error(), `state="waiting" pid=0`) {
+		t.Fatalf("Install() = %#v, %v, target prints = %d", result, err, targetPrints)
+	}
+}
+
+func TestDarwinInstallRejectsExecutableChangeDuringStart(t *testing.T) {
+	stubDarwinServiceReadiness(t, nil)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
+	foreignInvocation := invocation
+	foreignInvocation.BinaryPath = "/tmp/foreign-delegation"
+	artifact := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
+	originalRunner := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = originalRunner })
+	targetPrints := 0
+	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
+		if args[0] == "print" && len(args) == 2 && args[1] == fmt.Sprintf("gui/%d", os.Geteuid()) {
+			return userServiceCommandResult{}, nil
+		}
+		if args[0] != "print" {
+			return userServiceCommandResult{}, nil
+		}
+		targetPrints++
+		if targetPrints == 1 {
+			return userServiceCommandResult{ExitCode: 113}, nil
+		}
+		return launchctlTestStatus(artifact, "running", 123, foreignInvocation), nil
+	}
+	result, err := Install(ServiceRolePeer, invocation)
+	if err == nil || result.State != StateForeignConflict ||
+		!errors.Is(err, errLaunchAgentIdentityChangedDuringStart) {
+		t.Fatalf("Install() = %#v, %v", result, err)
+	}
+}
+
+func TestDarwinInstallRejectsArgumentChangeDuringStart(t *testing.T) {
+	stubDarwinServiceReadiness(t, nil)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
+	foreignInvocation := invocation
+	foreignInvocation.ConfigPath = filepath.Join(home, ".delegation", "foreign.json")
+	artifact := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
+	originalRunner := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = originalRunner })
+	targetPrints := 0
+	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
+		if args[0] == "print" && len(args) == 2 && args[1] == fmt.Sprintf("gui/%d", os.Geteuid()) {
+			return userServiceCommandResult{}, nil
+		}
+		if args[0] != "print" {
+			return userServiceCommandResult{}, nil
+		}
+		targetPrints++
+		if targetPrints == 1 {
+			return userServiceCommandResult{ExitCode: 113}, nil
+		}
+		return launchctlTestStatus(artifact, "running", 123, foreignInvocation), nil
+	}
+	result, err := Install(ServiceRolePeer, invocation)
+	if err == nil || result.State != StateForeignConflict ||
+		!errors.Is(err, errLaunchAgentIdentityChangedDuringStart) {
+		t.Fatalf("Install() = %#v, %v", result, err)
 	}
 }
 
@@ -125,7 +404,7 @@ func TestDarwinNamedInstanceLifecycleTargetsNamedAgent(t *testing.T) {
 		if args[0] == "print" {
 			targetPrints++
 			if targetPrints > 1 {
-				return launchctlTestStatus(artifact, "running"), nil
+				return launchctlTestStatus(artifact, "running", 123, invocation), nil
 			}
 			return userServiceCommandResult{ExitCode: 113}, nil
 		}
@@ -175,6 +454,11 @@ func TestDarwinInstallAcceptsOnlyManagedLoadedPath(t *testing.T) {
 	stubDarwinServiceReadiness(t, nil)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
 	originalRunner := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = originalRunner })
 	foreign := false
@@ -202,7 +486,7 @@ func TestDarwinInstallAcceptsOnlyManagedLoadedPath(t *testing.T) {
 			staleUnloadPrints--
 			unloadPrints++
 			path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
-			return launchctlTestStatus(path, "running"), nil
+			return launchctlTestStatus(path, "running", 123, invocation), nil
 		}
 		if !loaded {
 			unloadPrints++
@@ -212,9 +496,8 @@ func TestDarwinInstallAcceptsOnlyManagedLoadedPath(t *testing.T) {
 		if foreign {
 			path = "/tmp/foreign.plist"
 		}
-		return launchctlTestStatus(path, "running"), nil
+		return launchctlTestStatus(path, "running", 123, invocation), nil
 	}
-	invocation := testInvocation(ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"))
 	result, err := Install(ServiceRolePeer, invocation)
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() loaded managed path = %#v, %v", result, err)
@@ -239,6 +522,11 @@ func TestDarwinInstallRejectsIdentityChangeDuringUnload(t *testing.T) {
 	stubDarwinServiceReadiness(t, nil)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
 	originalRunner := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = originalRunner })
 	targetPrints := 0
@@ -249,13 +537,11 @@ func TestDarwinInstallRejectsIdentityChangeDuringUnload(t *testing.T) {
 			if targetPrints > 1 {
 				path = "/tmp/foreign.plist"
 			}
-			return launchctlTestStatus(path, "running"), nil
+			return launchctlTestStatus(path, "running", 123, invocation), nil
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, testInvocation(
-		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"),
-	))
+	result, err := Install(ServiceRolePeer, invocation)
 	if err == nil || result.State != StateForeignConflict ||
 		!errors.Is(err, errLaunchAgentIdentityChangedDuringUnload) {
 		t.Fatalf("Install() = %#v, %v", result, err)
@@ -289,6 +575,11 @@ func TestDarwinInstallReportsIdentityChangeAfterKickstart(t *testing.T) {
 	stubDarwinServiceReadiness(t, nil)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
 	originalRunner := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = originalRunner })
 	targetPrints := 0
@@ -298,13 +589,11 @@ func TestDarwinInstallReportsIdentityChangeAfterKickstart(t *testing.T) {
 			if targetPrints == 1 {
 				return userServiceCommandResult{ExitCode: 113}, nil
 			}
-			return launchctlTestStatus("/tmp/foreign.plist", "running"), nil
+			return launchctlTestStatus("/tmp/foreign.plist", "running", 123, invocation), nil
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, testInvocation(
-		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"),
-	))
+	result, err := Install(ServiceRolePeer, invocation)
 	if err == nil || result.State != StateForeignConflict {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -314,6 +603,11 @@ func TestDarwinInstallReconcilesLostBootstrapResponse(t *testing.T) {
 	stubDarwinServiceReadiness(t, nil)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
 	originalRunner := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = originalRunner })
 	targetPrints := 0
@@ -328,16 +622,18 @@ func TestDarwinInstallReconcilesLostBootstrapResponse(t *testing.T) {
 				state = "running"
 			}
 			path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
-			return launchctlTestStatus(path, state), nil
+			pid := 0
+			if state == "running" {
+				pid = 123
+			}
+			return launchctlTestStatus(path, state, pid, invocation), nil
 		}
 		if args[0] == "bootstrap" {
 			return userServiceCommandResult{}, errors.New("connection lost")
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, testInvocation(
-		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"),
-	))
+	result, err := Install(ServiceRolePeer, invocation)
 	if err != nil || result.State != StateActive {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -348,6 +644,11 @@ func TestDarwinInstallRejectsServiceThatNeverBecomesReady(t *testing.T) {
 	stubDarwinServiceReadiness(t, readinessErr)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
 	originalRunner := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = originalRunner })
 	targetPrints := 0
@@ -358,13 +659,11 @@ func TestDarwinInstallRejectsServiceThatNeverBecomesReady(t *testing.T) {
 				return userServiceCommandResult{ExitCode: 113}, nil
 			}
 			path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
-			return launchctlTestStatus(path, "running"), nil
+			return launchctlTestStatus(path, "running", 123, invocation), nil
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, testInvocation(
-		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"),
-	))
+	result, err := Install(ServiceRolePeer, invocation)
 	if !errors.Is(err, readinessErr) || result.State != StateIndeterminate {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -374,18 +673,21 @@ func TestDarwinInstallRejectsLoadedJobThatCannotBeUnloaded(t *testing.T) {
 	stubDarwinServiceReadiness(t, nil)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	invocation := testInvocation(
+		ServiceRolePeer,
+		"/opt/delegation/bin/delegation",
+		filepath.Join(home, ".delegation", "config.json"),
+	)
 	originalRunner := runLaunchctl
 	t.Cleanup(func() { runLaunchctl = originalRunner })
 	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
 		if args[0] == "print" && len(args) == 2 && strings.Contains(args[1], LaunchAgentPeerName) {
 			path := filepath.Join(home, "Library", "LaunchAgents", LaunchAgentPeerName+".plist")
-			return launchctlTestStatus(path, "running"), nil
+			return launchctlTestStatus(path, "running", 123, invocation), nil
 		}
 		return userServiceCommandResult{}, nil
 	}
-	result, err := Install(ServiceRolePeer, testInvocation(
-		ServiceRolePeer, "/opt/delegation/bin/delegation", filepath.Join(home, ".delegation", "config.json"),
-	))
+	result, err := Install(ServiceRolePeer, invocation)
 	if err == nil || result.State != StateIndeterminate || !strings.Contains(err.Error(), "remained loaded") {
 		t.Fatalf("Install() = %#v, %v", result, err)
 	}
@@ -398,8 +700,79 @@ func stubDarwinServiceReadiness(t *testing.T, err error) {
 	t.Cleanup(func() { waitForDarwinServiceReady = original })
 }
 
-func launchctlTestStatus(path, state string) userServiceCommandResult {
-	return userServiceCommandResult{Output: []byte("path = " + path + "\nstate = " + state + "\n")}
+func stubLaunchAgentStartTiming(t *testing.T, timeout, poll time.Duration) {
+	t.Helper()
+	originalTimeout := launchAgentStartTimeout
+	originalPoll := launchAgentStartPoll
+	launchAgentStartTimeout = timeout
+	launchAgentStartPoll = poll
+	t.Cleanup(func() {
+		launchAgentStartTimeout = originalTimeout
+		launchAgentStartPoll = originalPoll
+	})
+}
+
+func launchctlTestStatus(
+	path string,
+	state string,
+	pid int,
+	invocation Invocation,
+) userServiceCommandResult {
+	var output strings.Builder
+	fmt.Fprintf(&output, "path = %s\nstate = %s\nprogram = %s\narguments = {\n", path, state, invocation.BinaryPath)
+	for _, argument := range launchAgentArguments(invocation) {
+		fmt.Fprintf(&output, "\t%s\n", argument)
+	}
+	output.WriteString("}\n")
+	if pid > 0 {
+		fmt.Fprintf(&output, "pid = %d\n", pid)
+	}
+	return userServiceCommandResult{Output: []byte(output.String())}
+}
+
+func launchctlTestStatusWithoutArguments(
+	path string,
+	state string,
+	pid int,
+	invocation Invocation,
+) userServiceCommandResult {
+	var output strings.Builder
+	fmt.Fprintf(&output, "path = %s\nstate = %s\nprogram = %s\n", path, state, invocation.BinaryPath)
+	if pid > 0 {
+		fmt.Fprintf(&output, "pid = %d\n", pid)
+	}
+	return userServiceCommandResult{Output: []byte(output.String())}
+}
+
+func launchctlTestStatusWithoutProgram(
+	path string,
+	state string,
+	pid int,
+	invocation Invocation,
+) userServiceCommandResult {
+	var output strings.Builder
+	fmt.Fprintf(&output, "path = %s\nstate = %s\narguments = {\n", path, state)
+	for _, argument := range launchAgentArguments(invocation) {
+		fmt.Fprintf(&output, "\t%s\n", argument)
+	}
+	output.WriteString("}\n")
+	if pid > 0 {
+		fmt.Fprintf(&output, "pid = %d\n", pid)
+	}
+	return userServiceCommandResult{Output: []byte(output.String())}
+}
+
+func launchctlTestStatusWithoutProgramOrArguments(
+	path string,
+	state string,
+	pid int,
+) userServiceCommandResult {
+	var output strings.Builder
+	fmt.Fprintf(&output, "path = %s\nstate = %s\n", path, state)
+	if pid > 0 {
+		fmt.Fprintf(&output, "pid = %d\n", pid)
+	}
+	return userServiceCommandResult{Output: []byte(output.String())}
 }
 
 func TestParseLaunchAgentStatusUsesTopLevelFields(t *testing.T) {
@@ -407,17 +780,35 @@ func TestParseLaunchAgentStatusUsesTopLevelFields(t *testing.T) {
 		"gui/501/" + LaunchAgentPeerName + " = {\n" +
 			"\tpath = /tmp/delegation.plist\n" +
 			"\tstate = running\n" +
+			"\tprogram = /opt/delegation/bin/delegation\n" +
+			"\targuments = {\n" +
+			"\t\t/opt/delegation/bin/delegation\n" +
+			"\t\tservice\n" +
+			"\t\trun\n" +
+			"\t\t--config\n" +
+			"\t\t/Users/test/config.json\n" +
+			"\t}\n" +
 			"\tendpoints = {\n" +
 			"\t\tstate = active\n" +
 			"\t}\n" +
+			"\tpid = 123\n" +
 			"}\n",
 	)}
 	status, err := parseLaunchAgentStatus(result)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := launchAgentStatus{Path: "/tmp/delegation.plist", State: "running"}
-	if status != want {
+	want := launchAgentStatus{
+		Path:             "/tmp/delegation.plist",
+		State:            "running",
+		Program:          "/opt/delegation/bin/delegation",
+		Arguments:        []string{"/opt/delegation/bin/delegation", "service", "run", "--config", "/Users/test/config.json"},
+		ArgumentsPresent: true,
+		PID:              123,
+	}
+	if status.Path != want.Path || status.State != want.State || status.Program != want.Program ||
+		status.ArgumentsPresent != want.ArgumentsPresent || status.PID != want.PID ||
+		!slices.Equal(status.Arguments, want.Arguments) {
 		t.Fatalf("parseLaunchAgentStatus() = %#v, want %#v", status, want)
 	}
 }
