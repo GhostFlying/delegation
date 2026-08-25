@@ -36,7 +36,8 @@ grep -F "\"version\":\"$version\"" "$tmp/version" >/dev/null
 cp -R "$plugin_root" "$tmp/plugin"
 mkdir -p "$tmp/payload" "$tmp/fake-bin"
 cp "$tmp/delegation" "$tmp/payload/delegation"
-tar -czf "$tmp/artifact.tar.gz" -C "$tmp/payload" delegation
+cp "$repo_root/THIRD_PARTY_NOTICES.txt" "$tmp/payload/THIRD_PARTY_NOTICES.txt"
+tar -czf "$tmp/artifact.tar.gz" -C "$tmp/payload" delegation THIRD_PARTY_NOTICES.txt
 
 case "$(uname -s)" in
   Linux) os=linux ;;
@@ -86,7 +87,11 @@ chmod 0755 "$tmp/fake-bin/curl"
 cat >"$tmp/fake-bin/link" <<'EOF'
 #!/bin/sh
 set -eu
-if [ -n "${DELEGATION_TEST_LINK_BARRIER_DIR:-}" ]; then
+case "$2" in
+*/delegation) is_runtime=1 ;;
+*) is_runtime=0 ;;
+esac
+if [ "$is_runtime" -eq 1 ] && [ -n "${DELEGATION_TEST_LINK_BARRIER_DIR:-}" ]; then
   mkdir -p "$DELEGATION_TEST_LINK_BARRIER_DIR"
   : >"$DELEGATION_TEST_LINK_BARRIER_DIR/ready.$$"
   attempts=0
@@ -99,11 +104,11 @@ if [ -n "${DELEGATION_TEST_LINK_BARRIER_DIR:-}" ]; then
     sleep 1
   done
 fi
-case "${DELEGATION_TEST_LINK_RACE:-}" in
-  directory)
+case "$is_runtime:${DELEGATION_TEST_LINK_RACE:-}" in
+  1:directory)
     mkdir -p "$2"
     ;;
-  symlink)
+  1:symlink)
     mkdir -p "$DELEGATION_TEST_LINK_RACE_OUTSIDE"
     /bin/ln -s "$DELEGATION_TEST_LINK_RACE_OUTSIDE" "$2"
     ;;
@@ -114,7 +119,7 @@ if "$real_link" "$@"; then
 else
   link_status=$?
 fi
-if [ -n "${DELEGATION_TEST_LINK_BARRIER_DIR:-}" ]; then
+if [ "$is_runtime" -eq 1 ] && [ -n "${DELEGATION_TEST_LINK_BARRIER_DIR:-}" ]; then
   printf '%s\n' "$link_status" >"$DELEGATION_TEST_LINK_BARRIER_DIR/result.$$"
 fi
 exit "$link_status"
@@ -185,6 +190,10 @@ mkdir -p "$runtime_user_home"
 installed=$(PATH="$tmp/fake-bin:$PATH" HOME="$runtime_user_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime")
 test "$installed" = "$runtime_home/bin/$version/$os-$arch/delegation"
 test -x "$installed"
+test -f "$(dirname "$installed")/THIRD_PARTY_NOTICES.txt"
+cmp "$repo_root/THIRD_PARTY_NOTICES.txt" "$(dirname "$installed")/THIRD_PARTY_NOTICES.txt"
+test "$(LC_ALL=C ls -A1 "$(dirname "$installed")")" = "THIRD_PARTY_NOTICES.txt
+delegation"
 test "$(wc -l <"$download_log")" -eq 1
 case "$os" in
   linux) test "$(stat -c '%a' "$runtime_home")" = 700 ;;
@@ -268,7 +277,9 @@ race_target="$race_home/bin/$version/$os-$arch"
 installed=$(PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$race_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" DELEGATION_TEST_CREATE_TARGET="$race_target" "$tmp/plugin/scripts/install-runtime")
 test "$installed" = "$race_target/delegation"
 test -x "$installed"
-test "$(LC_ALL=C ls -A1 "$race_target")" = delegation
+test -f "$race_target/THIRD_PARTY_NOTICES.txt"
+test "$(LC_ALL=C ls -A1 "$race_target")" = "THIRD_PARTY_NOTICES.txt
+delegation"
 
 concurrent_home="$tmp/concurrent-home"
 concurrent_barrier="$tmp/concurrent-barrier"
@@ -282,7 +293,9 @@ concurrent_binary="$concurrent_home/bin/$version/$os-$arch/delegation"
 test "$(sed -n '1p' "$tmp/concurrent-first")" = "$concurrent_binary"
 test "$(sed -n '1p' "$tmp/concurrent-second")" = "$concurrent_binary"
 test -x "$concurrent_binary"
-test "$(LC_ALL=C ls -A1 "$(dirname "$concurrent_binary")")" = delegation
+test -f "$(dirname "$concurrent_binary")/THIRD_PARTY_NOTICES.txt"
+test "$(LC_ALL=C ls -A1 "$(dirname "$concurrent_binary")")" = "THIRD_PARTY_NOTICES.txt
+delegation"
 test "$(find "$concurrent_barrier" -type f -name 'result.*' | wc -l)" -eq 2
 test "$(grep -l '^0$' "$concurrent_barrier"/result.* | wc -l)" -eq 1
 test "$(grep -L '^0$' "$concurrent_barrier"/result.* | wc -l)" -eq 1
@@ -311,7 +324,7 @@ printf '%s\n' 'outside' >"$tmp/outside"
 chmod 0644 "$tmp/outside"
 rm "$tmp/payload/delegation"
 ln -s "$tmp/outside" "$tmp/payload/delegation"
-tar -czf "$tmp/malicious.tar.gz" -C "$tmp/payload" delegation
+tar -czf "$tmp/malicious.tar.gz" -C "$tmp/payload" delegation THIRD_PARTY_NOTICES.txt
 if command -v sha256sum >/dev/null 2>&1; then
   checksum=$(sha256sum "$tmp/malicious.tar.gz" | awk '{ print $1 }')
 else
@@ -322,6 +335,6 @@ if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$tmp/malicious-home" DELEGATION_T
   printf '%s\n' 'expected symlink runtime archive to fail' >&2
   exit 1
 fi
-grep -F 'must contain one regular file' "$tmp/malicious-err" >/dev/null
+grep -F 'must contain two regular files' "$tmp/malicious-err" >/dev/null
 test ! -x "$tmp/outside"
 test ! -e "$tmp/malicious-home/bin/$version/$os-$arch"

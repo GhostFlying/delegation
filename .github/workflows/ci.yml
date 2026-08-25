@@ -308,6 +308,11 @@ jobs:
       - name: Compare deterministic unsigned package bytes
         run: |
           diff -r dist-first dist-second
+          go run ./cmd/releasepack verify-release --release dist-first
+          go run ./cmd/releasepack verify-release --release dist-second
+          diff -u \
+            plugins/delegation/release-artifacts.sha256 \
+            dist-first/release-artifacts.sha256
       - name: Verify exact release target matrix
         shell: bash
         run: |

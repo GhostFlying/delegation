@@ -37,6 +37,10 @@ var releaseTargets = []target{
 
 const requiredGoVersion = "go1.26.5"
 const productionBuildTags = "ts_omit_logtail"
+const releaseNoticeName = "THIRD_PARTY_NOTICES.txt"
+const maxReleaseNoticeSize = 1 << 20
+
+var archiveTime = time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 var versionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
 
@@ -106,6 +110,10 @@ func packageRelease(repoRoot, output string) error {
 	if err := verifyGoToolchain(root); err != nil {
 		return err
 	}
+	notice, err := readReleaseNotice(root)
+	if err != nil {
+		return err
+	}
 	parent := filepath.Dir(output)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return fmt.Errorf("create output parent: %w", err)
@@ -129,12 +137,15 @@ func packageRelease(repoRoot, output string) error {
 		}
 		archivePath := filepath.Join(staging, name)
 		if target.archive == "zip" {
-			err = writeZip(archivePath, binaryPath, binaryName)
+			err = writeZip(archivePath, binaryPath, binaryName, notice)
 		} else {
-			err = writeTarGzip(archivePath, binaryPath, binaryName)
+			err = writeTarGzip(archivePath, binaryPath, binaryName, notice)
 		}
 		if err != nil {
 			return fmt.Errorf("package %s: %w", name, err)
+		}
+		if err := verifyRuntimeArchive(archivePath, target, notice); err != nil {
+			return fmt.Errorf("verify %s: %w", name, err)
 		}
 		if err := os.Remove(binaryPath); err != nil {
 			return fmt.Errorf("remove staged binary: %w", err)
@@ -246,7 +257,18 @@ func verifyGoToolchain(root string) error {
 	return nil
 }
 
-func writeTarGzip(destination, binaryPath, binaryName string) error {
+func readReleaseNotice(root string) ([]byte, error) {
+	notice, err := readBoundedRegularFile(filepath.Join(root, releaseNoticeName), maxReleaseNoticeSize)
+	if err != nil {
+		return nil, fmt.Errorf("read release notice: %w", err)
+	}
+	if len(notice) == 0 {
+		return nil, errors.New("release notice is empty")
+	}
+	return notice, nil
+}
+
+func writeTarGzip(destination, binaryPath, binaryName string, notice []byte) error {
 	binary, err := os.ReadFile(binaryPath)
 	if err != nil {
 		return err
@@ -258,19 +280,29 @@ func writeTarGzip(destination, binaryPath, binaryName string) error {
 	gzipWriter := gzip.NewWriter(file)
 	gzipWriter.Header.ModTime = time.Unix(0, 0).UTC()
 	tarWriter := tar.NewWriter(gzipWriter)
-	header := &tar.Header{
-		Name:     binaryName,
-		Mode:     0o755,
-		Size:     int64(len(binary)),
-		ModTime:  time.Unix(0, 0).UTC(),
-		Typeflag: tar.TypeReg,
-		Format:   tar.FormatUSTAR,
+	entries := []struct {
+		name string
+		mode int64
+		data []byte
+	}{
+		{name: binaryName, mode: 0o755, data: binary},
+		{name: releaseNoticeName, mode: 0o644, data: notice},
 	}
-	if err := tarWriter.WriteHeader(header); err != nil {
-		return closeArchive(file, tarWriter, gzipWriter, err)
-	}
-	if _, err := tarWriter.Write(binary); err != nil {
-		return closeArchive(file, tarWriter, gzipWriter, err)
+	for _, entry := range entries {
+		header := &tar.Header{
+			Name:     entry.name,
+			Mode:     entry.mode,
+			Size:     int64(len(entry.data)),
+			ModTime:  time.Unix(0, 0).UTC(),
+			Typeflag: tar.TypeReg,
+			Format:   tar.FormatUSTAR,
+		}
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return closeArchive(file, tarWriter, gzipWriter, err)
+		}
+		if _, err := tarWriter.Write(entry.data); err != nil {
+			return closeArchive(file, tarWriter, gzipWriter, err)
+		}
 	}
 	return closeArchive(file, tarWriter, gzipWriter, nil)
 }
@@ -279,7 +311,7 @@ func closeArchive(file *os.File, tarWriter *tar.Writer, gzipWriter *gzip.Writer,
 	return errors.Join(prior, tarWriter.Close(), gzipWriter.Close(), file.Close())
 }
 
-func writeZip(destination, binaryPath, binaryName string) error {
+func writeZip(destination, binaryPath, binaryName string, notice []byte) error {
 	binary, err := os.ReadFile(binaryPath)
 	if err != nil {
 		return err
@@ -289,12 +321,26 @@ func writeZip(destination, binaryPath, binaryName string) error {
 		return err
 	}
 	zipWriter := zip.NewWriter(file)
-	header := &zip.FileHeader{Name: binaryName, Method: zip.Deflate}
-	header.SetMode(0o755)
-	header.SetModTime(time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC))
-	entry, err := zipWriter.CreateHeader(header)
-	if err == nil {
-		_, err = entry.Write(binary)
+	entries := []struct {
+		name string
+		mode os.FileMode
+		data []byte
+	}{
+		{name: binaryName, mode: 0o755, data: binary},
+		{name: releaseNoticeName, mode: 0o644, data: notice},
+	}
+	for _, archiveEntry := range entries {
+		header := &zip.FileHeader{Name: archiveEntry.name, Method: zip.Deflate}
+		header.SetMode(archiveEntry.mode)
+		header.SetModTime(archiveTime)
+		entry, createErr := zipWriter.CreateHeader(header)
+		if createErr == nil {
+			_, createErr = entry.Write(archiveEntry.data)
+		}
+		if createErr != nil {
+			err = createErr
+			break
+		}
 	}
 	return errors.Join(err, zipWriter.Close(), file.Close())
 }

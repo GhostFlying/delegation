@@ -273,6 +273,7 @@ $delegationHome = Resolve-LocalDelegationHome -Path $delegationHome
 $targetParent = Join-Path $delegationHome "bin\$version"
 $target = Join-Path $targetParent "windows-$arch"
 $binary = Join-Path $target "delegation.exe"
+$notice = Join-Path $target "THIRD_PARTY_NOTICES.txt"
 $locks = Join-Path $delegationHome ".locks"
 Initialize-DelegationHome -Path $delegationHome
 New-Item -ItemType Directory -Force -Path $locks, $targetParent | Out-Null
@@ -300,13 +301,20 @@ try {
             throw "delegation: incomplete runtime directory already exists: $target"
         }
         $installedEntries = @(Get-ChildItem -LiteralPath $target -Force)
-        if ($installedEntries.Count -ne 1 -or
-            $installedEntries[0].Name -ne "delegation.exe" -or
-            $installedEntries[0].PSIsContainer) {
+        $installedBinary = $installedEntries | Where-Object Name -CEQ "delegation.exe"
+        $installedNotice = $installedEntries | Where-Object Name -CEQ "THIRD_PARTY_NOTICES.txt"
+        if ($installedEntries.Count -ne 2 -or
+            $null -eq $installedBinary -or
+            $null -eq $installedNotice -or
+            $installedBinary.PSIsContainer -or
+            $installedNotice.PSIsContainer) {
             throw "delegation: installed runtime directory contains unexpected files: $target"
         }
-        if (($installedEntries[0].Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        if (($installedBinary.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "delegation: installed runtime must not be a reparse point: $binary"
+        }
+        if (($installedNotice.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "delegation: installed release notice must not be a reparse point: $notice"
         }
         $installedVersion = (& $binary version | Out-String).Trim()
         $versionExitCode = $LASTEXITCODE
@@ -331,16 +339,60 @@ try {
         throw "delegation: SHA-256 mismatch for $artifact"
     }
 
+    Add-Type -AssemblyName System.IO.Compression
+    $archiveStream = [System.IO.File]::OpenRead($archive)
+    try {
+        $zip = New-Object System.IO.Compression.ZipArchive(
+            $archiveStream,
+            [System.IO.Compression.ZipArchiveMode]::Read,
+            $false
+        )
+        try {
+            $archiveEntries = @($zip.Entries)
+            $binaryUnixMode = if ($archiveEntries.Count -ge 1) {
+                [Convert]::ToInt32($archiveEntries[0].ExternalAttributes.ToString("X8").Substring(0, 4), 16)
+            } else {
+                0
+            }
+            $noticeUnixMode = if ($archiveEntries.Count -ge 2) {
+                [Convert]::ToInt32($archiveEntries[1].ExternalAttributes.ToString("X8").Substring(0, 4), 16)
+            } else {
+                0
+            }
+            if ($archiveEntries.Count -ne 2 -or
+                $archiveEntries[0].FullName -cne "delegation.exe" -or
+                $archiveEntries[1].FullName -cne "THIRD_PARTY_NOTICES.txt" -or
+                [string]::IsNullOrEmpty($archiveEntries[0].Name) -or
+                [string]::IsNullOrEmpty($archiveEntries[1].Name) -or
+                $archiveEntries[0].Length -le 0 -or
+                $archiveEntries[1].Length -le 0 -or
+                $archiveEntries[1].Length -gt 1048576 -or
+                $binaryUnixMode -ne 0x81ed -or
+                $noticeUnixMode -ne 0x81a4) {
+                throw "delegation: unexpected files in $artifact"
+            }
+        } finally {
+            $zip.Dispose()
+        }
+    } finally {
+        $archiveStream.Dispose()
+    }
+
     $expanded = Join-Path $staging "expanded"
     Expand-Archive -LiteralPath $archive -DestinationPath $expanded
     $entries = @(Get-ChildItem -LiteralPath $expanded -Force)
-    if ($entries.Count -ne 1 -or
-        $entries[0].Name -ne "delegation.exe" -or
-        $entries[0].PSIsContainer -or
-        ($entries[0].Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    $downloadedBinaryItem = $entries | Where-Object Name -CEQ "delegation.exe"
+    $downloadedNoticeItem = $entries | Where-Object Name -CEQ "THIRD_PARTY_NOTICES.txt"
+    if ($entries.Count -ne 2 -or
+        $null -eq $downloadedBinaryItem -or
+        $null -eq $downloadedNoticeItem -or
+        $downloadedBinaryItem.PSIsContainer -or
+        $downloadedNoticeItem.PSIsContainer -or
+        ($downloadedBinaryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        ($downloadedNoticeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "delegation: unexpected files in $artifact"
     }
-    $downloadedBinary = $entries[0].FullName
+    $downloadedBinary = $downloadedBinaryItem.FullName
     $installedVersion = (& $downloadedBinary version | Out-String).Trim()
     $versionExitCode = $LASTEXITCODE
     if ($versionExitCode -ne 0) {
@@ -359,12 +411,17 @@ try {
     }
     $committedTarget = Get-Item -LiteralPath $target -Force
     $committedEntries = @(Get-ChildItem -LiteralPath $target -Force)
+    $committedBinary = $committedEntries | Where-Object Name -CEQ "delegation.exe"
+    $committedNotice = $committedEntries | Where-Object Name -CEQ "THIRD_PARTY_NOTICES.txt"
     if (-not $committedTarget.PSIsContainer -or
         ($committedTarget.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        $committedEntries.Count -ne 1 -or
-        $committedEntries[0].Name -ne "delegation.exe" -or
-        $committedEntries[0].PSIsContainer -or
-        ($committedEntries[0].Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        $committedEntries.Count -ne 2 -or
+        $null -eq $committedBinary -or
+        $null -eq $committedNotice -or
+        $committedBinary.PSIsContainer -or
+        $committedNotice.PSIsContainer -or
+        ($committedBinary.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        ($committedNotice.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "delegation: committed runtime layout is invalid: $target"
     }
     Write-Output $binary

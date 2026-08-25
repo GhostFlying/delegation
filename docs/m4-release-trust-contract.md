@@ -12,6 +12,8 @@ retroactively signed.
 A published runtime must have all of the following properties:
 
 - the plugin pins the exact SHA-256 of every platform archive;
+- every archive contains the runtime executable and the audited `THIRD_PARTY_NOTICES.txt`, and no
+  other entry;
 - macOS executables are Developer ID signed and accepted by Apple's notary service;
 - Windows executables are Authenticode signed with an RFC 3161 timestamp;
 - the published bytes are the same bytes that passed native signature verification;
@@ -31,8 +33,9 @@ Delegation uses a two-stage candidate-and-promotion flow:
 
 1. Candidate source commit `S` contains the final version and all build-affecting source. Its
    checksum file is not yet the candidate manifest.
-2. The protected candidate workflow checks out `S`, builds on native runners, signs and verifies the
-   macOS and Windows executables, packages all six archives, and generates the candidate manifest.
+2. The protected candidate workflow checks out `S`, builds on native runners with Go 1.26.5 and
+   `ts_omit_logtail`, signs and verifies the macOS and Windows executables, packages all six
+   archives with the tracked notice, and generates the candidate manifest.
 3. The workflow creates SLSA provenance for the six archives at source commit `S`, includes its
    Sigstore bundle, and uploads one immutable GitHub candidate artifact.
 4. A normal commit `M` changes only `plugins/delegation/release-artifacts.sha256` to the reviewed
@@ -76,6 +79,32 @@ trust decision.
 The descriptor never contains certificates' private material, passwords, API keys, access tokens,
 temporary keychain paths, runner names, or local user paths.
 
+## Runtime Archive And Attribution Contract
+
+Each runtime archive contains exactly two regular files in this order:
+
+1. `delegation` on Linux and macOS or `delegation.exe` on Windows, mode `0755`; and
+2. `THIRD_PARTY_NOTICES.txt`, mode `0644`.
+
+No directory, link, duplicate, renamed, reordered, or additional entry is permitted. Tar archives
+use canonical USTAR headers and a canonical gzip header. ZIP archives use fixed entry metadata.
+Both formats use fixed timestamps and omit owner names, link targets, comments, and variable build
+metadata. Normal unsigned packaging, signed native packaging, candidate assembly and verification,
+and promotion all use the same fail-closed archive verifier and require the notice bytes to match
+the tracked source file exactly.
+
+The tracked notice is derived from the union of modules actually linked into the six production
+targets selected by Go 1.26.5 minimal version selection with `CGO_ENABLED=0` and the
+`ts_omit_logtail` build tag. It includes the Go toolchain license and patent grant, every linked
+module's applicable license, and incorporated-code notices required by linked modules. A dependency,
+toolchain, target matrix, or production build-tag change requires a fresh linked-closure audit and
+notice update before packaging.
+
+Installers validate the checksum before extraction and then require the exact two-entry archive
+layout. The versioned runtime directory retains exactly the executable and
+`THIRD_PARTY_NOTICES.txt`. Existing, racing, linked, or extra entries fail closed; POSIX publication
+uses exact-destination hard links and Windows publishes the validated two-file directory atomically.
+
 ## Native Signing Boundaries
 
 The macOS and Windows candidate jobs use a protected `release-signing` GitHub environment restricted
@@ -86,9 +115,9 @@ is a signed release.
 
 macOS jobs import a base64-encoded Developer ID Application certificate into an ephemeral keychain,
 sign with hardened runtime and a secure timestamp, verify the signature, submit a temporary ZIP to
-`notarytool`, and require an accepted result. Delegation remains a single-binary `tar.gz`; a raw
-command-line executable cannot carry a stapled ticket, so notarization is verified before packaging
-and Gatekeeper may retrieve the ticket online.
+`notarytool`, and require an accepted result. Delegation remains a raw command-line executable
+inside a two-file `tar.gz`; it cannot carry a stapled ticket, so notarization is verified before
+packaging and Gatekeeper may retrieve the ticket online.
 
 Windows jobs import a base64-encoded PFX only for the duration of the job, sign with SHA-256, request
 an RFC 3161 timestamp from the configured HTTPS timestamp service, and require `signtool verify` to
@@ -111,6 +140,8 @@ Promotion fails closed unless all of these conditions hold:
 - the candidate artifact ID and GitHub container digest match the selected run, while its artifact
   name and recomputed payload digest match the descriptor;
 - the candidate contains no unlisted files, directories, links, or duplicate archive targets;
+- every archive contains the executable followed by the byte-identical audited notice with fixed
+  names, modes, order, and metadata;
 - every archive digest matches the manifest and descriptor;
 - every native target has the required successful verification evidence; and
 - the candidate provenance verifies against the candidate workflow and source commit `S`.

@@ -98,16 +98,16 @@ func TestReleaseWorkflowPublishesVerifiedUnsignedArtifacts(t *testing.T) {
 	assertPinnedActions(t, workflow)
 }
 
-func TestOrdinaryCIValidatesUnsignedPackagesWithoutRebindingPublishedManifest(t *testing.T) {
+func TestOrdinaryCIValidatesUnsignedPackagesAgainstTrackedManifest(t *testing.T) {
 	workflow := readWorkflow(t, "ci.yml")
 	if !strings.Contains(workflow, "diff -r dist-first dist-second") {
 		t.Fatal("ordinary CI does not compare deterministic unsigned package bytes")
 	}
-	if strings.Contains(
+	if !strings.Contains(
 		workflow,
-		"diff -u plugins/delegation/release-artifacts.sha256 dist-first/release-artifacts.sha256",
+		"diff -u \\\n            plugins/delegation/release-artifacts.sha256 \\\n            dist-first/release-artifacts.sha256",
 	) {
-		t.Fatal("ordinary CI rebinds the published manifest to post-release source")
+		t.Fatal("ordinary CI does not bind the tracked manifest to the fresh deterministic build")
 	}
 	assertPinnedActions(t, workflow)
 }

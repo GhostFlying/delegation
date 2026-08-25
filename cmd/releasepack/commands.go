@@ -22,6 +22,8 @@ func runCommand(name string, args []string, stdout, stderr io.Writer) int {
 		err = runAssemble(args, stderr)
 	case "verify-candidate":
 		err = runVerifyCandidate(args, stdout, stderr)
+	case "verify-release":
+		err = runVerifyRelease(args, stderr)
 	case "verify-github-metadata":
 		err = runVerifyGitHubMetadata(args, stderr)
 	case "verify-promotion":
@@ -121,6 +123,10 @@ func runPackageTarget(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	notice, err := readReleaseNotice(root)
+	if err != nil {
+		return err
+	}
 	binaryPath, err := filepath.Abs(*binary)
 	if err != nil {
 		return fmt.Errorf("resolve binary: %w", err)
@@ -142,14 +148,14 @@ func runPackageTarget(args []string, stderr io.Writer) error {
 	}
 	archivePath := filepath.Join(outputRoot, t.archiveName(version))
 	if t.archive == "zip" {
-		err = writeZip(archivePath, binaryPath, t.binaryName())
+		err = writeZip(archivePath, binaryPath, t.binaryName(), notice)
 	} else {
-		err = writeTarGzip(archivePath, binaryPath, t.binaryName())
+		err = writeTarGzip(archivePath, binaryPath, t.binaryName(), notice)
 	}
 	if err != nil {
 		return fmt.Errorf("package signed target: %w", err)
 	}
-	return verifyRuntimeArchive(archivePath, t)
+	return verifyRuntimeArchive(archivePath, t, notice)
 }
 
 func runWriteEvidence(args []string, stderr io.Writer) error {
@@ -203,11 +209,25 @@ func runAssemble(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return assembleCandidate(*input, *output, *repository, version, *sourceCommit, *workflowRunID, *candidateName)
+	notice, err := readReleaseNotice(root)
+	if err != nil {
+		return err
+	}
+	return assembleCandidate(
+		*input,
+		*output,
+		*repository,
+		version,
+		*sourceCommit,
+		*workflowRunID,
+		*candidateName,
+		notice,
+	)
 }
 
 func runVerifyCandidate(args []string, stdout, stderr io.Writer) error {
 	flags := newCommandFlags("verify-candidate", stderr)
+	repoRoot := flags.String("repo", ".", "repository root")
 	candidateRoot := flags.String("candidate", "", "candidate directory")
 	repository := flags.String("repository", "", "expected GitHub owner/repository")
 	sourceCommit := flags.String("source-commit", "", "expected candidate source commit")
@@ -223,18 +243,42 @@ func runVerifyCandidate(args []string, stdout, stderr io.Writer) error {
 	if *candidateRoot == "" {
 		return errors.New("--candidate is required")
 	}
+	root, err := filepath.Abs(*repoRoot)
+	if err != nil {
+		return fmt.Errorf("resolve repository root: %w", err)
+	}
+	notice, err := readReleaseNotice(root)
+	if err != nil {
+		return err
+	}
 	descriptor, err := verifyCandidate(*candidateRoot, candidateExpectations{
 		Repository:        *repository,
 		SourceCommit:      *sourceCommit,
 		WorkflowRunID:     *workflowRunID,
 		CandidateName:     *candidateName,
 		RequireProvenance: *requireProvenance,
-	})
+	}, notice)
 	if err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(stdout, "version=%s\npayload_sha256=%s\n", descriptor.RuntimeVersion, descriptor.CandidateArtifact.PayloadSHA256)
 	return err
+}
+
+func runVerifyRelease(args []string, stderr io.Writer) error {
+	flags := newCommandFlags("verify-release", stderr)
+	repoRoot := flags.String("repo", ".", "repository root")
+	releaseRoot := flags.String("release", "", "release directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if err := requireNoArguments(flags); err != nil {
+		return err
+	}
+	if *releaseRoot == "" {
+		return errors.New("--release is required")
+	}
+	return verifyRelease(*repoRoot, *releaseRoot)
 }
 
 func runVerifyGitHubMetadata(args []string, stderr io.Writer) error {

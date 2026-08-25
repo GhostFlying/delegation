@@ -23,7 +23,7 @@ type candidateFixture struct {
 
 func TestCandidateDescriptorAndPayloadVerify(t *testing.T) {
 	fixture := makeCandidateFixture(t, "1.2.3-rc.1", strings.Repeat("a", 40))
-	descriptor, err := verifyCandidate(fixture.candidate, fixture.expectations())
+	descriptor, err := verifyCandidate(fixture.candidate, fixture.expectations(), testReleaseNotice(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestCandidateVerifierRejectsTamperingAndUnexpectedEntries(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := makeCandidateFixture(t, "1.2.3", strings.Repeat("b", 40))
 			test.mutate(t, fixture)
-			_, err := verifyCandidate(fixture.candidate, fixture.expectations())
+			_, err := verifyCandidate(fixture.candidate, fixture.expectations(), testReleaseNotice(t))
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("verifyCandidate() error = %v, want %q", err, test.want)
 			}
@@ -137,6 +137,7 @@ func TestCandidateAssemblerRejectsUnverifiedEvidence(t *testing.T) {
 		fixture.sourceCommit,
 		fixture.workflowRunID,
 		fixture.candidateName,
+		testReleaseNotice(t),
 	)
 	if err == nil || !strings.Contains(err.Error(), "required verification result") {
 		t.Fatalf("assembleCandidate() error = %v", err)
@@ -154,6 +155,7 @@ func makeCandidateFixture(t *testing.T, version, sourceCommit string) candidateF
 		fixture.sourceCommit,
 		fixture.workflowRunID,
 		fixture.candidateName,
+		testReleaseNotice(t),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +172,7 @@ func makeCandidateParts(t *testing.T, version, sourceCommit string) candidateFix
 	if err := os.Mkdir(input, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	notice := testReleaseNotice(t)
 	for _, target := range releaseTargets {
 		binary := filepath.Join(root, "binary-"+target.id())
 		if err := os.WriteFile(binary, []byte("signed "+target.id()+"\n"), 0o755); err != nil {
@@ -178,9 +181,9 @@ func makeCandidateParts(t *testing.T, version, sourceCommit string) candidateFix
 		archive := filepath.Join(input, target.archiveName(version))
 		var err error
 		if target.archive == "zip" {
-			err = writeZip(archive, binary, target.binaryName())
+			err = writeZip(archive, binary, target.binaryName(), notice)
 		} else {
-			err = writeTarGzip(archive, binary, target.binaryName())
+			err = writeTarGzip(archive, binary, target.binaryName(), notice)
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -204,6 +207,15 @@ func makeCandidateParts(t *testing.T, version, sourceCommit string) candidateFix
 		workflowRunID: workflowRunID,
 		candidateName: "delegation-release-candidate-" + workflowRunID,
 	}
+}
+
+func testReleaseNotice(t *testing.T) []byte {
+	t.Helper()
+	notice, err := readReleaseNotice(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return notice
 }
 
 func (f candidateFixture) expectations() candidateExpectations {

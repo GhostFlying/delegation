@@ -50,23 +50,27 @@ func verifyPromotion(
 	workflowRunID,
 	candidateName string,
 ) (promotionContract, error) {
+	repoRoot, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return promotionContract{}, fmt.Errorf("resolve repository root: %w", err)
+	}
+	notice, err := readReleaseNotice(repoRoot)
+	if err != nil {
+		return promotionContract{}, err
+	}
 	descriptor, err := verifyCandidate(candidateRoot, candidateExpectations{
 		Repository:        repository,
 		SourceCommit:      sourceCommit,
 		WorkflowRunID:     workflowRunID,
 		CandidateName:     candidateName,
 		RequireProvenance: true,
-	})
+	}, notice)
 	if err != nil {
 		return promotionContract{}, err
 	}
 	expectedTag := "v" + descriptor.RuntimeVersion
 	if tag != expectedTag {
 		return promotionContract{}, fmt.Errorf("release tag %q does not match %q", tag, expectedTag)
-	}
-	repoRoot, err = filepath.Abs(repoRoot)
-	if err != nil {
-		return promotionContract{}, fmt.Errorf("resolve repository root: %w", err)
 	}
 	tagCommit, err := gitOutput(repoRoot, "rev-parse", "--verify", "refs/tags/"+tag+"^{commit}")
 	if err != nil {

@@ -210,9 +210,6 @@ try {
 
     $testPlugin = Join-Path $tempRoot "plugin with spaces"
     Copy-Item -LiteralPath $pluginRoot -Destination $testPlugin -Recurse
-    $payload = Join-Path $tempRoot "payload"
-    New-Item -ItemType Directory -Path $payload | Out-Null
-    Copy-Item -LiteralPath $runtime -Destination (Join-Path $payload "delegation.exe")
     $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
     switch ($architecture) {
         "X64" { $arch = "amd64" }
@@ -220,8 +217,13 @@ try {
         default { throw "unsupported test architecture: $architecture" }
     }
     $artifactName = "delegation_${version}_windows_${arch}.zip"
-    $artifact = Join-Path $tempRoot $artifactName
-    Compress-Archive -LiteralPath (Join-Path $payload "delegation.exe") -DestinationPath $artifact
+    $packageRoot = Join-Path $tempRoot "release-part"
+    & go -C $repoRoot run ./cmd/releasepack package-target `
+        --target "windows-$arch" --binary $runtime --out $packageRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "releasepack package-target failed with exit code $LASTEXITCODE"
+    }
+    $artifact = Join-Path $packageRoot $artifactName
     Write-ArtifactChecksum $testPlugin $artifact $artifactName
 
     $expectedUrl = "https://github.com/GhostFlying/delegation/releases/download/v$version/$artifactName"
@@ -231,6 +233,7 @@ try {
     Assert-True ($windowsPowerShellInstall.ExitCode -eq 0) "Windows PowerShell installation failed: $($windowsPowerShellInstall.Stderr)"
     Assert-True (($windowsPowerShellInstall.Stdout | Out-String).Trim() -eq $windowsPowerShellBinary) "Windows PowerShell installer returned an unexpected path"
     Assert-True (Test-Path -LiteralPath $windowsPowerShellBinary -PathType Leaf) "Windows PowerShell did not commit the runtime"
+    Assert-True (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $windowsPowerShellBinary) "THIRD_PARTY_NOTICES.txt") -PathType Leaf) "Windows PowerShell did not retain the release notice"
 
 	$resolvedAncestorTarget = Join-Path $tempRoot "resolved-ancestor-target"
 	$resolvedAncestorAlias = Join-Path $tempRoot "resolved-ancestor-alias"
@@ -354,6 +357,7 @@ try {
     $expectedBinary = Join-Path $env:DELEGATION_HOME "bin\$version\windows-$arch\delegation.exe"
     Assert-True ($installed -eq $expectedBinary) "installer returned $installed, expected $expectedBinary"
     Assert-True (Test-Path -LiteralPath $expectedBinary -PathType Leaf) "installer did not atomically install the runtime"
+    Assert-True (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $expectedBinary) "THIRD_PARTY_NOTICES.txt") -PathType Leaf) "installer did not retain the release notice"
     Assert-True ($global:DelegationTestDownloadCount -eq 1) "installer made $global:DelegationTestDownloadCount download requests"
 
     $installedEnvironment = @{
