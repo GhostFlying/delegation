@@ -5,6 +5,21 @@ its own userspace Tailscale node through `tsnet`. It does not use, configure, or
 `tailscaled`, its socket, or the system Tailscale CLI. The broker listens inside its embedded
 tailnet node; each peer resolves and dials that broker through its own embedded node.
 
+The supported host matrix is:
+
+| Host OS | Managed CLI | Status |
+| --- | --- | --- |
+| Linux | Codex | Supported |
+| Linux | TraeX | Supported |
+| macOS | Codex | Supported |
+| macOS | TraeX | Supported |
+| Windows 11 | Codex | Supported |
+| Windows | TraeX | Unsupported |
+
+Do not configure, qualify, or install a Windows TraeX deployment. Historical Windows TraeX
+qualification results remain diagnostic evidence and must not be represented as a supported-path
+`PASS`. They do not block M6 release acceptance for the supported combinations above.
+
 This guide uses placeholders only. Replace every `<...>` value with a value for that one deployment
 without reusing a Codex value in a TraeX deployment or a TraeX value in a Codex deployment.
 
@@ -132,6 +147,8 @@ fragment, and no `--allow-insecure-nonloopback`. `<codex-broker-tsnet-hostname>`
 node's full MagicDNS FQDN.
 
 ## Create The TraeX Domain
+
+This section applies only to Linux and macOS. Windows TraeX is outside the M6 support contract.
 
 Repeat the process with a separate broker, controller UUID, tokens, state, and peer URL:
 
@@ -374,6 +391,7 @@ fresh native services with explicit configs:
 
 M6 does not support:
 
+- TraeX brokers, peers, or managed workers on Windows;
 - migration between TCP and embedded Tailscale;
 - in-place upgrade, downgrade, rollback, config conversion, or service replacement;
 - broker federation, broker failover, active/active or active/passive high availability, or

@@ -216,6 +216,7 @@ jobs:
           python .ci/codex/codex-rs/skills/src/assets/samples/plugin-creator/scripts/validate_plugin.py plugins/delegation
           python .ci/codex/codex-rs/skills/src/assets/samples/skill-creator/scripts/quick_validate.py plugins/delegation/skills/delegation-setup
           python .ci/codex/codex-rs/skills/src/assets/samples/skill-creator/scripts/quick_validate.py plugins/delegation/skills/cross-device-delegation
+          ./tests/m6_support_contract_test.sh
       - name: Install from the local marketplace
         shell: bash
         run: |

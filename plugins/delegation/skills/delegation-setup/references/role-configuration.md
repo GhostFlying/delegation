@@ -17,6 +17,9 @@ node; Delegation does not use system `tailscaled`. Do not convert an existing TC
 reuse its config, database, token domain, state, or service definition. M6 has no migration,
 in-place upgrade, or rollback workflow.
 
+M6 supports Codex and TraeX on Linux and macOS, and Codex on Windows 11. Windows TraeX is
+unsupported. Do not create a Windows TraeX broker, peer, managed home, or native service.
+
 - `setup broker` creates or joins the authority for one Delegation network. The wire field
   `controllerId` is the stable network or trust-domain ID, not a controller device role. Token
   authentication is the default. Keep plaintext listeners on loopback unless the user explicitly
@@ -70,7 +73,7 @@ Tailscale mode requires `ws://` with the explicit `/v1/connect` path and forbids
 FQDN. The embedded peer classifies the name or Tailscale IP as one currently online tailnet peer
 before dialing it; it never falls back to the host network.
 
-For a TraeX peer launched through warmpool:
+For a TraeX peer launched through warmpool on Linux or macOS:
 
 ```text
 setup peer

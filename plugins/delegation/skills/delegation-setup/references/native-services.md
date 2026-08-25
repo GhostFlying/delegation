@@ -1,5 +1,8 @@
 # Native Services
 
+M6 supports native Codex services on Linux, macOS, and Windows 11, and native TraeX services on
+Linux and macOS. Windows TraeX is unsupported; do not configure or install it.
+
 For a fresh embedded Tailscale deployment, qualify each broker and peer before installation. Run
 `doctor --config <path>`, then start `service run --config <path>` in the foreground with the same
 explicit config and peer environment source intended for the service. Use bounded polling rather
