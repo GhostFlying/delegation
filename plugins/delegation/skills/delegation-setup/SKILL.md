@@ -9,6 +9,12 @@ Set up the native runtime that matches this plugin version.
 Never download `latest`, skip checksum verification, or expose a broker token to a managed CLI
 child process.
 
+For embedded Tailscale, create only fresh named deployments. Delegation embeds one `tsnet` node in
+each broker or peer process and does not use system `tailscaled`. Do not migrate, upgrade, roll back,
+or replace an existing deployment. Require `--auth-mode token` for every embedded Tailscale broker
+and peer; no unauthenticated Tailscale mode is supported. Keep Codex and TraeX in separate instance,
+broker, controller, token, state, hostname, and service domains.
+
 ## Resolve The Plugin
 
 Resolve the plugin root from this skill directory. Read `VERSION` and
@@ -54,10 +60,22 @@ native service identity.
 
 Run the launcher with `version --json` and confirm it exactly matches `VERSION`, then run the
 launcher with `doctor --config <path>` for each broker and peer config. Report the installed version,
-configured processes, configuration paths, and checks without printing credentials. Run
+configured processes, configuration paths, and checks without printing credentials. Boundedly poll
 `status --config <path>` after each service starts. For a broker, verify both its `/healthz`
 endpoint and loopback-only `/status` page without printing or transmitting the master token. Keep
 the status listener on loopback; use an authenticated tunnel for remote inspection.
+
+For a fresh embedded Tailscale deployment, qualify every broker and peer with foreground
+`service run --config <path>` before installing a native service. Use an explicit config for every
+command and boundedly poll status until the broker responds or the peer reports both
+`connectionState=ready` and `workerSyncReady=true`. Track a bootstrap broker while issuing peer
+credentials, then stop and wait for its complete process tree before starting the qualification
+broker. On Windows, resolve and start the native `delegation.exe` directly instead of tracking the
+`.cmd` wrapper. Use shell-free `System.Diagnostics.ProcessStartInfo.ArgumentList.Add()` once per
+exact argument so paths containing spaces remain intact, retain the native process object and PID,
+and use exact-PID process-tree cleanup. Never replace a live service for qualification. Status may
+report only the transport and optional Tailscale hostname from the transport configuration; do not
+print enrollment-key paths, state directories, lease paths, or tokens.
 
 After a plugin or runtime update, tell the user to start a new task in the configured CLI so the
 updated skills and MCP configuration are loaded. Do not attempt to reload a managed worker in place.
