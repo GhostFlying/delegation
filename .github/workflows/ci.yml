@@ -106,6 +106,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: ./tests/windows_plugin_test.ps1 -NativeProcessOnly
+      - name: Test Windows qualification handoff with PowerShell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/windows_qualification_handoff_test.ps1
+      - name: Test Windows qualification handoff with Windows PowerShell
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/windows_qualification_handoff_test.ps1
       - name: Test Windows Task Scheduler round trip
         if: runner.os == 'Windows'
         shell: pwsh
