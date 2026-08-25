@@ -322,6 +322,7 @@ func TestPeerServicesRegisterDevicesAndServeRootBridge(t *testing.T) {
 	registry := &observedRootRegistry{Store: registryStore}
 	brokerServer, err := broker.New(broker.Options{
 		ControllerID:      runtimeControllerID,
+		Transport:         delegationconfig.TransportStatus{Transport: "tcp"},
 		AuthMode:          delegationconfig.AuthModeNone,
 		Registry:          registry,
 		HeartbeatInterval: 500 * time.Millisecond,
@@ -384,7 +385,12 @@ func TestPeerServicesRegisterDevicesAndServeRootBridge(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForReadyRuntimeStatus(
-		t, endpoint, runtimeDeviceID, "peer-a", firstConfig.Peer.MaxWorkerSlots,
+		t,
+		endpoint,
+		runtimeDeviceID,
+		"peer-a",
+		firstConfig.Transport.Status(),
+		firstConfig.Peer.MaxWorkerSlots,
 	)
 	bridgeClient, err := localbridge.NewClient(endpoint)
 	if err != nil {
@@ -530,6 +536,7 @@ func TestPeerServiceUsesRoleLocalTailscaleRuntimeForConnectorDial(t *testing.T) 
 	}
 	brokerServer, err := broker.New(broker.Options{
 		ControllerID:      runtimeControllerID,
+		Transport:         delegationconfig.TransportStatus{Transport: "tcp"},
 		AuthMode:          delegationconfig.AuthModeNone,
 		Registry:          registry,
 		HeartbeatInterval: 500 * time.Millisecond,
@@ -561,6 +568,7 @@ func TestPeerServiceUsesRoleLocalTailscaleRuntimeForConnectorDial(t *testing.T) 
 	)
 	cfg.Transport = testTailscaleRuntimeConfig(t, "peer-node")
 	cfg.Broker.URL = "ws://broker-node:8787/v1/connect"
+	useDelegationTokenAuthentication(t, &cfg)
 	var connectionClosed bool
 	fakeRuntime := &fakeEmbeddedTailscaleRuntime{
 		dial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -627,6 +635,7 @@ func TestPeerServiceReleasesResourcesWhenTailscaleStartFails(t *testing.T) {
 	)
 	cfg.Transport = testTailscaleRuntimeConfig(t, "peer-node")
 	cfg.Broker.URL = "ws://broker-node:8787/v1/connect"
+	useDelegationTokenAuthentication(t, &cfg)
 	startErr := errors.New("tailscale start failed")
 	closeErr := errors.New("tailscale close failed")
 	fakeRuntime := &fakeEmbeddedTailscaleRuntime{startErr: startErr, closeErr: closeErr}
@@ -1093,6 +1102,7 @@ func waitForRuntimeDevice(t *testing.T, registry *store.Store, deviceID string, 
 func waitForReadyRuntimeStatus(
 	t *testing.T,
 	endpoint, deviceID, deviceName string,
+	transport delegationconfig.TransportStatus,
 	maxWorkerSlots int,
 ) {
 	t.Helper()
@@ -1107,7 +1117,8 @@ func waitForReadyRuntimeStatus(
 		cancelStatus()
 		if lastErr == nil && lastStatus.Connected && lastStatus.WorkerSyncReady &&
 			lastStatus.ControllerID == runtimeControllerID && lastStatus.DeviceID == deviceID &&
-			lastStatus.DeviceName == deviceName && lastStatus.MaxWorkerSlots == maxWorkerSlots {
+			lastStatus.DeviceName == deviceName && lastStatus.TransportStatus == transport &&
+			lastStatus.MaxWorkerSlots == maxWorkerSlots {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

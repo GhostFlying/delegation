@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
@@ -20,7 +21,8 @@ func (p staticStatusProvider) LocalStatus(context.Context) (StatusSnapshot, erro
 func TestReadStatusReturnsValidatedLocalSnapshot(t *testing.T) {
 	identity := ServiceIdentity{ControllerID: bridgeTestControllerID, DeviceID: bridgeTestDeviceID}
 	want := StatusSnapshot{
-		Version: "0.1.0-test", ControllerID: identity.ControllerID, DeviceID: identity.DeviceID,
+		TransportStatus: config.TransportStatus{Transport: "tcp"},
+		Version:         "0.1.0-test", ControllerID: identity.ControllerID, DeviceID: identity.DeviceID,
 		DeviceName: "test-peer", ServiceRunning: true, ConnectionState: ConnectionReady,
 		Connected: true, RegistryRevision: 7, WorkerRevision: 5,
 		BrokerWorkerRevision: 5, WorkerSyncReady: true,
@@ -69,7 +71,8 @@ func TestReadStatusReturnsValidatedLocalSnapshot(t *testing.T) {
 
 func TestStatusSnapshotRejectsInconsistentCountsAndSynchronization(t *testing.T) {
 	valid := StatusSnapshot{
-		Version: "0.1.0-test", ControllerID: bridgeTestControllerID, DeviceID: bridgeTestDeviceID,
+		TransportStatus: config.TransportStatus{Transport: "tcp"},
+		Version:         "0.1.0-test", ControllerID: bridgeTestControllerID, DeviceID: bridgeTestDeviceID,
 		DeviceName: "test-peer", ServiceRunning: true, ConnectionState: ConnectionReady,
 		Connected: true, WorkerRevision: 8,
 		BrokerWorkerRevision: 8, WorkerSyncReady: true, MaxWorkerSlots: 4,
@@ -147,7 +150,8 @@ func TestStatusSnapshotRejectsInconsistentCountsAndSynchronization(t *testing.T)
 
 func TestStatusSnapshotAcceptsConnectionStates(t *testing.T) {
 	base := StatusSnapshot{
-		Version: "0.1.0-test", ControllerID: bridgeTestControllerID, DeviceID: bridgeTestDeviceID,
+		TransportStatus: config.TransportStatus{Transport: "tcp"},
+		Version:         "0.1.0-test", ControllerID: bridgeTestControllerID, DeviceID: bridgeTestDeviceID,
 		DeviceName: "test-peer", ServiceRunning: true, MaxWorkerSlots: 4,
 	}
 	tests := map[string]StatusSnapshot{

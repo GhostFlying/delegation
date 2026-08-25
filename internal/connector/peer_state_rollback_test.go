@@ -97,6 +97,7 @@ func TestConnectorRetainsStartupRollbackWhenLocalRevisionAdvances(t *testing.T) 
 		ControllerID: connectorTestControllerID,
 		AuthMode:     config.AuthModeNone,
 		Registry:     wrapped,
+		Transport:    config.TransportStatus{Transport: "tcp"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -166,6 +167,7 @@ func TestConnectorStopsReconnectLoopAfterPeerStateRollback(t *testing.T) {
 		ControllerID: connectorTestControllerID,
 		AuthMode:     config.AuthModeNone,
 		Registry:     wrapped,
+		Transport:    config.TransportStatus{Transport: "tcp"},
 	})
 	if err != nil {
 		t.Fatal(err)

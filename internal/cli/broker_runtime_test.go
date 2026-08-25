@@ -193,7 +193,7 @@ func TestBrokerServiceServesIndependentLoopbackStatus(t *testing.T) {
 }
 
 func TestBrokerServiceUsesRoleLocalTailscaleRuntimeAndNativeStatusListener(t *testing.T) {
-	configPath, cfg := setupBrokerRuntimeTest(t, "none")
+	configPath, cfg := setupBrokerRuntimeTest(t, "token")
 	cfg.Transport = testTailscaleRuntimeConfig(t, "broker-node")
 	cfg.Broker.Listen = ":8787"
 	cfg.Broker.StatusListen = "127.0.0.1:8788"
@@ -284,7 +284,7 @@ func TestBrokerServiceUsesRoleLocalTailscaleRuntimeAndNativeStatusListener(t *te
 }
 
 func TestBrokerServiceClosesTailscaleRuntimeOnListenFailure(t *testing.T) {
-	configPath, cfg := setupBrokerRuntimeTest(t, "none")
+	configPath, cfg := setupBrokerRuntimeTest(t, "token")
 	cfg.Transport = testTailscaleRuntimeConfig(t, "broker-node")
 	cfg.Broker.Listen = ":8787"
 	listenErr := errors.New("tailnet listen failed")

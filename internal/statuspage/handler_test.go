@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/GhostFlying/delegation/internal/config"
 )
 
 func TestJSONStatusReturnsOneAggregateSnapshot(t *testing.T) {
@@ -40,6 +42,55 @@ func TestJSONStatusReturnsOneAggregateSnapshot(t *testing.T) {
 	for _, forbidden := range []string{"prompt", "taskName", "gitUrl", "path", "deviceId"} {
 		if strings.Contains(response.Body.String(), forbidden) {
 			t.Errorf("JSON contains forbidden field %q", forbidden)
+		}
+	}
+}
+
+func TestTailscaleStatusExposesOnlyHostnameAndTransport(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.TransportStatus = config.TransportStatus{
+		Transport:         "tailscale",
+		TailscaleHostname: "delegation-node",
+	}
+	handler := NewHandler(func(context.Context) (Snapshot, error) { return snapshot, nil })
+
+	jsonResponse := requestStatus(t, handler, http.MethodGet, JSONPath)
+	if jsonResponse.Code != http.StatusOK {
+		t.Fatalf("JSON status = %d, body = %q", jsonResponse.Code, jsonResponse.Body.String())
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(jsonResponse.Body.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(document["transport"]); got != `"tailscale"` {
+		t.Fatalf("JSON transport = %s, want %q", got, "tailscale")
+	}
+	if got := string(document["tailscaleHostname"]); got != `"delegation-node"` {
+		t.Fatalf("JSON tailscaleHostname = %s, want %q", got, "delegation-node")
+	}
+
+	htmlResponse := requestStatus(t, handler, http.MethodGet, HTMLPath)
+	if htmlResponse.Code != http.StatusOK {
+		t.Fatalf("HTML status = %d, body = %q", htmlResponse.Code, htmlResponse.Body.String())
+	}
+	if !strings.Contains(
+		htmlResponse.Body.String(),
+		"Transport tailscale | Tailscale hostname delegation-node",
+	) {
+		t.Fatalf("HTML status omitted Tailscale hostname: %q", htmlResponse.Body.String())
+	}
+
+	for _, response := range []*httptest.ResponseRecorder{jsonResponse, htmlResponse} {
+		body := response.Body.String()
+		for _, forbidden := range []string{
+			"stateDir",
+			"authKeyFile",
+			"/private/tailscale-state",
+			"tskey-auth-sensitive",
+		} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("status response contains sensitive transport data %q", forbidden)
+			}
 		}
 	}
 }
@@ -249,19 +300,27 @@ func TestStatusProviderFailuresReturnBoundedError(t *testing.T) {
 		{
 			name: "provider error",
 			provider: func(context.Context) (Snapshot, error) {
-				return Snapshot{}, errors.New(secret)
+				return Snapshot{
+					TransportStatus: config.TransportStatus{Transport: "tcp"},
+				}, errors.New(secret)
 			},
 		},
 		{
 			name: "oversized snapshot",
 			provider: func(context.Context) (Snapshot, error) {
-				return Snapshot{Version: strings.Repeat("x", maximumTextBytes+1)}, nil
+				return Snapshot{
+					TransportStatus: config.TransportStatus{Transport: "tcp"},
+					Version:         strings.Repeat("x", maximumTextBytes+1),
+				}, nil
 			},
 		},
 		{
 			name: "non-printing snapshot text",
 			provider: func(context.Context) (Snapshot, error) {
-				return Snapshot{Version: "version\nsecret"}, nil
+				return Snapshot{
+					TransportStatus: config.TransportStatus{Transport: "tcp"},
+					Version:         "version\nsecret",
+				}, nil
 			},
 		},
 		{
@@ -324,9 +383,10 @@ func TestStatusProviderFailuresReturnBoundedError(t *testing.T) {
 
 func testSnapshot() Snapshot {
 	return Snapshot{
-		Version:       "0.2.0",
-		UptimeSeconds: 3723,
-		ControllerID:  "123e4567-e89b-42d3-a456-426614174100",
+		TransportStatus: config.TransportStatus{Transport: "tcp"},
+		Version:         "0.2.0",
+		UptimeSeconds:   3723,
+		ControllerID:    "123e4567-e89b-42d3-a456-426614174100",
 		Devices: DeviceCounts{
 			Registered: 9,
 			Online:     8,

@@ -353,6 +353,202 @@ func TestServiceInstallPreflightsBrokerAuthorityBeforeWritingArtifact(t *testing
 	}
 }
 
+func TestServiceInstallPreflightsTailscaleAuthorityBeforeWritingArtifact(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		role         delegationconfig.Role
+		artifactName string
+	}{
+		{
+			name:         "broker",
+			role:         delegationconfig.RoleBroker,
+			artifactName: userservice.SystemdBrokerUnitName,
+		},
+		{
+			name:         "peer",
+			role:         delegationconfig.RolePeer,
+			artifactName: userservice.SystemdPeerUnitName,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := privateTestDirectory(t)
+			configHome := filepath.Join(root, "xdg")
+			t.Setenv("XDG_CONFIG_HOME", configHome)
+
+			var configPath string
+			var cfg delegationconfig.Config
+			switch test.role {
+			case delegationconfig.RoleBroker:
+				configPath, cfg = setupBrokerRuntimeTest(t, "none")
+			case delegationconfig.RolePeer:
+				configPath, cfg = setupConnectorRuntimeTest(
+					t,
+					"123e4567-e89b-42d3-a456-426614174204",
+					"tailscale-service-install",
+					"wss://broker.example.test",
+				)
+			default:
+				t.Fatalf("unsupported test role %q", test.role)
+			}
+			stateDir := writeTailscaleConfigFixture(
+				t,
+				configPath,
+				&cfg,
+				test.name+"-node",
+			)
+			invalidKey := "must-not-appear-in-service-output"
+			if err := os.WriteFile(
+				cfg.Transport.Tailscale.AuthKeyFile,
+				[]byte(invalidKey),
+				0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			args := []string{"service", "install", "--config", configPath}
+			if test.role == delegationconfig.RolePeer {
+				args = append(
+					args,
+					"--environment-file",
+					filepath.Join(root, "unused-peer.env"),
+				)
+			}
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Run(args, &stdout, &stderr)
+			if code == 0 || !strings.Contains(stderr.String(), "tskey-auth- prefix") {
+				t.Fatalf(
+					"service install code = %d, stdout = %q, stderr = %q",
+					code,
+					stdout.String(),
+					stderr.String(),
+				)
+			}
+			if strings.Contains(stdout.String(), invalidKey) ||
+				strings.Contains(stderr.String(), invalidKey) {
+				t.Fatalf(
+					"service install disclosed enrollment key: stdout = %q, stderr = %q",
+					stdout.String(),
+					stderr.String(),
+				)
+			}
+			assertPathAbsent(
+				t,
+				filepath.Join(configHome, "systemd", "user", test.artifactName),
+			)
+			assertNoTailscaleRuntimeSideEffects(t, stateDir)
+		})
+	}
+}
+
+func TestServiceInstallRejectsTailscaleLeaseAuthorityCollisionsBeforeWritingArtifact(
+	t *testing.T,
+) {
+	t.Run("broker configuration", func(t *testing.T) {
+		root := privateTestDirectory(t)
+		configHome := filepath.Join(root, "xdg")
+		t.Setenv("XDG_CONFIG_HOME", configHome)
+		configPath, cfg := setupBrokerRuntimeTest(t, "none")
+		stateDir := writeTailscaleConfigFixture(t, configPath, &cfg, "broker-node")
+		collidingConfigPath := stateDir + ".tailscale.lock"
+		data, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(collidingConfigPath, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := Run(
+			[]string{"service", "install", "--config", collidingConfigPath},
+			&stdout,
+			&stderr,
+		)
+		if code == 0 || !strings.Contains(
+			stderr.String(),
+			"Tailscale state directory lease path conflicts with broker configuration",
+		) {
+			t.Fatalf(
+				"service install code = %d, stdout = %q, stderr = %q",
+				code,
+				stdout.String(),
+				stderr.String(),
+			)
+		}
+		assertPathAbsent(
+			t,
+			filepath.Join(configHome, "systemd", "user", userservice.SystemdBrokerUnitName),
+		)
+		got, err := os.ReadFile(collidingConfigPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, data) {
+			t.Fatal("service install changed colliding config/lease authority")
+		}
+	})
+
+	t.Run("peer environment", func(t *testing.T) {
+		root := privateTestDirectory(t)
+		configHome := filepath.Join(root, "xdg")
+		t.Setenv("XDG_CONFIG_HOME", configHome)
+		configPath, cfg := setupConnectorRuntimeTest(
+			t,
+			"123e4567-e89b-42d3-a456-426614174207",
+			"tailscale-environment-collision",
+			"wss://broker.example.test",
+		)
+		stateDir := writeTailscaleConfigFixture(t, configPath, &cfg, "peer-node")
+		environmentPath := stateDir + ".tailscale.lock"
+		environment := strings.Join([]string{
+			codexconfig.EnvironmentVariable + "=" + serviceTestProviderConfig,
+			"GATEWAY_KEY=operator-secret",
+			"",
+		}, "\n")
+		writePeerServiceEnvironment(t, environmentPath, environment)
+
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := Run([]string{
+			"service", "install",
+			"--config", configPath,
+			"--environment-file", environmentPath,
+		}, &stdout, &stderr)
+		if code == 0 || !strings.Contains(
+			stderr.String(),
+			"peer service environment path conflicts with Tailscale state directory lease",
+		) {
+			t.Fatalf(
+				"service install code = %d, stdout = %q, stderr = %q",
+				code,
+				stdout.String(),
+				stderr.String(),
+			)
+		}
+		if strings.Contains(stdout.String(), "operator-secret") ||
+			strings.Contains(stderr.String(), "operator-secret") {
+			t.Fatalf(
+				"service install disclosed provider credential: stdout = %q, stderr = %q",
+				stdout.String(),
+				stderr.String(),
+			)
+		}
+		assertPathAbsent(
+			t,
+			filepath.Join(configHome, "systemd", "user", userservice.SystemdPeerUnitName),
+		)
+		got, err := os.ReadFile(environmentPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != environment {
+			t.Fatal("service install changed colliding environment/lease authority")
+		}
+	})
+}
+
 func TestServiceInstallReportsForeignConflictAsJSON(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.json")

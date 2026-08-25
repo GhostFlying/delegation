@@ -120,6 +120,7 @@ func TestResultPackageGCBackgroundLifecycle(t *testing.T) {
 	registry := &runningResultPackageGCRegistry{compactor: compactor}
 	server, err := New(Options{
 		ControllerID: brokerTestControllerID,
+		Transport:    config.TransportStatus{Transport: "tcp"},
 		AuthMode:     config.AuthModeNone,
 		Registry:     registry,
 		ReportError: func(err error) {
@@ -159,6 +160,7 @@ func TestResultPackageGCBackgroundErrorDoesNotFailPrepare(t *testing.T) {
 	reported := make(chan error, 1)
 	server, err := New(Options{
 		ControllerID: brokerTestControllerID,
+		Transport:    config.TransportStatus{Transport: "tcp"},
 		AuthMode:     config.AuthModeNone,
 		Registry:     registry,
 		ReportError:  func(err error) { reported <- err },
@@ -194,6 +196,7 @@ func TestResultPackageGCCloseCancelsAndWaitsForActiveOperation(t *testing.T) {
 	}
 	server, err := New(Options{
 		ControllerID: brokerTestControllerID,
+		Transport:    config.TransportStatus{Transport: "tcp"},
 		AuthMode:     config.AuthModeNone,
 		Registry:     registry,
 		ReportError: func(err error) {

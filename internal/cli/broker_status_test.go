@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/statuspage"
 )
 
@@ -20,7 +21,8 @@ func (f statusHTTPDoerFunc) Do(request *http.Request) (*http.Response, error) {
 
 func TestReadBrokerStatusUsesBoundedLoopbackJSON(t *testing.T) {
 	want := statuspage.Snapshot{
-		Version: "0.2.0-test", ControllerID: statusTestControllerID,
+		TransportStatus: delegationconfig.TransportStatus{Transport: "tcp"},
+		Version:         "0.2.0-test", ControllerID: statusTestControllerID,
 		Devices:      statuspage.DeviceCounts{Registered: 3, Online: 2, Connected: 2, SyncReady: 1},
 		Dispatch:     statuspage.DispatchCounts{Pending: 1, Started: 2, Failed: 3, LifetimeStarted: 4},
 		RunningTurns: 1, OccupiedSlots: 2, LifetimeTurns: 5, Trees: 6,
@@ -30,7 +32,7 @@ func TestReadBrokerStatusUsesBoundedLoopbackJSON(t *testing.T) {
 			SourceAcknowledged: 11, SourceReleased: 9, DetailsCompacted: 3,
 		},
 	}
-	body := `{"version":"0.2.0-test","uptimeSeconds":0,"controllerId":"` + statusTestControllerID +
+	body := `{"transport":"tcp","version":"0.2.0-test","uptimeSeconds":0,"controllerId":"` + statusTestControllerID +
 		`","devices":{"registered":3,"online":2,"connected":2,"syncReady":1},` +
 		`"dispatch":{"pending":1,"started":2,"failed":3,"lifetimeStarted":4},` +
 		`"runningTurns":1,"occupiedSlots":2,"lifetimeTurns":5,"trees":6,` +
@@ -87,7 +89,8 @@ func TestReadBrokerStatusRejectsInvalidResponses(t *testing.T) {
 func TestStatusCommandRendersBrokerSnapshot(t *testing.T) {
 	configPath, cfg := writeStatusTestConfig(t, "broker")
 	snapshot := statuspage.Snapshot{
-		Version: "0.2.0-test", UptimeSeconds: 61, ControllerID: cfg.ControllerID,
+		TransportStatus: delegationconfig.TransportStatus{Transport: "tcp"},
+		Version:         "0.2.0-test", UptimeSeconds: 61, ControllerID: cfg.ControllerID,
 		Devices:      statuspage.DeviceCounts{Registered: 3, Online: 2, Connected: 2, SyncReady: 1},
 		Dispatch:     statuspage.DispatchCounts{Pending: 1, Started: 2, Failed: 3, LifetimeStarted: 4},
 		RunningTurns: 1, OccupiedSlots: 2, LifetimeTurns: 5, Trees: 6,
@@ -97,6 +100,37 @@ func TestStatusCommandRendersBrokerSnapshot(t *testing.T) {
 			SourceAcknowledged: 11, SourceReleased: 9, DetailsCompacted: 3,
 		},
 	}
+	wantHuman := `delegation broker status
+version: 0.2.0-test
+transport: tcp
+uptime seconds: 61
+devices:
+  registered: 3
+  online: 2
+  connected: 2
+  sync ready: 1
+dispatches:
+  pending: 1
+  started: 2
+  failed: 3
+  lifetime started: 4
+running turns: 1
+occupied worker slots: 2
+lifetime turns: 5
+trees: 6
+artifacts:
+  available: 7
+  unchanged: 8
+  capture failed: 9
+results:
+  delivery pending: 10
+  details retained: 13
+  lifetime delivered: 12
+  lifetime source acknowledged: 11
+  lifetime source released: 9
+  lifetime details compacted: 3
+`
+	wantJSON := `{"transport":"tcp","version":"0.2.0-test","uptimeSeconds":61,"controllerId":"123e4567-e89b-42d3-a456-426614174800","devices":{"registered":3,"online":2,"connected":2,"syncReady":1},"dispatch":{"pending":1,"started":2,"failed":3,"lifetimeStarted":4},"runningTurns":1,"occupiedSlots":2,"lifetimeTurns":5,"trees":6,"artifacts":{"available":7,"unchanged":8,"captureFailed":9},"results":{"deliveryPending":10,"detailsRetained":13,"delivered":12,"sourceAcknowledged":11,"sourceReleased":9,"detailsCompacted":3}}` + "\n"
 	readBroker := func(_ context.Context, address string) (statuspage.Snapshot, error) {
 		if address != cfg.Broker.StatusListen {
 			t.Fatalf("broker status address = %q", address)
@@ -114,22 +148,40 @@ func TestStatusCommandRendersBrokerSnapshot(t *testing.T) {
 		if code != 0 || stderr.Len() != 0 {
 			t.Fatalf("broker status code = %d, stderr = %q", code, stderr.String())
 		}
+		want := wantHuman
 		if jsonOutput {
-			if !strings.Contains(stdout.String(), `"sourceReleased":9`) {
-				t.Fatalf("broker JSON status = %q", stdout.String())
-			}
-		} else {
-			for _, text := range []string{
-				"delegation broker status\n", "lifetime started: 4\n",
-				"running turns: 1\n", "capture failed: 9\n",
-				"delivery pending: 10\n", "details retained: 13\n",
-				"lifetime source acknowledged: 11\n", "lifetime details compacted: 3\n",
-			} {
-				if !strings.Contains(stdout.String(), text) {
-					t.Fatalf("broker human status missing %q: %q", text, stdout.String())
-				}
-			}
+			want = wantJSON
 		}
+		if stdout.String() != want {
+			t.Fatalf("broker status = %q, want %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestStatusCommandRejectsBrokerTransportMismatch(t *testing.T) {
+	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RoleBroker)
+	readBroker := func(context.Context, string) (statuspage.Snapshot, error) {
+		return statuspage.Snapshot{
+			TransportStatus: delegationconfig.TransportStatus{
+				Transport:         "tailscale",
+				TailscaleHostname: "other-broker",
+			},
+			ControllerID: cfg.ControllerID,
+		}, nil
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runStatusWithReaders(
+		[]string{"--config", configPath}, &stdout, &stderr, nil, readBroker,
+	)
+	if code != exitUnavailable || stdout.Len() != 0 ||
+		stderr.String() != brokerStatusUnavailableError {
+		t.Fatalf(
+			"broker mismatch code = %d, stdout = %q, stderr = %q",
+			code,
+			stdout.String(),
+			stderr.String(),
+		)
 	}
 }
 

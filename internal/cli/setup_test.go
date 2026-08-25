@@ -124,12 +124,106 @@ func TestSetupTailscaleBrokerIsOfflineAndPreservesOperatorState(t *testing.T) {
 	}
 }
 
+func TestSetupTailscaleRejectsNoneAuthenticationBeforeSideEffects(t *testing.T) {
+	tests := []struct {
+		name string
+		args func(*testing.T, string, string, string, string) []string
+	}{
+		{
+			name: "broker",
+			args: func(
+				_ *testing.T,
+				configPath, statePath, tailscaleStateDir, authKeyPath string,
+			) []string {
+				return []string{
+					"setup", "broker",
+					"--config", configPath,
+					"--state", statePath,
+					"--auth-mode", "none",
+					"--transport", "tailscale",
+					"--tailscale-hostname", "broker-node",
+					"--tailscale-auth-key-file", authKeyPath,
+					"--tailscale-state-dir", tailscaleStateDir,
+				}
+			},
+		},
+		{
+			name: "peer",
+			args: func(
+				t *testing.T,
+				configPath, statePath, tailscaleStateDir, authKeyPath string,
+			) []string {
+				root := filepath.Dir(filepath.Dir(configPath))
+				return []string{
+					"setup", "peer",
+					"--config", configPath,
+					"--state", statePath,
+					"--controller-id", "123e4567-e89b-42d3-a456-426614174000",
+					"--device-name", "peer-node",
+					"--broker-url", "ws://broker.tailnet.test:8787/v1/connect",
+					"--auth-mode", "none",
+					"--codex-binary", testCodexBinary(t),
+					"--codex-home", filepath.Join(root, "managed", "codex"),
+					"--workspace-root", filepath.Join(root, "managed", "workspaces"),
+					"--transport", "tailscale",
+					"--tailscale-hostname", "peer-node",
+					"--tailscale-auth-key-file", authKeyPath,
+					"--tailscale-state-dir", tailscaleStateDir,
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := privateTestDirectory(t)
+			managedRoot := filepath.Join(root, "managed")
+			configPath := filepath.Join(managedRoot, test.name+".json")
+			authKeyPath := testTailscaleAuthKeyFile(t, root)
+			tokenPath := filepath.Join(managedRoot, "secrets", test.name+".token")
+			statePath := filepath.Join(managedRoot, "state", test.name+".sqlite3")
+			tailscaleStateDir := filepath.Join(managedRoot, "state", "tailscale", test.name)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			code := Run(
+				test.args(t, configPath, statePath, tailscaleStateDir, authKeyPath),
+				&stdout,
+				&stderr,
+			)
+
+			if code == 0 || !strings.Contains(stderr.String(), "auth mode none") {
+				t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("setup stdout = %q, want empty", stdout.String())
+			}
+			for _, path := range []string{
+				configPath,
+				tokenPath,
+				statePath,
+				tailscaleStateDir,
+				filepath.Join(managedRoot, "codex"),
+				filepath.Join(managedRoot, "workspaces"),
+				managedRoot,
+			} {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("setup created %q: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSetupTailscaleTraeXPeerUsesNamedInstanceState(t *testing.T) {
 	root := privateTestDirectory(t)
 	delegationHome := filepath.Join(root, "delegation")
 	t.Setenv("DELEGATION_HOME", delegationHome)
 	t.Setenv("DELEGATION_CONFIG", "")
 	authKeyPath := testTailscaleAuthKeyFile(t, root)
+	tokenPath := filepath.Join(root, "peer.token")
+	if _, err := tokenfile.Ensure(tokenPath); err != nil {
+		t.Fatal(err)
+	}
 	instanceRoot := filepath.Join(delegationHome, "instances", "traex-main")
 	tailscaleStateDir := filepath.Join(instanceRoot, "state", "tailscale", "peer")
 	executable := testCodexBinary(t)
@@ -144,7 +238,8 @@ func TestSetupTailscaleTraeXPeerUsesNamedInstanceState(t *testing.T) {
 		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
 		"--device-name", "traex-tailnet-peer",
 		"--broker-url", "ws://broker.tailnet.test:8787/v1/connect",
-		"--auth-mode", "none",
+		"--auth-mode", "token",
+		"--token-file", tokenPath,
 		"--cli-command", executable,
 		"--cli-launcher", executable,
 		"--transport", "tailscale",
@@ -216,7 +311,7 @@ func TestSetupTailscaleNamedBrokersIsolateCodexAndTraeX(t *testing.T) {
 			"--host-kind", test.hostKind,
 			"--listen", test.listen,
 			"--status-listen", test.statusListen,
-			"--auth-mode", "none",
+			"--auth-mode", "token",
 			"--transport", "tailscale",
 			"--tailscale-hostname", test.hostname,
 			"--tailscale-auth-key-file", authKeyPath,
@@ -261,7 +356,7 @@ func TestSetupTailscaleBrokerDoesNotReplaceConfigOrMutateOperatorState(t *testin
 	args := []string{
 		"setup", "broker",
 		"--config", configPath,
-		"--auth-mode", "none",
+		"--auth-mode", "token",
 		"--transport", "tailscale",
 		"--tailscale-hostname", "broker-node",
 		"--tailscale-auth-key-file", authKeyPath,
@@ -324,6 +419,10 @@ func TestSetupTailscalePeerRejectsEnrollmentKeyInsideManagedHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspaceRoot := filepath.Join(root, "workspaces")
+	tokenPath := filepath.Join(root, "peer.token")
+	if _, err := tokenfile.Ensure(tokenPath); err != nil {
+		t.Fatal(err)
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -334,7 +433,8 @@ func TestSetupTailscalePeerRejectsEnrollmentKeyInsideManagedHome(t *testing.T) {
 		"--device-id", "123e4567-e89b-42d3-a456-426614174001",
 		"--device-name", "codex-peer",
 		"--broker-url", "ws://broker.tailnet.test:8787/v1/connect",
-		"--auth-mode", "none",
+		"--auth-mode", "token",
+		"--token-file", tokenPath,
 		"--codex-binary", testCodexBinary(t),
 		"--codex-home", codexHome,
 		"--workspace-root", workspaceRoot,
@@ -507,6 +607,38 @@ func TestSetupRejectsTailscaleStateContainingBrokerAuthority(t *testing.T) {
 
 	if code == 0 || !strings.Contains(stderr.String(), "broker configuration must not be inside Tailscale state") {
 		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	if _, err := os.Lstat(tailscaleStateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("setup created Tailscale state directory: %v", err)
+	}
+}
+
+func TestSetupRejectsTailscaleLeaseCollidingWithBrokerConfigWithoutSideEffects(t *testing.T) {
+	root := privateTestDirectory(t)
+	tailscaleStateDir := filepath.Join(root, "tailscale")
+	configPath := tailscaleStateDir + ".tailscale.lock"
+	authKeyPath := testTailscaleAuthKeyFile(t, root)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Run([]string{
+		"setup", "broker",
+		"--config", configPath,
+		"--auth-mode", "token",
+		"--transport", "tailscale",
+		"--tailscale-hostname", "broker-node",
+		"--tailscale-auth-key-file", authKeyPath,
+		"--tailscale-state-dir", tailscaleStateDir,
+	}, &stdout, &stderr)
+
+	if code == 0 || !strings.Contains(
+		stderr.String(),
+		"Tailscale state directory lease path conflicts with broker configuration",
+	) {
+		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
+	}
+	if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("setup created colliding config/lease authority: %v", err)
 	}
 	if _, err := os.Lstat(tailscaleStateDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("setup created Tailscale state directory: %v", err)

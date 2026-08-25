@@ -38,6 +38,7 @@ type peerStatusStore interface {
 type peerLocalStatusProvider struct {
 	client         connectorStatusSource
 	state          peerStatusStore
+	transport      delegationconfig.TransportStatus
 	controllerID   string
 	deviceID       string
 	deviceName     string
@@ -68,6 +69,7 @@ func (p peerLocalStatusProvider) LocalStatus(ctx context.Context) (localbridge.S
 		connectionErrorCode = ""
 	}
 	status := localbridge.StatusSnapshot{
+		TransportStatus:            p.transport,
 		Version:                    buildinfo.Version,
 		ControllerID:               p.controllerID,
 		DeviceID:                   p.deviceID,
@@ -179,7 +181,8 @@ func runStatusWithReaders(
 			statusInstanceID = delegationconfig.DefaultInstanceID
 		}
 		if err != nil || status.Validate() != nil || status.ControllerID != cfg.ControllerID ||
-			statusInstanceID != cfg.EffectiveInstanceID() {
+			statusInstanceID != cfg.EffectiveInstanceID() ||
+			status.TransportStatus != cfg.Transport.Status() {
 			return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
 		}
 		return writeBrokerStatus(stdout, stderr, status, *jsonOutput)
@@ -197,7 +200,8 @@ func runStatusWithReaders(
 	status, err := readPeer(ctx, endpoint)
 	cancel()
 	if err != nil || status.Validate() != nil ||
-		status.ControllerID != cfg.ControllerID || status.DeviceID != cfg.DeviceID {
+		status.ControllerID != cfg.ControllerID || status.DeviceID != cfg.DeviceID ||
+		status.TransportStatus != cfg.Transport.Status() {
 		return writeFixedStatusError(stderr, peerStatusUnavailableError, exitUnavailable)
 	}
 	return writePeerStatus(stdout, stderr, status, *jsonOutput)
@@ -221,6 +225,10 @@ func writePeerStatus(
 		var rendered bytes.Buffer
 		fmt.Fprintln(&rendered, "delegation peer status")
 		fmt.Fprintf(&rendered, "version: %s\n", status.Version)
+		fmt.Fprintf(&rendered, "transport: %s\n", status.Transport)
+		if status.TailscaleHostname != "" {
+			fmt.Fprintf(&rendered, "tailscale hostname: %s\n", status.TailscaleHostname)
+		}
 		fmt.Fprintf(&rendered, "device: %s\n", status.DeviceName)
 		fmt.Fprintf(&rendered, "service running: %t\n", status.ServiceRunning)
 		fmt.Fprintf(&rendered, "broker connection: %s\n", status.ConnectionState)

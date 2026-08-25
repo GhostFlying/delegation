@@ -94,6 +94,7 @@ type Options struct {
 	ControllerID      string
 	InstanceID        string
 	HostKind          hostkind.Kind
+	Transport         config.TransportStatus
 	AuthMode          config.AuthMode
 	MasterToken       *tokenfile.Token
 	Registry          Registry
@@ -108,6 +109,7 @@ type Server struct {
 	controllerID      string
 	instanceID        string
 	hostKind          hostkind.Kind
+	transport         config.TransportStatus
 	authMode          config.AuthMode
 	masterToken       tokenfile.Token
 	registry          Registry
@@ -230,6 +232,9 @@ func New(options Options) (*Server, error) {
 	if err := options.HostKind.Validate(); err != nil {
 		return nil, err
 	}
+	if err := options.Transport.Validate(); err != nil {
+		return nil, fmt.Errorf("broker transport status: %w", err)
+	}
 	if options.Registry == nil {
 		return nil, errors.New("broker registry is required")
 	}
@@ -270,6 +275,7 @@ func New(options Options) (*Server, error) {
 		controllerID:            options.ControllerID,
 		instanceID:              options.InstanceID,
 		hostKind:                options.HostKind,
+		transport:               options.Transport,
 		authMode:                options.AuthMode,
 		registry:                options.Registry,
 		statusReader:            options.StatusReader,

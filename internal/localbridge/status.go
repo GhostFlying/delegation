@@ -65,6 +65,7 @@ type ResultCounts struct {
 }
 
 type StatusSnapshot struct {
+	config.TransportStatus
 	Version                    string          `json:"version"`
 	ControllerID               string          `json:"controllerId"`
 	DeviceID                   string          `json:"deviceId"`
@@ -85,6 +86,9 @@ type StatusSnapshot struct {
 }
 
 func (s StatusSnapshot) Validate() error {
+	if err := s.TransportStatus.Validate(); err != nil {
+		return fmt.Errorf("transport status: %w", err)
+	}
 	if len(s.Version) == 0 || len(s.Version) > maximumStatusVersionBytes || !utf8.ValidString(s.Version) {
 		return errors.New("version must be bounded UTF-8 text")
 	}

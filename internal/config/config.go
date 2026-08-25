@@ -71,6 +71,13 @@ type TransportConfig struct {
 	Tailscale *TailscaleConfig `json:"tailscale,omitempty"`
 }
 
+// TransportStatus is the safe transport metadata exposed by live status
+// surfaces. It intentionally excludes credentials and local paths.
+type TransportStatus struct {
+	Transport         string `json:"transport"`
+	TailscaleHostname string `json:"tailscaleHostname,omitempty"`
+}
+
 type TailscaleConfig struct {
 	StateDir string `json:"stateDir"`
 	Hostname string `json:"hostname"`
@@ -322,7 +329,13 @@ func (c Config) ValidateForRuntime(capabilities RuntimeCapabilities) error {
 		return fmt.Errorf("unsupported role %q", c.Role)
 	}
 
-	return c.Broker.Auth.validate()
+	if err := c.Broker.Auth.validate(); err != nil {
+		return err
+	}
+	if c.Transport.Mode == TransportModeTailscale && c.Broker.Auth.Mode == AuthModeNone {
+		return errors.New("auth mode none is not supported when transport mode is tailscale")
+	}
+	return nil
 }
 
 func (p PeerConfig) validateCLI() error {
@@ -445,6 +458,39 @@ func (t TransportConfig) validate() error {
 		}
 	default:
 		return fmt.Errorf("unsupported transport mode %d", t.Mode)
+	}
+	return nil
+}
+
+func (t TransportConfig) Status() TransportStatus {
+	switch t.Mode {
+	case TransportModeTCP:
+		return TransportStatus{Transport: "tcp"}
+	case TransportModeTailscale:
+		status := TransportStatus{Transport: "tailscale"}
+		if t.Tailscale != nil {
+			status.TailscaleHostname = t.Tailscale.Hostname
+		}
+		return status
+	default:
+		return TransportStatus{}
+	}
+}
+
+func (s TransportStatus) Validate() error {
+	switch s.Transport {
+	case "tcp":
+		if s.TailscaleHostname != "" {
+			return errors.New("tailscale hostname must be absent for tcp status")
+		}
+	case "tailscale":
+		if !validTailscaleHostname(s.TailscaleHostname) {
+			return errors.New(
+				"tailscale status hostname must be a lowercase DNS label from 1 through 63 characters",
+			)
+		}
+	default:
+		return errors.New("status transport must be tcp or tailscale")
 	}
 	return nil
 }

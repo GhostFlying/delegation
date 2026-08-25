@@ -72,3 +72,29 @@ func TestDoctorRejectsTraeCLIHomePermissionDrift(t *testing.T) {
 		t.Fatalf("doctor code = %d, stderr = %q", code, stderr.String())
 	}
 }
+
+func TestDoctorRejectsTailscaleEnrollmentKeyPermissionDrift(t *testing.T) {
+	configPath, cfg := setupConnectorRuntimeTest(
+		t,
+		"123e4567-e89b-42d3-a456-426614174206",
+		"tailscale-key-permission-drift",
+		"wss://broker.example.test",
+	)
+	stateDir := writeTailscaleConfigFixture(t, configPath, &cfg, "peer-node")
+	if err := os.Chmod(cfg.Transport.Tailscale.AuthKeyFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(cfg.Transport.Tailscale.AuthKeyFile, 0o600)
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"doctor", "--config", configPath}, &stdout, &stderr)
+	if code == 0 ||
+		!strings.Contains(stderr.String(), "Tailscale enrollment key") ||
+		!strings.Contains(stderr.String(), "mode 0600") {
+		t.Fatalf("doctor code = %d, stderr = %q", code, stderr.String())
+	}
+	assertNoTailscaleRuntimeSideEffects(t, stateDir)
+}

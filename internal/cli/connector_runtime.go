@@ -25,6 +25,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/rootapply"
 	"github.com/GhostFlying/delegation/internal/serviceenv"
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/tailscaleauth"
 	"github.com/GhostFlying/delegation/internal/tailscaleruntime"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 	"github.com/GhostFlying/delegation/internal/workerhost"
@@ -295,6 +296,7 @@ func runConnectorServiceWithProviderEnvironment(
 		},
 		peerLocalStatusProvider{
 			client: client, state: peerState,
+			transport:    cfg.Transport.Status(),
 			controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 			deviceName: cfg.DeviceName, maxWorkerSlots: cfg.Peer.MaxWorkerSlots,
 		},
@@ -472,14 +474,38 @@ func loadConnectorAuthority(
 	if cfg.Role != delegationconfig.RolePeer {
 		return connectorAuthority{}, errors.New("connector runtime requires a peer configuration")
 	}
-	if err := pathguard.ValidatePeerRuntimeAuthority(
-		configPath,
-		cfg.Peer.StateFile,
-		cfg.Broker.Auth.TokenFile,
-		cfg.Peer.CodexHome,
-		cfg.Peer.WorkspaceRoot,
-	); err != nil {
-		return connectorAuthority{}, err
+	if cfg.Transport.Mode == delegationconfig.TransportModeTailscale {
+		tailscaleConfig := cfg.Transport.Tailscale
+		if tailscaleConfig == nil {
+			return connectorAuthority{}, errors.New("peer tailscale configuration is required")
+		}
+		if err := pathguard.ValidatePeerTailscaleAuthority(
+			configPath,
+			cfg.Peer.StateFile,
+			cfg.Broker.Auth.TokenFile,
+			cfg.Peer.CodexHome,
+			cfg.Peer.WorkspaceRoot,
+			tailscaleConfig.StateDir,
+			tailscaleConfig.AuthKeyFile,
+		); err != nil {
+			return connectorAuthority{}, err
+		}
+		if err := store.ValidateTailscaleStateDir(tailscaleConfig.StateDir); err != nil {
+			return connectorAuthority{}, err
+		}
+		if _, err := tailscaleauth.Read(tailscaleConfig.AuthKeyFile); err != nil {
+			return connectorAuthority{}, err
+		}
+	} else {
+		if err := pathguard.ValidatePeerRuntimeAuthority(
+			configPath,
+			cfg.Peer.StateFile,
+			cfg.Broker.Auth.TokenFile,
+			cfg.Peer.CodexHome,
+			cfg.Peer.WorkspaceRoot,
+		); err != nil {
+			return connectorAuthority{}, err
+		}
 	}
 	configuredCLI := cfg.Peer.EffectiveCLI()
 	for name, executable := range map[string]string{

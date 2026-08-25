@@ -282,6 +282,7 @@ func testManagedWorkerPublishesResultPackage(t *testing.T, scenario artifactE2ES
 		ControllerID: artifactE2EControllerID,
 		AuthMode:     config.AuthModeNone,
 		Registry:     brokerState,
+		Transport:    config.TransportStatus{Transport: "tcp"},
 	})
 	if err != nil {
 		t.Fatal(err)
