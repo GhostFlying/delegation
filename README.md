@@ -4,14 +4,15 @@ Delegation is a plugin for assigning bounded Codex or TraeX work across trusted 
 operating systems, toolchains, or local capabilities. Every participating device can host
 user-created root tasks and managed workers.
 
-The project is delivered in reviewed milestones. The current M5 checkpoint includes the M4
-reliability and safe-apply contracts plus named local instances, isolated state and native services,
-structured shell-free CLI launch specifications, and managed TraeX workers launched through an
-explicit warmpool wrapper. Codex and TraeX deployments may coexist on one device with independent
-credentials, homes, workspaces, sockets, services, and recovery state. Each Delegation network
-remains homogeneous by host kind; M5 does not enable cross-CLI dispatch or mixed-CLI networks.
-Managed workers synchronize an exact Git HEAD plus the root task's dirty index and worktree state,
-then reliably return terminal rollouts and Git result packages for explicit safe application.
+The project is delivered in reviewed milestones. The current M6 checkpoint includes the M5 named
+instances, native services, and Codex or TraeX worker hosting plus an embedded Tailscale transport.
+Each broker and peer process runs its own userspace `tsnet` node; Delegation does not install, start,
+or connect to a system `tailscaled`. Codex and TraeX remain separate deployments with independent
+instances, brokers, controller IDs, Delegation tokens, Tailscale nodes, state, and services. Each
+Delegation network remains homogeneous by host kind; M6 does not enable cross-CLI dispatch or
+mixed-CLI networks. Managed workers synchronize an exact Git HEAD plus the root task's dirty index
+and worktree state, then reliably return terminal rollouts and Git result packages for explicit
+safe application.
 
 ## Install The Plugin
 
@@ -117,11 +118,30 @@ the token itself is never accepted as a command-line value. Pass the same `--dev
 the broker issued that token. Setup validates the complete peer configuration before creating
 local credentials and never overwrites an existing configuration.
 
+M6 can carry that authenticated Delegation protocol over an embedded Tailscale network. Tailscale
+enrollment and Delegation bearer authentication remain separate: every embedded node retains its
+protected Tailscale enrollment-key file, while every broker retains its Delegation master-token
+file and every peer retains its issued Delegation token file. Tailnet membership never replaces
+Delegation token authentication. Embedded Tailscale requires `--auth-mode token` for every broker
+and peer; no unauthenticated mode is supported.
+
+Embedded Tailscale is supported only for fresh deployments. Do not edit, migrate, upgrade, roll
+back, or reuse an existing TCP or pre-M6 config, database, token domain, Tailscale state directory,
+or native service definition. Create new named instances and qualify them with foreground
+`service run` commands, bounded status polling, and complete process-tree cleanup before installing
+services. A credential-issuance bootstrap broker must be tracked and stopped before the
+qualification broker starts. On Windows, start the resolved native `delegation.exe`, not the
+`.cmd` wrapper, with shell-free `System.Diagnostics.ProcessStartInfo.ArgumentList` entries for
+every exact argument, so paths containing spaces remain intact and cleanup owns the runtime process
+tree. See the
+[M6 embedded Tailscale operator guide](docs/m6-embedded-tailscale.md) for the exact broker and peer
+flags, `ws://<broker-tsnet-hostname>:<port>/v1/connect` URL, credential workflow, and support
+boundaries.
+
 `instanceId` names one local Delegation deployment. It is not a principal, credential, protocol
 target, or network identity. `hostKind` identifies the CLI family hosted by one homogeneous network
 and currently accepts only `codex` or `traex`; a broker rejects peers from the other family before
-registry mutation, and broker state is permanently bound to its first host family. Existing
-version-3 configs that omit both fields are interpreted as the `default` Codex instance. New setup
+registry mutation, and broker state is permanently bound to its first host family. Fresh setup
 commands persist both fields explicitly:
 
 ```bash
@@ -137,14 +157,12 @@ shell parsing or expansion. TraeX requires the structured form and a launcher. F
 
 ```bash
 plugins/delegation/scripts/delegation-mcp setup peer \
-  --instance traex-main \
+  --instance <traex-instance-id> \
   --host-kind traex \
-  --cli-command /absolute/path/to/traex \
-  --cli-argument=-p \
-  --cli-argument=ultra \
-  --cli-launcher /absolute/path/to/warmpool \
-  --cli-launcher-prefix-argument=run \
-  --cli-launcher-prefix-argument=--
+  --cli-command <traex-executable> \
+  --cli-argument=<traex-cli-argument> \
+  --cli-launcher <traex-launcher-executable> \
+  --cli-launcher-prefix-argument=<traex-launcher-prefix-argument>
 ```
 
 Managed TraeX workers use this exact shell-free launch. The connector adapts TraeX's app-server
@@ -153,17 +171,17 @@ preserving the same isolated worker profile and worker-only MCP authority as Cod
 remain separate deployments; this does not enable cross-CLI dispatch or mixed-CLI networks.
 
 This persists `peer.cli.command`, exact `arguments`, and a shell-free `launcher` with `executable`
-and `prefixArguments`; legacy version-3 Codex configs using `peer.codexBinary` remain readable. A
+and `prefixArguments`. `--codex-binary` remains a Codex-only shorthand for fresh configuration. A
 launcher must preserve stdio; on Linux it must `exec` the target CLI, while on macOS and Windows it
 must remain attached and must not daemonize or detach. Use `--flag=-value` for an argv element that
 begins with `-`.
 
-The existing `--codex-home` flag and `peer.codexHome` JSON field retain their names for version-3
-configuration compatibility. They identify the managed CLI home, not the product identity. Codex
-maps the path to `CODEX_HOME`; TraeX maps it to `TRAE_HOME` and uses `<peer.codexHome>/cli` as
-`TRAECLI_HOME`. These directories must not reuse the user's normal CLI homes; setup, doctor, and
-worker launch reject user authentication, instructions, profiles, plugins, hooks, model providers,
-execution rules, and non-system skills in a managed TraeX home.
+The `--codex-home` flag and `peer.codexHome` JSON field retain their established names. They
+identify the managed CLI home, not the product identity. Codex maps the path to `CODEX_HOME`; TraeX
+maps it to `TRAE_HOME` and uses `<peer.codexHome>/cli` as `TRAECLI_HOME`. These directories must not
+reuse the user's normal CLI homes; setup, doctor, and worker launch reject user authentication,
+instructions, profiles, plugins, hooks, model providers, execution rules, and non-system skills in
+a managed TraeX home.
 
 The `default` instance keeps the existing `~/.delegation/broker.json`,
 `~/.delegation/peer.json`, local bridge, and native service identities. A named instance uses
@@ -178,7 +196,8 @@ peer config. An explicit instance selector must match the selected config. Named
 inherited `DELEGATION_CONFIG` unless `--config` is also explicit, preventing a split namespace.
 
 Enroll each peer from the broker installation before running peer setup. Choose a new stable UUID
-for the peer and start the broker once so its state is initialized, then run:
+for the peer, start a tracked bootstrap broker, and use bounded polling until its explicit config
+reports status. While that bootstrap process is ready, run:
 
 ```bash
 plugins/delegation/scripts/delegation-mcp credential issue \
@@ -186,6 +205,9 @@ plugins/delegation/scripts/delegation-mcp credential issue \
   --device-id <device-uuid> \
   --out <protected-staging-token-file>
 ```
+
+Stop and wait for the complete bootstrap process tree immediately after issuance. Confirm it exited
+before starting any later qualification broker for the same config and Tailscale state.
 
 Transfer that file over an authenticated encrypted channel and preserve or re-establish
 current-user-only file protection on the target. Never paste its contents into a Codex or TraeX
@@ -203,10 +225,11 @@ plugins/delegation/scripts/delegation-mcp credential revoke \
 Revocation closes access on the next broker frame and marks the peer offline. Revoked IDs remain
 tombstoned and require a new device UUID.
 
-Pre-1.0 releases provide no upgrade support. Config, broker state, peer state, wire protocol, local
-bridge, and native service definitions are versioned independently. Discard configuration and state
-created by earlier development checkouts, then run `setup broker` and `setup peer` again; the
-current runtime never converts or deletes them automatically.
+Pre-1.0 releases provide no migration, in-place upgrade, or rollback support. Config, broker state,
+peer state, embedded Tailscale state, wire protocol, local bridge, and native service definitions
+are versioned independently. Preserve an old deployment only as a separately stopped installation;
+create fresh config, state, credentials, and service identities for the current runtime. The
+runtime never converts, replaces, rolls back, or deletes an earlier deployment automatically.
 
 Run `doctor --config <path>` after setup. Broker and peer may coexist on one device through
 `broker.json` and `peer.json`; commands that could be ambiguous require an explicit config. Install
@@ -266,6 +289,9 @@ counts, current and lifetime dispatch/turn counts, occupied worker slots, and bo
 counts. Broker result status separates current delivery/detail retention from lifetime delivered,
 source-acknowledged, source-released, and compacted-detail totals. Neither surface includes prompts,
 messages, Git URLs, workspaces, rollout contents, credentials, or provider configuration.
+M6 adds only `transport` and, for embedded Tailscale, `tailscaleHostname` to these status surfaces.
+It does not expose the Tailscale enrollment key or path, Tailscale state or lease paths, Delegation
+tokens, or other local authority paths.
 
 When status reports `stateRecoveryRequired`, stop the peer service and restore the original peer
 database before restarting it. An automated reset policy is intentionally not defined yet because
@@ -283,6 +309,11 @@ ssh -L 8788:127.0.0.1:8788 <broker-host>
 Then open `http://127.0.0.1:8788/status` locally. Status responses disable caching and external
 content. An older pre-release broker config without `statusListen` must be recreated with the
 current `setup broker` command; pre-1.0 configuration migration is intentionally unsupported.
+
+M6 does not support broker federation, high availability, multiple brokers for one controller
+domain, Tailscale Funnel or Serve, public ingress, or a network containing both Codex and TraeX
+peers. Run one broker for each fresh controller domain and keep its embedded listener reachable
+only inside the tailnet.
 
 Managed worker process cleanup is lifecycle ownership, not an OS security boundary. On Unix-like
 hosts, a deliberately detached same-UID process is outside the current threat model; on macOS, an
