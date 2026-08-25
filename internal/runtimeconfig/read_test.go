@@ -1,15 +1,15 @@
 package runtimeconfig
 
 import (
-	"encoding/json"
-	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 )
 
-func TestReadAcceptsEmbeddedTailscaleWithoutChangingPlainReadContract(t *testing.T) {
+func TestEmbeddedTailscaleConfigRoundTripWithoutChangingPlainConfigContract(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "authority")
 	if err := delegationconfig.PreparePrivateDirectory(root); err != nil {
 		t.Fatal(err)
@@ -33,22 +33,37 @@ func TestReadAcceptsEmbeddedTailscaleWithoutChangingPlainReadContract(t *testing
 			Auth:         delegationconfig.AuthConfig{Mode: delegationconfig.AuthModeNone},
 		},
 	}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
+
+	capabilities := Capabilities()
+	if !capabilities.EmbeddedTailscale {
+		t.Fatal("Capabilities() does not report embedded tailscale")
 	}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "not supported by this runtime") {
+		t.Fatalf("config.Validate() error = %v, want unsupported runtime", err)
+	}
+
 	path := filepath.Join(root, "broker.json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := WriteNew(path, cfg); err != nil {
 		t.Fatal(err)
 	}
+	plainWritePath := filepath.Join(root, "plain-broker.json")
+	if err := delegationconfig.WriteNew(plainWritePath, cfg); err == nil ||
+		!strings.Contains(err.Error(), "not supported by this runtime") {
+		t.Fatalf("config.WriteNew() error = %v, want unsupported runtime", err)
+	}
+
 	got, err := Read(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Transport.Mode != delegationconfig.TransportModeTailscale {
-		t.Fatalf("runtime transport mode = %v", got.Transport.Mode)
+	if !reflect.DeepEqual(got, cfg) {
+		t.Fatalf("Read() = %#v, want %#v", got, cfg)
 	}
-	if _, err := delegationconfig.Read(path); err == nil {
-		t.Fatal("plain config.Read accepted embedded tailscale")
+	if _, err := delegationconfig.Read(path); err == nil ||
+		!strings.Contains(err.Error(), "not supported by this runtime") {
+		t.Fatalf("config.Read() error = %v, want unsupported runtime", err)
 	}
 }

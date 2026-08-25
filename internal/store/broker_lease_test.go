@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -173,6 +175,109 @@ func TestTailscaleStateDirLeaseRejectsAliasWithoutChangingTarget(t *testing.T) {
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Fatal("lease acquisition changed the symbolic link target")
+	}
+}
+
+func TestValidateTailscaleStateDirIsNonMutating(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	if err := createPrivateDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	future := filepath.Join(root, "future", "tailscale")
+	if err := ValidateTailscaleStateDir(future); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "future")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("validation created a future state parent: %v", err)
+	}
+
+	existing := filepath.Join(root, "existing")
+	if err := createPrivateDirectory(existing); err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(existing, "marker")
+	if err := os.WriteFile(markerPath, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateTailscaleStateDir(existing); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(marker) != "unchanged" {
+		t.Fatalf("validation changed state marker: %q", marker)
+	}
+}
+
+func TestValidateTailscaleStateDirRejectsFileAndSymlink(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	if err := createPrivateDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(root, "file")
+	if err := os.WriteFile(filePath, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateTailscaleStateDir(filePath); err == nil ||
+		!strings.Contains(err.Error(), "must be a directory") {
+		t.Fatalf("file validation error = %v", err)
+	}
+
+	target := filepath.Join(root, "target")
+	if err := createPrivateDirectory(target); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("creating directory symlink is unavailable: %v", err)
+	}
+	if err := ValidateTailscaleStateDir(alias); err == nil ||
+		!strings.Contains(err.Error(), "not a symbolic link") {
+		t.Fatalf("symlink validation error = %v", err)
+	}
+}
+
+func TestValidateTailscaleStateDirRejectsUnsafeLeaseParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode test")
+	}
+	root := t.TempDir()
+	unsafeParent := filepath.Join(root, "shared")
+	if err := os.Mkdir(unsafeParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	future := filepath.Join(unsafeParent, "future-tailscale")
+	if err := ValidateTailscaleStateDir(future); err == nil ||
+		!strings.Contains(err.Error(), "must not be accessible by group or other users") {
+		t.Fatalf("unsafe parent validation error = %v", err)
+	}
+	if _, err := os.Lstat(future); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("validation created future state directory: %v", err)
+	}
+}
+
+func TestValidateTailscaleStateDirRejectsSymlinkedLeaseParent(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	if err := createPrivateDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "target")
+	if err := createPrivateDirectory(target); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("creating directory symlink is unavailable: %v", err)
+	}
+	future := filepath.Join(alias, "future-tailscale")
+	if err := ValidateTailscaleStateDir(future); err == nil ||
+		!strings.Contains(err.Error(), "not a symbolic link") {
+		t.Fatalf("symlinked parent validation error = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(target, "future-tailscale")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("validation created state under symlink target: %v", err)
 	}
 }
 

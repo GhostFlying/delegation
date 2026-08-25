@@ -41,13 +41,10 @@ func AcquirePeerLease(statePath string) (*PeerLease, error) {
 // AcquireTailscaleStateDirLease exclusively owns a configured tsnet state
 // directory without creating, changing, or removing that directory.
 func AcquireTailscaleStateDirLease(stateDir string) (*TailscaleStateDirLease, error) {
-	if !filepath.IsAbs(stateDir) {
-		return nil, errors.New("tailscale state directory path must be absolute")
-	}
-	stateDir = filepath.Clean(stateDir)
-	if err := validateTailscaleStateDir(stateDir); err != nil {
+	if err := ValidateTailscaleStateDir(stateDir); err != nil {
 		return nil, err
 	}
+	stateDir = filepath.Clean(stateDir)
 	lease, err := acquireExclusiveLease(
 		stateDir+".tailscale.lock",
 		"tailscale state directory",
@@ -56,13 +53,26 @@ func AcquireTailscaleStateDirLease(stateDir string) (*TailscaleStateDirLease, er
 	if err != nil {
 		return nil, err
 	}
-	if err := validateTailscaleStateDir(stateDir); err != nil {
+	if err := ValidateTailscaleStateDir(stateDir); err != nil {
 		return nil, errors.Join(err, lease.Close())
 	}
 	return lease, nil
 }
 
-func validateTailscaleStateDir(stateDir string) error {
+// ValidateTailscaleStateDir non-mutatingly checks whether a configured tsnet
+// state directory can use the same local authority accepted at runtime. A
+// missing future directory is valid and is not created.
+func ValidateTailscaleStateDir(stateDir string) error {
+	if !filepath.IsAbs(stateDir) {
+		return errors.New("tailscale state directory path must be absolute")
+	}
+	stateDir = filepath.Clean(stateDir)
+	if err := validateLocalStatePath(stateDir); err != nil {
+		return fmt.Errorf("validate tailscale state directory location: %w", err)
+	}
+	if err := ValidatePath(stateDir + ".tailscale.lock"); err != nil {
+		return fmt.Errorf("validate tailscale state directory lease path: %w", err)
+	}
 	info, err := os.Lstat(stateDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

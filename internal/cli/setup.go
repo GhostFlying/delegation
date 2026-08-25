@@ -19,23 +19,29 @@ import (
 	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/pathguard"
+	"github.com/GhostFlying/delegation/internal/runtimeconfig"
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/tailscaleauth"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
 
 type setupResult struct {
-	Role          delegationconfig.Role `json:"role"`
-	InstanceID    string                `json:"instanceId"`
-	HostKind      hostkind.Kind         `json:"hostKind"`
-	ConfigPath    string                `json:"configPath"`
-	ControllerID  string                `json:"controllerId"`
-	DeviceID      string                `json:"deviceId,omitempty"`
-	StatePath     string                `json:"statePath,omitempty"`
-	CodexHome     string                `json:"codexHome,omitempty"`
-	GitBinary     string                `json:"gitBinary,omitempty"`
-	WorkspaceRoot string                `json:"workspaceRoot,omitempty"`
-	TokenFile     string                `json:"tokenFile,omitempty"`
-	StatusListen  string                `json:"statusListen,omitempty"`
+	Role                 delegationconfig.Role          `json:"role"`
+	InstanceID           string                         `json:"instanceId"`
+	HostKind             hostkind.Kind                  `json:"hostKind"`
+	ConfigPath           string                         `json:"configPath"`
+	ControllerID         string                         `json:"controllerId"`
+	DeviceID             string                         `json:"deviceId,omitempty"`
+	StatePath            string                         `json:"statePath,omitempty"`
+	CodexHome            string                         `json:"codexHome,omitempty"`
+	GitBinary            string                         `json:"gitBinary,omitempty"`
+	WorkspaceRoot        string                         `json:"workspaceRoot,omitempty"`
+	TokenFile            string                         `json:"tokenFile,omitempty"`
+	StatusListen         string                         `json:"statusListen,omitempty"`
+	Transport            delegationconfig.TransportMode `json:"transport"`
+	TailscaleHostname    string                         `json:"tailscaleHostname,omitempty"`
+	TailscaleStateDir    string                         `json:"tailscaleStateDir,omitempty"`
+	TailscaleAuthKeyFile string                         `json:"tailscaleAuthKeyFile,omitempty"`
 }
 
 type repeatedStringFlag []string
@@ -78,6 +84,18 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 	statePath := flags.String("state", "", "broker state database path; defaults beside the config")
 	authMode := flags.String("auth-mode", string(delegationconfig.AuthModeToken), "authentication mode: token or none")
 	tokenFile := flags.String("token-file", "", "token file path; generated when omitted in token mode")
+	transport := flags.String("transport", "tcp", "network transport: tcp or tailscale")
+	tailscaleHostname := flags.String("tailscale-hostname", "", "embedded Tailscale node hostname")
+	tailscaleAuthKeyFile := flags.String(
+		"tailscale-auth-key-file",
+		"",
+		"protected Tailscale enrollment key file",
+	)
+	tailscaleStateDir := flags.String(
+		"tailscale-state-dir",
+		"",
+		"persistent embedded Tailscale state directory; defaults under the selected instance",
+	)
 	allowInsecure := flags.Bool("allow-insecure-nonloopback", false, "acknowledge plaintext non-loopback transport")
 	jsonOutput := flags.Bool("json", false, "print setup result as JSON")
 	if code := parseFlags(flags, args); code >= 0 {
@@ -117,6 +135,21 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 		return writeError(stderr, err)
 	}
 	resourceRoot := setupResourceRoot(resolvedConfig, *instanceID)
+	transportConfig, err := resolveSetupTransport(
+		flags,
+		*transport,
+		*tailscaleHostname,
+		*tailscaleAuthKeyFile,
+		*tailscaleStateDir,
+		filepath.Join(resourceRoot, "state", "tailscale", "broker"),
+	)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	if transportConfig.Mode == delegationconfig.TransportModeTailscale &&
+		!flagWasSet(flags, "listen") {
+		*listen = ":8787"
+	}
 	if *statePath == "" {
 		*statePath = filepath.Join(resourceRoot, "state", "broker.sqlite3")
 	}
@@ -140,6 +173,7 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 		HostKind:      networkHostKind,
 		Role:          delegationconfig.RoleBroker,
 		ControllerID:  *controllerID,
+		Transport:     transportConfig,
 		Broker: delegationconfig.BrokerConfig{
 			Listen:                   *listen,
 			StatusListen:             *statusListen,
@@ -148,13 +182,13 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 			AllowInsecureNonLoopback: *allowInsecure,
 		},
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := runtimeconfig.Validate(cfg); err != nil {
 		return writeError(stderr, err)
 	}
 	if err := ensureConfigAvailable(resolvedConfig); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := pathguard.ValidateBrokerAuthority(resolvedConfig, resolvedState, auth.TokenFile); err != nil {
+	if err := validateBrokerSetupAuthority(resolvedConfig, resolvedState, auth.TokenFile, transportConfig); err != nil {
 		return writeError(stderr, err)
 	}
 	if err := store.ValidatePath(resolvedState); err != nil {
@@ -171,18 +205,22 @@ func runSetupBroker(args []string, stdout, stderr io.Writer) int {
 			return writeError(stderr, err)
 		}
 	}
-	if err := delegationconfig.WriteNew(resolvedConfig, cfg); err != nil {
+	if err := runtimeconfig.WriteNew(resolvedConfig, cfg); err != nil {
 		return writeError(stderr, err)
 	}
 	return writeSetupResult(stdout, stderr, setupResult{
-		Role:         cfg.Role,
-		InstanceID:   cfg.InstanceID,
-		HostKind:     cfg.HostKind,
-		ConfigPath:   resolvedConfig,
-		ControllerID: cfg.ControllerID,
-		StatePath:    cfg.Broker.StateFile,
-		TokenFile:    auth.TokenFile,
-		StatusListen: cfg.Broker.StatusListen,
+		Role:                 cfg.Role,
+		InstanceID:           cfg.InstanceID,
+		HostKind:             cfg.HostKind,
+		ConfigPath:           resolvedConfig,
+		ControllerID:         cfg.ControllerID,
+		StatePath:            cfg.Broker.StateFile,
+		TokenFile:            auth.TokenFile,
+		StatusListen:         cfg.Broker.StatusListen,
+		Transport:            cfg.Transport.Mode,
+		TailscaleHostname:    transportHostname(cfg.Transport),
+		TailscaleStateDir:    transportStateDir(cfg.Transport),
+		TailscaleAuthKeyFile: transportAuthKeyFile(cfg.Transport),
 	}, *jsonOutput)
 }
 
@@ -217,6 +255,18 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	)
 	workspaceRoot := flags.String("workspace-root", "", "managed worker workspace root; defaults beside the peer config")
 	statePath := flags.String("state", "", "peer reservation database path; defaults beside the peer config")
+	transport := flags.String("transport", "tcp", "network transport: tcp or tailscale")
+	tailscaleHostname := flags.String("tailscale-hostname", "", "embedded Tailscale node hostname")
+	tailscaleAuthKeyFile := flags.String(
+		"tailscale-auth-key-file",
+		"",
+		"protected Tailscale enrollment key file",
+	)
+	tailscaleStateDir := flags.String(
+		"tailscale-state-dir",
+		"",
+		"persistent embedded Tailscale state directory; defaults under the selected instance",
+	)
 	maxWorkerSlots := flags.Int(
 		"max-worker-slots",
 		4,
@@ -287,6 +337,17 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		return writeError(stderr, err)
 	}
 	resourceRoot := setupResourceRoot(resolvedConfig, *instanceID)
+	transportConfig, err := resolveSetupTransport(
+		flags,
+		*transport,
+		*tailscaleHostname,
+		*tailscaleAuthKeyFile,
+		*tailscaleStateDir,
+		filepath.Join(resourceRoot, "state", "tailscale", "peer"),
+	)
+	if err != nil {
+		return writeError(stderr, err)
+	}
 	auth, err := resolveAuth(*authMode, *tokenFile, "")
 	if err != nil {
 		return writeError(stderr, err)
@@ -386,6 +447,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		ControllerID:  *controllerID,
 		DeviceID:      *deviceID,
 		DeviceName:    *deviceName,
+		Transport:     transportConfig,
 		Broker: delegationconfig.BrokerConfig{
 			URL:                      *brokerURL,
 			Auth:                     auth,
@@ -400,18 +462,19 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 			MaxWorkerSlots: *maxWorkerSlots,
 		},
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := runtimeconfig.Validate(cfg); err != nil {
 		return writeError(stderr, err)
 	}
 	if err := ensureConfigAvailable(resolvedConfig); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := pathguard.ValidatePeerRuntimeAuthority(
+	if err := validatePeerSetupAuthority(
 		resolvedConfig,
 		resolvedState,
 		auth.TokenFile,
 		resolvedCodexHome,
 		resolvedWorkspaceRoot,
+		transportConfig,
 	); err != nil {
 		return writeError(stderr, err)
 	}
@@ -476,32 +539,161 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	if workspaceCreated {
 		preparedDirectories = append(preparedDirectories, resolvedWorkspaceRoot)
 	}
-	if err := pathguard.ValidatePeerRuntimeAuthority(
+	if err := validatePeerSetupAuthority(
 		resolvedConfig,
 		resolvedState,
 		auth.TokenFile,
 		resolvedCodexHome,
 		resolvedWorkspaceRoot,
+		transportConfig,
 	); err != nil {
 		return writeError(stderr, err)
 	}
-	if err := delegationconfig.WriteNew(resolvedConfig, cfg); err != nil {
+	if err := runtimeconfig.WriteNew(resolvedConfig, cfg); err != nil {
 		return writeError(stderr, err)
 	}
 	committed = true
 	return writeSetupResult(stdout, stderr, setupResult{
-		Role:          cfg.Role,
-		InstanceID:    cfg.InstanceID,
-		HostKind:      cfg.HostKind,
-		ConfigPath:    resolvedConfig,
-		ControllerID:  cfg.ControllerID,
-		DeviceID:      cfg.DeviceID,
-		StatePath:     cfg.Peer.StateFile,
-		CodexHome:     cfg.Peer.CodexHome,
-		GitBinary:     cfg.Peer.GitBinary,
-		WorkspaceRoot: cfg.Peer.WorkspaceRoot,
-		TokenFile:     auth.TokenFile,
+		Role:                 cfg.Role,
+		InstanceID:           cfg.InstanceID,
+		HostKind:             cfg.HostKind,
+		ConfigPath:           resolvedConfig,
+		ControllerID:         cfg.ControllerID,
+		DeviceID:             cfg.DeviceID,
+		StatePath:            cfg.Peer.StateFile,
+		CodexHome:            cfg.Peer.CodexHome,
+		GitBinary:            cfg.Peer.GitBinary,
+		WorkspaceRoot:        cfg.Peer.WorkspaceRoot,
+		TokenFile:            auth.TokenFile,
+		Transport:            cfg.Transport.Mode,
+		TailscaleHostname:    transportHostname(cfg.Transport),
+		TailscaleStateDir:    transportStateDir(cfg.Transport),
+		TailscaleAuthKeyFile: transportAuthKeyFile(cfg.Transport),
 	}, *jsonOutput)
+}
+
+func resolveSetupTransport(
+	flags *flag.FlagSet,
+	rawMode, hostname, authKeyFile, stateDir, defaultStateDir string,
+) (delegationconfig.TransportConfig, error) {
+	switch rawMode {
+	case "tcp":
+		for _, name := range []string{
+			"tailscale-hostname",
+			"tailscale-auth-key-file",
+			"tailscale-state-dir",
+		} {
+			if flagWasSet(flags, name) {
+				return delegationconfig.TransportConfig{}, fmt.Errorf(
+					"--%s requires --transport tailscale",
+					name,
+				)
+			}
+		}
+		return delegationconfig.TransportConfig{Mode: delegationconfig.TransportModeTCP}, nil
+	case "tailscale":
+		if hostname == "" {
+			return delegationconfig.TransportConfig{}, errors.New(
+				"--tailscale-hostname is required with --transport tailscale",
+			)
+		}
+		if authKeyFile == "" {
+			return delegationconfig.TransportConfig{}, errors.New(
+				"--tailscale-auth-key-file is required with --transport tailscale",
+			)
+		}
+		resolvedAuthKeyFile, err := absolutePath(authKeyFile)
+		if err != nil {
+			return delegationconfig.TransportConfig{}, err
+		}
+		if stateDir == "" {
+			stateDir = defaultStateDir
+		}
+		resolvedStateDir, err := absolutePath(stateDir)
+		if err != nil {
+			return delegationconfig.TransportConfig{}, err
+		}
+		if err := store.ValidateTailscaleStateDir(resolvedStateDir); err != nil {
+			return delegationconfig.TransportConfig{}, err
+		}
+		if _, err := tailscaleauth.Read(resolvedAuthKeyFile); err != nil {
+			return delegationconfig.TransportConfig{}, err
+		}
+		return delegationconfig.TransportConfig{
+			Mode: delegationconfig.TransportModeTailscale,
+			Tailscale: &delegationconfig.TailscaleConfig{
+				StateDir:    resolvedStateDir,
+				Hostname:    hostname,
+				AuthKeyFile: resolvedAuthKeyFile,
+			},
+		}, nil
+	default:
+		return delegationconfig.TransportConfig{}, fmt.Errorf(
+			"unsupported transport %q; must be tcp or tailscale",
+			rawMode,
+		)
+	}
+}
+
+func validateBrokerSetupAuthority(
+	configPath, statePath, tokenPath string,
+	transport delegationconfig.TransportConfig,
+) error {
+	if transport.Mode != delegationconfig.TransportModeTailscale {
+		return pathguard.ValidateBrokerAuthority(configPath, statePath, tokenPath)
+	}
+	return pathguard.ValidateBrokerTailscaleAuthority(
+		configPath,
+		statePath,
+		tokenPath,
+		transport.Tailscale.StateDir,
+		transport.Tailscale.AuthKeyFile,
+	)
+}
+
+func validatePeerSetupAuthority(
+	configPath, statePath, tokenPath, codexHome, workspaceRoot string,
+	transport delegationconfig.TransportConfig,
+) error {
+	if transport.Mode != delegationconfig.TransportModeTailscale {
+		return pathguard.ValidatePeerRuntimeAuthority(
+			configPath,
+			statePath,
+			tokenPath,
+			codexHome,
+			workspaceRoot,
+		)
+	}
+	return pathguard.ValidatePeerTailscaleAuthority(
+		configPath,
+		statePath,
+		tokenPath,
+		codexHome,
+		workspaceRoot,
+		transport.Tailscale.StateDir,
+		transport.Tailscale.AuthKeyFile,
+	)
+}
+
+func transportHostname(transport delegationconfig.TransportConfig) string {
+	if transport.Tailscale == nil {
+		return ""
+	}
+	return transport.Tailscale.Hostname
+}
+
+func transportStateDir(transport delegationconfig.TransportConfig) string {
+	if transport.Tailscale == nil {
+		return ""
+	}
+	return transport.Tailscale.StateDir
+}
+
+func transportAuthKeyFile(transport delegationconfig.TransportConfig) string {
+	if transport.Tailscale == nil {
+		return ""
+	}
+	return transport.Tailscale.AuthKeyFile
 }
 
 func writeInsecureTransportWarning(stderr io.Writer, cfg delegationconfig.Config) error {
@@ -620,6 +812,7 @@ func writeSetupResult(stdout, stderr io.Writer, result setupResult, jsonOutput b
 	fmt.Fprintf(stdout, "host kind: %s\n", result.HostKind)
 	fmt.Fprintf(stdout, "config: %s\n", result.ConfigPath)
 	fmt.Fprintf(stdout, "controllerId: %s\n", result.ControllerID)
+	fmt.Fprintf(stdout, "transport: %s\n", transportModeName(result.Transport))
 	if result.DeviceID != "" {
 		fmt.Fprintf(stdout, "deviceId: %s\n", result.DeviceID)
 	}
@@ -645,7 +838,27 @@ func writeSetupResult(stdout, stderr io.Writer, result setupResult, jsonOutput b
 	if result.StatusListen != "" {
 		fmt.Fprintf(stdout, "status: http://%s/status\n", result.StatusListen)
 	}
+	if result.TailscaleHostname != "" {
+		fmt.Fprintf(stdout, "Tailscale hostname: %s\n", result.TailscaleHostname)
+	}
+	if result.TailscaleStateDir != "" {
+		fmt.Fprintf(stdout, "Tailscale state: %s\n", result.TailscaleStateDir)
+	}
+	if result.TailscaleAuthKeyFile != "" {
+		fmt.Fprintf(stdout, "Tailscale enrollment key file: %s\n", result.TailscaleAuthKeyFile)
+	}
 	return 0
+}
+
+func transportModeName(mode delegationconfig.TransportMode) string {
+	switch mode {
+	case delegationconfig.TransportModeTCP:
+		return "tcp"
+	case delegationconfig.TransportModeTailscale:
+		return "tailscale"
+	default:
+		return fmt.Sprintf("unknown(%d)", mode)
+	}
 }
 
 func resolveCodexExecutable(name string) (string, error) {
