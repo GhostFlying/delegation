@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion = 3
+	CurrentSchemaVersion = 4
 	DefaultInstanceID    = "default"
 	brokerConnectPath    = "/v1/connect"
 	maximumConfigSize    = 1024 * 1024
@@ -42,16 +42,39 @@ const (
 	AuthModeToken AuthMode = "token"
 )
 
+type TransportMode uint8
+
+const (
+	TransportModeTCP TransportMode = iota
+	TransportModeTailscale
+)
+
+type RuntimeCapabilities struct {
+	EmbeddedTailscale bool
+}
+
 type Config struct {
-	SchemaVersion int           `json:"schemaVersion"`
-	InstanceID    string        `json:"instanceId,omitempty"`
-	HostKind      hostkind.Kind `json:"hostKind,omitempty"`
-	Role          Role          `json:"role"`
-	ControllerID  string        `json:"controllerId"`
-	DeviceID      string        `json:"deviceId,omitempty"`
-	DeviceName    string        `json:"deviceName,omitempty"`
-	Broker        BrokerConfig  `json:"broker"`
-	Peer          PeerConfig    `json:"peer"`
+	SchemaVersion int             `json:"schemaVersion"`
+	InstanceID    string          `json:"instanceId,omitempty"`
+	HostKind      hostkind.Kind   `json:"hostKind,omitempty"`
+	Role          Role            `json:"role"`
+	ControllerID  string          `json:"controllerId"`
+	DeviceID      string          `json:"deviceId,omitempty"`
+	DeviceName    string          `json:"deviceName,omitempty"`
+	Transport     TransportConfig `json:"transport"`
+	Broker        BrokerConfig    `json:"broker"`
+	Peer          PeerConfig      `json:"peer"`
+}
+
+type TransportConfig struct {
+	Mode      TransportMode    `json:"mode"`
+	Tailscale *TailscaleConfig `json:"tailscale,omitempty"`
+}
+
+type TailscaleConfig struct {
+	StateDir    string `json:"stateDir"`
+	Hostname    string `json:"hostname"`
+	AuthKeyFile string `json:"authKeyFile"`
 }
 
 type BrokerConfig struct {
@@ -136,6 +159,12 @@ func defaultPath(instanceID, name string) (string, error) {
 }
 
 func Read(path string) (Config, error) {
+	return ReadForRuntime(path, RuntimeCapabilities{})
+}
+
+// ReadForRuntime reads and validates a configuration against explicitly
+// available runtime transport capabilities.
+func ReadForRuntime(path string, capabilities RuntimeCapabilities) (Config, error) {
 	file, err := openProtectedConfig(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
@@ -152,13 +181,17 @@ func Read(path string) (Config, error) {
 		return Config{}, fmt.Errorf("config exceeds %d-byte limit", maximumConfigSize)
 	}
 	var header struct {
-		SchemaVersion int `json:"schemaVersion"`
+		SchemaVersion int             `json:"schemaVersion"`
+		Transport     json.RawMessage `json:"transport"`
 	}
 	if err := json.Unmarshal(data, &header); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 	if header.SchemaVersion != CurrentSchemaVersion {
 		return Config{}, unsupportedSchemaVersion(header.SchemaVersion)
+	}
+	if err := validateTransportJSON(header.Transport); err != nil {
+		return Config{}, err
 	}
 	var cfg Config
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -169,13 +202,19 @@ func Read(path string) (Config, error) {
 	if err := ensureJSONEOF(decoder); err != nil {
 		return Config{}, err
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.ValidateForRuntime(capabilities); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
 }
 
 func (c Config) Validate() error {
+	return c.ValidateForRuntime(RuntimeCapabilities{})
+}
+
+// ValidateForRuntime validates a configuration against explicitly available
+// runtime transport capabilities.
+func (c Config) ValidateForRuntime(capabilities RuntimeCapabilities) error {
 	if c.SchemaVersion != CurrentSchemaVersion {
 		return unsupportedSchemaVersion(c.SchemaVersion)
 	}
@@ -192,6 +231,15 @@ func (c Config) Validate() error {
 	if identity.ValidateID(c.ControllerID) != nil {
 		return errors.New("controllerId must be a UUID")
 	}
+	if err := c.Transport.validate(); err != nil {
+		return err
+	}
+	if c.Transport.Mode == TransportModeTailscale && !capabilities.EmbeddedTailscale {
+		return errors.New("embedded tailscale transport is not supported by this runtime")
+	}
+	if c.Transport.Mode == TransportModeTailscale && c.Broker.AllowInsecureNonLoopback {
+		return errors.New("allowInsecureNonLoopback must be false when transport mode is tailscale")
+	}
 
 	switch c.Role {
 	case RoleBroker:
@@ -204,8 +252,15 @@ func (c Config) Validate() error {
 		if c.EffectiveInstanceID() != DefaultInstanceID && c.Broker.StatusListen == "" {
 			return errors.New("named broker instances require a status listener")
 		}
-		if err := validateListen(c.Broker.Listen, c.Broker.AllowInsecureNonLoopback); err != nil {
-			return err
+		switch c.Transport.Mode {
+		case TransportModeTCP:
+			if err := validateListen(c.Broker.Listen, c.Broker.AllowInsecureNonLoopback); err != nil {
+				return err
+			}
+		case TransportModeTailscale:
+			if err := validateTailscaleListen(c.Broker.Listen); err != nil {
+				return err
+			}
 		}
 		if c.Broker.StatusListen != "" {
 			if err := validateStatusListen(c.Broker.StatusListen); err != nil {
@@ -225,7 +280,11 @@ func (c Config) Validate() error {
 		if c.Broker.Listen != "" || c.Broker.StatusListen != "" || c.Broker.StateFile != "" {
 			return errors.New("peer config must not contain broker listener or state fields")
 		}
-		if _, err := NormalizeBrokerURL(c.Broker.URL, c.Broker.AllowInsecureNonLoopback); err != nil {
+		if _, err := NormalizeBrokerURLForTransport(
+			c.Broker.URL,
+			c.Transport.Mode,
+			c.Broker.AllowInsecureNonLoopback,
+		); err != nil {
 			return err
 		}
 		if err := c.Peer.validateCLI(); err != nil {
@@ -339,6 +398,83 @@ func (a AuthConfig) validate() error {
 	return nil
 }
 
+func (m TransportMode) MarshalJSON() ([]byte, error) {
+	switch m {
+	case TransportModeTCP:
+		return json.Marshal("tcp")
+	case TransportModeTailscale:
+		return json.Marshal("tailscale")
+	default:
+		return nil, fmt.Errorf("unsupported transport mode %d", m)
+	}
+}
+
+func (m *TransportMode) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("transport mode must be tcp or tailscale: %w", err)
+	}
+	switch value {
+	case "tcp":
+		*m = TransportModeTCP
+	case "tailscale":
+		*m = TransportModeTailscale
+	default:
+		return fmt.Errorf("unsupported transport mode %q", value)
+	}
+	return nil
+}
+
+func (t TransportConfig) validate() error {
+	switch t.Mode {
+	case TransportModeTCP:
+		if t.Tailscale != nil {
+			return errors.New("tailscale configuration must be absent when transport mode is tcp")
+		}
+	case TransportModeTailscale:
+		if t.Tailscale == nil {
+			return errors.New("tailscale configuration is required when transport mode is tailscale")
+		}
+		if err := t.Tailscale.validate(); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported transport mode %d", t.Mode)
+	}
+	return nil
+}
+
+func (t TailscaleConfig) validate() error {
+	if !filepath.IsAbs(t.StateDir) {
+		return errors.New("tailscale stateDir must be a non-empty absolute path")
+	}
+	if !validTailscaleHostname(t.Hostname) {
+		return errors.New("tailscale hostname must be a lowercase DNS label from 1 through 63 characters")
+	}
+	if !filepath.IsAbs(t.AuthKeyFile) {
+		return errors.New("tailscale authKeyFile must be a non-empty absolute path")
+	}
+	return nil
+}
+
+func validTailscaleHostname(hostname string) bool {
+	if len(hostname) < 1 || len(hostname) > 63 ||
+		!lowercaseLetterOrDigit(hostname[0]) ||
+		!lowercaseLetterOrDigit(hostname[len(hostname)-1]) {
+		return false
+	}
+	for i := 1; i < len(hostname)-1; i++ {
+		if !lowercaseLetterOrDigit(hostname[i]) && hostname[i] != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func lowercaseLetterOrDigit(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= '0' && value <= '9'
+}
+
 // NormalizeBrokerURL validates a configured broker endpoint and returns its
 // canonical connector URL.
 func NormalizeBrokerURL(raw string, allowInsecureNonLoopback bool) (string, error) {
@@ -369,6 +505,53 @@ func NormalizeBrokerURL(raw string, allowInsecureNonLoopback bool) (string, erro
 	return parsed.String(), nil
 }
 
+// NormalizeBrokerURLForTransport validates a broker endpoint using the
+// selected transport's connector rules.
+func NormalizeBrokerURLForTransport(
+	raw string,
+	mode TransportMode,
+	allowInsecureNonLoopback bool,
+) (string, error) {
+	switch mode {
+	case TransportModeTCP:
+		return NormalizeBrokerURL(raw, allowInsecureNonLoopback)
+	case TransportModeTailscale:
+		if allowInsecureNonLoopback {
+			return "", errors.New("allowInsecureNonLoopback must be false when transport mode is tailscale")
+		}
+		return normalizeTailscaleBrokerURL(raw)
+	default:
+		return "", fmt.Errorf("unsupported transport mode %d", mode)
+	}
+}
+
+func normalizeTailscaleBrokerURL(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
+		return "", errors.New("tailscale broker URL must be an absolute ws:// URL")
+	}
+	if parsed.Scheme != "ws" {
+		return "", errors.New("tailscale broker URL must use ws://")
+	}
+	if strings.HasSuffix(parsed.Host, ":") {
+		return "", errors.New("tailscale broker URL port must be an integer from 1 through 65535")
+	}
+	if port := parsed.Port(); port != "" {
+		portNumber, err := strconv.Atoi(port)
+		if err != nil || portNumber < 1 || portNumber > 65535 {
+			return "", errors.New("tailscale broker URL port must be an integer from 1 through 65535")
+		}
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery ||
+		parsed.Fragment != "" || parsed.RawFragment != "" || parsed.RawPath != "" {
+		return "", errors.New("tailscale broker URL must not contain credentials, query, fragment, or an escaped path")
+	}
+	if parsed.Path != brokerConnectPath {
+		return "", errors.New("tailscale broker URL path must be /v1/connect")
+	}
+	return parsed.String(), nil
+}
+
 func ensureJSONEOF(decoder *json.Decoder) error {
 	var trailing any
 	err := decoder.Decode(&trailing)
@@ -379,6 +562,27 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 		return fmt.Errorf("decode trailing config data: %w", err)
 	}
 	return errors.New("config must contain exactly one JSON value")
+}
+
+func validateTransportJSON(raw json.RawMessage) error {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return errors.New("transport configuration is required")
+	}
+	var header struct {
+		Mode *string `json:"mode"`
+	}
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return fmt.Errorf("decode transport configuration: %w", err)
+	}
+	if header.Mode == nil {
+		return errors.New("transport mode is required")
+	}
+	switch *header.Mode {
+	case "tcp", "tailscale":
+		return nil
+	default:
+		return fmt.Errorf("unsupported transport mode %q", *header.Mode)
+	}
 }
 
 func validateListen(address string, allowInsecureNonLoopback bool) error {
@@ -395,6 +599,21 @@ func validateListen(address string, allowInsecureNonLoopback bool) error {
 	}
 	if !allowInsecureNonLoopback {
 		return errors.New("plaintext non-loopback listener requires explicit acknowledgement")
+	}
+	return nil
+}
+
+func validateTailscaleListen(address string) error {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("tailscale broker listen address must be :port: %w", err)
+	}
+	if host != "" || address != ":"+port {
+		return errors.New("tailscale broker listen address must use an empty host")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return errors.New("tailscale broker listen port must be an integer from 1 through 65535")
 	}
 	return nil
 }
@@ -428,6 +647,9 @@ func listenPortsConflict(primaryAddress, statusAddress string) bool {
 // UsesInsecureNonLoopbackTransport reports whether the configured network hop
 // relies on an external encrypted network or tunnel for transport security.
 func (c Config) UsesInsecureNonLoopbackTransport() bool {
+	if c.Transport.Mode != TransportModeTCP {
+		return false
+	}
 	switch c.Role {
 	case RoleBroker:
 		host, _, err := net.SplitHostPort(c.Broker.Listen)

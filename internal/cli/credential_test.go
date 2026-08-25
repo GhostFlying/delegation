@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -621,6 +622,8 @@ func TestCredentialIssueRejectsMismatchedStateHostKindWithoutSideEffects(t *test
 }
 
 func TestCredentialRejectsUnsupportedSchemaWithoutMutatingAuthority(t *testing.T) {
+	currentSchemaVersion := delegationconfig.CurrentSchemaVersion
+	futureSchemaVersion := currentSchemaVersion + 1
 	home := t.TempDir()
 	t.Setenv("DELEGATION_HOME", home)
 	statePath := filepath.Join(home, "state", "broker.sqlite3")
@@ -634,7 +637,7 @@ func TestCredentialRejectsUnsupportedSchemaWithoutMutatingAuthority(t *testing.T
 		t.Fatal(err)
 	}
 	unsupportedConfig := delegationconfig.Config{
-		SchemaVersion: delegationconfig.CurrentSchemaVersion + 1,
+		SchemaVersion: futureSchemaVersion,
 		Role:          delegationconfig.RoleBroker,
 		ControllerID:  credentialTestControllerID,
 		Broker: delegationconfig.BrokerConfig{
@@ -650,7 +653,7 @@ func TestCredentialRejectsUnsupportedSchemaWithoutMutatingAuthority(t *testing.T
 		t.Fatal(err)
 	}
 	protectedFixture := unsupportedConfig
-	protectedFixture.SchemaVersion = delegationconfig.CurrentSchemaVersion
+	protectedFixture.SchemaVersion = currentSchemaVersion
 	protectedFixture.Broker.Listen = "127.0.0.1:9876"
 	protectedFixture.Broker.StateFile = statePath
 	if err := delegationconfig.WriteNew(configPath, protectedFixture); err != nil {
@@ -677,7 +680,10 @@ func TestCredentialRejectsUnsupportedSchemaWithoutMutatingAuthority(t *testing.T
 	if code == 0 {
 		t.Fatal("credential issue accepted an unsupported broker config")
 	}
-	for _, text := range []string{"unsupported config schema version 4", "supports only version 3"} {
+	for _, text := range []string{
+		fmt.Sprintf("unsupported config schema version %d", futureSchemaVersion),
+		fmt.Sprintf("supports only version %d", currentSchemaVersion),
+	} {
 		if !strings.Contains(stderr, text) {
 			t.Fatalf("unsupported schema credential error = %q, want %q", stderr, text)
 		}

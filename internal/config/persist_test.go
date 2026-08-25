@@ -4,8 +4,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/GhostFlying/delegation/internal/securefs"
@@ -41,6 +43,110 @@ func TestWriteNewRoundTrip(t *testing.T) {
 		if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
 			t.Fatalf("config permissions = %o, want %o", got, want)
 		}
+	}
+}
+
+func TestWriteNewRejectsTailscaleBeforeSideEffects(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "config.json")
+	cfg := tailscaleBrokerWriteConfig(t)
+	if err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities()); err != nil {
+		t.Fatalf("test config is not valid with tailscale support: %v", err)
+	}
+
+	err := WriteNew(path, cfg)
+	if err == nil || !strings.Contains(err.Error(), "not supported by this runtime") {
+		t.Fatalf("WriteNew() error = %v, want unsupported runtime", err)
+	}
+	requireWritePathAbsent(t, path)
+}
+
+func TestWriteNewForRuntimeTailscaleRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "config.json")
+	cfg := tailscaleBrokerWriteConfig(t)
+	capabilities := tailscaleRuntimeCapabilities()
+
+	if err := WriteNewForRuntime(path, cfg, capabilities); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadForRuntime(path, capabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, cfg) {
+		t.Fatalf("ReadForRuntime() = %#v, want %#v", got, cfg)
+	}
+}
+
+func TestWriteNewForRuntimeRejectsTailscaleWithoutCapability(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "config.json")
+	cfg := tailscaleBrokerWriteConfig(t)
+
+	err := WriteNewForRuntime(path, cfg, RuntimeCapabilities{})
+	if err == nil || !strings.Contains(err.Error(), "not supported by this runtime") {
+		t.Fatalf("WriteNewForRuntime() error = %v, want unsupported runtime", err)
+	}
+	requireWritePathAbsent(t, path)
+}
+
+func TestWriteNewRejectsInvalidConfigBeforeSideEffects(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "config.json")
+	cfg := protectedTestConfig(t)
+	cfg.ControllerID = "not-a-uuid"
+
+	if err := WriteNew(path, cfg); err == nil {
+		t.Fatal("WriteNew() accepted invalid config")
+	}
+	requireWritePathAbsent(t, path)
+}
+
+func TestWriteNewForRuntimeRejectsInvalidTailscaleConfigBeforeSideEffects(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *Config)
+		want   string
+	}{
+		{
+			name: "malformed tailscale",
+			mutate: func(t *testing.T, cfg *Config) {
+				cfg.Transport.Tailscale.StateDir = "relative"
+			},
+			want: "tailscale stateDir",
+		},
+		{
+			name: "wrong role",
+			mutate: func(t *testing.T, cfg *Config) {
+				cfg.Role = Role("relay")
+			},
+			want: "unsupported role",
+		},
+		{
+			name: "wrong listen",
+			mutate: func(t *testing.T, cfg *Config) {
+				cfg.Broker.Listen = "127.0.0.1:8787"
+			},
+			want: "tailscale broker listen",
+		},
+		{
+			name: "wrong URL",
+			mutate: func(t *testing.T, cfg *Config) {
+				*cfg = testTailscalePeerConfig(t)
+				cfg.Broker.URL = "wss://broker.tailnet.test:8787/v1/connect"
+			},
+			want: "tailscale broker URL must use ws://",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "private", "config.json")
+			cfg := tailscaleBrokerWriteConfig(t)
+			test.mutate(t, &cfg)
+
+			err := WriteNewForRuntime(path, cfg, tailscaleRuntimeCapabilities())
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("WriteNewForRuntime() error = %v, want %q", err, test.want)
+			}
+			requireWritePathAbsent(t, path)
+		})
 	}
 }
 
@@ -189,5 +295,22 @@ func TestWriteNewRetrySyncsExistingDirectoryAnchor(t *testing.T) {
 	}
 	if !slices.Contains(synced, failingParent) {
 		t.Fatalf("retry synced paths = %q, want existing directory parent %q", synced, failingParent)
+	}
+}
+
+func tailscaleBrokerWriteConfig(t *testing.T) Config {
+	t.Helper()
+	cfg := protectedTestConfig(t)
+	cfg.Transport = testTailscaleTransport(t)
+	cfg.Broker.Listen = ":8787"
+	return cfg
+}
+
+func requireWritePathAbsent(t *testing.T, path string) {
+	t.Helper()
+	for _, candidate := range []string{filepath.Dir(path), path} {
+		if _, err := os.Lstat(candidate); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("validation created %q or returned unexpected status: %v", candidate, err)
+		}
 	}
 }
