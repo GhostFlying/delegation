@@ -321,6 +321,10 @@ only inside the tailnet.
 Managed worker process cleanup is lifecycle ownership, not an OS security boundary. On Unix-like
 hosts, a deliberately detached same-UID process is outside the current threat model; on macOS, an
 immediately daemonizing double-fork may reparent before it becomes discoverable to the connector.
+Unix-like managed workers use a restricted filesystem profile but have network access enabled by
+default. Delegation does not impose an egress allowlist; host networking, proxy, and firewall policy
+still apply. Treat network access as an ordinary worker capability rather than an isolation
+boundary.
 Windows managed workers use Codex's `:danger-full-access` permission profile because
 restricted read profiles require a separately provisioned elevated Windows sandbox. The broker and
 worker MCP capability checks constrain the normal worker principal only; they are not a security
