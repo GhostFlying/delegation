@@ -79,6 +79,7 @@ func TestTransportConfigRoundTrip(t *testing.T) {
 				cfg.Transport = testTailscaleTransport(t)
 				cfg.Broker.Listen = ":8787"
 				cfg.Broker.StatusListen = "127.0.0.1:8788"
+				useTokenAuthentication(t, &cfg)
 				return cfg
 			},
 		},
@@ -88,6 +89,7 @@ func TestTransportConfigRoundTrip(t *testing.T) {
 				cfg := testPeerConfig(t)
 				cfg.Transport = testTailscaleTransport(t)
 				cfg.Broker.URL = "ws://broker.tailnet.test:8787/v1/connect"
+				useTokenAuthentication(t, &cfg)
 				return cfg
 			},
 		},
@@ -117,6 +119,39 @@ func TestTransportConfigRoundTrip(t *testing.T) {
 				t.Fatalf("Read() = %#v, want %#v", got, cfg)
 			}
 		})
+	}
+}
+
+func TestTransportStatusValidation(t *testing.T) {
+	tcp := TransportConfig{Mode: TransportModeTCP}.Status()
+	if tcp != (TransportStatus{Transport: "tcp"}) {
+		t.Fatalf("TCP status = %#v", tcp)
+	}
+	if err := tcp.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	tailscale := testTailscaleTransport(t).Status()
+	if tailscale != (TransportStatus{
+		Transport:         "tailscale",
+		TailscaleHostname: "delegation-node",
+	}) {
+		t.Fatalf("Tailscale status = %#v", tailscale)
+	}
+	if err := tailscale.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, status := range []TransportStatus{
+		{},
+		{Transport: "unknown"},
+		{Transport: "tcp", TailscaleHostname: "unexpected"},
+		{Transport: "tailscale"},
+		{Transport: "tailscale", TailscaleHostname: "Invalid"},
+	} {
+		if err := status.Validate(); err == nil {
+			t.Fatalf("Validate() accepted %#v", status)
+		}
 	}
 }
 
@@ -203,6 +238,49 @@ func TestTransportModeValidation(t *testing.T) {
 	}
 }
 
+func TestTailscaleRequiresTokenAuthentication(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  func(*testing.T) Config
+	}{
+		{
+			name: "broker",
+			cfg: func(t *testing.T) Config {
+				cfg := protectedTestConfig(t)
+				cfg.Transport = testTailscaleTransport(t)
+				cfg.Broker.Listen = ":8787"
+				cfg.Broker.StatusListen = "127.0.0.1:8788"
+				return cfg
+			},
+		},
+		{
+			name: "peer",
+			cfg: func(t *testing.T) Config {
+				cfg := testTailscalePeerConfig(t)
+				cfg.Broker.Auth = AuthConfig{Mode: AuthModeNone}
+				return cfg
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := test.cfg(t)
+			err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities())
+			if err == nil || !strings.Contains(err.Error(), "auth mode none") {
+				t.Fatalf("ValidateForRuntime() error = %v, want auth mode none rejection", err)
+			}
+		})
+	}
+}
+
+func TestTCPAllowsNoneAuthentication(t *testing.T) {
+	for _, cfg := range []Config{protectedTestConfig(t), testPeerConfig(t)} {
+		if err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities()); err != nil {
+			t.Fatalf("ValidateForRuntime() rejected TCP auth mode none: %v", err)
+		}
+	}
+}
+
 func TestTransportModeCanonicalRoundTrip(t *testing.T) {
 	for _, mode := range []TransportMode{TransportModeTCP, TransportModeTailscale} {
 		data, err := json.Marshal(mode)
@@ -231,6 +309,7 @@ func TestTailscaleRuntimeActivationGate(t *testing.T) {
 				cfg.Transport = testTailscaleTransport(t)
 				cfg.Broker.Listen = ":8787"
 				cfg.Broker.StatusListen = "127.0.0.1:8788"
+				useTokenAuthentication(t, &cfg)
 				return cfg
 			},
 		},
@@ -416,6 +495,7 @@ func TestTailscaleBrokerListenValidation(t *testing.T) {
 	cfg.Transport = testTailscaleTransport(t)
 	cfg.Broker.Listen = ":8787"
 	cfg.Broker.StatusListen = "127.0.0.1:8788"
+	useTokenAuthentication(t, &cfg)
 	if err := cfg.ValidateForRuntime(tailscaleRuntimeCapabilities()); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
@@ -1252,7 +1332,19 @@ func testTailscalePeerConfig(t *testing.T) Config {
 	cfg := testPeerConfig(t)
 	cfg.Transport = testTailscaleTransport(t)
 	cfg.Broker.URL = "ws://broker.tailnet.test:8787/v1/connect"
+	cfg.Broker.Auth = AuthConfig{
+		Mode:      AuthModeToken,
+		TokenFile: filepath.Join(t.TempDir(), "peer.token"),
+	}
 	return cfg
+}
+
+func useTokenAuthentication(t *testing.T, cfg *Config) {
+	t.Helper()
+	cfg.Broker.Auth = AuthConfig{
+		Mode:      AuthModeToken,
+		TokenFile: filepath.Join(t.TempDir(), "broker.token"),
+	}
 }
 
 func TestReadRejectsOversizedProtectedConfig(t *testing.T) {

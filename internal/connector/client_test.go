@@ -1295,6 +1295,7 @@ func newBrokerFixture(
 		AuthMode:          authMode,
 		MasterToken:       master,
 		Registry:          registry,
+		Transport:         config.TransportStatus{Transport: "tcp"},
 		HeartbeatInterval: heartbeat,
 	})
 	if err != nil {

@@ -106,12 +106,16 @@ func ValidatePeerTailscaleAuthority(
 		return err
 	}
 	tailscaleState := namedPath{name: "Tailscale state directory", path: tailscaleStateDir}
+	tailscaleLease := tailscaleStateLease(tailscaleStateDir)
 	tailscaleAuthKey := namedPath{name: "Tailscale enrollment key", path: tailscaleAuthKeyPath}
 	for _, directory := range []namedPath{
 		{name: "worker CODEX_HOME", path: codexHome},
 		{name: "worker workspace root", path: workspaceRoot},
 	} {
 		if err := rejectMutualContainment(tailscaleState, directory); err != nil {
+			return err
+		}
+		if err := rejectMutualContainment(tailscaleLease, directory); err != nil {
 			return err
 		}
 		contained, err := pathWithin(tailscaleAuthKey.path, directory.path)
@@ -163,13 +167,70 @@ func ValidatePeerServiceEnvironment(
 	); err != nil {
 		return err
 	}
-	for _, authority := range peerAuthorityFiles(configPath, statePath, tokenPath) {
+	return validatePeerServiceEnvironment(
+		environmentPath,
+		peerAuthorityFiles(configPath, statePath, tokenPath),
+		codexHome,
+		workspaceRoot,
+		nil,
+	)
+}
+
+// ValidatePeerTailscaleServiceEnvironment extends peer service environment
+// authority validation to embedded Tailscale state, lease, and enrollment key
+// paths.
+func ValidatePeerTailscaleServiceEnvironment(
+	environmentPath, configPath, statePath, tokenPath, codexHome, workspaceRoot,
+	tailscaleStateDir, tailscaleAuthKeyPath string,
+) error {
+	if !filepath.IsAbs(environmentPath) {
+		return errors.New("peer service environment path must be absolute")
+	}
+	if err := ValidatePeerTailscaleAuthority(
+		configPath,
+		statePath,
+		tokenPath,
+		codexHome,
+		workspaceRoot,
+		tailscaleStateDir,
+		tailscaleAuthKeyPath,
+	); err != nil {
+		return err
+	}
+	authorities := append(
+		peerAuthorityFiles(configPath, statePath, tokenPath),
+		tailscaleStateLease(tailscaleStateDir),
+		namedPath{name: "Tailscale enrollment key", path: tailscaleAuthKeyPath},
+	)
+	tailscaleState := namedPath{name: "Tailscale state directory", path: tailscaleStateDir}
+	return validatePeerServiceEnvironment(
+		environmentPath,
+		authorities,
+		codexHome,
+		workspaceRoot,
+		[]namedPath{tailscaleState, tailscaleStateLease(tailscaleStateDir)},
+	)
+}
+
+func validatePeerServiceEnvironment(
+	environmentPath string,
+	authorities []namedPath,
+	codexHome, workspaceRoot string,
+	isolatedPaths []namedPath,
+) error {
+	environment := namedPath{name: "peer service environment", path: environmentPath}
+	for _, authority := range authorities {
 		conflicts, err := equivalent(environmentPath, authority.path)
 		if err != nil {
 			return err
 		}
 		if conflicts {
 			return fmt.Errorf("peer service environment path conflicts with %s", authority.name)
+		}
+	}
+	for _, isolated := range isolatedPaths {
+		if err := rejectMutualContainment(environment, isolated); err != nil {
+			return err
 		}
 	}
 	for _, directory := range []namedPath{
@@ -184,7 +245,7 @@ func ValidatePeerServiceEnvironment(
 			return fmt.Errorf("peer service environment must not be inside %s", directory.name)
 		}
 	}
-	if err := requireSingleLink(namedPath{name: "peer service environment", path: environmentPath}); err != nil {
+	if err := requireSingleLink(environment); err != nil {
 		return err
 	}
 	return nil
@@ -270,6 +331,7 @@ func validateTailscaleAuthority(
 	files []namedPath, tailscaleStateDir, tailscaleAuthKeyPath string,
 ) error {
 	tailscaleState := namedPath{name: "Tailscale state directory", path: tailscaleStateDir}
+	tailscaleLease := tailscaleStateLease(tailscaleStateDir)
 	tailscaleAuthKey := namedPath{name: "Tailscale enrollment key", path: tailscaleAuthKeyPath}
 	for _, file := range files {
 		conflicts, err := equivalent(tailscaleAuthKey.path, file.path)
@@ -280,13 +342,32 @@ func validateTailscaleAuthority(
 			return fmt.Errorf("%s path conflicts with %s", tailscaleAuthKey.name, file.name)
 		}
 	}
+	for _, file := range append(append([]namedPath{}, files...), tailscaleAuthKey) {
+		conflicts, err := equivalent(tailscaleLease.path, file.path)
+		if err != nil {
+			return err
+		}
+		if conflicts {
+			return fmt.Errorf("%s path conflicts with %s", tailscaleLease.name, file.name)
+		}
+	}
 	protectedFiles := append(append([]namedPath{}, files...), tailscaleAuthKey)
 	for _, file := range protectedFiles {
 		if err := rejectMutualContainment(tailscaleState, file); err != nil {
 			return err
 		}
+		if err := rejectMutualContainment(tailscaleLease, file); err != nil {
+			return err
+		}
 	}
 	return requireSingleLink(tailscaleAuthKey)
+}
+
+func tailscaleStateLease(stateDir string) namedPath {
+	return namedPath{
+		name: "Tailscale state directory lease",
+		path: stateDir + ".tailscale.lock",
+	}
 }
 
 func rejectMutualContainment(first, second namedPath) error {

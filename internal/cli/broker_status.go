@@ -90,6 +90,10 @@ func writeBrokerStatus(
 		var rendered bytes.Buffer
 		fmt.Fprintln(&rendered, "delegation broker status")
 		fmt.Fprintf(&rendered, "version: %s\n", status.Version)
+		fmt.Fprintf(&rendered, "transport: %s\n", status.Transport)
+		if status.TailscaleHostname != "" {
+			fmt.Fprintf(&rendered, "tailscale hostname: %s\n", status.TailscaleHostname)
+		}
 		fmt.Fprintf(&rendered, "uptime seconds: %d\n", status.UptimeSeconds)
 		fmt.Fprintln(&rendered, "devices:")
 		fmt.Fprintf(&rendered, "  registered: %d\n", status.Devices.Registered)

@@ -150,31 +150,24 @@ func validateWindowsStateObject(path string, directory bool) error {
 	if err != nil {
 		return err
 	}
-	if dacl == nil || dacl.AceCount != 1 {
-		return errors.New("DACL must grant access only to the current user")
-	}
-	var ace *windows.ACCESS_ALLOWED_ACE
-	if err := windows.GetAce(dacl, 0, &ace); err != nil {
-		return err
-	}
-	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
-		return errors.New("DACL must contain one allow entry")
-	}
 	if directory {
-		inheritance := uint8(windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE)
-		if ace.Header.AceFlags&inheritance != inheritance || ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
-			return errors.New("directory DACL must propagate one non-inherited entry")
+		sid, err := currentWindowsUserSID()
+		if err != nil {
+			return err
+		}
+		if err := validateWindowsStateDirectoryDACL(dacl, sid); err != nil {
+			return err
+		}
+	} else {
+		if err := validateWindowsStateFileDACL(dacl); err != nil {
+			return err
 		}
 	}
-	sid, err := currentWindowsUserSID()
+	owner, _, err := descriptor.Owner()
 	if err != nil {
 		return err
 	}
-	aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-	if !aceSID.Equals(sid) {
-		return errors.New("DACL must grant access only to the current user")
-	}
-	owner, _, err := descriptor.Owner()
+	sid, err := currentWindowsUserSID()
 	if err != nil {
 		return err
 	}
@@ -182,6 +175,115 @@ func validateWindowsStateObject(path string, directory bool) error {
 	// under the protected current-user-only DACL. Open normalizes that owner.
 	if owner == nil || (!owner.Equals(sid) && (directory || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid))) {
 		return errors.New("path must be owned by the current user or local Administrators")
+	}
+	return nil
+}
+
+type stateDirectoryACEExpectation struct {
+	flags uint8
+}
+
+const windowsFileAllAccess windows.ACCESS_MASK = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
+
+func validateWindowsStateDirectoryDACL(dacl *windows.ACL, current *windows.SID) error {
+	combined := []stateDirectoryACEExpectation{{
+		flags: windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE,
+	}}
+	split := []stateDirectoryACEExpectation{
+		{},
+		{
+			flags: windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE | windows.INHERIT_ONLY_ACE,
+		},
+	}
+	reversedSplit := []stateDirectoryACEExpectation{split[1], split[0]}
+	for _, expected := range [][]stateDirectoryACEExpectation{combined, split, reversedSplit} {
+		matches, err := windowsStateDirectoryDACLMatches(dacl, current, expected)
+		if err != nil {
+			return err
+		}
+		if matches {
+			return nil
+		}
+	}
+	return errors.New("directory DACL must be a canonical current-user-only ACL")
+}
+
+func windowsStateDirectoryDACLMatches(
+	dacl *windows.ACL,
+	current *windows.SID,
+	expected []stateDirectoryACEExpectation,
+) (bool, error) {
+	if dacl == nil || int(dacl.AceCount) != len(expected) {
+		return false, nil
+	}
+	for index, want := range expected {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return false, err
+		}
+		if ace == nil ||
+			ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			ace.Header.AceFlags != want.flags ||
+			!isWindowsStateFullAccess(ace.Mask) {
+			return false, nil
+		}
+		aceSID, valid := windowsStateACESID(ace)
+		if !valid || !aceSID.Equals(current) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func isWindowsStateFullAccess(mask windows.ACCESS_MASK) bool {
+	return mask == windows.GENERIC_ALL || mask == windowsFileAllAccess
+}
+
+type stateSIDHeader struct {
+	revision          uint8
+	subAuthorityCount uint8
+	authority         [6]byte
+}
+
+func windowsStateACESID(ace *windows.ACCESS_ALLOWED_ACE) (*windows.SID, bool) {
+	if ace == nil {
+		return nil, false
+	}
+	sidOffset := unsafe.Offsetof(windows.ACCESS_ALLOWED_ACE{}.SidStart)
+	headerSize := unsafe.Sizeof(stateSIDHeader{})
+	if uintptr(ace.Header.AceSize) < sidOffset+headerSize {
+		return nil, false
+	}
+	header := (*stateSIDHeader)(unsafe.Pointer(&ace.SidStart))
+	sidSize := headerSize + uintptr(header.subAuthorityCount)*4
+	if sidOffset+sidSize > uintptr(ace.Header.AceSize) {
+		return nil, false
+	}
+	sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+	if !sid.IsValid() || uintptr(sid.Len()) != sidSize {
+		return nil, false
+	}
+	return sid, true
+}
+
+func validateWindowsStateFileDACL(dacl *windows.ACL) error {
+	if dacl == nil || dacl.AceCount != 1 {
+		return errors.New("DACL must grant access only to the current user")
+	}
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(dacl, 0, &ace); err != nil {
+		return err
+	}
+	if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+		return errors.New("DACL must contain one allow entry")
+	}
+	sid, err := currentWindowsUserSID()
+	if err != nil {
+		return err
+	}
+	aceSID, valid := windowsStateACESID(ace)
+	if !valid || !aceSID.Equals(sid) {
+		return errors.New("DACL must grant access only to the current user")
 	}
 	return nil
 }

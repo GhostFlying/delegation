@@ -96,6 +96,7 @@ func TestPeerLocalStatusProviderCombinesLiveAndDurableState(t *testing.T) {
 			Connected: true, RegistryRevision: 42, WorkerRevision: 77,
 		}},
 		state:          staticPeerStatusStore{status: durable},
+		transport:      delegationconfig.TransportStatus{Transport: "tcp"},
 		controllerID:   statusTestControllerID,
 		deviceID:       statusTestDeviceID,
 		deviceName:     "status-peer",
@@ -107,6 +108,7 @@ func TestPeerLocalStatusProviderCombinesLiveAndDurableState(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := localbridge.StatusSnapshot{
+		TransportStatus:      delegationconfig.TransportStatus{Transport: "tcp"},
 		Version:              buildinfo.Version,
 		ControllerID:         statusTestControllerID,
 		DeviceID:             statusTestDeviceID,
@@ -210,6 +212,7 @@ func TestStatusCommandRendersStablePeerOutput(t *testing.T) {
 			args: []string{"status", "--config", configPath},
 			want: `delegation peer status
 version: 0.2.0-test
+transport: tcp
 device: status-peer
 service running: true
 broker connection: ready
@@ -255,7 +258,7 @@ results:
 		{
 			name: "JSON",
 			args: []string{"status", "--config", configPath, "--json"},
-			want: `{"version":"0.2.0-test","controllerId":"123e4567-e89b-42d3-a456-426614174800","deviceId":"123e4567-e89b-42d3-a456-426614174801","deviceName":"status-peer","serviceRunning":true,"connectionState":"ready","connectionErrorCode":"","connected":true,"registryRevision":42,"workerRevision":77,"brokerWorkerRevision":77,"recoveryPeerWorkerRevision":0,"workerSyncReady":true,"maxWorkerSlots":8,"workers":{"total":10,"reserved":1,"pending":1,"starting":1,"preflight":1,"ready":1,"running":1,"finalizing":1,"idle":1,"interrupted":1,"failed":1,"occupied":6},"artifacts":{"capturePending":2,"publishPending":3,"retained":4,"retainedBytes":8192},"results":{"outboxCapturePending":1,"outboxPublishPending":2,"outboxDeliveryPending":3,"outboxDelivered":4,"outboxReleasePending":5,"outboxRetainedBytes":16384,"inboxReceiving":5,"inboxAvailable":6,"inboxEvictionPending":7,"inboxEvicted":8,"inboxRetainedBytes":32768,"rolloutCaptureFailed":2,"workspaceCaptureFailed":1}}` + "\n",
+			want: `{"transport":"tcp","version":"0.2.0-test","controllerId":"123e4567-e89b-42d3-a456-426614174800","deviceId":"123e4567-e89b-42d3-a456-426614174801","deviceName":"status-peer","serviceRunning":true,"connectionState":"ready","connectionErrorCode":"","connected":true,"registryRevision":42,"workerRevision":77,"brokerWorkerRevision":77,"recoveryPeerWorkerRevision":0,"workerSyncReady":true,"maxWorkerSlots":8,"workers":{"total":10,"reserved":1,"pending":1,"starting":1,"preflight":1,"ready":1,"running":1,"finalizing":1,"idle":1,"interrupted":1,"failed":1,"occupied":6},"artifacts":{"capturePending":2,"publishPending":3,"retained":4,"retainedBytes":8192},"results":{"outboxCapturePending":1,"outboxPublishPending":2,"outboxDeliveryPending":3,"outboxDelivered":4,"outboxReleasePending":5,"outboxRetainedBytes":16384,"inboxReceiving":5,"inboxAvailable":6,"inboxEvictionPending":7,"inboxEvicted":8,"inboxRetainedBytes":32768,"rolloutCaptureFailed":2,"workspaceCaptureFailed":1}}` + "\n",
 		},
 	}
 	for _, test := range tests {
@@ -307,6 +310,18 @@ func TestStatusCommandReturnsBoundedRoleAndPeerErrors(t *testing.T) {
 			read: func(context.Context, string) (localbridge.StatusSnapshot, error) {
 				status := statusTestSnapshot(peerCfg)
 				status.DeviceID = statusTestOtherID
+				return status, nil
+			},
+			wantCode: exitUnavailable, wantErr: peerStatusUnavailableError,
+		},
+		{
+			name: "peer transport mismatch", config: peerConfig,
+			read: func(context.Context, string) (localbridge.StatusSnapshot, error) {
+				status := statusTestSnapshot(peerCfg)
+				status.TransportStatus = delegationconfig.TransportStatus{
+					Transport:         "tailscale",
+					TailscaleHostname: "other-peer",
+				}
 				return status, nil
 			},
 			wantCode: exitUnavailable, wantErr: peerStatusUnavailableError,
@@ -405,6 +420,7 @@ func writeStatusTestConfig(
 
 func statusTestSnapshot(cfg delegationconfig.Config) localbridge.StatusSnapshot {
 	return localbridge.StatusSnapshot{
+		TransportStatus:      delegationconfig.TransportStatus{Transport: "tcp"},
 		Version:              "0.2.0-test",
 		ControllerID:         cfg.ControllerID,
 		DeviceID:             cfg.DeviceID,

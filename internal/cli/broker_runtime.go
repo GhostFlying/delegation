@@ -15,6 +15,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/tailscaleauth"
 	"github.com/GhostFlying/delegation/internal/tailscaleruntime"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
@@ -157,6 +158,7 @@ func runBrokerService(
 		ControllerID: cfg.ControllerID,
 		InstanceID:   cfg.EffectiveInstanceID(),
 		HostKind:     cfg.EffectiveHostKind(),
+		Transport:    cfg.Transport.Status(),
 		AuthMode:     cfg.Broker.Auth.Mode,
 		MasterToken:  masterToken,
 		Registry:     resources.registry,
@@ -256,10 +258,35 @@ func loadBrokerAuthority(
 	if cfg.Role != delegationconfig.RoleBroker {
 		return nil, errors.New("broker runtime requires a broker configuration")
 	}
-	if err := pathguard.ValidateBrokerAuthority(
-		configPath, cfg.Broker.StateFile, cfg.Broker.Auth.TokenFile,
-	); err != nil {
-		return nil, err
+	var authorityErr error
+	if cfg.Transport.Mode == delegationconfig.TransportModeTailscale {
+		tailscaleConfig := cfg.Transport.Tailscale
+		if tailscaleConfig == nil {
+			return nil, errors.New("broker tailscale configuration is required")
+		}
+		authorityErr = pathguard.ValidateBrokerTailscaleAuthority(
+			configPath,
+			cfg.Broker.StateFile,
+			cfg.Broker.Auth.TokenFile,
+			tailscaleConfig.StateDir,
+			tailscaleConfig.AuthKeyFile,
+		)
+	} else {
+		authorityErr = pathguard.ValidateBrokerAuthority(
+			configPath, cfg.Broker.StateFile, cfg.Broker.Auth.TokenFile,
+		)
+	}
+	if authorityErr != nil {
+		return nil, authorityErr
+	}
+	if cfg.Transport.Mode == delegationconfig.TransportModeTailscale {
+		tailscaleConfig := cfg.Transport.Tailscale
+		if err := store.ValidateTailscaleStateDir(tailscaleConfig.StateDir); err != nil {
+			return nil, err
+		}
+		if _, err := tailscaleauth.Read(tailscaleConfig.AuthKeyFile); err != nil {
+			return nil, err
+		}
 	}
 	if err := store.ValidatePath(cfg.Broker.StateFile); err != nil {
 		return nil, err

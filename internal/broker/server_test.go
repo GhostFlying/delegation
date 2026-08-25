@@ -939,6 +939,7 @@ func newBrokerHarnessForInstance(
 	server, err := New(Options{
 		ControllerID:      brokerTestControllerID,
 		InstanceID:        instanceID,
+		Transport:         config.TransportStatus{Transport: "tcp"},
 		AuthMode:          authMode,
 		MasterToken:       master,
 		Registry:          registry,

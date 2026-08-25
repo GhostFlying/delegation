@@ -251,6 +251,22 @@ func validatePeerServiceEnvironmentPath(
 	if cfg.Role != delegationconfig.RolePeer {
 		return errors.New("peer service environment requires a peer configuration")
 	}
+	if cfg.Transport.Mode == delegationconfig.TransportModeTailscale {
+		tailscaleConfig := cfg.Transport.Tailscale
+		if tailscaleConfig == nil {
+			return errors.New("peer tailscale configuration is required")
+		}
+		return pathguard.ValidatePeerTailscaleServiceEnvironment(
+			environmentPath,
+			configPath,
+			cfg.Peer.StateFile,
+			cfg.Broker.Auth.TokenFile,
+			cfg.Peer.CodexHome,
+			cfg.Peer.WorkspaceRoot,
+			tailscaleConfig.StateDir,
+			tailscaleConfig.AuthKeyFile,
+		)
+	}
 	return pathguard.ValidatePeerServiceEnvironment(
 		environmentPath,
 		configPath,

@@ -3,8 +3,11 @@ package statuspage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/GhostFlying/delegation/internal/config"
 )
 
 const maximumTextBytes = 256
@@ -12,9 +15,10 @@ const maximumTextBytes = 256
 // Provider returns one internally consistent broker status snapshot.
 type Provider func(context.Context) (Snapshot, error)
 
-// Snapshot is the aggregate, transport-neutral broker status presented by the
-// status endpoints. It intentionally contains no per-device or per-task data.
+// Snapshot is the aggregate broker status presented by the status endpoints.
+// It intentionally contains no credentials, local paths, or per-device data.
 type Snapshot struct {
+	config.TransportStatus
 	Version       string         `json:"version,omitempty"`
 	UptimeSeconds uint64         `json:"uptimeSeconds"`
 	ControllerID  string         `json:"controllerId,omitempty"`
@@ -65,6 +69,9 @@ type ResultCounts struct {
 
 // Validate checks that a snapshot is safe for bounded status presentation.
 func (s Snapshot) Validate() error {
+	if err := s.TransportStatus.Validate(); err != nil {
+		return fmt.Errorf("transport status: %w", err)
+	}
 	if !validOptionalText(s.Version) {
 		return errors.New("version is not bounded display text")
 	}

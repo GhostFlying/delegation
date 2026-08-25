@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
+	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
 )
@@ -57,6 +58,7 @@ func TestStatusCombinesDurableStateWithLiveSynchronizedConnections(t *testing.T)
 	syncing.revision.Store(2)
 	server := &Server{
 		controllerID: brokerTestControllerID,
+		transport:    config.TransportStatus{Transport: "tcp"},
 		statusReader: reader,
 		connections:  map[string]*session{readyDevice: ready, syncingDevice: syncing},
 		latestRevisions: map[string]uint64{
@@ -72,7 +74,8 @@ func TestStatusCombinesDurableStateWithLiveSynchronizedConnections(t *testing.T)
 		t.Fatal(err)
 	}
 	want := statuspage.Snapshot{
-		Version: buildinfo.Version, UptimeSeconds: 123, ControllerID: brokerTestControllerID,
+		TransportStatus: config.TransportStatus{Transport: "tcp"},
+		Version:         buildinfo.Version, UptimeSeconds: 123, ControllerID: brokerTestControllerID,
 		Devices:      statuspage.DeviceCounts{Registered: 3, Online: 2, Connected: 2, SyncReady: 1},
 		Dispatch:     statuspage.DispatchCounts{Pending: 5, Started: 6, Failed: 7, LifetimeStarted: 16},
 		RunningTurns: 8, OccupiedSlots: 9, LifetimeTurns: 17, Trees: 4,
@@ -100,6 +103,7 @@ func TestStatusAllowsConnectedSessionAfterDurableCredentialRevocation(t *testing
 	connected.workerReady.Store(true)
 	server := &Server{
 		controllerID: brokerTestControllerID,
+		transport:    config.TransportStatus{Transport: "tcp"},
 		statusReader: reader,
 		connections:  map[string]*session{deviceID: connected},
 		latestRevisions: map[string]uint64{
@@ -123,7 +127,7 @@ func TestStatusAllowsConnectedSessionAfterDurableCredentialRevocation(t *testing
 }
 
 func TestStatusFailsClosedWithoutDurableSnapshot(t *testing.T) {
-	server := &Server{}
+	server := &Server{transport: config.TransportStatus{Transport: "tcp"}}
 	if _, err := server.Status(context.Background()); err == nil {
 		t.Fatal("Status() succeeded without a status reader")
 	}
@@ -140,6 +144,7 @@ func TestStatusRetriesConnectionChurnAndStopsAtBound(t *testing.T) {
 	reader := &observedStatusReader{}
 	server := &Server{
 		controllerID:    brokerTestControllerID,
+		transport:       config.TransportStatus{Transport: "tcp"},
 		statusReader:    reader,
 		connections:     map[string]*session{},
 		latestRevisions: map[string]uint64{},

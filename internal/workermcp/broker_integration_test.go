@@ -323,6 +323,7 @@ func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 		ControllerID:      controllerID,
 		AuthMode:          config.AuthModeNone,
 		Registry:          registry,
+		Transport:         config.TransportStatus{Transport: "tcp"},
 		HeartbeatInterval: time.Hour,
 	})
 	if err != nil {

@@ -56,9 +56,10 @@ func (s *Server) buildStatusSnapshot(
 		uptime = 0
 	}
 	snapshot := statuspage.Snapshot{
-		Version:       buildinfo.Version,
-		UptimeSeconds: uint64(uptime / time.Second),
-		ControllerID:  s.controllerID,
+		TransportStatus: s.transport,
+		Version:         buildinfo.Version,
+		UptimeSeconds:   uint64(uptime / time.Second),
+		ControllerID:    s.controllerID,
 		Devices: statuspage.DeviceCounts{
 			Registered: uint64(durable.Devices.Total),
 			Online:     uint64(durable.Devices.Online),

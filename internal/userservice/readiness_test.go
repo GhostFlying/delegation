@@ -274,6 +274,10 @@ func TestTailscaleBrokerReadinessUsesOnlyNativeStatusListener(t *testing.T) {
 	}
 
 	snapshot := statuspage.Snapshot{
+		TransportStatus: delegationconfig.TransportStatus{
+			Transport:         "tailscale",
+			TailscaleHostname: "alpha-broker",
+		},
 		Version:      "0.2.0-test",
 		ControllerID: readinessControllerID,
 		InstanceID:   "alpha",
@@ -294,6 +298,9 @@ func TestTailscaleBrokerReadinessUsesOnlyNativeStatusListener(t *testing.T) {
 		ControllerID: readinessControllerID,
 		Transport: delegationconfig.TransportConfig{
 			Mode: delegationconfig.TransportModeTailscale,
+			Tailscale: &delegationconfig.TailscaleConfig{
+				Hostname: "alpha-broker",
+			},
 		},
 		Broker: delegationconfig.BrokerConfig{
 			Listen:       ":" + primaryPort,

@@ -105,26 +105,12 @@ func validateTokenDirectoryHandle(handle windows.Handle) error {
 	if err != nil {
 		return fmt.Errorf("read token directory DACL: %w", err)
 	}
-	if dacl == nil || dacl.AceCount != 1 {
-		return errors.New("token directory DACL must grant access only to the current user")
-	}
-	var ace *windows.ACCESS_ALLOWED_ACE
-	if err := windows.GetAce(dacl, 0, &ace); err != nil {
-		return fmt.Errorf("read token directory DACL entry: %w", err)
-	}
-	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
-		ace.Header.AceFlags&windows.INHERITED_ACE != 0 ||
-		ace.Header.AceFlags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE) !=
-			windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE {
-		return errors.New("token directory DACL must contain one inheritable allow entry")
-	}
 	sid, err := currentUserSID()
 	if err != nil {
 		return err
 	}
-	aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-	if !aceSID.Equals(sid) {
-		return errors.New("token directory DACL must grant access only to the current user")
+	if err := validateTokenDirectoryDACL(dacl, sid); err != nil {
+		return err
 	}
 	owner, _, err := descriptor.Owner()
 	if err != nil {
@@ -134,6 +120,93 @@ func validateTokenDirectoryHandle(handle windows.Handle) error {
 		return errors.New("token directory must be owned by the current user")
 	}
 	return nil
+}
+
+type tokenDirectoryACEExpectation struct {
+	flags uint8
+}
+
+const tokenFileAllAccess windows.ACCESS_MASK = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
+
+func validateTokenDirectoryDACL(dacl *windows.ACL, current *windows.SID) error {
+	combined := []tokenDirectoryACEExpectation{{
+		flags: windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE,
+	}}
+	split := []tokenDirectoryACEExpectation{
+		{},
+		{
+			flags: windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE | windows.INHERIT_ONLY_ACE,
+		},
+	}
+	reversedSplit := []tokenDirectoryACEExpectation{split[1], split[0]}
+	for _, expected := range [][]tokenDirectoryACEExpectation{combined, split, reversedSplit} {
+		matches, err := tokenDirectoryDACLMatches(dacl, current, expected)
+		if err != nil {
+			return fmt.Errorf("read token directory DACL entry: %w", err)
+		}
+		if matches {
+			return nil
+		}
+	}
+	return errors.New("token directory DACL must be a canonical current-user-only ACL")
+}
+
+func tokenDirectoryDACLMatches(
+	dacl *windows.ACL,
+	current *windows.SID,
+	expected []tokenDirectoryACEExpectation,
+) (bool, error) {
+	if dacl == nil || int(dacl.AceCount) != len(expected) {
+		return false, nil
+	}
+	for index, want := range expected {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return false, err
+		}
+		if ace == nil ||
+			ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			ace.Header.AceFlags != want.flags ||
+			!isTokenDirectoryFullAccess(ace.Mask) {
+			return false, nil
+		}
+		aceSID, valid := tokenDirectoryACESID(ace)
+		if !valid || !aceSID.Equals(current) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func isTokenDirectoryFullAccess(mask windows.ACCESS_MASK) bool {
+	return mask == windows.GENERIC_ALL || mask == tokenFileAllAccess
+}
+
+type tokenSIDHeader struct {
+	revision          uint8
+	subAuthorityCount uint8
+	authority         [6]byte
+}
+
+func tokenDirectoryACESID(ace *windows.ACCESS_ALLOWED_ACE) (*windows.SID, bool) {
+	if ace == nil {
+		return nil, false
+	}
+	sidOffset := unsafe.Offsetof(windows.ACCESS_ALLOWED_ACE{}.SidStart)
+	headerSize := unsafe.Sizeof(tokenSIDHeader{})
+	if uintptr(ace.Header.AceSize) < sidOffset+headerSize {
+		return nil, false
+	}
+	header := (*tokenSIDHeader)(unsafe.Pointer(&ace.SidStart))
+	sidSize := headerSize + uintptr(header.subAuthorityCount)*4
+	if sidOffset+sidSize > uintptr(ace.Header.AceSize) {
+		return nil, false
+	}
+	sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+	if !sid.IsValid() || uintptr(sid.Len()) != sidSize {
+		return nil, false
+	}
+	return sid, true
 }
 
 func validateLocalTokenVolume(path string) error {

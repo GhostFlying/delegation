@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/GhostFlying/delegation/internal/config"
 )
 
 const (
@@ -43,6 +45,7 @@ const statusDocument = `<!doctype html>
 <main>
 <h1>Delegation broker</h1>
 <p class="meta">{{if .Version}}Version {{.Version}} | {{end}}Uptime {{.Uptime}}</p>
+<p class="meta">Transport {{.Transport}}{{if .TailscaleHostname}} | Tailscale hostname {{.TailscaleHostname}}{{end}}</p>
 <table>
 <caption>Broker operational status</caption>
 <thead><tr><th scope="col">Metric</th><th scope="col">Count</th></tr></thead>
@@ -93,6 +96,7 @@ type handler struct {
 }
 
 type pageData struct {
+	config.TransportStatus
 	Version       string
 	Uptime        string
 	Devices       DeviceCounts
@@ -182,16 +186,17 @@ func loopbackRequestHost(authority string) bool {
 
 func renderHTML(snapshot Snapshot) ([]byte, error) {
 	data := pageData{
-		Version:       snapshot.Version,
-		Uptime:        formatUptime(snapshot.UptimeSeconds),
-		Devices:       snapshot.Devices,
-		Dispatch:      snapshot.Dispatch,
-		RunningTurns:  snapshot.RunningTurns,
-		OccupiedSlots: snapshot.OccupiedSlots,
-		LifetimeTurns: snapshot.LifetimeTurns,
-		Trees:         snapshot.Trees,
-		Artifacts:     snapshot.Artifacts,
-		Results:       snapshot.Results,
+		TransportStatus: snapshot.TransportStatus,
+		Version:         snapshot.Version,
+		Uptime:          formatUptime(snapshot.UptimeSeconds),
+		Devices:         snapshot.Devices,
+		Dispatch:        snapshot.Dispatch,
+		RunningTurns:    snapshot.RunningTurns,
+		OccupiedSlots:   snapshot.OccupiedSlots,
+		LifetimeTurns:   snapshot.LifetimeTurns,
+		Trees:           snapshot.Trees,
+		Artifacts:       snapshot.Artifacts,
+		Results:         snapshot.Results,
 	}
 	var body bytes.Buffer
 	if err := statusTemplate.Execute(&body, data); err != nil {
