@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/broker"
@@ -37,6 +38,124 @@ func (*readinessBackend) Call(
 	any,
 ) error {
 	return errors.New("unexpected readiness backend call")
+}
+
+func TestServiceReadinessTimeoutFollowsTransport(t *testing.T) {
+	for _, role := range []delegationconfig.Role{
+		delegationconfig.RoleBroker,
+		delegationconfig.RolePeer,
+	} {
+		for _, test := range []struct {
+			name string
+			mode delegationconfig.TransportMode
+			want time.Duration
+		}{
+			{name: "tcp", mode: delegationconfig.TransportModeTCP, want: serviceReadinessTimeout},
+			{
+				name: "tailscale", mode: delegationconfig.TransportModeTailscale,
+				want: tailscaleServiceReadinessTimeout,
+			},
+		} {
+			t.Run(string(role)+"/"+test.name, func(t *testing.T) {
+				cfg := delegationconfig.Config{
+					Role: role,
+					Transport: delegationconfig.TransportConfig{
+						Mode: test.mode,
+					},
+				}
+				if got := serviceReadinessTimeoutFor(cfg); got != test.want {
+					t.Fatalf("serviceReadinessTimeoutFor() = %s, want %s", got, test.want)
+				}
+			})
+		}
+	}
+}
+
+func TestTailscaleServiceReadinessCanSucceedAfterLegacyDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		attempts := 0
+		cfg := delegationconfig.Config{
+			Transport: delegationconfig.TransportConfig{
+				Mode: delegationconfig.TransportModeTailscale,
+			},
+		}
+		err := waitForServiceReadyConfig(
+			t.Context(),
+			cfg,
+			func(context.Context, delegationconfig.Config) error {
+				attempts++
+				if time.Since(start) <= serviceReadinessTimeout {
+					return errors.New("embedded Tailscale is still starting")
+				}
+				return nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		elapsed := time.Since(start)
+		if elapsed <= serviceReadinessTimeout || elapsed >= tailscaleServiceReadinessTimeout {
+			t.Fatalf(
+				"readiness completed after %s, want between %s and %s",
+				elapsed,
+				serviceReadinessTimeout,
+				tailscaleServiceReadinessTimeout,
+			)
+		}
+		if attempts < serviceReadinessConfirmations+1 {
+			t.Fatalf(
+				"readiness attempts = %d, want delayed failures and %d confirmations",
+				attempts,
+				serviceReadinessConfirmations,
+			)
+		}
+	})
+}
+
+func TestServiceReadinessTimeoutReturnsLastProbeError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		probeErr := errors.New("service endpoint is unavailable")
+		err := waitForServiceReadyConfig(
+			t.Context(),
+			delegationconfig.Config{},
+			func(context.Context, delegationconfig.Config) error {
+				return probeErr
+			},
+		)
+		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, probeErr) {
+			t.Fatalf(
+				"waitForServiceReadyConfig() error = %v, want deadline and last probe error",
+				err,
+			)
+		}
+		if elapsed := time.Since(start); elapsed != serviceReadinessTimeout {
+			t.Fatalf("readiness elapsed = %s, want %s", elapsed, serviceReadinessTimeout)
+		}
+	})
+}
+
+func TestServiceReadinessRequiresConsecutiveConfirmations(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		results := []error{nil, errors.New("service restarted"), nil, nil}
+		attempts := 0
+		err := waitForServiceReadyConfig(
+			t.Context(),
+			delegationconfig.Config{},
+			func(context.Context, delegationconfig.Config) error {
+				result := results[attempts]
+				attempts++
+				return result
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempts != len(results) {
+			t.Fatalf("readiness attempts = %d, want %d", attempts, len(results))
+		}
+	})
 }
 
 func TestConnectorReadinessRejectsWrongBridgeIdentity(t *testing.T) {
