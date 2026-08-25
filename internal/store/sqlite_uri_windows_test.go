@@ -31,6 +31,12 @@ func TestValidatePathRejectsWindowsNetworkPath(t *testing.T) {
 	}
 }
 
+func TestValidateTailscaleStateDirRejectsWindowsNetworkPath(t *testing.T) {
+	if err := ValidateTailscaleStateDir(`\\server\share\delegation\tailscale`); err == nil {
+		t.Fatal("ValidateTailscaleStateDir accepted a Windows network path")
+	}
+}
+
 func TestWindowsDriveTypeRejectsMappedNetworkDrive(t *testing.T) {
 	if err := validateWindowsDriveType(windows.DRIVE_REMOTE); err == nil {
 		t.Fatal("validateWindowsDriveType accepted a mapped network drive")
