@@ -162,6 +162,13 @@ func makePromotionFixture(t *testing.T, addSourceChange bool) promotionFixture {
 	if err := os.WriteFile(filepath.Join(repoRoot, "README.md"), []byte("release fixture\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(
+		filepath.Join(repoRoot, releaseNoticeName),
+		testReleaseNotice(t),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
 	runGitTest(t, repoRoot, "init", "-b", "main")
 	runGitTest(t, repoRoot, "add", ".")
 	runGitTest(t, repoRoot, "-c", "user.name=Release Test", "-c", "user.email=release-test@example.invalid", "commit", "-m", "candidate source")
@@ -175,6 +182,7 @@ func makePromotionFixture(t *testing.T, addSourceChange bool) promotionFixture {
 		candidate.sourceCommit,
 		candidate.workflowRunID,
 		candidate.candidateName,
+		testReleaseNotice(t),
 	); err != nil {
 		t.Fatal(err)
 	}

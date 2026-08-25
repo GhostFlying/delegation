@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -37,6 +39,7 @@ var (
 	runIDPattern           = regexp.MustCompile(`^[1-9][0-9]*$`)
 	notarizationIDPattern  = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
 	lowercaseDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	canonicalGzipHeader    = [...]byte{0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff}
 )
 
 type signatureEvidence struct {
@@ -182,7 +185,16 @@ func writeEvidence(path string, t target, notarizationRequestID string) error {
 	return nil
 }
 
-func assembleCandidate(input, output, repository, version, sourceCommit, workflowRunID, candidateName string) error {
+func assembleCandidate(
+	input,
+	output,
+	repository,
+	version,
+	sourceCommit,
+	workflowRunID,
+	candidateName string,
+	notice []byte,
+) error {
 	if err := validateCandidateIdentity(repository, sourceCommit, workflowRunID, candidateName); err != nil {
 		return err
 	}
@@ -222,7 +234,7 @@ func assembleCandidate(input, output, repository, version, sourceCommit, workflo
 		if err != nil {
 			return err
 		}
-		if err := verifyRuntimeArchive(filepath.Join(staging, archiveName), t); err != nil {
+		if err := verifyRuntimeArchive(filepath.Join(staging, archiveName), t, notice); err != nil {
 			return fmt.Errorf("verify %s: %w", archiveName, err)
 		}
 		evidenceName := t.evidenceName()
@@ -285,7 +297,7 @@ func assembleCandidate(input, output, repository, version, sourceCommit, workflo
 		SourceCommit:  sourceCommit,
 		WorkflowRunID: workflowRunID,
 		CandidateName: candidateName,
-	}); err != nil {
+	}, notice); err != nil {
 		return fmt.Errorf("verify assembled candidate: %w", err)
 	}
 	if err := commitReleaseDirectory(staging, output); err != nil {
@@ -294,7 +306,7 @@ func assembleCandidate(input, output, repository, version, sourceCommit, workflo
 	return nil
 }
 
-func verifyCandidate(root string, expected candidateExpectations) (candidateDescriptor, error) {
+func verifyCandidate(root string, expected candidateExpectations, notice []byte) (candidateDescriptor, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return candidateDescriptor{}, fmt.Errorf("resolve candidate directory: %w", err)
@@ -357,7 +369,7 @@ func verifyCandidate(root string, expected candidateExpectations) (candidateDesc
 		if archiveEntry.SizeBytes != artifact.SizeBytes || archiveEntry.SHA256 != artifact.SHA256 {
 			return candidateDescriptor{}, fmt.Errorf("candidate archive %s does not match its descriptor", archiveName)
 		}
-		if err := verifyRuntimeArchive(filepath.Join(root, archiveName), t); err != nil {
+		if err := verifyRuntimeArchive(filepath.Join(root, archiveName), t, notice); err != nil {
 			return candidateDescriptor{}, fmt.Errorf("verify %s: %w", archiveName, err)
 		}
 		evidenceName := t.evidenceName()
@@ -598,54 +610,177 @@ func verifyChecksumManifest(path string, checksums map[string]string) error {
 	return nil
 }
 
-func verifyRuntimeArchive(path string, t target) error {
+func verifyRelease(repoRoot, releaseRoot string) error {
+	repoRoot, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return fmt.Errorf("resolve repository root: %w", err)
+	}
+	releaseRoot, err = filepath.Abs(releaseRoot)
+	if err != nil {
+		return fmt.Errorf("resolve release directory: %w", err)
+	}
+	version, err := readVersion(repoRoot)
+	if err != nil {
+		return err
+	}
+	notice, err := readReleaseNotice(repoRoot)
+	if err != nil {
+		return err
+	}
+	expectedNames := make(map[string]struct{}, len(releaseTargets)+1)
+	expectedNames[candidateManifestName] = struct{}{}
+	for _, target := range releaseTargets {
+		expectedNames[target.archiveName(version)] = struct{}{}
+	}
+	if err := requireExactRegularFiles(releaseRoot, expectedNames); err != nil {
+		return err
+	}
+	checksums := make(map[string]string, len(releaseTargets))
+	for _, target := range releaseTargets {
+		archiveName := target.archiveName(version)
+		archivePath := filepath.Join(releaseRoot, archiveName)
+		if err := verifyRuntimeArchive(archivePath, target, notice); err != nil {
+			return fmt.Errorf("verify %s: %w", archiveName, err)
+		}
+		digest, err := fileSHA256(archivePath)
+		if err != nil {
+			return fmt.Errorf("hash %s: %w", archiveName, err)
+		}
+		checksums[archiveName] = digest
+	}
+	if err := verifyChecksumManifest(
+		filepath.Join(releaseRoot, candidateManifestName),
+		checksums,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyRuntimeArchive(path string, t target, notice []byte) error {
 	if t.archive == "zip" {
 		reader, err := zip.OpenReader(path)
 		if err != nil {
 			return err
 		}
 		defer reader.Close()
-		if len(reader.File) != 1 {
-			return fmt.Errorf("zip contains %d entries, want 1", len(reader.File))
+		if len(reader.File) != 2 {
+			return fmt.Errorf("zip contains %d entries, want 2", len(reader.File))
 		}
-		entry := reader.File[0]
-		if entry.Name != t.binaryName() || !entry.Mode().IsRegular() || entry.Mode().Perm() != 0o755 ||
-			entry.UncompressedSize64 == 0 || entry.UncompressedSize64 > maxArchiveSize {
+		if reader.Comment != "" {
+			return errors.New("zip archive comment is not canonical")
+		}
+		binaryEntry := reader.File[0]
+		if binaryEntry.Name != t.binaryName() || !binaryEntry.Mode().IsRegular() ||
+			binaryEntry.Mode() != 0o755 || binaryEntry.UncompressedSize64 == 0 ||
+			binaryEntry.UncompressedSize64 > maxArchiveSize || !zipMetadataIsFixed(binaryEntry, 0o755) {
 			return errors.New("zip does not contain the expected executable")
 		}
-		opened, err := entry.Open()
-		if err != nil {
+		noticeEntry := reader.File[1]
+		if noticeEntry.Name != releaseNoticeName || !noticeEntry.Mode().IsRegular() ||
+			noticeEntry.Mode() != 0o644 || noticeEntry.UncompressedSize64 != uint64(len(notice)) ||
+			!zipMetadataIsFixed(noticeEntry, 0o644) {
+			return errors.New("zip does not contain the expected release notice")
+		}
+		if err := consumeZipEntry(binaryEntry, nil); err != nil {
 			return err
 		}
-		_, copyErr := io.Copy(io.Discard, opened)
-		return errors.Join(copyErr, opened.Close())
+		return consumeZipEntry(noticeEntry, notice)
 	}
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	var rawGzipHeader [len(canonicalGzipHeader)]byte
+	if _, err := file.ReadAt(rawGzipHeader[:], 0); err != nil {
+		return fmt.Errorf("read gzip header: %w", err)
+	}
+	if rawGzipHeader != canonicalGzipHeader {
+		return errors.New("gzip archive header is not canonical")
+	}
 	gzipReader, err := gzip.NewReader(file)
 	if err != nil {
 		return err
 	}
 	defer gzipReader.Close()
+	if !gzipReader.ModTime.IsZero() || gzipReader.Name != "" ||
+		gzipReader.Comment != "" || len(gzipReader.Extra) != 0 || gzipReader.OS != 255 {
+		return errors.New("gzip archive metadata is not canonical")
+	}
 	tarReader := tar.NewReader(gzipReader)
-	header, err := tarReader.Next()
+	binaryHeader, err := tarReader.Next()
 	if err != nil {
 		return err
 	}
-	if header.Name != t.binaryName() || header.Typeflag != tar.TypeReg || header.FileInfo().Mode().Perm() != 0o755 ||
-		header.Size <= 0 || header.Size > maxArchiveSize {
+	if binaryHeader.Name != t.binaryName() || binaryHeader.Typeflag != tar.TypeReg ||
+		binaryHeader.Mode != 0o755 || binaryHeader.Size <= 0 ||
+		binaryHeader.Size > maxArchiveSize || !tarMetadataIsFixed(binaryHeader) {
 		return errors.New("tar archive does not contain the expected executable")
 	}
 	if _, err := io.Copy(io.Discard, tarReader); err != nil {
 		return err
 	}
+	noticeHeader, err := tarReader.Next()
+	if err != nil {
+		return fmt.Errorf("read tar release notice: %w", err)
+	}
+	if noticeHeader.Name != releaseNoticeName || noticeHeader.Typeflag != tar.TypeReg ||
+		noticeHeader.Mode != 0o644 || noticeHeader.Size != int64(len(notice)) ||
+		!tarMetadataIsFixed(noticeHeader) {
+		return errors.New("tar archive does not contain the expected release notice")
+	}
+	archivedNotice, err := io.ReadAll(io.LimitReader(tarReader, int64(len(notice))+1))
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(archivedNotice, notice) {
+		return errors.New("tar release notice does not match the audited notice")
+	}
 	if _, err := tarReader.Next(); err != io.EOF {
-		return fmt.Errorf("tar contains an unexpected second entry: %w", err)
+		return fmt.Errorf("tar contains an unexpected third entry: %w", err)
 	}
 	return nil
+}
+
+func zipMetadataIsFixed(entry *zip.File, mode os.FileMode) bool {
+	const unixRegularFile = 0o100000
+
+	return entry.Modified.Equal(archiveTime) && entry.Method == zip.Deflate &&
+		entry.ModifiedDate == 33 && entry.ModifiedTime == 0 &&
+		entry.Comment == "" && bytes.Equal(entry.Extra, []byte{
+		0x55, 0x54, 0x05, 0x00, 0x01, 0x00, 0xa6, 0xce, 0x12,
+	}) && !entry.NonUTF8 && entry.CreatorVersion == 0x314 &&
+		entry.ReaderVersion == 0x14 && entry.Flags == 0x8 &&
+		entry.ExternalAttrs == uint32(unixRegularFile|mode)<<16
+}
+
+func consumeZipEntry(entry *zip.File, expected []byte) error {
+	opened, err := entry.Open()
+	if err != nil {
+		return err
+	}
+	var destination io.Writer = io.Discard
+	var archived bytes.Buffer
+	if expected != nil {
+		destination = &archived
+	}
+	_, copyErr := io.Copy(destination, opened)
+	if err := errors.Join(copyErr, opened.Close()); err != nil {
+		return err
+	}
+	if expected != nil && !bytes.Equal(archived.Bytes(), expected) {
+		return errors.New("zip release notice does not match the audited notice")
+	}
+	return nil
+}
+
+func tarMetadataIsFixed(header *tar.Header) bool {
+	return header.ModTime.Equal(time.Unix(0, 0).UTC()) && header.Uid == 0 && header.Gid == 0 &&
+		header.Uname == "" && header.Gname == "" && header.Linkname == "" &&
+		header.AccessTime.IsZero() && header.ChangeTime.IsZero() &&
+		header.Devmajor == 0 && header.Devminor == 0 && len(header.PAXRecords) == 0 &&
+		len(header.Xattrs) == 0 && header.Format == tar.FormatUSTAR
 }
 
 func candidatePayloadSHA256(entries []candidatePayloadEntry) string {
