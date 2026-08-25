@@ -62,3 +62,10 @@ outside the release history.
 8. Obtain one independent read-only Codex review of the full M6 range and final tree.
 9. Fast-forward `main`, push it, create and push `v0.1.0-alpha.7`, dispatch the release workflow,
    and verify the six archives plus checksum manifest.
+
+## Final Review Remediation
+
+The final milestone Round 1 found that an inherited `TS_CONTROL_URL` could override the embedded
+node's coordination authority while a fresh enrollment key was live. Pin every embedded node to
+Tailscale's default control URL, cover the inherited-environment trigger, then regenerate the
+alpha.7 source and manifest commits before final milestone Round 2.

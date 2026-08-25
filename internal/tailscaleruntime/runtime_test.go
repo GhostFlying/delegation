@@ -22,6 +22,7 @@ import (
 const runtimeTestAuthKey = "tskey-auth-runtime-test-value"
 
 func TestRuntimeStartConfiguresNodeAndClearsAuthKey(t *testing.T) {
+	t.Setenv("TS_CONTROL_URL", "https://headscale.example.test")
 	authKeyFile := runtimeAuthKeyFile(t)
 	fake := &fakeNode{}
 	lease := &fakeCloser{}
@@ -61,6 +62,9 @@ func TestRuntimeStartConfiguresNodeAndClearsAuthKey(t *testing.T) {
 	}
 	if got.Dir != cfg.Dir || got.Hostname != cfg.Hostname || got.AuthKey != runtimeTestAuthKey {
 		t.Fatalf("node config = %#v", got)
+	}
+	if got.ControlURL != defaultControlURL {
+		t.Fatalf("node control URL = %q, want %q", got.ControlURL, defaultControlURL)
 	}
 	if got.Ephemeral {
 		t.Fatal("runtime configured an ephemeral node")

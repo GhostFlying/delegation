@@ -15,12 +15,16 @@ import (
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tailscaleauth"
+	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 	"tailscale.com/types/key"
 )
 
-const forceLoginEnvironment = "TSNET_FORCE_LOGIN"
+const (
+	defaultControlURL     = ipn.DefaultControlURL
+	forceLoginEnvironment = "TSNET_FORCE_LOGIN"
+)
 
 type Config struct {
 	Dir         string
@@ -39,12 +43,13 @@ type Runtime struct {
 }
 
 type nodeConfig struct {
-	Dir       string
-	Hostname  string
-	AuthKey   string
-	Ephemeral bool
-	Logf      func(string, ...any)
-	UserLogf  func(string, ...any)
+	Dir        string
+	Hostname   string
+	AuthKey    string
+	ControlURL string
+	Ephemeral  bool
+	Logf       func(string, ...any)
+	UserLogf   func(string, ...any)
 }
 
 type node interface {
@@ -105,12 +110,13 @@ func (r *Runtime) Start(ctx context.Context, cfg Config) error {
 		return failLease(err)
 	}
 	nodeCfg := nodeConfig{
-		Dir:       cfg.Dir,
-		Hostname:  cfg.Hostname,
-		AuthKey:   key.AuthKey(),
-		Ephemeral: false,
-		Logf:      discardLog,
-		UserLogf:  discardLog,
+		Dir:        cfg.Dir,
+		Hostname:   cfg.Hostname,
+		AuthKey:    key.AuthKey(),
+		ControlURL: defaultControlURL,
+		Ephemeral:  false,
+		Logf:       discardLog,
+		UserLogf:   discardLog,
 	}
 	key = nil
 	startedNode, err := r.newNode(nodeCfg)
@@ -439,12 +445,13 @@ type tsnetNode struct {
 
 func newTSNetNode(cfg nodeConfig) (node, error) {
 	return &tsnetNode{server: &tsnet.Server{
-		Dir:       cfg.Dir,
-		Hostname:  cfg.Hostname,
-		AuthKey:   cfg.AuthKey,
-		Ephemeral: cfg.Ephemeral,
-		Logf:      cfg.Logf,
-		UserLogf:  cfg.UserLogf,
+		Dir:        cfg.Dir,
+		Hostname:   cfg.Hostname,
+		AuthKey:    cfg.AuthKey,
+		ControlURL: cfg.ControlURL,
+		Ephemeral:  cfg.Ephemeral,
+		Logf:       cfg.Logf,
+		UserLogf:   cfg.UserLogf,
 	}}, nil
 }
 
