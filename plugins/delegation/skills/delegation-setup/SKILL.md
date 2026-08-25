@@ -15,6 +15,9 @@ or replace an existing deployment. Require `--auth-mode token` for every embedde
 and peer; no unauthenticated Tailscale mode is supported. Keep Codex and TraeX in separate instance,
 broker, controller, token, state, hostname, and service domains.
 
+M6 supports Codex and TraeX on Linux and macOS, and Codex on Windows 11. Windows TraeX is
+unsupported. Stop instead of configuring, qualifying, or installing a Windows TraeX deployment.
+
 ## Resolve The Plugin
 
 Resolve the plugin root from this skill directory. Read `VERSION` and

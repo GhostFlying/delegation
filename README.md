@@ -14,6 +14,21 @@ mixed-CLI networks. Managed workers synchronize an exact Git HEAD plus the root 
 and worktree state, then reliably return terminal rollouts and Git result packages for explicit
 safe application.
 
+M6 has this host support matrix:
+
+| Host OS | Managed CLI | Status |
+| --- | --- | --- |
+| Linux | Codex | Supported |
+| Linux | TraeX | Supported |
+| macOS | Codex | Supported |
+| macOS | TraeX | Supported |
+| Windows 11 | Codex | Supported |
+| Windows | TraeX | Unsupported |
+
+The Windows TraeX combination is explicitly outside the M6 product contract. Do not configure,
+qualify, or install a Windows TraeX peer or broker. This restriction does not affect Windows Codex
+or either managed CLI on Linux and macOS.
+
 ## Install The Plugin
 
 For Codex:
@@ -139,7 +154,9 @@ process object and PID, and cleans up only that PID's process tree. The helper i
 native executables, not `.cmd` or `.bat` wrappers. See the
 [M6 embedded Tailscale operator guide](docs/m6-embedded-tailscale.md) for the exact broker and peer
 flags, `ws://<broker-tsnet-hostname>:<port>/v1/connect` URL, credential workflow, and support
-boundaries.
+boundaries. The [M6 release closure](docs/m6-release-closure.md) records the final platform
+disposition and explains why historical Windows TraeX `BLOCKED` evidence is not a supported-path
+release blocker.
 
 `instanceId` names one local Delegation deployment. It is not a principal, credential, protocol
 target, or network identity. `hostKind` identifies the CLI family hosted by one homogeneous network
