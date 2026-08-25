@@ -1,6 +1,6 @@
 {
   "name": "delegation",
-  "version": "0.1.0-alpha.4",
+  "version": "0.1.0-alpha.7",
   "description": "Delegate bounded Codex or TraeX work across trusted peers with synchronized Git workspaces.",
   "author": {
     "name": "GhostFlying",
