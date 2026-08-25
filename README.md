@@ -284,9 +284,10 @@ reconciled returns
 Linux requires a working systemd user manager. macOS uses the current GUI launchd domain and thus
 requires that user to have a GUI login. The Windows task uses an interactive user token and likewise
 requires a logged-in user. A nonzero Windows service exit is retried once per minute for up to 255
-attempts; a clean exit is not restarted. Runtime-path updates require explicit native service
-replacement.
-Restart the peer service after rotating provider credentials or replacing the environment file.
+attempts; a clean exit is not restarted. M6 does not define an in-place runtime or
+environment-file path update. Create and qualify a fresh named deployment instead. Provider
+credentials may be rotated in the existing protected environment file, followed by a peer-service
+restart.
 
 Inspect either process through its explicit role config:
 
