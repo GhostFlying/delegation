@@ -8,14 +8,17 @@ than a single immediate status probe; require broker status success or peer
 
 On POSIX, record the launched PID and stop and wait for that exact process in a trap. On Windows,
 do not track `delegation-mcp.cmd`: resolve the same native `delegation.exe` selected by the launcher,
-start it directly with shell-free `System.Diagnostics.ProcessStartInfo`, set `UseShellExecute` to
-`$false`, and call `ArgumentList.Add()` once per exact argv element. Do not use an argument-string
-interface or build a command string: executable, config, environment-file, and log paths may contain
-spaces. Open log paths with literal .NET file APIs rather than shell redirection. Retain the native
-process object and PID. Clean up that exact Windows PID with a process-tree scoped
-`taskkill.exe /PID <native-runtime-pid> /T /F` in `finally`, then wait for the process handle. Never
-use image-name matching or an unscoped kill. The runtime's Windows Job Object ownership covers its
-managed app-server descendants.
+dot-source `scripts/windows-process.ps1`, and call `Start-DelegationNativeProcess` with one exact
+argv element per `-ArgumentList` entry. The helper uses `ProcessStartInfo.ArgumentList` when
+available and the equivalent standard Windows quoting rules on Windows PowerShell 5.1. Pass
+environment additions or removals through `-Environment`, and pass literal output and error paths
+through `-StandardOutputPath` and `-StandardErrorPath`. Retain the returned native process object
+and its `Id`. Use the helper only with direct native executables, never `.cmd` or `.bat` wrappers.
+Use `Invoke-DelegationNativeProcessCapture` for bounded status commands and
+`Stop-DelegationNativeProcessTree` in `finally`; cleanup runs
+`taskkill.exe /PID <native-runtime-pid> /T /F` and waits for that process handle. Never build a
+command string, use `Start-Process -ArgumentList`, match an image name, or issue an unscoped kill.
+The runtime's Windows Job Object ownership covers its managed app-server descendants.
 
 Credential issuance uses the same ownership rules: start and boundedly poll a tracked bootstrap
 broker, issue while it is ready, then stop and wait for its complete process tree before starting
