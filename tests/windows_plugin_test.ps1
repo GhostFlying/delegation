@@ -1,3 +1,7 @@
+param(
+    [switch] $NativeProcessOnly
+)
+
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
@@ -37,42 +41,113 @@ function Invoke-ChildProcess {
         [Parameter(Mandatory = $true)] [string] $FilePath,
         [Parameter(Mandatory = $true)] [string[]] $Arguments,
         [hashtable] $Environment = @{},
-        [AllowNull()] [string] $StandardInput = $null
+        [AllowNull()] [string] $StandardInput = $null,
+        [AllowNull()] [object] $CloseStandardInputAfterJSONRPCResponseID = $null,
+        [ValidateRange(1, 2147483)] [int] $JSONRPCResponseTimeoutSeconds = 30,
+        [ValidateRange(1, 2147483)] [int] $ProcessExitTimeoutSeconds = 30
     )
-    $start = [System.Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = $FilePath
-    $start.UseShellExecute = $false
+    $start = New-DelegationNativeProcessStartInfo `
+        -FilePath $FilePath `
+        -ArgumentList $Arguments `
+        -Environment $Environment
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $start.RedirectStandardInput = $null -ne $StandardInput
-    foreach ($argument in $Arguments) {
-        $start.ArgumentList.Add($argument)
-    }
-    foreach ($entry in $Environment.GetEnumerator()) {
-        if ($null -eq $entry.Value) {
-            $null = $start.Environment.Remove($entry.Key)
-        } else {
-            $start.Environment[$entry.Key] = [string] $entry.Value
-        }
-    }
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $start
     if (-not $process.Start()) {
+        $process.Dispose()
         throw "failed to start $FilePath"
     }
-    if ($null -ne $StandardInput) {
-        $process.StandardInput.Write($StandardInput)
-		$process.StandardInput.Flush()
-		Start-Sleep -Milliseconds 1000
-        $process.StandardInput.Close()
-    }
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
-    [pscustomobject]@{
-        ExitCode = $process.ExitCode
-        Stdout = $stdout
-        Stderr = $stderr
+    try {
+        $observedJSONRPCResponse = $null -eq $CloseStandardInputAfterJSONRPCResponseID
+        $responseTimedOut = $false
+        $processExitTimedOut = $false
+        $stdout = $null
+        $stderr = $null
+        if ($null -ne $StandardInput) {
+            $process.StandardInput.Write($StandardInput)
+            $process.StandardInput.Flush()
+            if ($null -eq $CloseStandardInputAfterJSONRPCResponseID) {
+                Start-Sleep -Milliseconds 1000
+                $process.StandardInput.Close()
+            } else {
+                $stdoutBuilder = [System.Text.StringBuilder]::new()
+                $stderrTask = $process.StandardError.ReadToEndAsync()
+                $responseDeadline = [DateTime]::UtcNow.AddSeconds($JSONRPCResponseTimeoutSeconds)
+                $pendingRead = $null
+                while (-not $observedJSONRPCResponse) {
+                    $remaining = $responseDeadline - [DateTime]::UtcNow
+                    if ($remaining.TotalMilliseconds -le 0) {
+                        $responseTimedOut = $true
+                        break
+                    }
+                    $pendingRead = $process.StandardOutput.ReadLineAsync()
+                    if (-not $pendingRead.Wait([int] [Math]::Ceiling($remaining.TotalMilliseconds))) {
+                        $responseTimedOut = $true
+                        break
+                    }
+                    $line = $pendingRead.GetAwaiter().GetResult()
+                    $pendingRead = $null
+                    if ($null -eq $line) {
+                        break
+                    }
+                    $null = $stdoutBuilder.AppendLine($line)
+                    try {
+                        $message = $line | ConvertFrom-Json
+                        $idProperty = $message.PSObject.Properties["id"]
+                        if ($null -ne $idProperty -and
+                            [string] $idProperty.Value -ceq [string] $CloseStandardInputAfterJSONRPCResponseID) {
+                            $observedJSONRPCResponse = $true
+                        }
+                    } catch {
+                        $null = $_
+                    }
+                }
+                $process.StandardInput.Close()
+                $stdoutRemainderTask = $null
+                if ($null -eq $pendingRead) {
+                    $stdoutRemainderTask = $process.StandardOutput.ReadToEndAsync()
+                }
+                if (-not $process.WaitForExit($ProcessExitTimeoutSeconds * 1000)) {
+                    $processExitTimedOut = $true
+                    Stop-DelegationNativeProcessTree -Process $process
+                } else {
+                    $process.WaitForExit()
+                }
+                if ($null -ne $pendingRead) {
+                    $line = $pendingRead.GetAwaiter().GetResult()
+                    if ($null -ne $line) {
+                        $null = $stdoutBuilder.AppendLine($line)
+                    }
+                }
+                if ($null -ne $stdoutRemainderTask) {
+                    $null = $stdoutBuilder.Append($stdoutRemainderTask.GetAwaiter().GetResult())
+                } else {
+                    $null = $stdoutBuilder.Append($process.StandardOutput.ReadToEnd())
+                }
+                $stdout = $stdoutBuilder.ToString()
+                $stderr = $stderrTask.GetAwaiter().GetResult()
+            }
+        }
+        if ($null -eq $stdout) {
+            $stdout = $process.StandardOutput.ReadToEnd()
+        }
+        if ($null -eq $stderr) {
+            $stderr = $process.StandardError.ReadToEnd()
+        }
+        $process.WaitForExit()
+        $result = [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Stdout = $stdout
+            Stderr = $stderr
+            ObservedJSONRPCResponse = $observedJSONRPCResponse
+            JSONRPCResponseTimedOut = $responseTimedOut
+            ProcessExitTimedOut = $processExitTimedOut
+        }
+        return $result
+    } finally {
+        $process.Dispose()
     }
 }
 
@@ -81,10 +156,20 @@ function Invoke-BatchFile {
         [Parameter(Mandatory = $true)] [string] $Path,
         [string[]] $ScriptArguments = @(),
         [hashtable] $Environment = @{},
-        [AllowNull()] [string] $StandardInput = $null
+        [AllowNull()] [string] $StandardInput = $null,
+        [AllowNull()] [object] $CloseStandardInputAfterJSONRPCResponseID = $null,
+        [ValidateRange(1, 2147483)] [int] $JSONRPCResponseTimeoutSeconds = 30,
+        [ValidateRange(1, 2147483)] [int] $ProcessExitTimeoutSeconds = 30
     )
     $arguments = @("/d", "/s", "/c", "call", $Path) + $ScriptArguments
-    Invoke-ChildProcess $env:ComSpec $arguments $Environment $StandardInput
+    Invoke-ChildProcess `
+        -FilePath $env:ComSpec `
+        -Arguments $arguments `
+        -Environment $Environment `
+        -StandardInput $StandardInput `
+        -CloseStandardInputAfterJSONRPCResponseID $CloseStandardInputAfterJSONRPCResponseID `
+        -JSONRPCResponseTimeoutSeconds $JSONRPCResponseTimeoutSeconds `
+        -ProcessExitTimeoutSeconds $ProcessExitTimeoutSeconds
 }
 
 function Invoke-WindowsPowerShellInstall {
@@ -135,18 +220,527 @@ function Write-ArtifactChecksum {
     Set-Content -LiteralPath (Join-Path $PluginRoot "release-artifacts.sha256") -Value "$hash  $ArtifactName" -Encoding ascii
 }
 
+function Assert-ProcessExited {
+    param(
+        [Parameter(Mandatory = $true)] [int] $Id,
+        [Parameter(Mandatory = $true)] [string] $Message
+    )
+
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        if ($null -eq (Get-Process -Id $Id -ErrorAction SilentlyContinue)) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw $Message
+}
+
+function Test-DelegationNativeProcessHelper {
+    param(
+        [Parameter(Mandatory = $true)] [string] $RepoRoot,
+        [Parameter(Mandatory = $true)] [string] $TempRoot
+    )
+
+    $originalInvokeDelegationNativeTaskkill = (Get-Command Invoke-DelegationNativeTaskkill -CommandType Function).ScriptBlock
+    $originalStartDelegationNativeStreamCopy = (Get-Command Start-DelegationNativeStreamCopy -CommandType Function).ScriptBlock
+    $originalStartDelegationNativeReadToEnd = (Get-Command Start-DelegationNativeReadToEnd -CommandType Function).ScriptBlock
+    $originalWriteDelegationNativeStandardInput = (Get-Command Write-DelegationNativeStandardInput -CommandType Function).ScriptBlock
+    $probeRoot = Join-Path $TempRoot "native probe with spaces"
+    New-Item -ItemType Directory -Path $probeRoot | Out-Null
+    $probeSource = Join-Path $probeRoot "probe.go"
+    $probeBinary = Join-Path $probeRoot "native probe.exe"
+    @'
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
+	"time"
+)
+
+type ioResult struct {
+	PID            int      `json:"pid"`
+	Arguments      []string `json:"arguments"`
+	EnvironmentAdd string   `json:"environmentAdd"`
+	EnvironmentEmpty string `json:"environmentEmpty"`
+	RemovePresent  bool     `json:"removePresent"`
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		os.Exit(2)
+	}
+	switch os.Args[1] {
+	case "argv":
+		_ = json.NewEncoder(os.Stdout).Encode(os.Args[2:])
+		fmt.Fprint(os.Stderr, "\u53c2\u6570\u9519\u8bef-\u96ea\U0001f642")
+	case "io":
+		added := os.Getenv("DELEGATION_TEST_ADD")
+		empty := os.Getenv("DELEGATION_TEST_EMPTY")
+		_, removePresent := os.LookupEnv("DELEGATION_TEST_REMOVE")
+		_ = json.NewEncoder(os.Stdout).Encode(ioResult{
+			PID:            os.Getpid(),
+			Arguments:      os.Args[2:],
+			EnvironmentAdd: added,
+			EnvironmentEmpty: empty,
+			RemovePresent:  removePresent,
+		})
+		fmt.Fprintln(os.Stderr, "\u539f\u751f\u63a2\u9488\u9519\u8bef-\u96ea\U0001f642")
+	case "tree":
+		if len(os.Args) != 3 {
+			os.Exit(2)
+		}
+		child := exec.Command(os.Args[0], "child")
+		if err := child.Start(); err != nil {
+			panic(err)
+		}
+		pids := strconv.Itoa(os.Getpid()) + "\n" + strconv.Itoa(child.Process.Pid)
+		if err := os.WriteFile(os.Args[2], []byte(pids), 0600); err != nil {
+			panic(err)
+		}
+		fmt.Println(os.Getpid())
+		for {
+			time.Sleep(time.Second)
+		}
+	case "child", "sleep":
+		for {
+			time.Sleep(time.Second)
+		}
+	case "short":
+		fmt.Println(os.Getpid())
+		time.Sleep(2 * time.Second)
+	default:
+		os.Exit(2)
+	}
+}
+'@ | Set-Content -LiteralPath $probeSource -Encoding utf8
+    & go build -tags=ts_omit_logtail -trimpath -buildvcs=false -o $probeBinary $probeSource
+    if ($LASTEXITCODE -ne 0) {
+        throw "native process probe build failed with exit code $LASTEXITCODE"
+    }
+
+    $callerErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    Set-StrictMode -Off
+    $helperPath = Join-Path $RepoRoot "plugins\delegation\scripts\windows-process.ps1"
+    . $helperPath
+    Assert-True ($ErrorActionPreference -ceq "Continue") "dot-sourcing helper changed ErrorActionPreference"
+    $undefinedValue = $delegationUndefinedCallerVariable
+    Assert-True ($null -eq $undefinedValue) "dot-sourcing helper enabled strict mode in the caller"
+    $ErrorActionPreference = $callerErrorActionPreference
+    Set-StrictMode -Version Latest
+
+    $backslashesBeforeQuote = "before" + ("\" * 3) + '"' + "after"
+    $trailingBackslashes = "path with space" + ("\" * 3)
+    $smile = [char]::ConvertFromUtf32(0x1f642)
+    $unicodeArgument = "Unicode-" + [char] 0x96ea + $smile
+    $argvStderr = -join @(
+        [char] 0x53c2,
+        [char] 0x6570,
+        [char] 0x9519,
+        [char] 0x8bef,
+        "-",
+        [char] 0x96ea,
+        $smile
+    )
+    $environmentAdd = -join @(
+        [char] 0x65b0,
+        [char] 0x589e,
+        "-",
+        [char] 0x96ea,
+        $smile
+    )
+    $ioStderr = -join @(
+        [char] 0x539f,
+        [char] 0x751f,
+        [char] 0x63a2,
+        [char] 0x9488,
+        [char] 0x9519,
+        [char] 0x8bef,
+        "-",
+        [char] 0x96ea,
+        $smile
+    )
+    $expectedArguments = @(
+        "",
+        "plain",
+        "contains space",
+        "contains`t tab",
+        'embedded"quote',
+        $unicodeArgument,
+        $backslashesBeforeQuote,
+        $trailingBackslashes
+    )
+    $captured = Invoke-DelegationNativeProcessCapture `
+        -FilePath $probeBinary `
+        -ArgumentList (@("argv") + $expectedArguments) `
+        -TimeoutSeconds 30
+    try {
+        Assert-True (-not $captured.TimedOut) "argv probe timed out"
+        Assert-True ($captured.ExitCode -eq 0) "argv probe exited with $($captured.ExitCode): $($captured.Stderr)"
+        $actualArguments = $captured.Stdout | ConvertFrom-Json
+        Assert-True ($actualArguments.Count -eq $expectedArguments.Count) "argv probe returned $($actualArguments.Count) arguments, expected $($expectedArguments.Count)"
+        for ($index = 0; $index -lt $expectedArguments.Count; $index++) {
+            Assert-True ($actualArguments[$index] -ceq $expectedArguments[$index]) "argv $index changed during native launch"
+        }
+        Assert-True ($captured.Stderr -ceq $argvStderr) "strict UTF-8 stderr changed during native capture"
+    } finally {
+        $captured.Process.Dispose()
+    }
+
+    $configPath = Join-Path $probeRoot "config path with spaces.json"
+    $environmentPath = Join-Path $probeRoot "environment path with spaces.env"
+    $stdoutPath = Join-Path $probeRoot "stdout path with spaces.log"
+    $stderrPath = Join-Path $probeRoot "stderr path with spaces.log"
+    $strictUTF8 = [System.Text.UTF8Encoding]::new($false, $true)
+    Set-Content -LiteralPath $configPath -Value "{}" -Encoding ascii
+    Set-Content -LiteralPath $environmentPath -Value "NAME=value" -Encoding ascii
+    $originalAdd = [System.Environment]::GetEnvironmentVariable("DELEGATION_TEST_ADD")
+    $originalEmpty = [System.Environment]::GetEnvironmentVariable("DELEGATION_TEST_EMPTY")
+    $originalRemove = [System.Environment]::GetEnvironmentVariable("DELEGATION_TEST_REMOVE")
+    $env:DELEGATION_TEST_ADD = "parent add"
+    $env:DELEGATION_TEST_EMPTY = "parent nonempty"
+    $env:DELEGATION_TEST_REMOVE = "parent remove"
+    try {
+        $process = Start-DelegationNativeProcess `
+            -FilePath $probeBinary `
+            -ArgumentList @("io", $configPath, $environmentPath) `
+            -Environment @{
+                DELEGATION_TEST_ADD = $environmentAdd
+                DELEGATION_TEST_EMPTY = ""
+                DELEGATION_TEST_REMOVE = $null
+            } `
+            -StandardOutputPath $stdoutPath `
+            -StandardErrorPath $stderrPath
+        try {
+            $waitResult = @(Wait-DelegationNativeProcess -Process $process -TimeoutSeconds 30)
+            Assert-True ($waitResult.Count -eq 1) "wait returned $($waitResult.Count) pipeline values instead of one"
+            Assert-True ($waitResult[0] -is [bool]) "wait result was not Boolean"
+            Assert-True ([bool] $waitResult[0]) "redirected native process timed out"
+            Assert-True ($process.ExitCode -eq 0) "redirected native process exited with $($process.ExitCode)"
+            $ioResult = [System.IO.File]::ReadAllText($stdoutPath, $strictUTF8) | ConvertFrom-Json
+            Assert-True ([int] $ioResult.pid -eq $process.Id) "returned PID was not the native executable PID"
+            Assert-True ($ioResult.arguments[0] -ceq $configPath) "config path with spaces changed"
+            Assert-True ($ioResult.arguments[1] -ceq $environmentPath) "environment-file path with spaces changed"
+            Assert-True ($ioResult.environmentAdd -ceq $environmentAdd) "Unicode environment addition was not applied"
+            Assert-True ($ioResult.environmentEmpty -ceq "") "empty environment override was not applied"
+            Assert-True (-not [bool] $ioResult.removePresent) "environment removal was not applied"
+            Assert-True ([System.IO.File]::ReadAllText($stderrPath, $strictUTF8).Contains($ioStderr)) "stderr path did not receive native Unicode output"
+            Stop-DelegationNativeProcessTree -Process $process
+        } finally {
+            $process.Dispose()
+        }
+        Assert-True ($env:DELEGATION_TEST_ADD -ceq "parent add") "environment addition changed the parent environment"
+        Assert-True ($env:DELEGATION_TEST_EMPTY -ceq "parent nonempty") "empty environment override changed the parent environment"
+        Assert-True ($env:DELEGATION_TEST_REMOVE -ceq "parent remove") "environment removal changed the parent environment"
+    } finally {
+        [System.Environment]::SetEnvironmentVariable("DELEGATION_TEST_ADD", $originalAdd)
+        [System.Environment]::SetEnvironmentVariable("DELEGATION_TEST_EMPTY", $originalEmpty)
+        [System.Environment]::SetEnvironmentVariable("DELEGATION_TEST_REMOVE", $originalRemove)
+    }
+
+    $childPIDPath = Join-Path $probeRoot "child pid with spaces.txt"
+    $treeOutputPath = Join-Path $probeRoot "tree stdout with spaces.log"
+    $treeErrorPath = Join-Path $probeRoot "tree stderr with spaces.log"
+    $tree = Start-DelegationNativeProcess `
+        -FilePath $probeBinary `
+        -ArgumentList @("tree", $childPIDPath) `
+        -StandardOutputPath $treeOutputPath `
+        -StandardErrorPath $treeErrorPath
+    $treePID = 0
+    $childPID = 0
+    try {
+        for ($attempt = 0; $attempt -lt 100; $attempt++) {
+            if (Test-Path -LiteralPath $childPIDPath -PathType Leaf) {
+                $treePIDs = @(Get-Content -LiteralPath $childPIDPath)
+                if ($treePIDs.Count -eq 2) {
+                    $treePID = [int] $treePIDs[0]
+                    $childPID = [int] $treePIDs[1]
+                    break
+                }
+            }
+            if ($tree.HasExited) {
+                throw "tree probe exited before creating its child"
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        Assert-True ($treePID -eq $tree.Id) "tree probe did not report the tracked native PID"
+        Assert-True ($childPID -gt 0) "tree probe did not report a descendant PID"
+        Assert-True ($null -ne (Get-Process -Id $childPID -ErrorAction SilentlyContinue)) "tree probe descendant was not running"
+        Stop-DelegationNativeProcessTree -Process $tree
+        Assert-ProcessExited -Id $tree.Id -Message "exact native parent PID survived process-tree cleanup"
+        Assert-ProcessExited -Id $childPID -Message "native descendant survived exact-PID process-tree cleanup"
+        $reportedPID = [int] [System.IO.File]::ReadAllText($treeOutputPath, $strictUTF8)
+        Assert-True ($reportedPID -eq $tree.Id) "tracked process object did not own the native executable PID"
+    } finally {
+        if (-not $tree.HasExited) {
+            Stop-DelegationNativeProcessTree -Process $tree
+        }
+        $tree.Dispose()
+    }
+
+    $stalledPIDPath = Join-Path $probeRoot "stalled jsonrpc pid.txt"
+    $stalledTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $stalled = Invoke-ChildProcess `
+        -FilePath $probeBinary `
+        -Arguments @("tree", $stalledPIDPath) `
+        -StandardInput "{} `n" `
+        -CloseStandardInputAfterJSONRPCResponseID 2 `
+        -JSONRPCResponseTimeoutSeconds 1 `
+        -ProcessExitTimeoutSeconds 1
+    $stalledTimer.Stop()
+    Assert-True $stalled.JSONRPCResponseTimedOut "missing JSON-RPC response did not report its deadline"
+    Assert-True (-not $stalled.ObservedJSONRPCResponse) "stalled JSON-RPC fixture reported a response"
+    Assert-True $stalled.ProcessExitTimedOut "stalled JSON-RPC fixture exited without exact-PID cleanup"
+    Assert-True ($stalledTimer.Elapsed.TotalSeconds -lt 15) "stalled JSON-RPC fixture was not bounded"
+    Assert-True (Test-Path -LiteralPath $stalledPIDPath -PathType Leaf) "stalled JSON-RPC fixture did not report its process tree"
+    $stalledPIDs = @(Get-Content -LiteralPath $stalledPIDPath)
+    Assert-True ($stalledPIDs.Count -eq 2) "stalled JSON-RPC fixture returned an incomplete process tree"
+    foreach ($stalledPID in $stalledPIDs) {
+        Assert-ProcessExited -Id ([int] $stalledPID) -Message "stalled JSON-RPC cleanup leaked PID $stalledPID"
+    }
+
+    $naturalExit = Start-DelegationNativeProcess `
+        -FilePath $probeBinary `
+        -ArgumentList @("short")
+    $taskkillRaceState = [pscustomobject] @{ Invoked = $false }
+    try {
+        function Invoke-DelegationNativeTaskkill {
+            param([int] $ProcessId)
+
+            $null = $ProcessId
+            $null = ($taskkillRaceState.Invoked = $true)
+            Start-Sleep -Milliseconds 2500
+            return [pscustomobject] @{
+                ExitCode = 128
+                Stdout = ""
+                Stderr = "process already exited"
+            }
+        }
+        Stop-DelegationNativeProcessTree -Process $naturalExit
+        Assert-True $taskkillRaceState.Invoked "natural-exit taskkill race did not reach the post-check window"
+        Assert-True ($naturalExit.HasExited) "natural-exit taskkill race did not wait for the tracked process"
+    } finally {
+        $null = Set-Item -Path Function:\Invoke-DelegationNativeTaskkill -Value $originalInvokeDelegationNativeTaskkill -Force
+        $naturalExit.Dispose()
+    }
+
+    $taskkillFailure = Start-DelegationNativeProcess `
+        -FilePath $probeBinary `
+        -ArgumentList @("sleep")
+    try {
+        $taskkillFailedClosed = $false
+        function Invoke-DelegationNativeTaskkill {
+            param([int] $ProcessId)
+
+            $null = $ProcessId
+            return [pscustomobject] @{
+                ExitCode = 5
+                Stdout = ""
+                Stderr = "access denied"
+            }
+        }
+        try {
+            Stop-DelegationNativeProcessTree -Process $taskkillFailure
+        } catch {
+            $taskkillFailedClosed = $_.Exception.Message -match "taskkill.exe failed with exit code 5"
+        }
+        Assert-True $taskkillFailedClosed "taskkill error was tolerated while the tracked process was still running"
+        Assert-True (-not $taskkillFailure.HasExited) "taskkill failure fixture exited unexpectedly"
+    } finally {
+        $null = Set-Item -Path Function:\Invoke-DelegationNativeTaskkill -Value $originalInvokeDelegationNativeTaskkill -Force
+        Stop-DelegationNativeProcessTree -Process $taskkillFailure
+        $taskkillFailure.Dispose()
+    }
+
+    $copyFailurePIDPath = Join-Path $probeRoot "copy failure pid.txt"
+    $copyInitializationFailed = $false
+    try {
+        function Start-DelegationNativeStreamCopy {
+            param(
+                [System.IO.Stream] $Source,
+                [System.IO.Stream] $Destination
+            )
+
+            $null = $Source
+            $null = $Destination
+            for ($attempt = 0; $attempt -lt 50; $attempt++) {
+                if (Test-Path -LiteralPath $copyFailurePIDPath -PathType Leaf) {
+                    break
+                }
+                Start-Sleep -Milliseconds 100
+            }
+            throw "injected stream-copy initialization failure"
+        }
+        try {
+            $null = Start-DelegationNativeProcess `
+                -FilePath $probeBinary `
+                -ArgumentList @("tree", $copyFailurePIDPath) `
+                -StandardOutputPath (Join-Path $probeRoot "copy failure stdout.log")
+        } catch {
+            $copyInitializationFailed = $_.Exception.Message -match "injected stream-copy initialization failure"
+        }
+    } finally {
+        $null = Set-Item -Path Function:\Start-DelegationNativeStreamCopy -Value $originalStartDelegationNativeStreamCopy -Force
+    }
+    Assert-True $copyInitializationFailed "stream-copy initialization failure was not returned"
+    Assert-True (Test-Path -LiteralPath $copyFailurePIDPath -PathType Leaf) "copy failure fixture did not report its process tree"
+    $copyFailurePIDs = @(Get-Content -LiteralPath $copyFailurePIDPath)
+    Assert-True ($copyFailurePIDs.Count -eq 2) "copy failure fixture returned an incomplete process tree"
+    foreach ($copyFailurePID in $copyFailurePIDs) {
+        Assert-ProcessExited -Id ([int] $copyFailurePID) -Message "stream-copy initialization failure leaked PID $copyFailurePID"
+    }
+
+    $partialOpenOutputPath = Join-Path $probeRoot "partial open stdout.log"
+    $partialOpenErrorPath = Join-Path $probeRoot "missing error directory\stderr.log"
+    $partialOpenFailed = $false
+    try {
+        $null = Start-DelegationNativeProcess `
+            -FilePath $probeBinary `
+            -ArgumentList @("sleep") `
+            -StandardOutputPath $partialOpenOutputPath `
+            -StandardErrorPath $partialOpenErrorPath
+    } catch {
+        $partialOpenFailed = $true
+    }
+    Assert-True $partialOpenFailed "invalid stderr path did not fail after stdout was opened"
+    $reopenedOutput = [System.IO.File]::Open(
+        $partialOpenOutputPath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None
+    )
+    $reopenedOutput.Dispose()
+
+    foreach ($captureFailureKind in @("read", "input")) {
+        $captureFailurePIDPath = Join-Path $probeRoot "$captureFailureKind failure pid.txt"
+        $captureFailed = $false
+        try {
+            if ($captureFailureKind -eq "read") {
+                function Start-DelegationNativeReadToEnd {
+                    param([System.IO.TextReader] $Reader)
+
+                    $null = $Reader
+                    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+                        if (Test-Path -LiteralPath $captureFailurePIDPath -PathType Leaf) {
+                            break
+                        }
+                        Start-Sleep -Milliseconds 100
+                    }
+                    throw "injected capture read initialization failure"
+                }
+            } else {
+                function Write-DelegationNativeStandardInput {
+                    param(
+                        [System.IO.TextWriter] $Writer,
+                        [string] $Value
+                    )
+
+                    $null = $Writer
+                    $null = $Value
+                    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+                        if (Test-Path -LiteralPath $captureFailurePIDPath -PathType Leaf) {
+                            break
+                        }
+                        Start-Sleep -Milliseconds 100
+                    }
+                    throw "injected capture input failure"
+                }
+            }
+            try {
+                $null = Invoke-DelegationNativeProcessCapture `
+                    -FilePath $probeBinary `
+                    -ArgumentList @("tree", $captureFailurePIDPath) `
+                    -StandardInput $(if ($captureFailureKind -eq "input") { "input" } else { $null }) `
+                    -TimeoutSeconds 30
+            } catch {
+                $captureFailed = $_.Exception.Message -match "injected capture $captureFailureKind"
+            }
+        } finally {
+            $null = Set-Item -Path Function:\Start-DelegationNativeReadToEnd -Value $originalStartDelegationNativeReadToEnd -Force
+            $null = Set-Item -Path Function:\Write-DelegationNativeStandardInput -Value $originalWriteDelegationNativeStandardInput -Force
+        }
+        Assert-True $captureFailed "capture $captureFailureKind failure was not returned"
+        Assert-True (Test-Path -LiteralPath $captureFailurePIDPath -PathType Leaf) "capture $captureFailureKind fixture did not report its process tree"
+        $captureFailurePIDs = @(Get-Content -LiteralPath $captureFailurePIDPath)
+        Assert-True ($captureFailurePIDs.Count -eq 2) "capture $captureFailureKind fixture returned an incomplete process tree"
+        foreach ($captureFailurePID in $captureFailurePIDs) {
+            Assert-ProcessExited -Id ([int] $captureFailurePID) -Message "capture $captureFailureKind failure leaked PID $captureFailurePID"
+        }
+    }
+
+    $timeoutCleanupState = [pscustomobject] @{
+        Calls = 0
+        ProcessId = 0
+    }
+    $timeoutCleanupError = $null
+    try {
+        function Invoke-DelegationNativeTaskkill {
+            param([int] $ProcessId)
+
+            $null = ($timeoutCleanupState.Calls++)
+            $null = ($timeoutCleanupState.ProcessId = $ProcessId)
+            if ($timeoutCleanupState.Calls -eq 1) {
+                return [pscustomobject] @{
+                    ExitCode = 5
+                    Stdout = ""
+                    Stderr = "injected timeout cleanup failure"
+                }
+            }
+            return & $originalInvokeDelegationNativeTaskkill -ProcessId $ProcessId
+        }
+        try {
+            $null = Invoke-DelegationNativeProcessCapture `
+                -FilePath $probeBinary `
+                -ArgumentList @("sleep") `
+                -TimeoutSeconds 1
+        } catch {
+            $timeoutCleanupError = $_.Exception.Message
+        }
+    } finally {
+        $null = Set-Item -Path Function:\Invoke-DelegationNativeTaskkill -Value $originalInvokeDelegationNativeTaskkill -Force
+    }
+    Assert-True ($timeoutCleanupState.Calls -eq 2) "capture timeout did not retry exact-PID cleanup after its first failure"
+    Assert-True ($timeoutCleanupError -match "taskkill.exe failed with exit code 5") "capture timeout did not preserve its original cleanup error"
+    Assert-ProcessExited -Id $timeoutCleanupState.ProcessId -Message "capture timeout error path leaked its native PID"
+
+    $timed = Invoke-DelegationNativeProcessCapture `
+        -FilePath $probeBinary `
+        -ArgumentList @("sleep") `
+        -TimeoutSeconds 1
+    try {
+        Assert-True $timed.TimedOut "bounded captured execution did not report its timeout"
+        Assert-True ($timed.Process.HasExited) "timed-out captured process did not exit"
+        Assert-True ($timed.ExitCode -ne 0) "timed-out captured process returned a successful exit code"
+        Assert-True ($null -ne $timed.Stdout) "timed-out captured process did not complete stdout"
+        Assert-True ($null -ne $timed.Stderr) "timed-out captured process did not complete stderr"
+        Assert-ProcessExited -Id $timed.Id -Message "timed-out captured process survived cleanup"
+    } finally {
+        $timed.Process.Dispose()
+    }
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $pluginRoot = Join-Path $repoRoot "plugins\delegation"
+. (Join-Path $pluginRoot "scripts\windows-process.ps1")
 $version = (Get-Content -LiteralPath (Join-Path $pluginRoot "VERSION") -Raw).Trim()
 $versionJSON = '"version":"' + $version + '"'
 $launcherPS = Join-Path $pluginRoot "scripts\delegation-mcp.ps1"
 $launcherCmd = Join-Path $pluginRoot "scripts\delegation-mcp.cmd"
-$pwsh = (Get-Command pwsh.exe).Source
-$windowsPowerShell = (Get-Command powershell.exe).Source
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("delegation-plugin-test-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 
 try {
+    Test-DelegationNativeProcessHelper -RepoRoot $repoRoot -TempRoot $tempRoot
+    if ($NativeProcessOnly) {
+        return
+    }
+
+    $pwsh = (Get-Command pwsh.exe).Source
+    $windowsPowerShell = (Get-Command powershell.exe).Source
     $runtime = Join-Path $tempRoot "delegation.exe"
     & go -C $repoRoot build -tags=ts_omit_logtail -trimpath -buildvcs=false -o $runtime ./cmd/delegation
     if ($LASTEXITCODE -ne 0) {
@@ -192,7 +786,15 @@ try {
         '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
     ) -join "`n"
     $mcpInput += "`n"
-    $overrideMCP = Invoke-BatchFile -Path $launcherCmd -ScriptArguments @("mcp", "root") -Environment $overrideEnvironment -StandardInput $mcpInput
+    $overrideMCP = Invoke-BatchFile `
+        -Path $launcherCmd `
+        -ScriptArguments @("mcp", "root") `
+        -Environment $overrideEnvironment `
+        -StandardInput $mcpInput `
+        -CloseStandardInputAfterJSONRPCResponseID 2
+    Assert-True $overrideMCP.ObservedJSONRPCResponse "cmd launcher root MCP did not return the tools/list response before stdin closed; stdout: $($overrideMCP.Stdout); stderr: $($overrideMCP.Stderr)"
+    Assert-True (-not $overrideMCP.JSONRPCResponseTimedOut) "cmd launcher root MCP tools/list response timed out; stdout: $($overrideMCP.Stdout); stderr: $($overrideMCP.Stderr)"
+    Assert-True (-not $overrideMCP.ProcessExitTimedOut) "cmd launcher root MCP did not exit after stdin closed; stdout: $($overrideMCP.Stdout); stderr: $($overrideMCP.Stderr)"
     Assert-True ($overrideMCP.ExitCode -eq 0) "cmd launcher root MCP failed: $($overrideMCP.Stderr)"
     Assert-True ($overrideMCP.Stdout -match '"name":"list_devices"') "cmd launcher root MCP did not expose list_devices"
     Assert-True ($overrideMCP.Stdout -match '"name":"describe_device"') "cmd launcher root MCP did not expose describe_device"
@@ -387,6 +989,7 @@ try {
     New-ProtectedDelegationHome -Path $reparseHome
     New-Item -ItemType Directory -Force -Path $reparseTarget | Out-Null
     $reparseBinary = Join-Path $reparseTarget "delegation.exe"
+    Set-Content -LiteralPath (Join-Path $reparseTarget "THIRD_PARTY_NOTICES.txt") -Value "fixture" -Encoding ascii
     $reparseCreated = $false
     try {
         New-Item -ItemType SymbolicLink -Path $reparseBinary -Target $runtime -ErrorAction Stop | Out-Null

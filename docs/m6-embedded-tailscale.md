@@ -297,28 +297,50 @@ On Windows, do not start or track `delegation-mcp.cmd`: its PID belongs to the w
 native runtime. Resolve the native `delegation.exe` with the launcher's exact rule:
 `DELEGATION_BINARY` when set, otherwise
 `<delegation-home>\bin\<plugin-version>\windows-<architecture>\delegation.exe`. Verify it with
-`version --json`, then start that executable directly with shell-free
-`System.Diagnostics.ProcessStartInfo`. Set `FileName` to the resolved native path,
-`UseShellExecute` to `$false`, and call `ArgumentList.Add()` once for each exact argv element. For
-example, add `service`, `run`, `--config`, and `<broker-config>` separately; for a peer, also add
-`--environment-file` and `<protected-peer-environment-file>` separately. Do not build one command
-string or use a PowerShell argument-string interface, because config, environment-file, executable,
-and log paths may contain spaces. Create a `System.Diagnostics.Process`, assign its `StartInfo`,
-call `Start()`, and retain that native runtime process object and PID. Configure output and error
-redirection on `ProcessStartInfo` when qualification logs are required, and open each log path with
-a literal .NET file API instead of embedding shell redirection in an argument.
+`version --json`, then dot-source the plugin's tested helper:
 
-Poll by starting the same native executable with a new shell-free `ProcessStartInfo` and adding
-`status`, `--config`, `<broker-config>`, and `--json` as four separate `ArgumentList` entries. Repeat
-until `<qualification-success-count>` consecutive successful results or
+```powershell
+$pluginRoot = "<plugin-root>"
+$helperPath = Join-Path $pluginRoot "scripts\windows-process.ps1"
+. $helperPath
+
+$broker = Start-DelegationNativeProcess `
+  -FilePath $delegation `
+  -ArgumentList @("service", "run", "--config", $brokerConfig) `
+  -StandardOutputPath $brokerLog `
+  -StandardErrorPath $brokerErrorLog
+
+$peer = Start-DelegationNativeProcess `
+  -FilePath $delegation `
+  -ArgumentList @(
+    "service", "run",
+    "--config", $peerConfig,
+    "--environment-file", $peerEnvironmentFile
+  ) `
+  -StandardOutputPath $peerLog `
+  -StandardErrorPath $peerErrorLog
+```
+
+`Start-DelegationNativeProcess` returns the native `System.Diagnostics.Process`; retain it and its
+exact `Id`. The helper is shell-free under Windows PowerShell 5.1 and PowerShell 7. It uses
+`ProcessStartInfo.ArgumentList` where available and otherwise applies the equivalent standard
+Windows command-line quoting rules, so empty arguments, quotes, Unicode, whitespace, and
+backslashes remain exact. Pass explicit environment additions or removals through `-Environment`.
+Use the helper only with direct native executables, never `.cmd` or `.bat` wrappers. Do not build
+one command string or use `Start-Process -ArgumentList`.
+
+Poll with `Invoke-DelegationNativeProcessCapture`, passing
+`@("status", "--config", $brokerConfig, "--json")` as the exact argument list and a bounded
+`-TimeoutSeconds`. Repeat until `<qualification-success-count>` consecutive successful results or
 `<qualification-timeout-seconds>` expires. For a peer, parse each successful JSON result and
 require both `connectionState` equal to `ready` and `workerSyncReady` equal to `true` for the same
 number of consecutive samples before the deadline. Fail immediately if the tracked runtime exits.
-In `finally`, run the process-tree-scoped
-`taskkill.exe /PID <native-runtime-pid> /T /F`, tolerate only the already-exited case, and
-`WaitForExit()` on the tracked process object. `/PID` must be the exact native PID; never use an
-image name or an unscoped kill. The `/T` cleanup and the runtime's own Windows Job Object ownership
-ensure managed app-server descendants do not survive qualification.
+Dispose each captured result's `Process` after reading it. In `finally`, call
+`Stop-DelegationNativeProcessTree -Process $peer` and then the same function for `$broker`, followed
+by `Dispose()` on each process object. Cleanup runs
+`taskkill.exe /PID <native-runtime-pid> /T /F` and waits for the tracked handle. `/PID` is the exact
+native PID; never use an image name or an unscoped kill. The `/T` cleanup and the runtime's own
+Windows Job Object ownership ensure managed app-server descendants do not survive qualification.
 
 Use this same direct-native, bounded-polling, process-tree cleanup for each Windows bootstrap
 broker. Issue the credential only after the bootstrap poll succeeds, then terminate and wait for

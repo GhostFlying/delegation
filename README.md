@@ -131,9 +131,12 @@ or native service definition. Create new named instances and qualify them with f
 `service run` commands, bounded status polling, and complete process-tree cleanup before installing
 services. A credential-issuance bootstrap broker must be tracked and stopped before the
 qualification broker starts. On Windows, start the resolved native `delegation.exe`, not the
-`.cmd` wrapper, with shell-free `System.Diagnostics.ProcessStartInfo.ArgumentList` entries for
-every exact argument, so paths containing spaces remain intact and cleanup owns the runtime process
-tree. See the
+`.cmd` wrapper, by dot-sourcing the bundled
+`plugins\delegation\scripts\windows-process.ps1` helper and calling
+`Start-DelegationNativeProcess`. It preserves exact argv under Windows PowerShell 5.1 and
+PowerShell 7, supports literal log paths and explicit environment changes, returns the native
+process object and PID, and cleans up only that PID's process tree. The helper is only for direct
+native executables, not `.cmd` or `.bat` wrappers. See the
 [M6 embedded Tailscale operator guide](docs/m6-embedded-tailscale.md) for the exact broker and peer
 flags, `ws://<broker-tsnet-hostname>:<port>/v1/connect` URL, credential workflow, and support
 boundaries.

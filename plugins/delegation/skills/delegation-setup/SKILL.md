@@ -71,11 +71,12 @@ command and boundedly poll status until the broker responds or the peer reports 
 `connectionState=ready` and `workerSyncReady=true`. Track a bootstrap broker while issuing peer
 credentials, then stop and wait for its complete process tree before starting the qualification
 broker. On Windows, resolve and start the native `delegation.exe` directly instead of tracking the
-`.cmd` wrapper. Use shell-free `System.Diagnostics.ProcessStartInfo.ArgumentList.Add()` once per
-exact argument so paths containing spaces remain intact, retain the native process object and PID,
-and use exact-PID process-tree cleanup. Never replace a live service for qualification. Status may
-report only the transport and optional Tailscale hostname from the transport configuration; do not
-print enrollment-key paths, state directories, lease paths, or tokens.
+`.cmd` wrapper. Dot-source `scripts/windows-process.ps1` and use its shell-free native process
+functions; they preserve exact argv on Windows PowerShell 5.1 and PowerShell 7, retain the native
+process object and PID, and perform exact-PID process-tree cleanup. Use them only with direct native
+executables, never `.cmd` or `.bat` wrappers. Never replace a live service for qualification.
+Status may report only the transport and optional Tailscale hostname from the transport
+configuration; do not print enrollment-key paths, state directories, lease paths, or tokens.
 
 After a plugin or runtime update, tell the user to start a new task in the configured CLI so the
 updated skills and MCP configuration are loaded. Do not attempt to reload a managed worker in place.
