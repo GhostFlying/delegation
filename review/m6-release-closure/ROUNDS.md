@@ -22,3 +22,21 @@ Findings and disposition:
      assertions, and a negative assertion for the old replacement text.
 
 Any tracked fix requires Round 2 on a new frozen commit and tree.
+
+## Round 2
+
+- Base: `bc00def530c3d8eb67eafc7c5a22c17138e0ca72`
+- Frozen commit: `06be492014f24cfda16ec7f3e8a4864d1770ef95`
+- Frozen tree: `3d5b539f170b7b88c341f5b94db9dfc476a55500`
+- Reviewer: independent local Codex `0.149.1`, read-only detached worktree
+- Verdict: `CLEAN`
+- Executable checks:
+  - `./tests/m6_support_contract_test.sh`: `PASS`
+  - `/bin/sh -n tests/m6_support_contract_test.sh`: `PASS`
+  - `git diff --check bc00def530c3d8eb67eafc7c5a22c17138e0ca72..06be492014f24cfda16ec7f3e8a4864d1770ef95`:
+    `PASS`
+  - Copied negative fixture changing `Windows TraeX is unsupported.` to a supported claim:
+    contract test failed as required
+
+No actionable findings remained. The M6 release-closure checkpoint is accepted at the Round 2
+frozen commit and tree.
