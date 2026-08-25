@@ -2,9 +2,11 @@ package userservice
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,6 +15,8 @@ import (
 	"github.com/GhostFlying/delegation/internal/broker"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/localbridge"
+	"github.com/GhostFlying/delegation/internal/runtimeconfig"
+	"github.com/GhostFlying/delegation/internal/statuspage"
 )
 
 const (
@@ -20,10 +24,11 @@ const (
 	serviceReadinessPoll          = 200 * time.Millisecond
 	serviceReadinessConfirmations = 2
 	maximumHealthBody             = 128
+	maximumStatusBody             = 16 * 1024
 )
 
 func waitForServiceReady(configPath string) error {
-	cfg, err := delegationconfig.Read(configPath)
+	cfg, err := runtimeconfig.Read(configPath)
 	if err != nil {
 		return err
 	}
@@ -69,6 +74,9 @@ func probeService(ctx context.Context, cfg delegationconfig.Config) error {
 		}
 		return localbridge.Probe(ctx, endpoint, expectedIdentity)
 	case delegationconfig.RoleBroker:
+		if cfg.Transport.Mode == delegationconfig.TransportModeTailscale {
+			return probeTailscaleBrokerStatus(ctx, cfg)
+		}
 		host, port, err := net.SplitHostPort(cfg.Broker.Listen)
 		if err != nil {
 			return err
@@ -115,6 +123,55 @@ func probeService(ctx context.Context, cfg delegationconfig.Config) error {
 	default:
 		return fmt.Errorf("unsupported service role %q", cfg.Role)
 	}
+}
+
+func probeTailscaleBrokerStatus(ctx context.Context, cfg delegationconfig.Config) error {
+	if cfg.Broker.StatusListen == "" {
+		return errors.New("tailscale broker readiness requires a loopback status listener")
+	}
+	statusURL := (&url.URL{
+		Scheme: "http",
+		Host:   cfg.Broker.StatusListen,
+		Path:   statuspage.JSONPath,
+	}).String()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
+	if err != nil {
+		return err
+	}
+	response, err := newBrokerHealthClient().Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	mediaType, _, mediaErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maximumStatusBody+1))
+	if readErr != nil {
+		return readErr
+	}
+	if response.StatusCode != http.StatusOK || mediaErr != nil ||
+		mediaType != "application/json" || len(body) > maximumStatusBody {
+		return errors.New("tailscale broker status response is invalid")
+	}
+	var snapshot statuspage.Snapshot
+	if err := json.Unmarshal(body, &snapshot); err != nil {
+		return fmt.Errorf("decode tailscale broker status: %w", err)
+	}
+	if err := snapshot.Validate(); err != nil {
+		return fmt.Errorf("validate tailscale broker status: %w", err)
+	}
+	statusInstanceID := snapshot.InstanceID
+	if statusInstanceID == "" {
+		statusInstanceID = delegationconfig.DefaultInstanceID
+	}
+	if snapshot.ControllerID != cfg.ControllerID ||
+		statusInstanceID != cfg.EffectiveInstanceID() {
+		return fmt.Errorf(
+			"tailscale broker status did not match controller %s instance %s",
+			cfg.ControllerID,
+			cfg.EffectiveInstanceID(),
+		)
+	}
+	return nil
 }
 
 func newBrokerHealthClient() *http.Client {

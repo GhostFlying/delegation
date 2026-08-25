@@ -148,7 +148,7 @@ New-Item -ItemType Directory -Path $tempRoot | Out-Null
 
 try {
     $runtime = Join-Path $tempRoot "delegation.exe"
-    & go -C $repoRoot build -trimpath -buildvcs=false -o $runtime ./cmd/delegation
+    & go -C $repoRoot build -tags=ts_omit_logtail -trimpath -buildvcs=false -o $runtime ./cmd/delegation
     if ($LASTEXITCODE -ne 0) {
         throw "go build failed with exit code $LASTEXITCODE"
     }

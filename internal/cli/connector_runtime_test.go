@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -26,6 +28,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/rootmcp"
+	"github.com/GhostFlying/delegation/internal/serviceenv"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -507,6 +510,158 @@ func TestPeerServicesRegisterDevicesAndServeRootBridge(t *testing.T) {
 	}
 }
 
+func TestPeerServiceUsesRoleLocalTailscaleRuntimeForConnectorDial(t *testing.T) {
+	t.Setenv(codexconfig.EnvironmentVariable, `{
+		"model":"mock-model",
+		"model_provider":"mock",
+		"model_providers.mock":{
+			"name":"Mock Responses provider",
+			"base_url":"http://127.0.0.1:1/v1",
+			"wire_api":"responses",
+			"requires_openai_auth":false
+		}
+	}`)
+	registry, err := store.Open(
+		context.Background(),
+		filepath.Join(t.TempDir(), "state", "broker.sqlite3"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brokerServer, err := broker.New(broker.Options{
+		ControllerID:      runtimeControllerID,
+		AuthMode:          delegationconfig.AuthModeNone,
+		Registry:          registry,
+		HeartbeatInterval: 500 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := brokerServer.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(brokerServer.Handler())
+	t.Cleanup(func() {
+		httpServer.Close()
+		closeContext, cancel := context.WithTimeout(context.Background(), time.Second)
+		if err := brokerServer.Close(closeContext); err != nil {
+			t.Errorf("close broker: %v", err)
+		}
+		cancel()
+		if err := registry.Close(); err != nil {
+			t.Errorf("close registry: %v", err)
+		}
+	})
+	brokerAddress := strings.TrimPrefix(httpServer.URL, "http://")
+	configPath, cfg := setupConnectorRuntimeTest(
+		t,
+		runtimeDeviceID,
+		"tailscale-peer",
+		"wss://setup-placeholder.example.test",
+	)
+	cfg.Transport = testTailscaleRuntimeConfig(t, "peer-node")
+	cfg.Broker.URL = "ws://broker-node:8787/v1/connect"
+	var connectionClosed bool
+	fakeRuntime := &fakeEmbeddedTailscaleRuntime{
+		dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if network != "tcp" || address != "broker-node:8787" {
+				return nil, fmt.Errorf("tailscale dial network/address = %q/%q", network, address)
+			}
+			var dialer net.Dialer
+			connection, err := dialer.DialContext(ctx, "tcp", brokerAddress)
+			if err != nil {
+				return nil, err
+			}
+			return &observedConn{Conn: connection, closed: &connectionClosed}, nil
+		},
+		beforeClose: func() error {
+			if !connectionClosed {
+				return errors.New("tailscale runtime closed before connector connection drained")
+			}
+			return nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runConnectorServiceWithProviderEnvironment(
+			ctx,
+			configPath,
+			cfg,
+			"",
+			serviceenv.LoadInherited,
+			io.Discard,
+			connectorRuntimeOptions{
+				newTailscale: func() embeddedTailscaleRuntime { return fakeRuntime },
+			},
+		)
+	}()
+	waitForRuntimeDevice(t, registry, runtimeDeviceID, true)
+	cancel()
+	if err := waitConnectorRuntime(done); err != nil {
+		t.Fatal(err)
+	}
+	waitForRuntimeDevice(t, registry, runtimeDeviceID, false)
+	if fakeRuntime.startCalls != 1 || fakeRuntime.dialCalls == 0 || fakeRuntime.closeCalls != 1 {
+		t.Fatalf(
+			"tailscale lifecycle = start %d, dial %d, close %d",
+			fakeRuntime.startCalls,
+			fakeRuntime.dialCalls,
+			fakeRuntime.closeCalls,
+		)
+	}
+	wantTailscale := cfg.Transport.Tailscale
+	if fakeRuntime.startConfig.Dir != wantTailscale.StateDir ||
+		fakeRuntime.startConfig.Hostname != wantTailscale.Hostname ||
+		fakeRuntime.startConfig.AuthKeyFile != wantTailscale.AuthKeyFile {
+		t.Fatalf("tailscale start config = %#v, want %#v", fakeRuntime.startConfig, wantTailscale)
+	}
+}
+
+func TestPeerServiceReleasesResourcesWhenTailscaleStartFails(t *testing.T) {
+	configPath, cfg := setupConnectorRuntimeTest(
+		t,
+		runtimeDeviceID,
+		"tailscale-start-failure",
+		"wss://setup-placeholder.example.test",
+	)
+	cfg.Transport = testTailscaleRuntimeConfig(t, "peer-node")
+	cfg.Broker.URL = "ws://broker-node:8787/v1/connect"
+	startErr := errors.New("tailscale start failed")
+	closeErr := errors.New("tailscale close failed")
+	fakeRuntime := &fakeEmbeddedTailscaleRuntime{startErr: startErr, closeErr: closeErr}
+	err := runConnectorServiceWithProviderEnvironment(
+		context.Background(),
+		configPath,
+		cfg,
+		"",
+		func() (serviceenv.Resolved, error) { return serviceenv.Resolved{}, nil },
+		io.Discard,
+		connectorRuntimeOptions{
+			newTailscale: func() embeddedTailscaleRuntime { return fakeRuntime },
+		},
+	)
+	for _, want := range []error{startErr, closeErr} {
+		if !errors.Is(err, want) {
+			t.Fatalf("connector start error = %v, want joined %v", err, want)
+		}
+	}
+	if fakeRuntime.startCalls != 1 || fakeRuntime.closeCalls != 1 {
+		t.Fatalf(
+			"failed tailscale lifecycle = start %d, close %d",
+			fakeRuntime.startCalls,
+			fakeRuntime.closeCalls,
+		)
+	}
+	lease, err := store.AcquirePeerLease(cfg.Peer.StateFile)
+	if err != nil {
+		t.Fatalf("peer state lease was not released: %v", err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func assertRootMCPDevices(t *testing.T, configPath string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -557,6 +712,16 @@ func assertRootMCPDevices(t *testing.T, configPath string) {
 		output.Devices[1].DeviceID != runtimeWorkerID {
 		t.Fatalf("devices through root MCP = %#v", output.Devices)
 	}
+}
+
+type observedConn struct {
+	net.Conn
+	closed *bool
+}
+
+func (c *observedConn) Close() error {
+	*c.closed = true
+	return c.Conn.Close()
 }
 
 func TestConnectorAuthorityIsReadBeforeRuntimeSideEffects(t *testing.T) {

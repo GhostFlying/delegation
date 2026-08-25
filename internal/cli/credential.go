@@ -16,6 +16,7 @@ import (
 	delegationcredential "github.com/GhostFlying/delegation/internal/credential"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/pathguard"
+	"github.com/GhostFlying/delegation/internal/runtimeconfig"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 )
@@ -218,7 +219,7 @@ func issueCredential(
 }
 
 func loadBrokerCredentialAuthority(path string) (delegationconfig.Config, tokenfile.Token, error) {
-	cfg, err := delegationconfig.Read(path)
+	cfg, err := runtimeconfig.Read(path)
 	if err != nil {
 		return delegationconfig.Config{}, tokenfile.Token{}, err
 	}

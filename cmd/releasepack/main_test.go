@@ -91,6 +91,23 @@ func TestTargetEnvironmentReplacesBuildSelectors(t *testing.T) {
 	}
 }
 
+func TestBuildTargetUsesExplicitPrivacyTag(t *testing.T) {
+	got := buildTargetArguments("delegation")
+	want := []string{
+		"build",
+		"-tags=ts_omit_logtail",
+		"-trimpath",
+		"-buildvcs=false",
+		"-ldflags=-buildid=",
+		"-o",
+		"delegation",
+		"./cmd/delegation",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("buildTargetArguments() = %q, want %q", got, want)
+	}
+}
+
 func TestChecksumManifestIsSorted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "checksums")
 	if err := writeChecksumManifest(path, map[string]string{"z.zip": "two", "a.tar.gz": "one"}); err != nil {

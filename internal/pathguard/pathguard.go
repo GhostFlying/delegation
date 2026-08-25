@@ -13,6 +13,14 @@ type namedPath struct {
 	path string
 }
 
+var platformPathAliasTarget = func(string, os.FileInfo) (string, bool, error) {
+	return "", false, nil
+}
+
+var platformCanonicalExistingPath = func(path string) (string, error) {
+	return filepath.Clean(path), nil
+}
+
 // ValidatePeerAuthority rejects aliases between the configuration, token, and
 // reservation database files that make up a peer authority.
 func ValidatePeerAuthority(configPath, statePath, tokenPath string) error {
@@ -71,6 +79,48 @@ func ValidatePeerRuntimeAuthority(
 	}
 	if workspaceInsideHome || homeInsideWorkspace {
 		return errors.New("worker workspace root and worker CODEX_HOME must not contain one another")
+	}
+	return nil
+}
+
+// ValidatePeerTailscaleAuthority extends the peer runtime authority check to
+// the embedded Tailscale state directory and enrollment key.
+func ValidatePeerTailscaleAuthority(
+	configPath, statePath, tokenPath, codexHome, workspaceRoot,
+	tailscaleStateDir, tailscaleAuthKeyPath string,
+) error {
+	if err := ValidatePeerRuntimeAuthority(
+		configPath,
+		statePath,
+		tokenPath,
+		codexHome,
+		workspaceRoot,
+	); err != nil {
+		return err
+	}
+	if err := validateTailscaleAuthority(
+		peerAuthorityFiles(configPath, statePath, tokenPath),
+		tailscaleStateDir,
+		tailscaleAuthKeyPath,
+	); err != nil {
+		return err
+	}
+	tailscaleState := namedPath{name: "Tailscale state directory", path: tailscaleStateDir}
+	tailscaleAuthKey := namedPath{name: "Tailscale enrollment key", path: tailscaleAuthKeyPath}
+	for _, directory := range []namedPath{
+		{name: "worker CODEX_HOME", path: codexHome},
+		{name: "worker workspace root", path: workspaceRoot},
+	} {
+		if err := rejectMutualContainment(tailscaleState, directory); err != nil {
+			return err
+		}
+		contained, err := pathWithin(tailscaleAuthKey.path, directory.path)
+		if err != nil {
+			return err
+		}
+		if contained {
+			return fmt.Errorf("%s must not be inside %s", tailscaleAuthKey.name, directory.name)
+		}
 	}
 	return nil
 }
@@ -158,6 +208,21 @@ func ValidateBrokerAuthority(configPath, statePath, masterPath string) error {
 	return nil
 }
 
+// ValidateBrokerTailscaleAuthority extends the broker file authority check to
+// the embedded Tailscale state directory and enrollment key.
+func ValidateBrokerTailscaleAuthority(
+	configPath, statePath, tokenPath, tailscaleStateDir, tailscaleAuthKeyPath string,
+) error {
+	if err := ValidateBrokerAuthority(configPath, statePath, tokenPath); err != nil {
+		return err
+	}
+	return validateTailscaleAuthority(
+		brokerAuthorityFiles(configPath, statePath, tokenPath),
+		tailscaleStateDir,
+		tailscaleAuthKeyPath,
+	)
+}
+
 // ValidateCredentialOutput rejects an output token path that aliases any file
 // belonging to the broker authority.
 func ValidateCredentialOutput(tokenPath, configPath, statePath, masterPath string) error {
@@ -199,6 +264,54 @@ func peerAuthorityFiles(configPath, statePath, tokenPath string) []namedPath {
 		namedPath{name: "peer shared memory", path: statePath + "-shm"},
 		namedPath{name: "peer instance lease", path: statePath + ".peer.lock"},
 	)
+}
+
+func validateTailscaleAuthority(
+	files []namedPath, tailscaleStateDir, tailscaleAuthKeyPath string,
+) error {
+	tailscaleState := namedPath{name: "Tailscale state directory", path: tailscaleStateDir}
+	tailscaleAuthKey := namedPath{name: "Tailscale enrollment key", path: tailscaleAuthKeyPath}
+	for _, file := range files {
+		conflicts, err := equivalent(tailscaleAuthKey.path, file.path)
+		if err != nil {
+			return err
+		}
+		if conflicts {
+			return fmt.Errorf("%s path conflicts with %s", tailscaleAuthKey.name, file.name)
+		}
+	}
+	protectedFiles := append(append([]namedPath{}, files...), tailscaleAuthKey)
+	for _, file := range protectedFiles {
+		if err := rejectMutualContainment(tailscaleState, file); err != nil {
+			return err
+		}
+	}
+	return requireSingleLink(tailscaleAuthKey)
+}
+
+func rejectMutualContainment(first, second namedPath) error {
+	firstInsideSecond, err := pathWithin(first.path, second.path)
+	if err != nil {
+		return err
+	}
+	if firstInsideSecond {
+		return fmt.Errorf("%s must not be inside %s", first.name, second.name)
+	}
+	secondInsideFirst, err := pathWithin(second.path, first.path)
+	if err != nil {
+		return err
+	}
+	if secondInsideFirst {
+		return fmt.Errorf("%s must not be inside %s", second.name, first.name)
+	}
+	conflicts, err := equivalent(first.path, second.path)
+	if err != nil {
+		return err
+	}
+	if conflicts {
+		return fmt.Errorf("%s path conflicts with %s", first.name, second.name)
+	}
+	return nil
 }
 
 func equivalent(first, second string) (bool, error) {
@@ -282,6 +395,10 @@ func pathWithin(candidate, directory string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	return pathWithinCanonical(canonicalCandidate, canonicalDirectory)
+}
+
+func pathWithinCanonical(canonicalCandidate, canonicalDirectory string) (bool, error) {
 	separator := string(filepath.Separator)
 	if strings.EqualFold(canonicalCandidate, canonicalDirectory) ||
 		strings.HasPrefix(strings.ToLower(canonicalCandidate), strings.ToLower(canonicalDirectory+separator)) {
@@ -306,21 +423,25 @@ func resolveFuturePath(path string, followedLinks int) (string, error) {
 		candidate := filepath.Join(resolved, component)
 		info, err := os.Lstat(candidate)
 		if errors.Is(err, os.ErrNotExist) {
-			return filepath.Join(append([]string{resolved}, components[index:]...)...), nil
+			canonicalResolved, err := platformCanonicalExistingPath(resolved)
+			if err != nil {
+				return "", fmt.Errorf("canonicalize existing path prefix %s: %w", resolved, err)
+			}
+			return filepath.Join(append([]string{canonicalResolved}, components[index:]...)...), nil
 		}
 		if err != nil {
 			return "", fmt.Errorf("resolve path aliases for %s: %w", path, err)
 		}
-		if info.Mode()&os.ModeSymlink == 0 {
+		target, alias, err := pathAliasTarget(candidate, info)
+		if err != nil {
+			return "", fmt.Errorf("read path alias %s: %w", candidate, err)
+		}
+		if !alias {
 			resolved = candidate
 			continue
 		}
 		if followedLinks >= 255 {
 			return "", fmt.Errorf("resolve path aliases for %s: too many symbolic links", path)
-		}
-		target, err := os.Readlink(candidate)
-		if err != nil {
-			return "", fmt.Errorf("read path alias %s: %w", candidate, err)
 		}
 		target, err = resolveLinkTarget(resolved, target)
 		if err != nil {
@@ -329,7 +450,19 @@ func resolveFuturePath(path string, followedLinks int) (string, error) {
 		remaining := append([]string{target}, components[index+1:]...)
 		return resolveFuturePath(filepath.Join(remaining...), followedLinks+1)
 	}
-	return filepath.Clean(resolved), nil
+	canonicalResolved, err := platformCanonicalExistingPath(resolved)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize existing path %s: %w", resolved, err)
+	}
+	return canonicalResolved, nil
+}
+
+func pathAliasTarget(path string, info os.FileInfo) (string, bool, error) {
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(path)
+		return target, true, err
+	}
+	return platformPathAliasTarget(path, info)
 }
 
 func splitAbsolutePath(path string) (string, []string) {

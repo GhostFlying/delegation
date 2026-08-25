@@ -192,6 +192,122 @@ func TestBrokerServiceServesIndependentLoopbackStatus(t *testing.T) {
 	waitForBrokerStop(t, done)
 }
 
+func TestBrokerServiceUsesRoleLocalTailscaleRuntimeAndNativeStatusListener(t *testing.T) {
+	configPath, cfg := setupBrokerRuntimeTest(t, "none")
+	cfg.Transport = testTailscaleRuntimeConfig(t, "broker-node")
+	cfg.Broker.Listen = ":8787"
+	cfg.Broker.StatusListen = "127.0.0.1:8788"
+	tailscaleReady := make(chan string, 1)
+	statusReady := make(chan string, 1)
+	var listenerClosed bool
+	fakeRuntime := &fakeEmbeddedTailscaleRuntime{
+		listen: func(ctx context.Context, network, address string) (net.Listener, error) {
+			if network != "tcp" || address != cfg.Broker.Listen {
+				return nil, fmt.Errorf("tailscale listen network/address = %q/%q", network, address)
+			}
+			var listenConfig net.ListenConfig
+			listener, err := listenConfig.Listen(ctx, "tcp", "127.0.0.1:0")
+			if err != nil {
+				return nil, err
+			}
+			tailscaleReady <- listener.Addr().String()
+			return &observedListener{Listener: listener, closed: &listenerClosed}, nil
+		},
+		beforeClose: func() error {
+			if !listenerClosed {
+				return errors.New("tailscale runtime closed before broker listener drained")
+			}
+			return nil
+		},
+	}
+	nativePrimaryCalled := false
+	options := brokerRuntimeOptions{
+		listen: func(context.Context, string, string) (net.Listener, error) {
+			nativePrimaryCalled = true
+			return nil, errors.New("native primary listener must not be used")
+		},
+		statusListen: func(ctx context.Context, network, address string) (net.Listener, error) {
+			if network != "tcp" || address != cfg.Broker.StatusListen {
+				return nil, fmt.Errorf("status listen network/address = %q/%q", network, address)
+			}
+			var listenConfig net.ListenConfig
+			listener, err := listenConfig.Listen(ctx, "tcp", "127.0.0.1:0")
+			if err == nil {
+				statusReady <- listener.Addr().String()
+			}
+			return listener, err
+		},
+		newTailscale: func() embeddedTailscaleRuntime { return fakeRuntime },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runBrokerService(ctx, configPath, cfg, io.Discard, options)
+	}()
+	brokerAddress := waitForBrokerAddress(t, tailscaleReady, done)
+	waitForBrokerHealth(t, brokerAddress)
+	statusAddress := waitForBrokerAddress(t, statusReady, done)
+	response, err := http.Get("http://" + statusAddress + statuspage.JSONPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var snapshot statuspage.Snapshot
+	if err := json.NewDecoder(response.Body).Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK ||
+		snapshot.ControllerID != runtimeControllerID ||
+		snapshot.InstanceID != "" {
+		t.Fatalf("status response = %d, snapshot = %#v", response.StatusCode, snapshot)
+	}
+	cancel()
+	waitForBrokerStop(t, done)
+
+	if nativePrimaryCalled {
+		t.Fatal("tailscale broker used the native primary listener")
+	}
+	if fakeRuntime.startCalls != 1 || fakeRuntime.listenCalls != 1 || fakeRuntime.closeCalls != 1 {
+		t.Fatalf(
+			"tailscale lifecycle = start %d, listen %d, close %d",
+			fakeRuntime.startCalls,
+			fakeRuntime.listenCalls,
+			fakeRuntime.closeCalls,
+		)
+	}
+	wantTailscale := cfg.Transport.Tailscale
+	if fakeRuntime.startConfig.Dir != wantTailscale.StateDir ||
+		fakeRuntime.startConfig.Hostname != wantTailscale.Hostname ||
+		fakeRuntime.startConfig.AuthKeyFile != wantTailscale.AuthKeyFile {
+		t.Fatalf("tailscale start config = %#v, want %#v", fakeRuntime.startConfig, wantTailscale)
+	}
+}
+
+func TestBrokerServiceClosesTailscaleRuntimeOnListenFailure(t *testing.T) {
+	configPath, cfg := setupBrokerRuntimeTest(t, "none")
+	cfg.Transport = testTailscaleRuntimeConfig(t, "broker-node")
+	cfg.Broker.Listen = ":8787"
+	listenErr := errors.New("tailnet listen failed")
+	closeErr := errors.New("tailnet close failed")
+	fakeRuntime := &fakeEmbeddedTailscaleRuntime{
+		listen: func(context.Context, string, string) (net.Listener, error) {
+			return nil, listenErr
+		},
+		closeErr: closeErr,
+	}
+	err := runBrokerService(context.Background(), configPath, cfg, io.Discard, brokerRuntimeOptions{
+		newTailscale: func() embeddedTailscaleRuntime { return fakeRuntime },
+	})
+	for _, want := range []error{listenErr, closeErr} {
+		if !errors.Is(err, want) {
+			t.Fatalf("runBrokerService() error = %v, want joined %v", err, want)
+		}
+	}
+	if fakeRuntime.closeCalls != 1 {
+		t.Fatalf("tailscale runtime close calls = %d, want 1", fakeRuntime.closeCalls)
+	}
+}
+
 func TestBrokerServiceUsesConfiguredMasterToken(t *testing.T) {
 	configPath, cfg := setupBrokerRuntimeTest(t, "token")
 	registry, err := store.Open(context.Background(), cfg.Broker.StateFile)
@@ -324,6 +440,7 @@ func TestBrokerServiceRejectsSecondProcessWithoutInvalidatingLiveLease(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
+		cfg.Broker.StatusListen = ""
 		err = runBrokerService(context.Background(), configPath, cfg, io.Discard, brokerRuntimeOptions{
 			listen: func(ctx context.Context, _, _ string) (net.Listener, error) {
 				var listenConfig net.ListenConfig
@@ -601,6 +718,16 @@ func testBrokerListen(ready chan<- string) brokerRuntimeOptions {
 			return listener, err
 		},
 	}
+}
+
+type observedListener struct {
+	net.Listener
+	closed *bool
+}
+
+func (l *observedListener) Close() error {
+	*l.closed = true
+	return l.Listener.Close()
 }
 
 func waitForBrokerHealth(t *testing.T, address string) {

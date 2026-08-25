@@ -14,6 +14,7 @@ import (
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/pathguard"
+	"github.com/GhostFlying/delegation/internal/runtimeconfig"
 	"github.com/GhostFlying/delegation/internal/serviceenv"
 	"github.com/GhostFlying/delegation/internal/userservice"
 )
@@ -62,7 +63,7 @@ func runServiceInstall(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
-	cfg, err := delegationconfig.Read(resolvedConfig)
+	cfg, err := runtimeconfig.Read(resolvedConfig)
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -198,7 +199,7 @@ func runServiceRuntime(args []string, stderr io.Writer) int {
 	if err != nil {
 		return writeError(stderr, err)
 	}
-	cfg, err := delegationconfig.Read(resolvedConfig)
+	cfg, err := runtimeconfig.Read(resolvedConfig)
 	if err != nil {
 		return writeError(stderr, err)
 	}

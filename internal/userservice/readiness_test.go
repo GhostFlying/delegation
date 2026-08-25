@@ -2,6 +2,7 @@ package userservice
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/localbridge"
+	"github.com/GhostFlying/delegation/internal/statuspage"
 )
 
 const (
@@ -256,6 +258,63 @@ func TestBrokerReadinessRequiresNamedInstanceIdentity(t *testing.T) {
 	responseInstanceID = cfg.InstanceID
 	if err := probeService(context.Background(), cfg); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTailscaleBrokerReadinessUsesOnlyNativeStatusListener(t *testing.T) {
+	primaryRequests := 0
+	primary := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		primaryRequests++
+		http.Error(writer, "tailnet listener must not be probed", http.StatusInternalServerError)
+	}))
+	defer primary.Close()
+	_, primaryPort, err := net.SplitHostPort(strings.TrimPrefix(primary.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := statuspage.Snapshot{
+		Version:      "0.2.0-test",
+		ControllerID: readinessControllerID,
+		InstanceID:   "alpha",
+	}
+	status := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != statuspage.JSONPath {
+			t.Errorf("status request path = %q, want %q", request.URL.Path, statuspage.JSONPath)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(writer).Encode(snapshot); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer status.Close()
+	cfg := delegationconfig.Config{
+		InstanceID:   "alpha",
+		Role:         delegationconfig.RoleBroker,
+		ControllerID: readinessControllerID,
+		Transport: delegationconfig.TransportConfig{
+			Mode: delegationconfig.TransportModeTailscale,
+		},
+		Broker: delegationconfig.BrokerConfig{
+			Listen:       ":" + primaryPort,
+			StatusListen: strings.TrimPrefix(status.URL, "http://"),
+		},
+	}
+	if err := probeService(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if primaryRequests != 0 {
+		t.Fatalf("tailscale broker readiness probed the tailnet port %d times", primaryRequests)
+	}
+
+	snapshot.InstanceID = "beta"
+	if err := probeService(context.Background(), cfg); err == nil {
+		t.Fatal("tailscale broker readiness accepted another instance")
+	}
+	snapshot.InstanceID = cfg.InstanceID
+	snapshot.ControllerID = "123e4567-e89b-42d3-a456-426614174799"
+	if err := probeService(context.Background(), cfg); err == nil {
+		t.Fatal("tailscale broker readiness accepted another controller")
 	}
 }
 

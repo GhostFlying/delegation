@@ -25,9 +25,14 @@ import (
 	"github.com/GhostFlying/delegation/internal/rootapply"
 	"github.com/GhostFlying/delegation/internal/serviceenv"
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/tailscaleruntime"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 	"github.com/GhostFlying/delegation/internal/workerhost"
 )
+
+type connectorRuntimeOptions struct {
+	newTailscale embeddedTailscaleRuntimeFactory
+}
 
 func runConnectorService(
 	ctx context.Context,
@@ -42,6 +47,7 @@ func runConnectorService(
 		"",
 		serviceenv.LoadInherited,
 		stderr,
+		connectorRuntimeOptions{},
 	)
 }
 
@@ -61,6 +67,7 @@ func runConnectorServiceWithEnvironmentFile(
 			return serviceenv.LoadProtectedFile(environmentFile)
 		},
 		stderr,
+		connectorRuntimeOptions{},
 	)
 }
 
@@ -71,6 +78,7 @@ func runConnectorServiceWithProviderEnvironment(
 	environmentFile string,
 	loadProviderEnvironment func() (serviceenv.Resolved, error),
 	stderr io.Writer,
+	options connectorRuntimeOptions,
 ) (resultErr error) {
 	authority, err := loadConnectorAuthority(configPath, cfg)
 	if err != nil {
@@ -108,6 +116,31 @@ func runConnectorServiceWithProviderEnvironment(
 	defer func() {
 		resultErr = errors.Join(resultErr, closeResources())
 	}()
+	var tailscale embeddedTailscaleRuntime
+	if cfg.Transport.Mode == delegationconfig.TransportModeTailscale {
+		newTailscale := options.newTailscale
+		if newTailscale == nil {
+			newTailscale = newEmbeddedTailscaleRuntime
+		}
+		tailscale = newTailscale()
+		if tailscale == nil {
+			return errors.New("create peer tailscale runtime: runtime is nil")
+		}
+		tailscaleConfig := cfg.Transport.Tailscale
+		if err := tailscale.Start(ctx, tailscaleruntime.Config{
+			Dir:         tailscaleConfig.StateDir,
+			Hostname:    tailscaleConfig.Hostname,
+			AuthKeyFile: tailscaleConfig.AuthKeyFile,
+		}); err != nil {
+			return errors.Join(
+				fmt.Errorf("start peer tailscale runtime: %w", err),
+				tailscale.Close(),
+			)
+		}
+		defer func() {
+			resultErr = errors.Join(resultErr, tailscale.Close())
+		}()
+	}
 	cliLaunch := authority.cliLaunch
 	appServerLaunch := authority.appServerLaunch
 	codexEnvironment := make(map[string]string, len(cliLaunch.Environment)+len(providerEnvironment.Environment))
@@ -210,9 +243,10 @@ func runConnectorServiceWithProviderEnvironment(
 		packages: resultPackages, state: peerState,
 		controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 	}
-	client, err := connector.New(connector.Options{
+	clientOptions := connector.Options{
 		BrokerURL:                cfg.Broker.URL,
 		AllowInsecureNonLoopback: cfg.Broker.AllowInsecureNonLoopback,
+		TransportMode:            cfg.Transport.Mode,
 		ControllerID:             cfg.ControllerID,
 		DeviceID:                 cfg.DeviceID,
 		DeviceName:               cfg.DeviceName,
@@ -231,7 +265,11 @@ func runConnectorServiceWithProviderEnvironment(
 		ReportError: func(err error) {
 			_ = reportConnectorError(writeStderr, err)
 		},
-	})
+	}
+	if tailscale != nil {
+		clientOptions.DialContext = tailscale.Dial
+	}
+	client, err := connector.New(clientOptions)
 	if err != nil {
 		return err
 	}

@@ -36,6 +36,7 @@ var releaseTargets = []target{
 }
 
 const requiredGoVersion = "go1.26.5"
+const productionBuildTags = "ts_omit_logtail"
 
 var versionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
 
@@ -169,16 +170,7 @@ func readVersion(root string) (string, error) {
 }
 
 func buildTarget(root, output string, target target) error {
-	command := exec.Command(
-		"go",
-		"build",
-		"-trimpath",
-		"-buildvcs=false",
-		"-ldflags=-buildid=",
-		"-o",
-		output,
-		"./cmd/delegation",
-	)
+	command := exec.Command("go", buildTargetArguments(output)...)
 	command.Dir = root
 	command.Env = targetEnvironment(os.Environ(), target)
 	command.Stdout = os.Stdout
@@ -187,6 +179,19 @@ func buildTarget(root, output string, target target) error {
 		return fmt.Errorf("build %s-%s: %w", target.os, target.arch, err)
 	}
 	return nil
+}
+
+func buildTargetArguments(output string) []string {
+	return []string{
+		"build",
+		"-tags=" + productionBuildTags,
+		"-trimpath",
+		"-buildvcs=false",
+		"-ldflags=-buildid=",
+		"-o",
+		output,
+		"./cmd/delegation",
+	}
 }
 
 func targetEnvironment(environment []string, target target) []string {

@@ -72,8 +72,10 @@ type TransportConfig struct {
 }
 
 type TailscaleConfig struct {
-	StateDir    string `json:"stateDir"`
-	Hostname    string `json:"hostname"`
+	StateDir string `json:"stateDir"`
+	Hostname string `json:"hostname"`
+	// AuthKeyFile is operator-managed authority required at every service
+	// start. The runtime reads it through tailscaleauth and never deletes it.
 	AuthKeyFile string `json:"authKeyFile"`
 }
 
@@ -260,6 +262,9 @@ func (c Config) ValidateForRuntime(capabilities RuntimeCapabilities) error {
 		case TransportModeTailscale:
 			if err := validateTailscaleListen(c.Broker.Listen); err != nil {
 				return err
+			}
+			if c.Broker.StatusListen == "" {
+				return errors.New("tailscale broker requires a loopback status listener")
 			}
 		}
 		if c.Broker.StatusListen != "" {

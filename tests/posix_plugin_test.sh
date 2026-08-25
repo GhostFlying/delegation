@@ -19,7 +19,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 go_bin=${GO:-go}
-"$go_bin" -C "$repo_root" build -trimpath -buildvcs=false -o "$tmp/delegation" ./cmd/delegation
+"$go_bin" -C "$repo_root" build -tags=ts_omit_logtail -trimpath -buildvcs=false -o "$tmp/delegation" ./cmd/delegation
 unset DELEGATION_BINARY
 unset DELEGATION_HOME
 
