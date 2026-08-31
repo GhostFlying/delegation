@@ -48,8 +48,89 @@ func (s *session) handleBrokerRequest(request protocol.Envelope) error {
 		return s.handleAcknowledgeResultPackageRequest(request)
 	case protocol.MethodReleaseResultPackage:
 		return s.handleReleaseResultPackageRequest(request)
+	case protocol.MethodPrepareUpgrade:
+		return s.handlePrepareUpgradeRequest(request)
+	case protocol.MethodArmUpgrade, protocol.MethodActivateUpgrade,
+		protocol.MethodCancelUpgrade, protocol.MethodStatusUpgrade:
+		return s.handleUpgradeTransactionRequest(request)
 	default:
 		return s.writeError(request, protocol.ErrorMethodNotFound, "method not found")
+	}
+}
+
+func (s *session) handlePrepareUpgradeRequest(request protocol.Envelope) error {
+	if err := validateBrokerUpgradeRequest(request); err != nil {
+		return s.writeError(request, protocol.ErrorInvalidRequest, "invalid coordinated upgrade request")
+	}
+	params, err := protocol.DecodePayload[protocol.PrepareUpgradeParams](request.Payload)
+	if err != nil || params.Validate() != nil {
+		return s.writeError(request, protocol.ErrorInvalidParams, "invalid coordinated upgrade payload")
+	}
+	if s.client.upgradeManager == nil {
+		return s.writeError(request, protocol.ErrorUnavailable, "coordinated upgrade is unavailable")
+	}
+	return s.startInbound(request, func(ctx context.Context) {
+		result, operationErr := s.client.upgradeManager.PrepareCoordinatedUpgrade(ctx, params)
+		s.finishUpgradeRequest(request, params.ControllerTransactionID, "prepare", result, operationErr)
+	})
+}
+
+func (s *session) handleUpgradeTransactionRequest(request protocol.Envelope) error {
+	if err := validateBrokerUpgradeRequest(request); err != nil {
+		return s.writeError(request, protocol.ErrorInvalidRequest, "invalid coordinated upgrade request")
+	}
+	params, err := protocol.DecodePayload[protocol.UpgradeTransactionParams](request.Payload)
+	if err != nil || params.Validate() != nil {
+		return s.writeError(request, protocol.ErrorInvalidParams, "invalid coordinated upgrade payload")
+	}
+	if s.client.upgradeManager == nil {
+		return s.writeError(request, protocol.ErrorUnavailable, "coordinated upgrade is unavailable")
+	}
+	return s.startInbound(request, func(ctx context.Context) {
+		var (
+			result       protocol.UpgradeSnapshot
+			operationErr error
+		)
+		switch request.Method {
+		case protocol.MethodArmUpgrade:
+			result, operationErr = s.client.upgradeManager.ArmCoordinatedUpgrade(ctx, params)
+		case protocol.MethodActivateUpgrade:
+			result, operationErr = s.client.upgradeManager.ActivateCoordinatedUpgrade(ctx, params)
+		case protocol.MethodCancelUpgrade:
+			result, operationErr = s.client.upgradeManager.CancelCoordinatedUpgrade(ctx, params)
+		case protocol.MethodStatusUpgrade:
+			result, operationErr = s.client.upgradeManager.CoordinatedUpgradeStatus(ctx, params)
+		}
+		s.finishUpgradeRequest(request, params.ControllerTransactionID, request.Method, result, operationErr)
+	})
+}
+
+func validateBrokerUpgradeRequest(request protocol.Envelope) error {
+	if request.TreeID != "" || request.Source != nil {
+		return errors.New("coordinated upgrade request has worker authority")
+	}
+	return nil
+}
+
+func (s *session) finishUpgradeRequest(
+	request protocol.Envelope, controllerTransactionID, operation string,
+	result protocol.UpgradeSnapshot, operationErr error,
+) {
+	if operationErr != nil {
+		s.client.reportError(fmt.Errorf("coordinated upgrade %s: %w", operation, operationErr))
+		if writeErr := s.writeError(request, protocol.ErrorUnavailable, "coordinated upgrade operation failed"); writeErr != nil {
+			s.close(writeErr)
+		}
+		return
+	}
+	if result.Validate() != nil || result.ControllerTransactionID != controllerTransactionID {
+		if writeErr := s.writeError(request, protocol.ErrorInternal, "peer returned invalid coordinated upgrade state"); writeErr != nil {
+			s.close(writeErr)
+		}
+		return
+	}
+	if writeErr := s.writeResult(request, result); writeErr != nil {
+		s.close(writeErr)
 	}
 }
 

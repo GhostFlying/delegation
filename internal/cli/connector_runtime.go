@@ -280,6 +280,12 @@ func runConnectorServiceWithProviderEnvironment(
 		packages: resultPackages, state: peerState,
 		controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 	}
+	upgradeManager, err := newServiceUpgradeManager(
+		cfg, configPath, environmentFile, runtimeBinary, buildinfo.Version,
+	)
+	if err != nil {
+		return fmt.Errorf("initialize local upgrade management: %w", err)
+	}
 	clientOptions := connector.Options{
 		BrokerURL:                cfg.Broker.URL,
 		AllowInsecureNonLoopback: cfg.Broker.AllowInsecureNonLoopback,
@@ -296,6 +302,7 @@ func runConnectorServiceWithProviderEnvironment(
 			host: workers, controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 		},
 		WorkerReadinessSource: peerState,
+		UpgradeManager:        upgradeManager,
 		ChangesArtifactSource: changesSource,
 		ResultPackageSource:   resultSource,
 		WorkspaceManager:      workerManager,
@@ -320,12 +327,6 @@ func runConnectorServiceWithProviderEnvironment(
 	})
 	if err != nil {
 		return err
-	}
-	upgradeManager, err := newServiceUpgradeManager(
-		cfg, configPath, environmentFile, runtimeBinary, buildinfo.Version,
-	)
-	if err != nil {
-		return fmt.Errorf("initialize local upgrade management: %w", err)
 	}
 	endpoint, err := localbridge.EndpointForInstance(
 		cfg.EffectiveInstanceID(), cfg.ControllerID, cfg.DeviceID,

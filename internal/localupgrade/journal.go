@@ -98,32 +98,33 @@ type Progress struct {
 }
 
 type Journal struct {
-	SchemaVersion        int                   `json:"schemaVersion"`
-	TransactionID        string                `json:"transactionId"`
-	State                State                 `json:"state"`
-	CommitAuthorized     bool                  `json:"commitAuthorized"`
-	Role                 delegationconfig.Role `json:"role"`
-	InstanceID           string                `json:"instanceId"`
-	ControllerID         string                `json:"controllerId"`
-	DeviceID             string                `json:"deviceId,omitempty"`
-	SourceVersion        string                `json:"sourceVersion"`
-	TargetVersion        string                `json:"targetVersion"`
-	SourceRuntimeDigest  string                `json:"sourceRuntimeDigest"`
-	TargetRuntimeDigest  string                `json:"targetRuntimeDigest"`
-	ConfigDigest         string                `json:"configDigest"`
-	SourceConfigDigest   string                `json:"sourceConfigDigest"`
-	SourceReadinessEpoch uint64                `json:"sourceReadinessEpoch,omitempty"`
-	Platform             string                `json:"platform"`
-	Architecture         string                `json:"architecture"`
-	Invocation           Invocation            `json:"invocation"`
-	Definition           Definition            `json:"definition"`
-	Configuration        Configuration         `json:"configuration"`
-	Database             Database              `json:"database"`
-	ActivatorPath        string                `json:"activatorPath"`
-	Progress             Progress              `json:"progress"`
-	FailureCode          string                `json:"failureCode,omitempty"`
-	CreatedAt            int64                 `json:"createdAt"`
-	UpdatedAt            int64                 `json:"updatedAt"`
+	SchemaVersion           int                   `json:"schemaVersion"`
+	TransactionID           string                `json:"transactionId"`
+	State                   State                 `json:"state"`
+	CommitAuthorized        bool                  `json:"commitAuthorized"`
+	Role                    delegationconfig.Role `json:"role"`
+	InstanceID              string                `json:"instanceId"`
+	ControllerID            string                `json:"controllerId"`
+	ControllerTransactionID string                `json:"controllerTransactionId,omitempty"`
+	DeviceID                string                `json:"deviceId,omitempty"`
+	SourceVersion           string                `json:"sourceVersion"`
+	TargetVersion           string                `json:"targetVersion"`
+	SourceRuntimeDigest     string                `json:"sourceRuntimeDigest"`
+	TargetRuntimeDigest     string                `json:"targetRuntimeDigest"`
+	ConfigDigest            string                `json:"configDigest"`
+	SourceConfigDigest      string                `json:"sourceConfigDigest"`
+	SourceReadinessEpoch    uint64                `json:"sourceReadinessEpoch,omitempty"`
+	Platform                string                `json:"platform"`
+	Architecture            string                `json:"architecture"`
+	Invocation              Invocation            `json:"invocation"`
+	Definition              Definition            `json:"definition"`
+	Configuration           Configuration         `json:"configuration"`
+	Database                Database              `json:"database"`
+	ActivatorPath           string                `json:"activatorPath"`
+	Progress                Progress              `json:"progress"`
+	FailureCode             string                `json:"failureCode,omitempty"`
+	CreatedAt               int64                 `json:"createdAt"`
+	UpdatedAt               int64                 `json:"updatedAt"`
 }
 
 type Snapshot struct {
@@ -168,6 +169,11 @@ func (j Journal) Validate() error {
 	}
 	if err := identity.ValidateID(j.ControllerID); err != nil {
 		return fmt.Errorf("controllerId %w", err)
+	}
+	if j.ControllerTransactionID != "" {
+		if err := identity.ValidateID(j.ControllerTransactionID); err != nil {
+			return fmt.Errorf("controllerTransactionId %w", err)
+		}
 	}
 	switch j.Role {
 	case delegationconfig.RoleBroker:

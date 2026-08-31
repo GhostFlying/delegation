@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	Version          = 6
+	Version          = 7
 	MaxMessageSize   = 256 * 1024
 	MaxErrorDataSize = 1024
 )
@@ -100,6 +100,11 @@ const (
 	MethodFinishWorkspaceTransfer = "workspace.transfer.finish"
 	MethodCancelWorkspaceTransfer = "workspace.transfer.cancel"
 	MethodPublishChangesArtifact  = "artifact.changes.publish"
+	MethodPrepareUpgrade          = "upgrade.prepare"
+	MethodArmUpgrade              = "upgrade.arm"
+	MethodActivateUpgrade         = "upgrade.activate"
+	MethodCancelUpgrade           = "upgrade.cancel"
+	MethodStatusUpgrade           = "upgrade.status"
 )
 
 const (
@@ -129,18 +134,19 @@ func (p CancelRequestParams) Validate() error {
 }
 
 const (
-	FeatureDeviceRegistry    = "deviceRegistryV1"
-	FeatureFullDuplexRPC     = "fullDuplexRpcV1"
-	FeatureMailbox           = "mailboxV1"
-	FeatureWorkerDispatch    = "managedWorkerDispatchV1"
-	FeatureWorkerLifecycle   = "workerLifecycleV1"
-	FeatureWorkerReadiness   = "workerReadinessV1"
-	FeaturePeerRoot          = "peerRootV1"
-	FeatureWorkspaceSync     = "workspaceSyncV1"
-	FeatureWorkspaceTransfer = "workspaceTransferV1"
-	FeatureChangesArtifact   = "changesArtifactV1"
-	FeatureResultPackage     = "resultPackageV3"
-	FeatureResultApply       = "resultApplyV1"
+	FeatureDeviceRegistry     = "deviceRegistryV1"
+	FeatureFullDuplexRPC      = "fullDuplexRpcV1"
+	FeatureMailbox            = "mailboxV1"
+	FeatureWorkerDispatch     = "managedWorkerDispatchV1"
+	FeatureWorkerLifecycle    = "workerLifecycleV1"
+	FeatureWorkerReadiness    = "workerReadinessV1"
+	FeaturePeerRoot           = "peerRootV1"
+	FeatureWorkspaceSync      = "workspaceSyncV1"
+	FeatureWorkspaceTransfer  = "workspaceTransferV1"
+	FeatureChangesArtifact    = "changesArtifactV1"
+	FeatureResultPackage      = "resultPackageV3"
+	FeatureResultApply        = "resultApplyV1"
+	FeatureCoordinatedUpgrade = "coordinatedUpgradeV1"
 )
 
 var methodPattern = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,63}$`)

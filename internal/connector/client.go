@@ -94,6 +94,17 @@ type WorkerReadinessSource interface {
 	WorkerReadiness(context.Context) (protocol.WorkerReadiness, error)
 }
 
+// UpgradeManager exposes only the peer-local coordinated-upgrade transitions.
+// Broker requests contain transaction identity and the target version, never
+// peer-local paths or release acquisition authority.
+type UpgradeManager interface {
+	PrepareCoordinatedUpgrade(context.Context, protocol.PrepareUpgradeParams) (protocol.UpgradeSnapshot, error)
+	ArmCoordinatedUpgrade(context.Context, protocol.UpgradeTransactionParams) (protocol.UpgradeSnapshot, error)
+	ActivateCoordinatedUpgrade(context.Context, protocol.UpgradeTransactionParams) (protocol.UpgradeSnapshot, error)
+	CancelCoordinatedUpgrade(context.Context, protocol.UpgradeTransactionParams) (protocol.UpgradeSnapshot, error)
+	CoordinatedUpgradeStatus(context.Context, protocol.UpgradeTransactionParams) (protocol.UpgradeSnapshot, error)
+}
+
 type workerLifecycleStartupSource interface {
 	StartupWorkerRevision() uint64
 }
@@ -252,6 +263,7 @@ type Options struct {
 	WorkerController         WorkerController
 	WorkerLifecycleSource    WorkerLifecycleSource
 	WorkerReadinessSource    WorkerReadinessSource
+	UpgradeManager           UpgradeManager
 	ChangesArtifactSource    ChangesArtifactSource
 	ResultPackageSource      ResultPackageSource
 	WorkspaceManager         WorkspaceManager
@@ -299,6 +311,7 @@ type Client struct {
 	workerController        WorkerController
 	workerLifecycle         WorkerLifecycleSource
 	workerReadiness         WorkerReadinessSource
+	upgradeManager          UpgradeManager
 	changesArtifacts        ChangesArtifactSource
 	artifactChanges         <-chan struct{}
 	resultSource            ResultPackageSource
@@ -476,6 +489,7 @@ func New(options Options) (*Client, error) {
 		workerController: workerController,
 		workerLifecycle:  options.WorkerLifecycleSource,
 		workerReadiness:  readinessSource,
+		upgradeManager:   options.UpgradeManager,
 		changesArtifacts: options.ChangesArtifactSource,
 		artifactChanges:  artifactChanges,
 		resultSource:     resultSource,
@@ -898,7 +912,7 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 	if result.HostKind != hello.HostKind {
 		return fmt.Errorf("broker host kind %q does not match connector host kind %q", result.HostKind, hello.HostKind)
 	}
-	for _, feature := range connectorProtocolFeatures() {
+	for _, feature := range connectorRequiredProtocolFeatures() {
 		if !slices.Contains(result.Features, feature) {
 			return fmt.Errorf("broker does not support required feature %q", feature)
 		}
@@ -913,6 +927,11 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 }
 
 func connectorProtocolFeatures() []string {
+	features := connectorRequiredProtocolFeatures()
+	return slices.Insert(features, 1, protocol.FeatureCoordinatedUpgrade)
+}
+
+func connectorRequiredProtocolFeatures() []string {
 	return []string{
 		protocol.FeatureChangesArtifact,
 		protocol.FeatureDeviceRegistry,

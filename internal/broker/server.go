@@ -717,6 +717,11 @@ func (s *Server) acceptHello(
 }
 
 func brokerProtocolFeatures() []string {
+	features := brokerRequiredProtocolFeatures()
+	return slices.Insert(features, 1, protocol.FeatureCoordinatedUpgrade)
+}
+
+func brokerRequiredProtocolFeatures() []string {
 	return []string{
 		protocol.FeatureChangesArtifact,
 		protocol.FeatureDeviceRegistry,
@@ -734,7 +739,7 @@ func brokerProtocolFeatures() []string {
 }
 
 func validatePeerFeatures(features []string) error {
-	for _, feature := range brokerProtocolFeatures() {
+	for _, feature := range brokerRequiredProtocolFeatures() {
 		if !slices.Contains(features, feature) {
 			return fmt.Errorf("peer does not support required protocol feature %q", feature)
 		}
