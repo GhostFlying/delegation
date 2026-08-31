@@ -174,8 +174,8 @@ func (b *fakeRootBackend) Call(
 		}
 		input := params.(protocol.ListAgentsParams)
 		*result.(*protocol.ListAgentsResult) = protocol.ListAgentsResult{
-			Agents: []protocol.AgentSummary{
-				testAgent(rootMCPThreadID, rootMCPWorkerID, "windows_build", input.AfterSequence+1),
+			Agents: []protocol.AgentState{
+				testAgentState(rootMCPThreadID, rootMCPWorkerID, "windows_build", input.AfterSequence+1),
 			},
 		}
 	case protocol.MethodSendAgent:
@@ -352,7 +352,16 @@ func TestRootMCPWaitAgentDescriptionCoversAllEventStreams(t *testing.T) {
 }
 
 func TestRootMCPSpawnsAndListsDurableAgents(t *testing.T) {
-	backend := &fakeRootBackend{}
+	listedState := testAgentState(rootMCPThreadID, rootMCPWorkerID, "windows_build", 1)
+	listedState.LifecyclePhase = protocol.WorkerLifecycleRunning
+	listedState.LifecycleTargetRevision = 7
+	listedState.LifecycleObservedAt = 11
+	listedState.LifecycleFreshness = protocol.AgentLifecycleCurrent
+	listedState.EffectiveStatus = protocol.AgentEffectiveRunning
+	listedState.TargetDispatchable = true
+	backend := &fakeRootBackend{agentsResult: &protocol.ListAgentsResult{
+		Agents: []protocol.AgentState{listedState},
+	}}
 	ctx, clientSession, closeSessions := connectRootMCP(t, backend)
 	defer closeSessions()
 	spawned := callTool(t, ctx, clientSession, ToolSpawnAgent, rootMCPThreadID, map[string]any{
@@ -368,9 +377,27 @@ func TestRootMCPSpawnsAndListsDurableAgents(t *testing.T) {
 	decodeStructured(t, spawned.StructuredContent, &agent)
 	if agent.SpawnID != rootMCPThreadID || agent.AgentID != rootMCPWorkerID ||
 		agent.ParentAgentID != rootMCPAgentID || agent.TargetDeviceID != rootMCPWorkerID ||
-		agent.TaskName != "windows_build" || agent.Status != protocol.AgentSpawnStarted ||
+		agent.TaskName != "windows_build" || agent.SpawnStatus != protocol.AgentSpawnStarted ||
 		agent.Outcome != protocol.AgentSpawnOutcomeStarted {
 		t.Fatalf("spawn_agent output = %#v", agent)
+	}
+	spawnJSON, err := json.Marshal(spawned.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spawnFields map[string]json.RawMessage
+	if err := json.Unmarshal(spawnJSON, &spawnFields); err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"spawn_status", "spawn_failure_code", "outcome"} {
+		if _, found := spawnFields[required]; !found {
+			t.Fatalf("spawn_agent omitted %q: %s", required, spawnJSON)
+		}
+	}
+	for _, forbidden := range []string{"status", "failure_code"} {
+		if _, found := spawnFields[forbidden]; found {
+			t.Fatalf("spawn_agent retained ambiguous %q alias: %s", forbidden, spawnJSON)
+		}
 	}
 	listed := callTool(t, ctx, clientSession, ToolListAgents, rootMCPThreadID, map[string]any{"limit": 1})
 	if listed.IsError {
@@ -378,8 +405,40 @@ func TestRootMCPSpawnsAndListsDurableAgents(t *testing.T) {
 	}
 	var page ListAgentsOutput
 	decodeStructured(t, listed.StructuredContent, &page)
-	if len(page.Agents) != 1 || page.Agents[0].TaskName != "windows_build" {
+	if len(page.Agents) != 1 || page.Agents[0].TaskName != "windows_build" ||
+		page.Agents[0].SpawnStatus != protocol.AgentSpawnStarted ||
+		page.Agents[0].LifecyclePhase != protocol.WorkerLifecycleRunning ||
+		page.Agents[0].LifecycleTargetRevision != 7 ||
+		page.Agents[0].LifecycleObservedAt != 11 ||
+		page.Agents[0].LifecycleFreshness != protocol.AgentLifecycleCurrent ||
+		page.Agents[0].EffectiveStatus != protocol.AgentEffectiveRunning ||
+		!page.Agents[0].TargetDispatchable {
 		t.Fatalf("list_agents output = %#v", page)
+	}
+	listJSON, err := json.Marshal(listed.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"spawn_status", "spawn_failure_code", "lifecycle_phase",
+		"lifecycle_failure_code", "lifecycle_target_revision",
+		"lifecycle_observed_at", "lifecycle_freshness", "effective_status",
+		"effective_failure_code", "failure_source", "target_dispatchable",
+	} {
+		if !bytes.Contains(listJSON, []byte("\""+required+"\"")) {
+			t.Fatalf("list_agents omitted %q: %s", required, listJSON)
+		}
+	}
+	var listFields struct {
+		Agents []map[string]json.RawMessage `json:"agents"`
+	}
+	if err := json.Unmarshal(listJSON, &listFields); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"status", "failure_code"} {
+		if _, found := listFields.Agents[0][forbidden]; found {
+			t.Fatalf("list_agents retained ambiguous %q alias: %s", forbidden, listJSON)
+		}
 	}
 	calls := backend.snapshot()
 	if len(calls) != 4 || calls[1].method != protocol.MethodSpawnAgent ||
@@ -418,7 +477,7 @@ func TestRootMCPReturnsPendingSpawnAttemptOutcomes(t *testing.T) {
 	} {
 		t.Run(string(outcome), func(t *testing.T) {
 			agent := testAgent(rootMCPThreadID, rootMCPWorkerID, "pending_attempt", 1)
-			agent.Status = protocol.AgentSpawnPending
+			agent.SpawnStatus = protocol.AgentSpawnPending
 			backend := &fakeRootBackend{spawnResult: &protocol.SpawnAgentResult{
 				Agent: agent, Outcome: outcome,
 			}}
@@ -435,7 +494,7 @@ func TestRootMCPReturnsPendingSpawnAttemptOutcomes(t *testing.T) {
 			}
 			var output SpawnAgentOutput
 			decodeStructured(t, spawned.StructuredContent, &output)
-			if output.Status != protocol.AgentSpawnPending || output.Outcome != outcome ||
+			if output.SpawnStatus != protocol.AgentSpawnPending || output.Outcome != outcome ||
 				output.AgentID != rootMCPWorkerID || output.TaskName != "pending_attempt" {
 				t.Fatalf("pending %s spawn output = %#v", outcome, output)
 			}
@@ -1070,8 +1129,22 @@ func testAgent(spawnID, deviceID, taskName string, sequence uint64) protocol.Age
 		Principal: control.NewWorkerPrincipal(
 			rootMCPControllerID, rootMCPTreeID, rootMCPWorkerID, rootMCPAgentID, deviceID,
 		).Identity(),
-		TaskName: taskName,
-		Status:   protocol.AgentSpawnStarted,
-		Sequence: sequence,
+		TaskName:    taskName,
+		SpawnStatus: protocol.AgentSpawnStarted,
+		Sequence:    sequence,
+	}
+}
+
+func testAgentState(spawnID, deviceID, taskName string, sequence uint64) protocol.AgentState {
+	return missingAgentState(testAgent(spawnID, deviceID, taskName, sequence))
+}
+
+func missingAgentState(spawn protocol.AgentSummary) protocol.AgentState {
+	return protocol.AgentState{
+		SpawnID: spawn.SpawnID, Principal: spawn.Principal, TaskName: spawn.TaskName,
+		SpawnStatus: spawn.SpawnStatus, SpawnFailureCode: spawn.SpawnFailureCode,
+		WorkspaceID: spawn.WorkspaceID, Sequence: spawn.Sequence,
+		LifecycleFreshness: protocol.AgentLifecycleMissing,
+		EffectiveStatus:    protocol.AgentEffectiveIndeterminate,
 	}
 }

@@ -197,6 +197,18 @@ func TestWaitAgentKeepsIndependentCursorsOutOfModelInput(t *testing.T) {
 		secondOutput.Activities[0].Phase != protocol.WorkerLifecycleIdle || secondOutput.HasMore {
 		t.Fatalf("second wait_agent output = %#v", secondOutput)
 	}
+	activityJSON, err := json.Marshal(secondOutput.Activities[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"spawn_status", "lifecycle_freshness", "effective_status",
+		"effective_failure_code", "failure_source", "target_dispatchable",
+	} {
+		if strings.Contains(string(activityJSON), "\""+forbidden+"\"") {
+			t.Fatalf("wait_agent activity mixed in projection field %q: %s", forbidden, activityJSON)
+		}
+	}
 
 	var waits []protocol.WaitAgentParams
 	for _, call := range backend.snapshot() {

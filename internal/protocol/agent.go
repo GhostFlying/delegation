@@ -3,6 +3,7 @@ package protocol
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -126,13 +127,13 @@ func (p SpawnWorkerParams) Validate() error {
 }
 
 type AgentSummary struct {
-	SpawnID     string                    `json:"spawnId"`
-	Principal   control.PrincipalIdentity `json:"principal"`
-	TaskName    string                    `json:"taskName"`
-	Status      AgentSpawnStatus          `json:"status"`
-	FailureCode string                    `json:"failureCode"`
-	WorkspaceID string                    `json:"workspaceId,omitempty"`
-	Sequence    uint64                    `json:"sequence"`
+	SpawnID          string                    `json:"spawnId"`
+	Principal        control.PrincipalIdentity `json:"principal"`
+	TaskName         string                    `json:"taskName"`
+	SpawnStatus      AgentSpawnStatus          `json:"spawnStatus"`
+	SpawnFailureCode string                    `json:"spawnFailureCode"`
+	WorkspaceID      string                    `json:"workspaceId,omitempty"`
+	Sequence         uint64                    `json:"sequence"`
 }
 
 func (a AgentSummary) Validate() error {
@@ -153,7 +154,7 @@ func (a AgentSummary) Validate() error {
 			return fmt.Errorf("workspaceId %w", err)
 		}
 	}
-	if err := a.Status.Validate(a.FailureCode); err != nil {
+	if err := a.SpawnStatus.Validate(a.SpawnFailureCode); err != nil {
 		return err
 	}
 	if a.Sequence < 1 || a.Sequence > MaximumAgentsPerTree {
@@ -171,7 +172,7 @@ func (r SpawnAgentResult) Validate() error {
 	if err := r.Agent.Validate(); err != nil {
 		return err
 	}
-	if err := r.Outcome.Validate(r.Agent.FailureCode); err != nil {
+	if err := r.Outcome.Validate(r.Agent.SpawnFailureCode); err != nil {
 		return err
 	}
 	var expectedStatus AgentSpawnStatus
@@ -185,7 +186,7 @@ func (r SpawnAgentResult) Validate() error {
 	default:
 		panic("validated agent spawn result has an unknown outcome")
 	}
-	if r.Agent.Status != expectedStatus {
+	if r.Agent.SpawnStatus != expectedStatus {
 		return errors.New("agent spawn outcome does not match durable status")
 	}
 	return nil
@@ -227,8 +228,134 @@ func (p ListAgentsParams) Validate() error {
 }
 
 type ListAgentsResult struct {
-	Agents       []AgentSummary `json:"agents"`
-	NextSequence uint64         `json:"nextSequence,omitempty"`
+	Agents       []AgentState `json:"agents"`
+	NextSequence uint64       `json:"nextSequence,omitempty"`
+}
+
+type AgentLifecycleFreshness string
+
+const (
+	AgentLifecycleCurrent AgentLifecycleFreshness = "current"
+	AgentLifecycleSyncing AgentLifecycleFreshness = "syncing"
+	AgentLifecycleOffline AgentLifecycleFreshness = "offline"
+	AgentLifecycleMissing AgentLifecycleFreshness = "missing"
+)
+
+type AgentEffectiveStatus string
+
+const (
+	AgentEffectiveIndeterminate AgentEffectiveStatus = "indeterminate"
+	AgentEffectiveStarting      AgentEffectiveStatus = "starting"
+	AgentEffectiveRunning       AgentEffectiveStatus = "running"
+	AgentEffectiveFinalizing    AgentEffectiveStatus = "finalizing"
+	AgentEffectiveIdle          AgentEffectiveStatus = "idle"
+	AgentEffectiveInterrupted   AgentEffectiveStatus = "interrupted"
+	AgentEffectiveFailed        AgentEffectiveStatus = "failed"
+)
+
+type AgentFailureSource string
+
+const (
+	AgentFailureSourceSpawn     AgentFailureSource = "spawn"
+	AgentFailureSourceLifecycle AgentFailureSource = "lifecycle"
+)
+
+// AgentState combines an immutable spawn receipt with the most recent
+// lifecycle observation and a generation-consistent target connection view.
+type AgentState struct {
+	SpawnID                 string                    `json:"spawnId"`
+	Principal               control.PrincipalIdentity `json:"principal"`
+	TaskName                string                    `json:"taskName"`
+	SpawnStatus             AgentSpawnStatus          `json:"spawnStatus"`
+	SpawnFailureCode        string                    `json:"spawnFailureCode"`
+	WorkspaceID             string                    `json:"workspaceId,omitempty"`
+	Sequence                uint64                    `json:"sequence"`
+	LifecyclePhase          WorkerLifecyclePhase      `json:"lifecyclePhase"`
+	LifecycleFailureCode    string                    `json:"lifecycleFailureCode"`
+	LifecycleTargetRevision uint64                    `json:"lifecycleTargetRevision"`
+	LifecycleObservedAt     int64                     `json:"lifecycleObservedAt"`
+	LifecycleFreshness      AgentLifecycleFreshness   `json:"lifecycleFreshness"`
+	EffectiveStatus         AgentEffectiveStatus      `json:"effectiveStatus"`
+	EffectiveFailureCode    string                    `json:"effectiveFailureCode"`
+	FailureSource           AgentFailureSource        `json:"failureSource"`
+	TargetDispatchable      bool                      `json:"targetDispatchable"`
+}
+
+func (a AgentState) SpawnReceipt() AgentSummary {
+	return AgentSummary{
+		SpawnID: a.SpawnID, Principal: a.Principal, TaskName: a.TaskName,
+		SpawnStatus: a.SpawnStatus, SpawnFailureCode: a.SpawnFailureCode,
+		WorkspaceID: a.WorkspaceID, Sequence: a.Sequence,
+	}
+}
+
+func (a AgentState) Validate() error {
+	if err := a.SpawnReceipt().Validate(); err != nil {
+		return err
+	}
+	switch a.LifecycleFreshness {
+	case AgentLifecycleMissing:
+		if a.LifecyclePhase != "" || a.LifecycleFailureCode != "" ||
+			a.LifecycleTargetRevision != 0 || a.LifecycleObservedAt != 0 {
+			return errors.New("missing lifecycle must not contain lifecycle state")
+		}
+	case AgentLifecycleCurrent, AgentLifecycleSyncing, AgentLifecycleOffline:
+		if a.LifecycleTargetRevision == 0 || a.LifecycleTargetRevision > math.MaxInt64 ||
+			a.LifecycleObservedAt < 0 {
+			return errors.New("agent lifecycle metadata is invalid")
+		}
+		if err := a.LifecyclePhase.Validate(a.LifecycleFailureCode); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported agent lifecycle freshness %q", a.LifecycleFreshness)
+	}
+	if a.TargetDispatchable && (a.LifecycleFreshness == AgentLifecycleSyncing ||
+		a.LifecycleFreshness == AgentLifecycleOffline) {
+		return errors.New("stale agent lifecycle target must not be dispatchable")
+	}
+	effective, failureCode, failureSource := ProjectAgentEffectiveState(
+		a.SpawnStatus, a.SpawnFailureCode, a.LifecyclePhase,
+		a.LifecycleFailureCode, a.LifecycleFreshness,
+	)
+	if a.EffectiveStatus != effective || a.EffectiveFailureCode != failureCode ||
+		a.FailureSource != failureSource {
+		return errors.New("agent effective state does not match its authorities")
+	}
+	return nil
+}
+
+func ProjectAgentEffectiveState(
+	spawnStatus AgentSpawnStatus,
+	spawnFailureCode string,
+	lifecyclePhase WorkerLifecyclePhase,
+	lifecycleFailureCode string,
+	freshness AgentLifecycleFreshness,
+) (AgentEffectiveStatus, string, AgentFailureSource) {
+	if spawnStatus == AgentSpawnFailed {
+		return AgentEffectiveFailed, spawnFailureCode, AgentFailureSourceSpawn
+	}
+	if lifecyclePhase == WorkerLifecycleFailed && freshness != AgentLifecycleMissing {
+		return AgentEffectiveFailed, lifecycleFailureCode, AgentFailureSourceLifecycle
+	}
+	if freshness != AgentLifecycleCurrent {
+		return AgentEffectiveIndeterminate, "", ""
+	}
+	switch lifecyclePhase {
+	case WorkerLifecycleReserved, WorkerLifecyclePending, WorkerLifecycleStarting,
+		WorkerLifecyclePreflight, WorkerLifecycleReady:
+		return AgentEffectiveStarting, "", ""
+	case WorkerLifecycleRunning:
+		return AgentEffectiveRunning, "", ""
+	case WorkerLifecycleFinalizing:
+		return AgentEffectiveFinalizing, "", ""
+	case WorkerLifecycleIdle:
+		return AgentEffectiveIdle, "", ""
+	case WorkerLifecycleInterrupted:
+		return AgentEffectiveInterrupted, "", ""
+	default:
+		return AgentEffectiveIndeterminate, "", ""
+	}
 }
 
 func ValidateAgentTaskName(taskName string) error {

@@ -126,7 +126,10 @@ func TestRootMCPRejectsAmbiguousTaskTargetAndMismatchedResult(t *testing.T) {
 	second := testAgent(rootMCPMessageID, rootMCPWorkerID, "duplicate", 2)
 	second.Principal.AgentID = rootMCPFollowupID
 	backend := &fakeRootBackend{agentsResult: &protocol.ListAgentsResult{
-		Agents: []protocol.AgentSummary{first, second},
+		Agents: []protocol.AgentState{
+			missingAgentState(first),
+			missingAgentState(second),
+		},
 	}}
 	ctx, clientSession, closeSessions := connectRootMCP(t, backend)
 	result := callTool(t, ctx, clientSession, ToolInterruptAgent, rootMCPThreadID, map[string]any{

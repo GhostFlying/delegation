@@ -176,7 +176,8 @@ func TestWorkerLifecycleActivityIsIndependentFromDispatchAndTreeScoped(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if agents.Agents[0].Status != protocol.AgentSpawnPending || agents.Agents[1].Status != protocol.AgentSpawnPending {
+	if agents.Agents[0].Spawn.SpawnStatus != protocol.AgentSpawnPending ||
+		agents.Agents[1].Spawn.SpawnStatus != protocol.AgentSpawnPending {
 		t.Fatalf("lifecycle changed dispatch receipts: %#v", agents.Agents)
 	}
 	if _, err := registry.MarkAgentSpawnStarted(
@@ -271,6 +272,83 @@ WHERE controller_id = ? AND tree_id = ? AND agent_id = ?
 	)
 	if err != nil || len(otherPage.Activities) != 0 || otherPage.Highwater != 0 {
 		t.Fatalf("other tree lifecycle page = %#v, error %v", otherPage, err)
+	}
+}
+
+func TestAgentListJoinsLifecycleWithoutChangingReceiptPagination(t *testing.T) {
+	registry, root := prepareAgentSpawnStore(t)
+	first := beginLifecycleAgent(
+		t, registry, root, lifecycleAgentOne, agentSpawnTargetID, "projected_first",
+	)
+	second := beginLifecycleAgent(
+		t, registry, root, lifecycleAgentTwo, agentSpawnTargetID, "projected_second",
+	)
+	third := beginLifecycleAgent(
+		t, registry, root, lifecycleMissingAgent, agentSpawnTargetID, "projected_third",
+	)
+	session := lifecycleSession(t, registry, lifecycleConnectionOne)
+	claimLifecycleSession(t, registry, session, 3)
+	applyLifecyclePage(
+		t, registry, session, 0, 1,
+		lifecycleSnapshotFor(first, 1, protocol.WorkerLifecycleRunning),
+	)
+
+	before, err := registry.ListAgents(
+		context.Background(), root.Identity(), AgentPageRequest{Limit: 2},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.Agents) != 2 || before.NextSequence != 2 ||
+		before.Agents[0].Spawn != first.Agent || before.Agents[1].Spawn != second.Agent {
+		t.Fatalf("initial joined page = %#v", before)
+	}
+	if got := before.Agents[0].Lifecycle; got == nil ||
+		got.TargetRevision != 1 || got.Phase != protocol.WorkerLifecycleRunning ||
+		got.FailureCode != "" || got.ObservedAt != 21 {
+		t.Fatalf("initial joined lifecycle = %#v", got)
+	}
+	if before.Agents[1].Lifecycle != nil {
+		t.Fatalf("missing lifecycle joined as %#v", before.Agents[1].Lifecycle)
+	}
+
+	applyLifecyclePage(
+		t, registry, session, 1, 3,
+		lifecycleSnapshotFor(first, 2, protocol.WorkerLifecycleIdle),
+		lifecycleSnapshotFor(second, 3, protocol.WorkerLifecycleRunning),
+	)
+	after, err := registry.ListAgents(
+		context.Background(), root.Identity(), AgentPageRequest{Limit: 2},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Agents) != 2 || after.NextSequence != before.NextSequence {
+		t.Fatalf("updated joined page = %#v", after)
+	}
+	for index, record := range after.Agents {
+		if record.Spawn != before.Agents[index].Spawn {
+			t.Fatalf("lifecycle update changed receipt %d: %#v", index, record.Spawn)
+		}
+	}
+	if after.Agents[0].Lifecycle == nil ||
+		after.Agents[0].Lifecycle.TargetRevision != 2 ||
+		after.Agents[0].Lifecycle.Phase != protocol.WorkerLifecycleIdle ||
+		after.Agents[1].Lifecycle == nil ||
+		after.Agents[1].Lifecycle.TargetRevision != 3 ||
+		after.Agents[1].Lifecycle.Phase != protocol.WorkerLifecycleRunning {
+		t.Fatalf("updated joined lifecycles = %#v", after.Agents)
+	}
+
+	last, err := registry.ListAgents(context.Background(), root.Identity(), AgentPageRequest{
+		AfterSequence: after.NextSequence, Limit: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(last.Agents) != 1 || last.NextSequence != 0 ||
+		last.Agents[0].Spawn != third.Agent || last.Agents[0].Lifecycle != nil {
+		t.Fatalf("stable final joined page = %#v", last)
 	}
 }
 

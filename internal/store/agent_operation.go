@@ -363,7 +363,7 @@ WHERE r.controller_id = ? AND r.tree_id = ? AND r.agent_id = ?
 	if receipt.Agent.Principal.ParentAgentID != source.AgentID {
 		return AgentSpawnReceipt{}, ErrAuthorizationDenied
 	}
-	if receipt.Agent.Status != protocol.AgentSpawnStarted {
+	if receipt.Agent.SpawnStatus != protocol.AgentSpawnStarted {
 		return AgentSpawnReceipt{}, fmt.Errorf("%w: managed agent has not started", ErrConflict)
 	}
 	return receipt, nil

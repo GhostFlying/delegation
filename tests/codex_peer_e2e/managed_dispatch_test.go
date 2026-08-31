@@ -133,7 +133,7 @@ func testManagedAdmission(
 		spawned := dispatched.result.spawned
 		root := dispatched.result.root
 		if err := spawned.Validate(); err != nil ||
-			spawned.Agent.Status != protocol.AgentSpawnStarted ||
+			spawned.Agent.SpawnStatus != protocol.AgentSpawnStarted ||
 			spawned.Outcome != protocol.AgentSpawnOutcomeStarted ||
 			spawned.Agent.TaskName != dispatched.taskName ||
 			spawned.Agent.Principal.DeviceID != deviceIDs[target.label] ||
@@ -167,7 +167,7 @@ WHERE status IN ('reserved', 'starting', 'preflight', 'ready', 'running')
 	}
 	busy, err := spawnManagedAgent(ctx, rootA, busyParams)
 	if err != nil || busy.Outcome != protocol.AgentSpawnOutcomeBusy ||
-		busy.Agent.Status != protocol.AgentSpawnPending {
+		busy.Agent.SpawnStatus != protocol.AgentSpawnPending {
 		t.Fatalf("capacity-limited spawn = %#v, error %v", busy, err)
 	}
 	assertWorkerReservationCount(t, targetConfig.Peer.StateFile, busy.Agent, 0)
@@ -184,7 +184,7 @@ WHERE status IN ('reserved', 'starting', 'preflight', 'ready', 'running')
 	)
 	startedRetry, err := spawnManagedAgent(ctx, rootA, busyParams)
 	if err != nil || startedRetry.Outcome != protocol.AgentSpawnOutcomeStarted ||
-		startedRetry.Agent.Status != protocol.AgentSpawnStarted ||
+		startedRetry.Agent.SpawnStatus != protocol.AgentSpawnStarted ||
 		startedRetry.Agent.Principal != busy.Agent.Principal ||
 		startedRetry.Agent.Sequence != busy.Agent.Sequence {
 		t.Fatalf("capacity retry = %#v, busy %#v, error %v", startedRetry, busy, err)
@@ -243,7 +243,7 @@ func testManagedRootMCPFlow(
 	runRootAgentCase(rootMCPSpawn)
 	root := prepareManagedDispatchRoot(t, source, externalSourceThread)
 	agent := findManagedAgent(t, ctx, root, managedRootMCPTask)
-	if agent.Status != protocol.AgentSpawnStarted ||
+	if agent.SpawnStatus != protocol.AgentSpawnStarted ||
 		agent.Principal.ParentAgentID != root.root.Principal.AgentID ||
 		agent.Principal.DeviceID != deviceIDs[target.label] {
 		t.Fatalf("root MCP managed agent = %#v", agent)
@@ -302,7 +302,7 @@ func testManagedCollaborationAndRecovery(
 		Message:  "delegation-worker-case=" + workerCollaborationInitial + " Wait for a root steer, then report to the parent.",
 	})
 	if err != nil || spawned.Outcome != protocol.AgentSpawnOutcomeStarted ||
-		spawned.Agent.Status != protocol.AgentSpawnStarted ||
+		spawned.Agent.SpawnStatus != protocol.AgentSpawnStarted ||
 		spawned.Agent.Principal.ParentAgentID != root.root.Principal.AgentID ||
 		spawned.Agent.Principal.DeviceID != deviceIDs[target.label] {
 		t.Fatalf("collaboration spawn = %#v, error %v", spawned, err)
@@ -485,7 +485,7 @@ func findManagedAgent(
 	}
 	for _, agent := range result.Agents {
 		if agent.TaskName == taskName {
-			return agent
+			return agent.SpawnReceipt()
 		}
 	}
 	t.Fatalf("managed agent %s was not listed: %#v", taskName, result)

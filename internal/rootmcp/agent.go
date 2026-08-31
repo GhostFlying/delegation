@@ -22,26 +22,35 @@ type SpawnAgentInput struct {
 }
 
 type AgentOutput struct {
-	SpawnID        string                    `json:"spawn_id"`
-	AgentID        string                    `json:"agent_id"`
-	ParentAgentID  string                    `json:"parent_agent_id"`
-	TargetDeviceID string                    `json:"target_device_id"`
-	TaskName       string                    `json:"task_name"`
-	Status         protocol.AgentSpawnStatus `json:"status"`
-	FailureCode    string                    `json:"failure_code,omitempty"`
-	WorkspaceID    string                    `json:"workspace_id,omitempty"`
+	SpawnID                 string                           `json:"spawn_id"`
+	AgentID                 string                           `json:"agent_id"`
+	ParentAgentID           string                           `json:"parent_agent_id"`
+	TargetDeviceID          string                           `json:"target_device_id"`
+	TaskName                string                           `json:"task_name"`
+	SpawnStatus             protocol.AgentSpawnStatus        `json:"spawn_status"`
+	SpawnFailureCode        string                           `json:"spawn_failure_code"`
+	LifecyclePhase          protocol.WorkerLifecyclePhase    `json:"lifecycle_phase"`
+	LifecycleFailureCode    string                           `json:"lifecycle_failure_code"`
+	LifecycleTargetRevision uint64                           `json:"lifecycle_target_revision"`
+	LifecycleObservedAt     int64                            `json:"lifecycle_observed_at"`
+	LifecycleFreshness      protocol.AgentLifecycleFreshness `json:"lifecycle_freshness"`
+	EffectiveStatus         protocol.AgentEffectiveStatus    `json:"effective_status"`
+	EffectiveFailureCode    string                           `json:"effective_failure_code"`
+	FailureSource           protocol.AgentFailureSource      `json:"failure_source"`
+	TargetDispatchable      bool                             `json:"target_dispatchable"`
+	WorkspaceID             string                           `json:"workspace_id,omitempty"`
 }
 
 type SpawnAgentOutput struct {
-	SpawnID        string                     `json:"spawn_id"`
-	AgentID        string                     `json:"agent_id"`
-	ParentAgentID  string                     `json:"parent_agent_id"`
-	TargetDeviceID string                     `json:"target_device_id"`
-	TaskName       string                     `json:"task_name"`
-	Status         protocol.AgentSpawnStatus  `json:"status"`
-	Outcome        protocol.AgentSpawnOutcome `json:"outcome"`
-	FailureCode    string                     `json:"failure_code,omitempty"`
-	WorkspaceID    string                     `json:"workspace_id,omitempty"`
+	SpawnID          string                     `json:"spawn_id"`
+	AgentID          string                     `json:"agent_id"`
+	ParentAgentID    string                     `json:"parent_agent_id"`
+	TargetDeviceID   string                     `json:"target_device_id"`
+	TaskName         string                     `json:"task_name"`
+	SpawnStatus      protocol.AgentSpawnStatus  `json:"spawn_status"`
+	Outcome          protocol.AgentSpawnOutcome `json:"outcome"`
+	SpawnFailureCode string                     `json:"spawn_failure_code"`
+	WorkspaceID      string                     `json:"workspace_id,omitempty"`
 }
 
 type ListAgentsInput struct {
@@ -245,30 +254,39 @@ func validateListAgentsResult(
 	return nil
 }
 
-func agentOutput(agent protocol.AgentSummary) AgentOutput {
+func agentOutput(agent protocol.AgentState) AgentOutput {
 	return AgentOutput{
-		SpawnID:        agent.SpawnID,
-		AgentID:        agent.Principal.AgentID,
-		ParentAgentID:  agent.Principal.ParentAgentID,
-		TargetDeviceID: agent.Principal.DeviceID,
-		TaskName:       agent.TaskName,
-		Status:         agent.Status,
-		FailureCode:    agent.FailureCode,
-		WorkspaceID:    agent.WorkspaceID,
+		SpawnID:                 agent.SpawnID,
+		AgentID:                 agent.Principal.AgentID,
+		ParentAgentID:           agent.Principal.ParentAgentID,
+		TargetDeviceID:          agent.Principal.DeviceID,
+		TaskName:                agent.TaskName,
+		SpawnStatus:             agent.SpawnStatus,
+		SpawnFailureCode:        agent.SpawnFailureCode,
+		LifecyclePhase:          agent.LifecyclePhase,
+		LifecycleFailureCode:    agent.LifecycleFailureCode,
+		LifecycleTargetRevision: agent.LifecycleTargetRevision,
+		LifecycleObservedAt:     agent.LifecycleObservedAt,
+		LifecycleFreshness:      agent.LifecycleFreshness,
+		EffectiveStatus:         agent.EffectiveStatus,
+		EffectiveFailureCode:    agent.EffectiveFailureCode,
+		FailureSource:           agent.FailureSource,
+		TargetDispatchable:      agent.TargetDispatchable,
+		WorkspaceID:             agent.WorkspaceID,
 	}
 }
 
 func spawnAgentOutput(result protocol.SpawnAgentResult) SpawnAgentOutput {
 	agent := result.Agent
 	return SpawnAgentOutput{
-		SpawnID:        agent.SpawnID,
-		AgentID:        agent.Principal.AgentID,
-		ParentAgentID:  agent.Principal.ParentAgentID,
-		TargetDeviceID: agent.Principal.DeviceID,
-		TaskName:       agent.TaskName,
-		Status:         agent.Status,
-		Outcome:        result.Outcome,
-		FailureCode:    agent.FailureCode,
-		WorkspaceID:    agent.WorkspaceID,
+		SpawnID:          agent.SpawnID,
+		AgentID:          agent.Principal.AgentID,
+		ParentAgentID:    agent.Principal.ParentAgentID,
+		TargetDeviceID:   agent.Principal.DeviceID,
+		TaskName:         agent.TaskName,
+		SpawnStatus:      agent.SpawnStatus,
+		Outcome:          result.Outcome,
+		SpawnFailureCode: agent.SpawnFailureCode,
+		WorkspaceID:      agent.WorkspaceID,
 	}
 }
