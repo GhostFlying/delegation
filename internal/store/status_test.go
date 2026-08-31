@@ -313,6 +313,147 @@ UPDATE peer_metadata SET worker_revision = 77, result_inbox_evicted = 8 WHERE si
 	}
 }
 
+func TestBrokerUpgradeBlockersCountOnlyUnfinishedWork(t *testing.T) {
+	ctx := context.Background()
+	registry, root, worker, _, _ := prepareChangesArtifactStore(t, true, true)
+
+	pending := beginLifecycleAgent(
+		t, registry, root, statusPendingAgentID, agentSpawnTargetID, "upgrade_pending",
+	)
+	operation, err := registry.BeginAgentOperation(ctx, AgentOperationIntent{
+		Source: root.Identity(), OperationID: statusFollowupID, AgentID: worker.AgentID,
+		Action: protocol.AgentOperationFollowup, PayloadDigest: sha256.Sum256([]byte("upgrade")),
+	}, time.Unix(20, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := testWorkspaceManifest("https://example.invalid/upgrade.git")
+	workspace, err := registry.BeginWorkspaceSync(ctx, WorkspaceSyncIntent{
+		Source: root.Identity(), SyncID: changesTestID(150_000),
+		TargetDeviceID: agentSpawnTargetID, GitURL: manifest.GitURL,
+		SourcePathHash: sha256.Sum256([]byte("upgrade workspace")),
+	}, time.Unix(21, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := lifecycleSession(t, registry, lifecycleConnectionOne)
+	claimLifecycleSession(t, registry, session, 1)
+	applyLifecyclePage(t, registry, session, 0, 1, protocol.WorkerLifecycleSnapshot{
+		TreeID: root.TreeID, AgentID: worker.AgentID, Revision: 1,
+		Phase: protocol.WorkerLifecycleRunning, CodexThreadID: lifecycleCodexThreadOne,
+		ActiveTurnID: lifecycleTurnOne,
+	})
+	packageID := changesTestID(151_000)
+	managedThreadID := changesTestID(152_000)
+	turnID := changesTestID(153_000)
+	metadata := statusResultMetadata(
+		t, worker.ControllerID, worker.TreeID, worker.AgentID, worker.DeviceID,
+		packageID, managedThreadID, turnID, false,
+	)
+	if _, err := registry.db.ExecContext(ctx, `
+INSERT INTO result_packages(
+	controller_id, tree_id, package_id, source_agent_id, source_device_id,
+	managed_thread_id, turn_id, lifecycle_revision, root_device_id,
+	manifest_bytes, manifest_size, manifest_sha256, state, published_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'deliveryPending', 22)
+`, root.ControllerID, root.TreeID, packageID, worker.AgentID,
+		worker.DeviceID, managedThreadID, turnID, root.DeviceID,
+		metadata.Manifest, metadata.ManifestDescriptor.Size, metadata.ManifestDescriptor.SHA256); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := registry.ReadBrokerUpgradeBlockers(ctx, root.ControllerID)
+	want := UpgradeBlockers{
+		OccupiedWorkers: 1, PendingSpawns: 1, PendingOperations: 1,
+		WorkspaceTransfers: 1, ResultFinalizations: 1,
+	}
+	if err != nil || got != want {
+		t.Fatalf("upgrade blockers = %#v, %v; want %#v", got, err, want)
+	}
+
+	if _, err := registry.MarkAgentSpawnFailed(ctx, keyForReceipt(pending), "cancelled", time.Unix(23, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.FinishAgentOperation(
+		ctx, operation.Key, protocol.AgentOperationOutcomeStarted, "", time.Unix(23, 0),
+	); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err = registry.PinWorkspaceSyncManifest(ctx, workspace.Key, manifest, time.Unix(23, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestHash, err := protocol.WorkspaceManifestHash(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.FinishWorkspaceSync(ctx, workspace.Key, protocol.WorkspaceSummary{
+		WorkspaceID: workspace.Key.SyncID, SourceDeviceID: root.DeviceID,
+		TargetDeviceID: agentSpawnTargetID, HeadOID: manifest.HeadOID,
+		ObjectFormat: manifest.ObjectFormat, WorkingDirectory: manifest.WorkingDirectory,
+		Strategy: protocol.WorkspaceStrategyDirect, ManifestHash: manifestHash,
+		Warnings: manifest.Warnings,
+	}, time.Unix(24, 0)); err != nil {
+		t.Fatal(err)
+	}
+	applyLifecyclePage(t, registry, session, 1, 2, protocol.WorkerLifecycleSnapshot{
+		TreeID: root.TreeID, AgentID: worker.AgentID, Revision: 2,
+		Phase: protocol.WorkerLifecycleIdle, CodexThreadID: lifecycleCodexThreadOne,
+	})
+	if _, err := registry.db.ExecContext(ctx, `
+UPDATE result_packages
+SET state = 'delivered', result_sequence = 1, root_retention_ordinal = 1,
+	delivered_at = 23, source_acknowledged_at = 24, source_released_at = 25
+WHERE controller_id = ? AND package_id = ?
+`, root.ControllerID, packageID); err != nil {
+		t.Fatal(err)
+	}
+	got, err = registry.ReadBrokerUpgradeBlockers(ctx, root.ControllerID)
+	if err != nil || !got.Empty() {
+		t.Fatalf("terminal broker blockers = %#v, %v", got, err)
+	}
+}
+
+func TestPeerUpgradeBlockersAreDeviceScoped(t *testing.T) {
+	ctx := context.Background()
+	state := openPeerTestStore(t)
+	local := workerReservation(t, changesTestID(160_000), "local upgrade worker")
+	local.Status = WorkerRunning
+	local.CodexThreadID = changesTestID(160_001)
+	local.ActiveTurnID = changesTestID(160_002)
+	local.LastBoundTurnID = local.ActiveTurnID
+	local.Revision, local.CreatedAt, local.UpdatedAt = 1, 1, 1
+	insertPeerStatusWorker(t, state, local)
+	if _, err := state.db.ExecContext(ctx, `
+INSERT INTO worker_operation_receipts(
+	controller_id, operation_id, tree_id, agent_id, action, payload_digest,
+	status, outcome, created_at, updated_at
+) VALUES (?, ?, ?, ?, 'followup', ?, 'pending', 'pending', 2, 2)
+`, local.ControllerID, changesTestID(160_003), local.TreeID, local.AgentID,
+		strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	insertPeerStatusArtifact(t, state, local, 160_004, ChangesCapturePending)
+	insertPeerStatusCapturedResult(t, state, local, 160_005, ResultOutboxDeliveryPending, false)
+
+	other := workerReservation(t, changesTestID(161_000), "other device worker")
+	other.DeviceID = changesTestID(161_001)
+	other.Status = WorkerRunning
+	other.CodexThreadID = changesTestID(161_002)
+	other.ActiveTurnID = changesTestID(161_003)
+	other.LastBoundTurnID = other.ActiveTurnID
+	other.Revision, other.CreatedAt, other.UpdatedAt = 2, 2, 2
+	insertPeerStatusWorker(t, state, other)
+	insertPeerStatusArtifact(t, state, other, 161_004, ChangesCapturePending)
+	insertPeerStatusCapturedResult(t, state, other, 161_005, ResultOutboxDeliveryPending, false)
+
+	got, err := state.ReadPeerUpgradeBlockers(ctx, local.ControllerID, local.DeviceID)
+	want := UpgradeBlockers{OccupiedWorkers: 1, PendingOperations: 1, ResultFinalizations: 2}
+	if err != nil || got != want {
+		t.Fatalf("peer upgrade blockers = %#v, %v; want %#v", got, err, want)
+	}
+}
+
 func TestPeerStatusSnapshotRejectsResultOutboxOverQuota(t *testing.T) {
 	state := openPeerTestStore(t)
 	worker := workerReservation(t, changesTestID(140_000), "over quota result status")
