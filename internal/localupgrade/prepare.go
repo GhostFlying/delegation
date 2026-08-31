@@ -1,0 +1,491 @@
+package localupgrade
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"time"
+
+	"github.com/GhostFlying/delegation/internal/codexconfig"
+	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/hostkind"
+	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/releaseverify"
+	"github.com/GhostFlying/delegation/internal/securefs"
+	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/userservice"
+	"github.com/GhostFlying/delegation/internal/workerreadiness"
+)
+
+const (
+	CompatibilitySchemaVersion = 1
+	TailscaleGeneration        = 1
+	maximumCompatibilityOutput = 16 << 10
+	maximumConfigDigestFile    = 1 << 20
+)
+
+type Compatibility struct {
+	SchemaVersion       int                    `json:"schemaVersion"`
+	RuntimeVersion      string                 `json:"runtimeVersion"`
+	Platform            string                 `json:"platform"`
+	Architecture        string                 `json:"architecture"`
+	ConfigSchemaVersion int                    `json:"configSchemaVersion"`
+	DatabaseKind        store.DatabaseKind     `json:"databaseKind"`
+	DatabaseIdentity    store.DatabaseIdentity `json:"databaseIdentity"`
+	TailscaleGeneration int                    `json:"tailscaleGeneration"`
+}
+
+func (c Compatibility) Validate() error {
+	if c.SchemaVersion != CompatibilitySchemaVersion || !validVersion(c.RuntimeVersion) {
+		return errors.New("target runtime compatibility identity is invalid")
+	}
+	if c.Platform != runtime.GOOS || c.Architecture != runtime.GOARCH {
+		return errors.New("target runtime compatibility platform does not match this host")
+	}
+	if c.ConfigSchemaVersion != delegationconfig.CurrentSchemaVersion {
+		return errors.New("target runtime does not support the current config schema")
+	}
+	current, err := store.CurrentDatabaseIdentity(c.DatabaseKind)
+	if err != nil {
+		return err
+	}
+	if c.DatabaseIdentity.ApplicationID != current.ApplicationID || c.DatabaseIdentity.SchemaVersion < 1 {
+		return errors.New("target runtime database identity is invalid")
+	}
+	if c.TailscaleGeneration != TailscaleGeneration {
+		return errors.New("target runtime Tailscale compatibility generation differs")
+	}
+	return nil
+}
+
+func CurrentCompatibility(role delegationconfig.Role, runtimeVersion string) (Compatibility, error) {
+	kind, err := databaseKind(role)
+	if err != nil {
+		return Compatibility{}, err
+	}
+	databaseIdentity, err := store.CurrentDatabaseIdentity(kind)
+	if err != nil {
+		return Compatibility{}, err
+	}
+	result := Compatibility{
+		SchemaVersion: CompatibilitySchemaVersion, RuntimeVersion: runtimeVersion,
+		Platform: runtime.GOOS, Architecture: runtime.GOARCH,
+		ConfigSchemaVersion: delegationconfig.CurrentSchemaVersion,
+		DatabaseKind:        kind, DatabaseIdentity: databaseIdentity,
+		TailscaleGeneration: TailscaleGeneration,
+	}
+	return result, result.Validate()
+}
+
+type TargetProbe func(context.Context, string, string, string) (Compatibility, error)
+
+func ProbeTarget(ctx context.Context, binary, configPath, environmentFile string) (Compatibility, error) {
+	arguments := []string{"service", "upgrade-compatibility", "--config", configPath, "--json"}
+	if environmentFile != "" {
+		arguments = append(arguments, "--environment-file", environmentFile)
+	}
+	command := exec.CommandContext(ctx, binary, arguments...)
+	var output boundedOutput
+	output.maximum = maximumCompatibilityOutput
+	command.Stdout = &output
+	command.Stderr = io.Discard
+	if err := command.Run(); err != nil {
+		return Compatibility{}, fmt.Errorf("run target compatibility probe: %w", err)
+	}
+	var result Compatibility
+	decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil {
+		return Compatibility{}, fmt.Errorf("decode target compatibility: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return Compatibility{}, errors.New("target compatibility must contain one JSON value")
+	}
+	if err := result.Validate(); err != nil {
+		return Compatibility{}, err
+	}
+	return result, nil
+}
+
+type PrepareDependencies struct {
+	AcquireRelease func(context.Context, string, string) (releaseverify.Result, error)
+	InstallRuntime func(context.Context, string, releaseverify.Result) (releaseverify.RuntimeMaterial, error)
+	ProbeTarget    TargetProbe
+	PrepareService func(context.Context, userservice.ServiceRole, userservice.Invocation, userservice.Invocation) (userservice.UpgradePlan, error)
+	ReadBlockers   func(context.Context) (store.UpgradeBlockers, error)
+	NewID          func() (string, error)
+	Now            func() time.Time
+}
+
+type PrepareOptions struct {
+	Store           *Store
+	Home            string
+	Config          delegationconfig.Config
+	ConfigPath      string
+	EnvironmentFile string
+	SourceBinary    string
+	CurrentVersion  string
+	TargetVersion   string
+	Dependencies    PrepareDependencies
+}
+
+type PrepareResult struct {
+	Journal Journal
+	Resumed bool
+}
+
+// Prepare verifies all local identities and writes protected transaction
+// material without mutating the live service definition or database.
+func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error) {
+	if options.Store == nil {
+		return PrepareResult{}, errors.New("upgrade transaction store is required")
+	}
+	lock, err := acquireJournalLock(filepath.Join(options.Store.path, "prepare.lock"))
+	if err != nil {
+		return PrepareResult{}, fmt.Errorf("acquire upgrade preparation lock: %w", err)
+	}
+	defer lock.Close()
+	if existing, loadErr := options.Store.Load(); loadErr == nil {
+		if existing.TargetVersion == options.TargetVersion {
+			if err := validateResumeRequest(existing, options); err != nil {
+				return PrepareResult{}, err
+			}
+			return PrepareResult{Journal: existing, Resumed: true}, nil
+		}
+		if !existing.Terminal() {
+			return PrepareResult{}, ErrTargetConflict
+		}
+	} else if !errors.Is(loadErr, os.ErrNotExist) {
+		return PrepareResult{}, loadErr
+	}
+	if err := validatePrepareOptions(options); err != nil {
+		return PrepareResult{}, err
+	}
+	dependencies := options.Dependencies
+	if dependencies.AcquireRelease == nil {
+		dependencies.AcquireRelease = func(ctx context.Context, current, target string) (releaseverify.Result, error) {
+			return releaseverify.AcquireCanonicalRelease(ctx, current, target, releaseverify.AcquisitionDependencies{})
+		}
+	}
+	if dependencies.InstallRuntime == nil {
+		dependencies.InstallRuntime = func(ctx context.Context, home string, result releaseverify.Result) (releaseverify.RuntimeMaterial, error) {
+			return releaseverify.InstallRuntime(ctx, home, result, nil)
+		}
+	}
+	if dependencies.ProbeTarget == nil {
+		dependencies.ProbeTarget = ProbeTarget
+	}
+	if dependencies.PrepareService == nil {
+		dependencies.PrepareService = userservice.PrepareUpgrade
+	}
+	if dependencies.ReadBlockers == nil {
+		dependencies.ReadBlockers = func(ctx context.Context) (store.UpgradeBlockers, error) {
+			return defaultBlockers(ctx, options.Config)
+		}
+	}
+	if dependencies.NewID == nil {
+		dependencies.NewID = identity.NewID
+	}
+	if dependencies.Now == nil {
+		dependencies.Now = time.Now
+	}
+
+	configDigest, err := protectedConfigurationDigest(options.ConfigPath, options.EnvironmentFile)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	sourceDigest, err := regularFileDigest(options.SourceBinary)
+	if err != nil {
+		return PrepareResult{}, fmt.Errorf("hash source runtime: %w", err)
+	}
+	verified, err := dependencies.AcquireRelease(ctx, options.CurrentVersion, options.TargetVersion)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	runtimeMaterial, err := dependencies.InstallRuntime(ctx, options.Home, verified)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	compatibility, err := dependencies.ProbeTarget(ctx, runtimeMaterial.BinaryPath, options.ConfigPath, options.EnvironmentFile)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	if compatibility.RuntimeVersion != options.TargetVersion {
+		return PrepareResult{}, errors.New("target compatibility version does not match the requested release")
+	}
+	databaseKind, err := databaseKind(options.Config.Role)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	if compatibility.DatabaseKind != databaseKind {
+		return PrepareResult{}, errors.New("target runtime database kind does not match the configured role")
+	}
+	databasePath := configuredDatabasePath(options.Config)
+	sourceIdentity, err := store.InspectUpgradeDatabase(ctx, databasePath, databaseKind)
+	if err != nil {
+		return PrepareResult{}, fmt.Errorf("inspect source database compatibility: %w", err)
+	}
+	if sourceIdentity.ApplicationID != compatibility.DatabaseIdentity.ApplicationID ||
+		sourceIdentity.SchemaVersion > compatibility.DatabaseIdentity.SchemaVersion {
+		return PrepareResult{}, errors.New("source database cannot migrate to the target runtime")
+	}
+	blockers, err := dependencies.ReadBlockers(ctx)
+	if err != nil {
+		return PrepareResult{}, fmt.Errorf("read upgrade blockers: %w", err)
+	}
+	if !blockers.Empty() {
+		return PrepareResult{}, fmt.Errorf("upgrade preflight found active durable work: %+v", blockers)
+	}
+	serviceRole, err := serviceRole(options.Config.Role)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	sourceInvocation := userservice.Invocation{
+		BinaryPath: options.SourceBinary, ConfigPath: options.ConfigPath,
+		EnvironmentFile: options.EnvironmentFile, InstanceID: options.Config.EffectiveInstanceID(),
+	}
+	targetInvocation := sourceInvocation
+	targetInvocation.BinaryPath = runtimeMaterial.BinaryPath
+	plan, err := dependencies.PrepareService(ctx, serviceRole, sourceInvocation, targetInvocation)
+	if err != nil {
+		return PrepareResult{}, fmt.Errorf("inspect managed service for upgrade: %w", err)
+	}
+	if currentBlockers, err := dependencies.ReadBlockers(ctx); err != nil {
+		return PrepareResult{}, fmt.Errorf("recheck durable upgrade blockers: %w", err)
+	} else if !currentBlockers.Empty() {
+		return PrepareResult{}, fmt.Errorf("upgrade preflight changed while preparing: %+v", currentBlockers)
+	}
+	configDigestAfter, err := protectedConfigurationDigest(options.ConfigPath, options.EnvironmentFile)
+	if err != nil || configDigestAfter != configDigest {
+		return PrepareResult{}, errors.Join(err, errors.New("upgrade configuration changed during preflight"))
+	}
+	sourceDigestAfter, err := regularFileDigest(options.SourceBinary)
+	if err != nil || sourceDigestAfter != sourceDigest {
+		return PrepareResult{}, errors.Join(err, errors.New("source runtime changed during preflight"))
+	}
+	transactionID, err := dependencies.NewID()
+	if err != nil {
+		return PrepareResult{}, fmt.Errorf("create upgrade transaction ID: %w", err)
+	}
+	materialRoot := filepath.Join(options.Store.path, "transactions", transactionID)
+	if err := delegationconfig.PreparePrivateDirectory(materialRoot); err != nil {
+		return PrepareResult{}, fmt.Errorf("prepare upgrade transaction material: %w", err)
+	}
+	oldDefinitionPath := filepath.Join(materialRoot, "source.definition")
+	newDefinitionPath := filepath.Join(materialRoot, "target.definition")
+	if err := writeProtectedMaterial(materialRoot, filepath.Base(oldDefinitionPath), plan.OldDefinition); err != nil {
+		return PrepareResult{}, err
+	}
+	if err := writeProtectedMaterial(materialRoot, filepath.Base(newDefinitionPath), plan.NewDefinition); err != nil {
+		return PrepareResult{}, err
+	}
+	now := dependencies.Now().UnixMilli()
+	journal := Journal{
+		SchemaVersion: JournalSchemaVersion, TransactionID: transactionID, State: StatePrepared,
+		Role: options.Config.Role, InstanceID: options.Config.EffectiveInstanceID(),
+		ControllerID: options.Config.ControllerID, DeviceID: options.Config.DeviceID,
+		SourceVersion: options.CurrentVersion, TargetVersion: options.TargetVersion,
+		SourceRuntimeDigest: sourceDigest, TargetRuntimeDigest: runtimeMaterial.BinarySHA256,
+		ConfigDigest: configDigest, Platform: runtime.GOOS, Architecture: runtime.GOARCH,
+		Invocation: Invocation{
+			BinaryPath: options.SourceBinary, TargetBinaryPath: runtimeMaterial.BinaryPath,
+			ConfigPath: options.ConfigPath, EnvironmentFile: options.EnvironmentFile,
+			NativeName: plan.NativeName, DefinitionPath: plan.Artifact,
+			UserIdentity: plan.UserIdentity, ProcessIDs: append([]int(nil), plan.ProcessIDs...),
+			ProcessGroup: plan.ProcessGroup,
+		},
+		Definition: Definition{
+			Kind: plan.Kind, OldDigest: digestBytes(plan.OldDefinition), NewDigest: digestBytes(plan.NewDefinition),
+			OldPath: oldDefinitionPath, NewPath: newDefinitionPath,
+		},
+		Database: Database{
+			Kind: databaseKind, CanonicalPath: databasePath,
+			ShadowPath:     filepath.Join(filepath.Dir(databasePath), "."+filepath.Base(databasePath)+"-upgrade-"+transactionID+".shadow"),
+			RollbackPath:   filepath.Join(filepath.Dir(databasePath), "."+filepath.Base(databasePath)+"-upgrade-"+transactionID+".rollback"),
+			SourceIdentity: sourceIdentity, TargetIdentity: compatibility.DatabaseIdentity,
+		},
+		ActivatorPath: filepath.Join(materialRoot, activatorDefinitionName()), CreatedAt: now, UpdatedAt: now,
+	}
+	created, resumed, err := options.Store.CreateOrResume(journal)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	return PrepareResult{Journal: created, Resumed: resumed}, nil
+}
+
+func validatePrepareOptions(options PrepareOptions) error {
+	if options.Home == "" || !filepath.IsAbs(options.Home) || filepath.Clean(options.Home) != options.Home {
+		return errors.New("delegation home must be an absolute clean path")
+	}
+	for name, path := range map[string]string{"config": options.ConfigPath, "source runtime": options.SourceBinary} {
+		if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return fmt.Errorf("%s path must be absolute and clean", name)
+		}
+	}
+	if err := options.Config.ValidateForRuntime(delegationconfig.RuntimeCapabilities{EmbeddedTailscale: true}); err != nil {
+		return err
+	}
+	switch options.Config.Role {
+	case delegationconfig.RoleBroker:
+		if options.EnvironmentFile != "" {
+			return errors.New("broker upgrade must not use an environment file")
+		}
+	case delegationconfig.RolePeer:
+		if options.EnvironmentFile == "" || !filepath.IsAbs(options.EnvironmentFile) || filepath.Clean(options.EnvironmentFile) != options.EnvironmentFile {
+			return errors.New("peer upgrade requires an absolute clean environment file")
+		}
+		if runtime.GOOS == "windows" && options.Config.EffectiveHostKind() == hostkind.TraeX {
+			return errors.New("TraeX service upgrade is unsupported on Windows")
+		}
+		if err := codexconfig.ValidateManagedRuntimeHome(options.Config.EffectiveHostKind(), options.Config.Peer.CodexHome); err != nil {
+			return fmt.Errorf("validate managed home for upgrade: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported upgrade role %q", options.Config.Role)
+	}
+	return nil
+}
+
+func validateResumeRequest(journal Journal, options PrepareOptions) error {
+	if journal.Role != options.Config.Role || journal.InstanceID != options.Config.EffectiveInstanceID() ||
+		journal.ControllerID != options.Config.ControllerID || journal.DeviceID != options.Config.DeviceID ||
+		journal.Invocation.ConfigPath != options.ConfigPath || journal.Invocation.EnvironmentFile != options.EnvironmentFile {
+		return errors.New("same-target upgrade does not match the configured service identity")
+	}
+	return nil
+}
+
+func protectedConfigurationDigest(paths ...string) (string, error) {
+	digest := sha256.New()
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		data, err := delegationconfig.ReadProtectedFile(path, maximumConfigDigestFile)
+		if err != nil {
+			return "", fmt.Errorf("read protected upgrade configuration %s: %w", path, err)
+		}
+		if _, err := fmt.Fprintf(digest, "%d:%s\x00%d:", len(path), path, len(data)); err != nil {
+			return "", err
+		}
+		if _, err := digest.Write(data); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+func regularFileDigest(path string) (string, error) { return workerreadiness.RuntimeDigest(path) }
+
+func writeProtectedMaterial(rootPath, name string, data []byte) error {
+	root, err := securefs.OpenRoot(rootPath, nil)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.Write(data)
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		_ = root.Remove(name)
+		return err
+	}
+	return root.Sync()
+}
+
+func configuredDatabasePath(config delegationconfig.Config) string {
+	if config.Role == delegationconfig.RoleBroker {
+		return config.Broker.StateFile
+	}
+	return config.Peer.StateFile
+}
+
+// ReadConfiguredBlockers opens the configured current-schema database and
+// returns the local preflight view used by running-service management.
+func ReadConfiguredBlockers(ctx context.Context, config delegationconfig.Config) (store.UpgradeBlockers, error) {
+	return defaultBlockers(ctx, config)
+}
+
+func defaultBlockers(ctx context.Context, config delegationconfig.Config) (store.UpgradeBlockers, error) {
+	switch config.Role {
+	case delegationconfig.RoleBroker:
+		state, err := store.OpenCurrent(ctx, config.Broker.StateFile)
+		if err != nil {
+			return store.UpgradeBlockers{}, err
+		}
+		defer state.Close()
+		return state.ReadBrokerUpgradeBlockers(ctx, config.ControllerID)
+	case delegationconfig.RolePeer:
+		state, err := store.OpenPeer(ctx, config.Peer.StateFile)
+		if err != nil {
+			return store.UpgradeBlockers{}, err
+		}
+		defer state.Close()
+		return state.ReadPeerUpgradeBlockers(ctx, config.ControllerID, config.DeviceID)
+	default:
+		return store.UpgradeBlockers{}, fmt.Errorf("unsupported upgrade role %q", config.Role)
+	}
+}
+
+func databaseKind(role delegationconfig.Role) (store.DatabaseKind, error) {
+	switch role {
+	case delegationconfig.RoleBroker:
+		return store.DatabaseBroker, nil
+	case delegationconfig.RolePeer:
+		return store.DatabasePeer, nil
+	default:
+		return "", fmt.Errorf("unsupported upgrade role %q", role)
+	}
+}
+
+func serviceRole(role delegationconfig.Role) (userservice.ServiceRole, error) {
+	switch role {
+	case delegationconfig.RoleBroker:
+		return userservice.ServiceRoleBroker, nil
+	case delegationconfig.RolePeer:
+		return userservice.ServiceRolePeer, nil
+	default:
+		return "", fmt.Errorf("unsupported upgrade role %q", role)
+	}
+}
+
+func activatorDefinitionName() string {
+	switch runtime.GOOS {
+	case "linux":
+		return "activator.service"
+	case "darwin":
+		return "activator.plist"
+	case "windows":
+		return "activator.xml"
+	default:
+		return "activator.definition"
+	}
+}
+
+type boundedOutput struct {
+	bytes.Buffer
+	maximum int
+}
+
+func (b *boundedOutput) Write(data []byte) (int, error) {
+	if b.Len()+len(data) > b.maximum {
+		return 0, errors.New("target compatibility output exceeds its size limit")
+	}
+	return b.Buffer.Write(data)
+}

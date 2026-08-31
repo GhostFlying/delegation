@@ -58,6 +58,108 @@ type StatusLifetimeCounters struct {
 	TurnsStarted      uint64
 }
 
+// UpgradeBlockers is a fixed-size snapshot of durable work that makes a
+// stopped-service database switch unsafe. Retained completed history is not a
+// blocker; only work which still requires this service is counted.
+type UpgradeBlockers struct {
+	OccupiedWorkers     int
+	PendingSpawns       int
+	PendingOperations   int
+	WorkspaceTransfers  int
+	ResultFinalizations int
+}
+
+func (b UpgradeBlockers) Empty() bool {
+	return b.OccupiedWorkers == 0 && b.PendingSpawns == 0 && b.PendingOperations == 0 &&
+		b.WorkspaceTransfers == 0 && b.ResultFinalizations == 0
+}
+
+// ReadBrokerUpgradeBlockers returns one read-transaction view of unfinished
+// controller work. CP5 owns the drain that first makes this snapshot stable.
+func (s *Store) ReadBrokerUpgradeBlockers(ctx context.Context, controllerID string) (UpgradeBlockers, error) {
+	if err := identity.ValidateID(controllerID); err != nil {
+		return UpgradeBlockers{}, fmt.Errorf("controllerId %w", err)
+	}
+	transaction, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return UpgradeBlockers{}, fmt.Errorf("begin broker upgrade preflight: %w", err)
+	}
+	defer transaction.Rollback()
+	var blockers UpgradeBlockers
+	queries := []struct {
+		destination *int
+		query       string
+	}{
+		{&blockers.OccupiedWorkers, "SELECT count(*) FROM agent_lifecycle_states WHERE controller_id = ? AND phase IN (" + occupiedWorkerStatesSQL + ")"},
+		{&blockers.PendingSpawns, "SELECT count(*) FROM agent_spawn_receipts WHERE controller_id = ? AND status = 'pending'"},
+		{&blockers.PendingOperations, "SELECT count(*) FROM agent_operation_receipts WHERE controller_id = ? AND outcome = 'pending'"},
+		{&blockers.WorkspaceTransfers, "SELECT count(*) FROM workspace_sync_receipts WHERE controller_id = ? AND status <> 'prepared'"},
+		{&blockers.ResultFinalizations, "SELECT count(*) FROM result_packages WHERE controller_id = ? AND (state = 'deliveryPending' OR source_released_at = 0)"},
+	}
+	for _, query := range queries {
+		if err := transaction.QueryRowContext(ctx, query.query, controllerID).Scan(query.destination); err != nil {
+			return UpgradeBlockers{}, fmt.Errorf("read broker upgrade blockers: %w", err)
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		return UpgradeBlockers{}, fmt.Errorf("commit broker upgrade preflight: %w", err)
+	}
+	return blockers, nil
+}
+
+// ReadPeerUpgradeBlockers returns one read-transaction view of local work
+// which must drain before the peer process and database can be replaced.
+func (s *PeerStore) ReadPeerUpgradeBlockers(ctx context.Context, controllerID, deviceID string) (UpgradeBlockers, error) {
+	if err := validateChangesArtifactDevice(controllerID, deviceID); err != nil {
+		return UpgradeBlockers{}, err
+	}
+	transaction, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return UpgradeBlockers{}, fmt.Errorf("begin peer upgrade preflight: %w", err)
+	}
+	defer transaction.Rollback()
+	var blockers UpgradeBlockers
+	queries := []struct {
+		destination *int
+		query       string
+		arguments   []any
+	}{
+		{&blockers.OccupiedWorkers, "SELECT count(*) FROM worker_reservations WHERE controller_id = ? AND device_id = ? AND status IN (" + occupiedWorkerStatesSQL + ")", []any{controllerID, deviceID}},
+		{&blockers.PendingOperations, `
+SELECT count(*)
+FROM worker_operation_receipts AS operation
+JOIN worker_reservations AS worker
+  ON worker.controller_id = operation.controller_id
+ AND worker.tree_id = operation.tree_id
+ AND worker.agent_id = operation.agent_id
+WHERE operation.controller_id = ? AND worker.device_id = ? AND operation.status = 'pending'
+`, []any{controllerID, deviceID}},
+		{&blockers.ResultFinalizations, `
+SELECT
+  (SELECT count(*)
+   FROM peer_changes_artifacts AS artifact
+   JOIN worker_reservations AS worker
+     ON worker.controller_id = artifact.controller_id
+    AND worker.tree_id = artifact.tree_id
+    AND worker.agent_id = artifact.agent_id
+   WHERE artifact.controller_id = ? AND worker.device_id = ? AND artifact.state <> 'published') +
+  (SELECT count(*) FROM peer_result_outbox
+   WHERE controller_id = ? AND source_device_id = ? AND state <> 'releasePending') +
+  (SELECT count(*) FROM peer_result_inbox
+   WHERE controller_id = ? AND root_device_id = ? AND state = 'receiving')
+`, []any{controllerID, deviceID, controllerID, deviceID, controllerID, deviceID}},
+	}
+	for _, query := range queries {
+		if err := transaction.QueryRowContext(ctx, query.query, query.arguments...).Scan(query.destination); err != nil {
+			return UpgradeBlockers{}, fmt.Errorf("read peer upgrade blockers: %w", err)
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		return UpgradeBlockers{}, fmt.Errorf("commit peer upgrade preflight: %w", err)
+	}
+	return blockers, nil
+}
+
 // PeerStatusSnapshot is a bounded, device-scoped view of durable peer state.
 type PeerStatusSnapshot struct {
 	WorkerRevision uint64
