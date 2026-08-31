@@ -73,3 +73,54 @@ Post-integration acceptance:
 - `go test -count=1 -tags=ts_omit_logtail -timeout=30m ./...` and
   `go vet -tags=ts_omit_logtail ./...` passed.
 - Linux amd64, macOS arm64, and Windows amd64 compile validation passed with `CGO_ENABLED=0`.
+
+## Checkpoint 3: Agent Current-State Projection
+
+- Base commit: `23e3234203f8bd429e6e324f9ced0a9d3f333795`
+- Base tree: `10c6ec8b8cdd0cdcbf99c41b178eb9247f89f12a`
+- Accepted review range:
+  `23e3234203f8bd429e6e324f9ced0a9d3f333795..c00ac422cbc8a89b5de9f39f79908c7f08022dbf`
+- Integration method: fast-forward; no rebase, conflict, or semantic adjustment occurred
+- Integration commit: `c00ac422cbc8a89b5de9f39f79908c7f08022dbf`
+- Integration tree before this evidence commit: `4c646db4a624a969b38db05c38ad4f54376a9329`
+
+### Review Round 1
+
+- Frozen commit: `738b13d04983944bb13cd8465afbfb12a58a0215`
+- Frozen tree: `a267378aa350c75ee4b8e8b457ad7f784afa71d3`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `FINDINGS`
+- Finding 1: a valid 31- or 32-agent projected response could exceed the 16 KiB root MCP
+  output limit, making the documented maximum page fail in an ordinary full-page list request.
+- Finding 2: the local bridge version remained 3 after the breaking agent response schema change,
+  allowing incompatible old and new processes to pass the version gate before payload decoding.
+- Disposition: both findings were actionable compatibility and operability defects. The output limit
+  was raised to 32 KiB with worst-case 32-agent coverage, and the local bridge version was raised
+  to 4 with legacy request and response rejection coverage.
+
+### Review Round 2
+
+- Frozen commit: `c00ac422cbc8a89b5de9f39f79908c7f08022dbf`
+- Frozen tree: `4c646db4a624a969b38db05c38ad4f54376a9329`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `CLEAN`
+- Findings: none
+- Confirmed dispositions: both round 1 findings were resolved and covered by regression tests
+- Residual risks: deliberate protected-state corruption and hostile same-UID protocol forgery are
+  outside ordinary supported workflows
+- Disposition: accepted and fast-forwarded into the integration branch at the exact frozen commit
+  and tree
+
+Executable acceptance at the accepted frozen revision:
+
+- `go test -count=1 ./internal/rootmcp ./internal/localbridge ./internal/protocol
+  ./internal/broker ./internal/store` passed.
+- The projection mapping, pagination, connection-generation churn, 32-agent output bound, local
+  bridge compatibility, spawn/list durability, and exact wait-activity tests passed 50 consecutive
+  runs under the race detector.
+- `go test -count=1 -tags=ts_omit_logtail -timeout=30m ./...` passed.
+- `go vet -tags=ts_omit_logtail ./...` passed.
+- Linux amd64, macOS arm64, and Windows amd64 compile validation passed with `CGO_ENABLED=0` and
+  `go test -exec=true -run '^$' -tags=ts_omit_logtail ./...`.
+- `go test -count=1 -tags=integration -run '^$' ./tests/codex_peer_e2e` passed.
+- The reviewed range passed `git diff --check`; the detached worktree remained clean.
