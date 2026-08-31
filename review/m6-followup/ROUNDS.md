@@ -135,3 +135,29 @@ Post-integration acceptance after the exact fast-forward and evidence commit:
 - Linux amd64, macOS arm64, and Windows amd64 compile validation passed with `CGO_ENABLED=0`.
 - Integration-tagged Codex peer E2E compilation and `git diff --check` passed.
 - Validation used `go1.26.5 linux/amd64`; the integration worktree remained clean.
+
+## Checkpoint 4: Local Atomic Service Upgrade
+
+- Base commit: `9d4b444292a32e5a2b9ef83a16e9f489e79da582`
+- Base tree: `fc7366d25e167d2c8e755cf281bf74564d223817`
+
+### Review Round 1
+
+- Frozen commit: `f3d77215cf2a31ea4cbdea0bbb37a47dfa6ab199`
+- Frozen tree: `91cb26a922f784336230d9120f6d7dc78fc0e9db`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `FINDINGS`
+- Finding 1: the documented alpha.4 bootstrap path rejected the real schema-3 config and
+  broker-19 or peer-15 database before the service could be upgraded.
+- Finding 2: peer qualification could commit after local process start without requiring lifecycle
+  synchronization and a new target-bound execution-readiness epoch.
+- Disposition: both findings were actionable supported-path operability defects. The round-2
+  revision adds an exact schema-3 TCP config conversion, exact broker 19-to-20 and peer 15-to-16
+  shadow migrations, crash-consistent protected configuration switching, and identity-bound peer
+  qualification that requires lifecycle sync plus a newer matching ready epoch.
+- Residual risks: platform service-manager execution remains fixture/fake tested; deliberate
+  protected-state corruption and hostile same-UID protocol forgery remain outside ordinary
+  supported workflows.
+
+Round-1 reviewer verification passed the focused packages, full Linux suite, vet, focused race,
+Darwin and Windows cross-compilation, and `git diff --check`.

@@ -303,7 +303,8 @@ func persistBrokerStatusUpgrade(
 		SourceVersion: "0.1.0-alpha.7", TargetVersion: "0.1.0-alpha.8",
 		SourceRuntimeDigest: strings.Repeat("1", 64),
 		TargetRuntimeDigest: strings.Repeat("2", 64), ConfigDigest: strings.Repeat("3", 64),
-		Platform: runtime.GOOS, Architecture: runtime.GOARCH,
+		SourceConfigDigest: strings.Repeat("3", 64),
+		Platform:           runtime.GOOS, Architecture: runtime.GOARCH,
 		Invocation: localupgrade.Invocation{
 			BinaryPath:       filepath.Join(materialRoot, "old"),
 			TargetBinaryPath: filepath.Join(materialRoot, "new"), ConfigPath: configPath,
@@ -315,6 +316,15 @@ func persistBrokerStatusUpgrade(
 			Kind: definitionKind, OldDigest: strings.Repeat("4", 64),
 			NewDigest: strings.Repeat("5", 64), OldPath: filepath.Join(materialRoot, "old.service"),
 			NewPath: filepath.Join(materialRoot, "new.service"),
+		},
+		Configuration: localupgrade.Configuration{
+			CanonicalPath: configPath,
+			SourcePath:    filepath.Join(materialRoot, "source.config.json"),
+			TargetPath:    filepath.Join(materialRoot, "target.config.json"),
+			ShadowPath:    filepath.Join(filepath.Dir(configPath), ".broker.json-upgrade.shadow"),
+			RollbackPath:  filepath.Join(filepath.Dir(configPath), ".broker.json-upgrade.rollback"),
+			SourceDigest:  strings.Repeat("3", 64),
+			TargetDigest:  strings.Repeat("3", 64),
 		},
 		Database: localupgrade.Database{
 			Kind: store.DatabaseBroker, CanonicalPath: cfg.Broker.StateFile,

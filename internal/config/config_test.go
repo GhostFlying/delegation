@@ -1313,6 +1313,119 @@ func TestConfigRejectsUnsupportedSchemaVersions(t *testing.T) {
 	}
 }
 
+func TestReadForUpgradeMigratesExactSchema3TCPConfigurations(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cfg  func(*testing.T) Config
+	}{
+		{name: "broker", cfg: protectedTestConfig},
+		{name: "peer", cfg: testPeerConfig},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			want := test.cfg(t)
+			legacy := schema3ConfigFixture(t, want)
+			path := filepath.Join(t.TempDir(), "private", test.name+".json")
+			writeProtectedConfigFixture(t, path, legacy)
+
+			got, source, target, migrated, err := ReadForUpgrade(
+				path, RuntimeCapabilities{EmbeddedTailscale: true},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !migrated || !bytes.Equal(source, legacy) || !reflect.DeepEqual(got, want) {
+				t.Fatalf("migration = %#v, migrated %v, source %q", got, migrated, source)
+			}
+			if !bytes.Contains(target, []byte(`"transport": {`)) ||
+				!bytes.Contains(target, []byte(`"mode": "tcp"`)) {
+				t.Fatalf("target config does not explicitly select TCP: %s", target)
+			}
+			targetPath := filepath.Join(t.TempDir(), "private", "target.json")
+			writeProtectedConfigFixture(t, targetPath, target)
+			roundTrip, err := ReadForRuntime(
+				targetPath, RuntimeCapabilities{EmbeddedTailscale: true},
+			)
+			if err != nil || !reflect.DeepEqual(roundTrip, want) {
+				t.Fatalf("target round trip = %#v, %v", roundTrip, err)
+			}
+		})
+	}
+}
+
+func TestReadForUpgradeRejectsNonExactSchema3Documents(t *testing.T) {
+	cfg := protectedTestConfig(t)
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]json.RawMessage)
+		want   string
+	}{
+		{
+			name: "unknown field",
+			mutate: func(document map[string]json.RawMessage) {
+				document["unknown"] = json.RawMessage(`true`)
+			},
+			want: "unknown field",
+		},
+		{
+			name: "transport already present",
+			mutate: func(document map[string]json.RawMessage) {
+				document["transport"] = json.RawMessage(`{"mode":"tcp"}`)
+			},
+			want: "must not contain transport",
+		},
+		{
+			name: "older schema",
+			mutate: func(document map[string]json.RawMessage) {
+				document["schemaVersion"] = json.RawMessage(`2`)
+			},
+			want: "unsupported config schema version 2",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var document map[string]json.RawMessage
+			if err := json.Unmarshal(schema3ConfigFixture(t, cfg), &document); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(document)
+			data, err := json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "private", "legacy.json")
+			writeProtectedConfigFixture(t, path, data)
+			if _, _, _, _, err := ReadForUpgrade(
+				path, RuntimeCapabilities{EmbeddedTailscale: true},
+			); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ReadForUpgrade() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestReadForUpgradeKeepsCurrentSchemaTransportStrict(t *testing.T) {
+	cfg := protectedTestConfig(t)
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	delete(document, "transport")
+	data, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "private", "current.json")
+	writeProtectedConfigFixture(t, path, data)
+	if _, _, _, _, err := ReadForUpgrade(
+		path, RuntimeCapabilities{EmbeddedTailscale: true},
+	); err == nil || !strings.Contains(err.Error(), "transport configuration is required") {
+		t.Fatalf("ReadForUpgrade() error = %v", err)
+	}
+}
+
 func TestReadReportsUnsupportedSchemaBeforeUnknownFields(t *testing.T) {
 	for _, version := range []int{3, CurrentSchemaVersion + 1} {
 		t.Run(strconv.Itoa(version), func(t *testing.T) {
@@ -1439,6 +1552,25 @@ func writeProtectedConfigFixture(t *testing.T, path string, data []byte) {
 	if _, err := lease.PublishNoReplace(tempName, filepath.Base(path)); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func schema3ConfigFixture(t *testing.T, cfg Config) []byte {
+	t.Helper()
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["schemaVersion"] = json.RawMessage(`3`)
+	delete(document, "transport")
+	legacy, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(legacy, '\n')
 }
 
 func protectedTestConfig(t *testing.T) Config {

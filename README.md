@@ -318,7 +318,10 @@ plugins/delegation/scripts/delegation-mcp service upgrade \
 
 Preparation accepts only a newer canonical GitHub release whose manifest, Sigstore provenance, tag
 commit, workflow identity, platform, architecture, and binary digest match. It also verifies exact
-native-service ownership, schema compatibility, and the absence of active work. Retrying the same
+native-service ownership, schema compatibility, and the absence of active work. The alpha.4
+bootstrap path accepts only its exact schema-3 TCP config and broker-19 or peer-15 database; the
+stopped-service activator preserves protected rollback material, migrates a shadow to schema 4 and
+broker-20 or peer-16, and atomically switches those files before starting the target. Retrying the same
 target resumes the protected journal. `--bootstrap` can start from the alpha.4 legacy service: the
 new CLI reads and verifies its exact native definition, running process identity, and executable
 version locally, so it does not require the old service to implement the current local-bridge
@@ -326,6 +329,9 @@ protocol or upgrade RPC. `prepared` and `armed` transactions may be cancelled wi
 `service upgrade --cancel --config <path> --transaction-id <uuid>`; after durable commit
 authorization, recovery is forward-only. Never substitute an arbitrary URL, binary, repository, or
 development override for a release upgrade.
+Peer completion additionally requires a newer target-bound execution-readiness epoch after the
+target reconnects and completes lifecycle synchronization; an old ready snapshot cannot qualify an
+upgrade.
 
 Inspect either process through its explicit role config:
 

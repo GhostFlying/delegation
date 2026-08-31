@@ -17,8 +17,10 @@ separate release operation performed from the final reviewed commit.
 Windows TraeX is a product-scope exclusion, not a successful qualification. Do not start another
 Windows TraeX formal qualification for M6.
 
-M6 supports only fresh independent deployments. Migration, in-place upgrade, downgrade, rollback,
-config conversion, state reuse, and native-service replacement remain unsupported.
+The original M6 platform qualification used only fresh independent deployments. The M6 follow-up
+adds one narrow in-place path: an exact alpha.4 schema-3 TCP service with broker schema 19 or peer
+schema 15 may move forward through the protected local bootstrap upgrade. Arbitrary config/state
+reuse, transport migration, downgrade, and operator-selected binaries remain unsupported.
 
 ## Acceptance Disposition
 

@@ -2,6 +2,8 @@ package localupgrade
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -86,6 +88,72 @@ func TestPrepareRejectsCompatibilityAndConfigurationDrift(t *testing.T) {
 	}
 }
 
+func TestPrepareAcceptsExactAlpha4PeerConfigAndDatabase(t *testing.T) {
+	options := prepareFixture(t)
+	currentConfig, err := os.ReadFile(options.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(currentConfig, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["schemaVersion"] = json.RawMessage(`3`)
+	delete(document, "transport")
+	legacyConfig, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyConfig = append(legacyConfig, '\n')
+	if err := os.WriteFile(options.ConfigPath, legacyConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", options.Config.Peer.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`DROP TABLE worker_readiness; PRAGMA user_version = 15`); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	options.Dependencies.ReadBlockers = nil
+	options.Dependencies.ReadReadinessEpoch = nil
+	options.Dependencies.ProbeTarget = func(
+		_ context.Context, _ string, targetConfigPath, _ string,
+	) (Compatibility, error) {
+		targetConfig, err := delegationconfig.ReadForRuntime(
+			targetConfigPath, delegationconfig.RuntimeCapabilities{EmbeddedTailscale: true},
+		)
+		if err != nil || targetConfig != options.Config {
+			t.Fatalf("target probe config = %#v, %v", targetConfig, err)
+		}
+		return testCompatibility(t, delegationconfig.RolePeer, options.TargetVersion), nil
+	}
+
+	result, err := Prepare(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := result.Journal
+	if journal.Configuration.SourceDigest == journal.Configuration.TargetDigest ||
+		journal.SourceConfigDigest == journal.ConfigDigest || journal.SourceReadinessEpoch != 0 ||
+		journal.Database.SourceIdentity.SchemaVersion != 15 ||
+		journal.Database.TargetIdentity.SchemaVersion != 16 {
+		t.Fatalf("alpha.4 preparation journal = %#v", journal)
+	}
+	if source, err := os.ReadFile(journal.Configuration.SourcePath); err != nil ||
+		!strings.Contains(string(source), `"schemaVersion": 3`) ||
+		strings.Contains(string(source), `"transport"`) {
+		t.Fatalf("source config = %q, %v", source, err)
+	}
+	if _, err := delegationconfig.Read(journal.Configuration.TargetPath); err != nil {
+		t.Fatalf("target config is not current: %v", err)
+	}
+}
+
 func prepareFixture(t *testing.T) PrepareOptions {
 	t.Helper()
 	root := t.TempDir()
@@ -102,8 +170,8 @@ func prepareFixture(t *testing.T) PrepareOptions {
 	sourceBinary := filepath.Join(root, "source-delegation")
 	targetBinary := filepath.Join(root, "target-delegation")
 	for path, data := range map[string][]byte{
-		configPath: []byte("config"), environmentPath: []byte("TOKEN=value\n"),
-		sourceBinary: []byte("source"), targetBinary: []byte("target"),
+		environmentPath: []byte("TOKEN=value\n"),
+		sourceBinary:    []byte("source"), targetBinary: []byte("target"),
 	} {
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			t.Fatal(err)
@@ -133,6 +201,15 @@ func prepareFixture(t *testing.T) PrepareOptions {
 			CodexHome: filepath.Join(root, "codex-home"), WorkspaceRoot: filepath.Join(root, "workspaces"),
 			StateFile: statePath, MaxWorkerSlots: 1,
 		},
+	}
+	configData, err := delegationconfig.EncodeForRuntime(
+		cfg, delegationconfig.RuntimeCapabilities{EmbeddedTailscale: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	readBlockers := func(context.Context) (store.UpgradeBlockers, error) { return store.UpgradeBlockers{}, nil }
 	return PrepareOptions{
@@ -168,7 +245,8 @@ func prepareFixture(t *testing.T) PrepareOptions {
 			ReadBlockers: readBlockers, NewID: func() (string, error) {
 				return "123e4567-e89b-42d3-a456-426614174899", nil
 			},
-			Now: func() time.Time { return time.Unix(100, 0) },
+			ReadReadinessEpoch: func(context.Context) (uint64, error) { return 3, nil },
+			Now:                func() time.Time { return time.Unix(100, 0) },
 		},
 	}
 }

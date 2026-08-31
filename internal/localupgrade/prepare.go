@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"time"
 
@@ -118,13 +119,14 @@ func ProbeTarget(ctx context.Context, binary, configPath, environmentFile string
 }
 
 type PrepareDependencies struct {
-	AcquireRelease func(context.Context, string, string) (releaseverify.Result, error)
-	InstallRuntime func(context.Context, string, releaseverify.Result) (releaseverify.RuntimeMaterial, error)
-	ProbeTarget    TargetProbe
-	PrepareService func(context.Context, userservice.ServiceRole, userservice.Invocation, userservice.Invocation) (userservice.UpgradePlan, error)
-	ReadBlockers   func(context.Context) (store.UpgradeBlockers, error)
-	NewID          func() (string, error)
-	Now            func() time.Time
+	AcquireRelease     func(context.Context, string, string) (releaseverify.Result, error)
+	InstallRuntime     func(context.Context, string, releaseverify.Result) (releaseverify.RuntimeMaterial, error)
+	ProbeTarget        TargetProbe
+	PrepareService     func(context.Context, userservice.ServiceRole, userservice.Invocation, userservice.Invocation) (userservice.UpgradePlan, error)
+	ReadBlockers       func(context.Context) (store.UpgradeBlockers, error)
+	ReadReadinessEpoch func(context.Context) (uint64, error)
+	NewID              func() (string, error)
+	Now                func() time.Time
 }
 
 type PrepareOptions struct {
@@ -193,6 +195,31 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 			return defaultBlockers(ctx, options.Config)
 		}
 	}
+	if dependencies.ReadReadinessEpoch == nil && options.Config.Role == delegationconfig.RolePeer {
+		dependencies.ReadReadinessEpoch = func(ctx context.Context) (uint64, error) {
+			identity, err := store.InspectUpgradeDatabase(ctx, options.Config.Peer.StateFile, store.DatabasePeer)
+			if err != nil {
+				return 0, err
+			}
+			current, err := store.CurrentDatabaseIdentity(store.DatabasePeer)
+			if err != nil {
+				return 0, err
+			}
+			if identity != current {
+				return 0, nil
+			}
+			state, err := store.OpenPeer(ctx, options.Config.Peer.StateFile)
+			if err != nil {
+				return 0, err
+			}
+			defer state.Close()
+			readiness, err := state.WorkerReadiness(ctx)
+			if errors.Is(err, store.ErrNotFound) {
+				return 0, nil
+			}
+			return readiness.Epoch, err
+		}
+	}
 	if dependencies.NewID == nil {
 		dependencies.NewID = identity.NewID
 	}
@@ -200,7 +227,24 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 		dependencies.Now = time.Now
 	}
 
-	configDigest, err := protectedConfigurationDigest(options.ConfigPath, options.EnvironmentFile)
+	configured, sourceConfig, targetConfig, _, err := delegationconfig.ReadForUpgrade(
+		options.ConfigPath, delegationconfig.RuntimeCapabilities{EmbeddedTailscale: true},
+	)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	if !reflect.DeepEqual(configured, options.Config) {
+		return PrepareResult{}, errors.New("upgrade configuration identity changed before preparation")
+	}
+	sourceConfigDigest, err := configurationDigest(
+		options.ConfigPath, sourceConfig, options.EnvironmentFile,
+	)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	targetConfigDigest, err := configurationDigest(
+		options.ConfigPath, targetConfig, options.EnvironmentFile,
+	)
 	if err != nil {
 		return PrepareResult{}, err
 	}
@@ -216,7 +260,23 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	compatibility, err := dependencies.ProbeTarget(ctx, runtimeMaterial.BinaryPath, options.ConfigPath, options.EnvironmentFile)
+	transactionID, err := dependencies.NewID()
+	if err != nil {
+		return PrepareResult{}, fmt.Errorf("create upgrade transaction ID: %w", err)
+	}
+	materialRoot := filepath.Join(options.Store.path, "transactions", transactionID)
+	if err := delegationconfig.PreparePrivateDirectory(materialRoot); err != nil {
+		return PrepareResult{}, fmt.Errorf("prepare upgrade transaction material: %w", err)
+	}
+	sourceConfigPath := filepath.Join(materialRoot, "source.config.json")
+	targetConfigPath := filepath.Join(materialRoot, "target.config.json")
+	if err := writeProtectedMaterial(materialRoot, filepath.Base(sourceConfigPath), sourceConfig); err != nil {
+		return PrepareResult{}, err
+	}
+	if err := writeProtectedMaterial(materialRoot, filepath.Base(targetConfigPath), targetConfig); err != nil {
+		return PrepareResult{}, err
+	}
+	compatibility, err := dependencies.ProbeTarget(ctx, runtimeMaterial.BinaryPath, targetConfigPath, options.EnvironmentFile)
 	if err != nil {
 		return PrepareResult{}, err
 	}
@@ -235,8 +295,15 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 	if err != nil {
 		return PrepareResult{}, fmt.Errorf("inspect source database compatibility: %w", err)
 	}
-	if sourceIdentity != compatibility.DatabaseIdentity {
+	if !store.SupportedUpgradeSource(databaseKind, sourceIdentity, compatibility.DatabaseIdentity) {
 		return PrepareResult{}, errors.New("source database schema is not directly compatible with the target runtime")
+	}
+	var sourceReadinessEpoch uint64
+	if options.Config.Role == delegationconfig.RolePeer && dependencies.ReadReadinessEpoch != nil {
+		sourceReadinessEpoch, err = dependencies.ReadReadinessEpoch(ctx)
+		if err != nil {
+			return PrepareResult{}, fmt.Errorf("read source worker readiness epoch: %w", err)
+		}
 	}
 	blockers, err := dependencies.ReadBlockers(ctx)
 	if err != nil {
@@ -265,20 +332,12 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 		return PrepareResult{}, fmt.Errorf("upgrade preflight changed while preparing: %+v", currentBlockers)
 	}
 	configDigestAfter, err := protectedConfigurationDigest(options.ConfigPath, options.EnvironmentFile)
-	if err != nil || configDigestAfter != configDigest {
+	if err != nil || configDigestAfter != sourceConfigDigest {
 		return PrepareResult{}, errors.Join(err, errors.New("upgrade configuration changed during preflight"))
 	}
 	sourceDigestAfter, err := regularFileDigest(options.SourceBinary)
 	if err != nil || sourceDigestAfter != sourceDigest {
 		return PrepareResult{}, errors.Join(err, errors.New("source runtime changed during preflight"))
-	}
-	transactionID, err := dependencies.NewID()
-	if err != nil {
-		return PrepareResult{}, fmt.Errorf("create upgrade transaction ID: %w", err)
-	}
-	materialRoot := filepath.Join(options.Store.path, "transactions", transactionID)
-	if err := delegationconfig.PreparePrivateDirectory(materialRoot); err != nil {
-		return PrepareResult{}, fmt.Errorf("prepare upgrade transaction material: %w", err)
 	}
 	oldDefinitionPath := filepath.Join(materialRoot, "source.definition")
 	newDefinitionPath := filepath.Join(materialRoot, "target.definition")
@@ -295,7 +354,9 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 		ControllerID: options.Config.ControllerID, DeviceID: options.Config.DeviceID,
 		SourceVersion: options.CurrentVersion, TargetVersion: options.TargetVersion,
 		SourceRuntimeDigest: sourceDigest, TargetRuntimeDigest: runtimeMaterial.BinarySHA256,
-		ConfigDigest: configDigest, Platform: runtime.GOOS, Architecture: runtime.GOARCH,
+		ConfigDigest: targetConfigDigest, SourceConfigDigest: sourceConfigDigest,
+		SourceReadinessEpoch: sourceReadinessEpoch,
+		Platform:             runtime.GOOS, Architecture: runtime.GOARCH,
 		Invocation: Invocation{
 			BinaryPath: options.SourceBinary, TargetBinaryPath: runtimeMaterial.BinaryPath,
 			ConfigPath: options.ConfigPath, EnvironmentFile: options.EnvironmentFile,
@@ -306,6 +367,12 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 		Definition: Definition{
 			Kind: plan.Kind, OldDigest: digestBytes(plan.OldDefinition), NewDigest: digestBytes(plan.NewDefinition),
 			OldPath: oldDefinitionPath, NewPath: newDefinitionPath,
+		},
+		Configuration: Configuration{
+			CanonicalPath: options.ConfigPath, SourcePath: sourceConfigPath, TargetPath: targetConfigPath,
+			ShadowPath:   filepath.Join(filepath.Dir(options.ConfigPath), "."+filepath.Base(options.ConfigPath)+"-upgrade-"+transactionID+".shadow"),
+			RollbackPath: filepath.Join(filepath.Dir(options.ConfigPath), "."+filepath.Base(options.ConfigPath)+"-upgrade-"+transactionID+".rollback"),
+			SourceDigest: digestBytes(sourceConfig), TargetDigest: digestBytes(targetConfig),
 		},
 		Database: Database{
 			Kind: databaseKind, CanonicalPath: databasePath,
@@ -384,14 +451,47 @@ func protectedConfigurationDigest(paths ...string) (string, error) {
 	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
+func configurationDigest(configPath string, configData []byte, environmentPath string) (string, error) {
+	digest := sha256.New()
+	if _, err := fmt.Fprintf(digest, "%d:%s\x00", len(configPath), configPath); err != nil {
+		return "", err
+	}
+	if _, err := fmt.Fprintf(digest, "%d:", len(configData)); err != nil {
+		return "", err
+	}
+	if _, err := digest.Write(configData); err != nil {
+		return "", err
+	}
+	if environmentPath != "" {
+		data, err := delegationconfig.ReadProtectedFile(environmentPath, maximumConfigDigestFile)
+		if err != nil {
+			return "", err
+		}
+		if _, err := fmt.Fprintf(digest, "%d:%s\x00%d:", len(environmentPath), environmentPath, len(data)); err != nil {
+			return "", err
+		}
+		if _, err := digest.Write(data); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
 func regularFileDigest(path string) (string, error) { return workerreadiness.RuntimeDigest(path) }
 
 func validateActivationMaterial(journal Journal) error {
-	configDigest, err := protectedConfigurationDigest(
-		journal.Invocation.ConfigPath, journal.Invocation.EnvironmentFile,
-	)
-	if err != nil || configDigest != journal.ConfigDigest {
+	configDigest, err := protectedConfigurationDigest(journal.Invocation.ConfigPath, journal.Invocation.EnvironmentFile)
+	if err != nil || configDigest != journal.SourceConfigDigest && configDigest != journal.ConfigDigest {
 		return errors.Join(err, errors.New("upgrade configuration changed after preparation"))
+	}
+	for _, material := range []struct{ path, digest string }{
+		{journal.Configuration.SourcePath, journal.Configuration.SourceDigest},
+		{journal.Configuration.TargetPath, journal.Configuration.TargetDigest},
+	} {
+		data, readErr := delegationconfig.ReadProtectedFile(material.path, maximumConfigDigestFile)
+		if readErr != nil || digestBytes(data) != material.digest {
+			return errors.Join(readErr, errors.New("protected upgrade configuration material changed"))
+		}
 	}
 	for label, material := range map[string]struct {
 		path   string
@@ -444,24 +544,13 @@ func ReadConfiguredBlockers(ctx context.Context, config delegationconfig.Config)
 }
 
 func defaultBlockers(ctx context.Context, config delegationconfig.Config) (store.UpgradeBlockers, error) {
-	switch config.Role {
-	case delegationconfig.RoleBroker:
-		state, err := store.OpenCurrent(ctx, config.Broker.StateFile)
-		if err != nil {
-			return store.UpgradeBlockers{}, err
-		}
-		defer state.Close()
-		return state.ReadBrokerUpgradeBlockers(ctx, config.ControllerID)
-	case delegationconfig.RolePeer:
-		state, err := store.OpenPeer(ctx, config.Peer.StateFile)
-		if err != nil {
-			return store.UpgradeBlockers{}, err
-		}
-		defer state.Close()
-		return state.ReadPeerUpgradeBlockers(ctx, config.ControllerID, config.DeviceID)
-	default:
-		return store.UpgradeBlockers{}, fmt.Errorf("unsupported upgrade role %q", config.Role)
+	kind, err := databaseKind(config.Role)
+	if err != nil {
+		return store.UpgradeBlockers{}, err
 	}
+	return store.ReadUpgradeBlockers(
+		ctx, configuredDatabasePath(config), kind, config.ControllerID, config.DeviceID,
+	)
 }
 
 func databaseKind(role delegationconfig.Role) (store.DatabaseKind, error) {

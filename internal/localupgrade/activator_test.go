@@ -12,8 +12,8 @@ import (
 
 func TestActivatorResumesAfterEveryUnjournaledAction(t *testing.T) {
 	steps := []activationStep{
-		stepServiceStop, stepDatabasePrepare, stepDefinitionSwitch,
-		stepDatabaseSwitch, stepServiceStart, stepQualification,
+		stepServiceStop, stepConfigurationPrepare, stepDatabasePrepare, stepDefinitionSwitch,
+		stepConfigurationSwitch, stepDatabaseSwitch, stepServiceStart, stepQualification,
 	}
 	for _, step := range steps {
 		t.Run(string(step), func(t *testing.T) {
@@ -152,6 +152,9 @@ func (f *fakeActivation) operations() ActivationOperations {
 			return nil
 		},
 		AcquireLease: func(Journal) (ActivationLease, error) { return testActivationLease{}, nil },
+		PrepareConfiguration: func(configuration Configuration) (Configuration, error) {
+			return configuration, nil
+		},
 		PrepareDatabase: func(_ context.Context, database Database) (Database, error) {
 			f.prepareDatabaseCalls++
 			if !f.stopped {
@@ -176,6 +179,7 @@ func (f *fakeActivation) operations() ActivationOperations {
 			}
 			return true, nil
 		},
+		SwitchConfiguration: func(Configuration) (bool, error) { return true, nil },
 		ServiceMatches: func(context.Context, userservice.UpgradePlan, bool) (bool, error) {
 			return f.running, nil
 		},
@@ -214,6 +218,8 @@ func createActivationJournal(t *testing.T) (*Store, Journal) {
 		journal.Definition.OldPath:          oldDefinition,
 		journal.Definition.NewPath:          newDefinition,
 		journal.Invocation.ConfigPath:       config,
+		journal.Configuration.SourcePath:    config,
+		journal.Configuration.TargetPath:    config,
 		journal.Invocation.EnvironmentFile:  environment,
 		journal.Invocation.BinaryPath:       sourceRuntime,
 		journal.Invocation.TargetBinaryPath: targetRuntime,
@@ -233,6 +239,9 @@ func createActivationJournal(t *testing.T) (*Store, Journal) {
 		t.Fatal(err)
 	}
 	journal.ConfigDigest = configDigest
+	journal.SourceConfigDigest = configDigest
+	journal.Configuration.SourceDigest = digestBytes(config)
+	journal.Configuration.TargetDigest = digestBytes(config)
 	transactionStore, err := OpenStore(filepath.Join(filepath.Dir(journal.ActivatorPath), "transaction"))
 	if err != nil {
 		t.Fatal(err)

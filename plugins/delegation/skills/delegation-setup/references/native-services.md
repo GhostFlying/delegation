@@ -97,7 +97,11 @@ also verifies the exact current-user service definition, executable/config/envir
 database and embedded-Tailscale compatibility, and the absence of occupied workers or unfinished
 operations. The new CLI performs bootstrap discovery directly from that native definition and its
 running process, so an alpha.4 service does not need the current local-bridge protocol or upgrade
-RPC. A same-target retry resumes the existing journal.
+RPC. Alpha.4 bootstrap accepts only the exact schema-3 TCP config and broker-19 or peer-15
+database. After the service stops, the activator preserves rollback material, migrates protected
+shadows to schema 4 and broker-20 or peer-16, and switches them atomically. A same-target retry
+resumes the existing journal. Peer completion requires target runtime/config digests, lifecycle
+synchronization, dispatchability, and a ready epoch newer than the source epoch.
 
 Arming installs a transaction-specific one-shot activator without changing the main service.
 Activation first writes durable commit authorization, then the independent activator stops the exact

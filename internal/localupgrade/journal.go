@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	JournalSchemaVersion = 1
+	JournalSchemaVersion = 2
 	maximumJournalBytes  = 64 << 10
 	maximumFailureBytes  = 64
 )
@@ -76,39 +76,54 @@ type Database struct {
 	TargetDigest   string                 `json:"targetDigest,omitempty"`
 }
 
+type Configuration struct {
+	CanonicalPath string `json:"canonicalPath"`
+	SourcePath    string `json:"sourcePath"`
+	TargetPath    string `json:"targetPath"`
+	ShadowPath    string `json:"shadowPath"`
+	RollbackPath  string `json:"rollbackPath"`
+	SourceDigest  string `json:"sourceDigest"`
+	TargetDigest  string `json:"targetDigest"`
+}
+
 type Progress struct {
-	ServiceStopped     bool `json:"serviceStopped"`
-	DatabasePrepared   bool `json:"databasePrepared"`
-	DefinitionSwitched bool `json:"definitionSwitched"`
-	DatabaseSwitched   bool `json:"databaseSwitched"`
-	ServiceStarted     bool `json:"serviceStarted"`
-	Qualified          bool `json:"qualified"`
+	ServiceStopped        bool `json:"serviceStopped"`
+	ConfigurationPrepared bool `json:"configurationPrepared"`
+	DatabasePrepared      bool `json:"databasePrepared"`
+	DefinitionSwitched    bool `json:"definitionSwitched"`
+	ConfigurationSwitched bool `json:"configurationSwitched"`
+	DatabaseSwitched      bool `json:"databaseSwitched"`
+	ServiceStarted        bool `json:"serviceStarted"`
+	Qualified             bool `json:"qualified"`
 }
 
 type Journal struct {
-	SchemaVersion       int                   `json:"schemaVersion"`
-	TransactionID       string                `json:"transactionId"`
-	State               State                 `json:"state"`
-	CommitAuthorized    bool                  `json:"commitAuthorized"`
-	Role                delegationconfig.Role `json:"role"`
-	InstanceID          string                `json:"instanceId"`
-	ControllerID        string                `json:"controllerId"`
-	DeviceID            string                `json:"deviceId,omitempty"`
-	SourceVersion       string                `json:"sourceVersion"`
-	TargetVersion       string                `json:"targetVersion"`
-	SourceRuntimeDigest string                `json:"sourceRuntimeDigest"`
-	TargetRuntimeDigest string                `json:"targetRuntimeDigest"`
-	ConfigDigest        string                `json:"configDigest"`
-	Platform            string                `json:"platform"`
-	Architecture        string                `json:"architecture"`
-	Invocation          Invocation            `json:"invocation"`
-	Definition          Definition            `json:"definition"`
-	Database            Database              `json:"database"`
-	ActivatorPath       string                `json:"activatorPath"`
-	Progress            Progress              `json:"progress"`
-	FailureCode         string                `json:"failureCode,omitempty"`
-	CreatedAt           int64                 `json:"createdAt"`
-	UpdatedAt           int64                 `json:"updatedAt"`
+	SchemaVersion        int                   `json:"schemaVersion"`
+	TransactionID        string                `json:"transactionId"`
+	State                State                 `json:"state"`
+	CommitAuthorized     bool                  `json:"commitAuthorized"`
+	Role                 delegationconfig.Role `json:"role"`
+	InstanceID           string                `json:"instanceId"`
+	ControllerID         string                `json:"controllerId"`
+	DeviceID             string                `json:"deviceId,omitempty"`
+	SourceVersion        string                `json:"sourceVersion"`
+	TargetVersion        string                `json:"targetVersion"`
+	SourceRuntimeDigest  string                `json:"sourceRuntimeDigest"`
+	TargetRuntimeDigest  string                `json:"targetRuntimeDigest"`
+	ConfigDigest         string                `json:"configDigest"`
+	SourceConfigDigest   string                `json:"sourceConfigDigest"`
+	SourceReadinessEpoch uint64                `json:"sourceReadinessEpoch,omitempty"`
+	Platform             string                `json:"platform"`
+	Architecture         string                `json:"architecture"`
+	Invocation           Invocation            `json:"invocation"`
+	Definition           Definition            `json:"definition"`
+	Configuration        Configuration         `json:"configuration"`
+	Database             Database              `json:"database"`
+	ActivatorPath        string                `json:"activatorPath"`
+	Progress             Progress              `json:"progress"`
+	FailureCode          string                `json:"failureCode,omitempty"`
+	CreatedAt            int64                 `json:"createdAt"`
+	UpdatedAt            int64                 `json:"updatedAt"`
 }
 
 type Snapshot struct {
@@ -156,7 +171,7 @@ func (j Journal) Validate() error {
 	}
 	switch j.Role {
 	case delegationconfig.RoleBroker:
-		if j.DeviceID != "" || j.Invocation.EnvironmentFile != "" {
+		if j.DeviceID != "" || j.Invocation.EnvironmentFile != "" || j.SourceReadinessEpoch != 0 {
 			return errors.New("broker journal contains peer-only identity")
 		}
 	case delegationconfig.RolePeer:
@@ -172,8 +187,11 @@ func (j Journal) Validate() error {
 	}
 	for name, digest := range map[string]string{
 		"source runtime": j.SourceRuntimeDigest, "target runtime": j.TargetRuntimeDigest,
-		"config": j.ConfigDigest, "old definition": j.Definition.OldDigest,
-		"new definition": j.Definition.NewDigest,
+		"config": j.ConfigDigest, "source config": j.SourceConfigDigest,
+		"old definition":       j.Definition.OldDigest,
+		"new definition":       j.Definition.NewDigest,
+		"configuration source": j.Configuration.SourceDigest,
+		"configuration target": j.Configuration.TargetDigest,
 	} {
 		if !validDigest(digest) {
 			return fmt.Errorf("%s digest is invalid", name)
@@ -191,6 +209,9 @@ func (j Journal) Validate() error {
 		j.Invocation.DefinitionPath,
 		j.Definition.OldPath, j.Definition.NewPath, j.Database.CanonicalPath,
 		j.Database.ShadowPath, j.Database.RollbackPath, j.ActivatorPath,
+		j.Configuration.CanonicalPath, j.Configuration.SourcePath,
+		j.Configuration.TargetPath, j.Configuration.ShadowPath,
+		j.Configuration.RollbackPath,
 	}
 	if j.Invocation.EnvironmentFile != "" {
 		paths = append(paths, j.Invocation.EnvironmentFile)
@@ -199,6 +220,14 @@ func (j Journal) Validate() error {
 		if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 			return errors.New("upgrade journal paths must be non-empty, absolute, and clean")
 		}
+	}
+	if j.Configuration.CanonicalPath != j.Invocation.ConfigPath ||
+		filepath.Dir(j.Configuration.CanonicalPath) != filepath.Dir(j.Configuration.ShadowPath) ||
+		filepath.Dir(j.Configuration.CanonicalPath) != filepath.Dir(j.Configuration.RollbackPath) ||
+		j.Configuration.CanonicalPath == j.Configuration.ShadowPath ||
+		j.Configuration.CanonicalPath == j.Configuration.RollbackPath ||
+		j.Configuration.ShadowPath == j.Configuration.RollbackPath {
+		return errors.New("upgrade configuration material paths are inconsistent")
 	}
 	if j.Database.CanonicalPath == j.Database.ShadowPath ||
 		j.Database.CanonicalPath == j.Database.RollbackPath ||
@@ -277,9 +306,11 @@ func (j Journal) Validate() error {
 	if j.State == StateForwardRecoveryRequired && !j.CommitAuthorized {
 		return errors.New("forward recovery requires durable commit authorization")
 	}
-	if (j.Progress.DatabasePrepared && !j.Progress.ServiceStopped) ||
+	if (j.Progress.ConfigurationPrepared && !j.Progress.ServiceStopped) ||
+		(j.Progress.DatabasePrepared && !j.Progress.ConfigurationPrepared) ||
 		(j.Progress.DefinitionSwitched && !j.Progress.DatabasePrepared) ||
-		(j.Progress.DatabaseSwitched && !j.Progress.DefinitionSwitched) ||
+		(j.Progress.ConfigurationSwitched && !j.Progress.DefinitionSwitched) ||
+		(j.Progress.DatabaseSwitched && !j.Progress.ConfigurationSwitched) ||
 		(j.Progress.ServiceStarted && !j.Progress.DatabaseSwitched) ||
 		(j.Progress.Qualified && !j.Progress.ServiceStarted) {
 		return errors.New("upgrade activation progress is inconsistent")

@@ -18,12 +18,14 @@ const maximumDefinitionBytes = 1 << 20
 type activationStep string
 
 const (
-	stepServiceStop      activationStep = "service_stop"
-	stepDatabasePrepare  activationStep = "database_prepare"
-	stepDefinitionSwitch activationStep = "definition_switch"
-	stepDatabaseSwitch   activationStep = "database_switch"
-	stepServiceStart     activationStep = "service_start"
-	stepQualification    activationStep = "qualification"
+	stepServiceStop          activationStep = "service_stop"
+	stepConfigurationPrepare activationStep = "configuration_prepare"
+	stepDatabasePrepare      activationStep = "database_prepare"
+	stepDefinitionSwitch     activationStep = "definition_switch"
+	stepConfigurationSwitch  activationStep = "configuration_switch"
+	stepDatabaseSwitch       activationStep = "database_switch"
+	stepServiceStart         activationStep = "service_start"
+	stepQualification        activationStep = "qualification"
 )
 
 // ActivationLease proves that the stopped service no longer owns its state
@@ -36,14 +38,16 @@ type ActivationLease interface {
 // ActivationOperations isolates the crash-consistent state machine from the
 // native service manager and qualification implementation.
 type ActivationOperations struct {
-	StopService      func(context.Context, userservice.UpgradePlan) error
-	SwitchDefinition func(context.Context, userservice.UpgradePlan, bool) error
-	StartService     func(context.Context, userservice.UpgradePlan, bool) error
-	ServiceMatches   func(context.Context, userservice.UpgradePlan, bool) (bool, error)
-	AcquireLease     func(Journal) (ActivationLease, error)
-	PrepareDatabase  func(context.Context, Database) (Database, error)
-	SwitchDatabase   func(Database) (bool, error)
-	Qualify          func(context.Context, Journal) error
+	StopService          func(context.Context, userservice.UpgradePlan) error
+	SwitchDefinition     func(context.Context, userservice.UpgradePlan, bool) error
+	StartService         func(context.Context, userservice.UpgradePlan, bool) error
+	ServiceMatches       func(context.Context, userservice.UpgradePlan, bool) (bool, error)
+	AcquireLease         func(Journal) (ActivationLease, error)
+	PrepareConfiguration func(Configuration) (Configuration, error)
+	PrepareDatabase      func(context.Context, Database) (Database, error)
+	SwitchDatabase       func(Database) (bool, error)
+	SwitchConfiguration  func(Configuration) (bool, error)
+	Qualify              func(context.Context, Journal) error
 }
 
 // DefaultActivationOperations returns the native operations used by the
@@ -51,16 +55,21 @@ type ActivationOperations struct {
 // must validate the role-specific local management endpoint and runtime.
 func DefaultActivationOperations(qualify func(context.Context, Journal) error) ActivationOperations {
 	return ActivationOperations{
-		StopService:      userservice.StopUpgrade,
-		SwitchDefinition: userservice.SwitchUpgradeDefinition,
-		StartService:     userservice.StartUpgrade,
-		ServiceMatches:   userservice.UpgradeServiceMatches,
-		AcquireLease:     acquireActivationLease,
+		StopService:          userservice.StopUpgrade,
+		SwitchDefinition:     userservice.SwitchUpgradeDefinition,
+		StartService:         userservice.StartUpgrade,
+		ServiceMatches:       userservice.UpgradeServiceMatches,
+		AcquireLease:         acquireActivationLease,
+		PrepareConfiguration: PrepareConfiguration,
 		PrepareDatabase: func(ctx context.Context, database Database) (Database, error) {
-			return PrepareDatabase(ctx, database, nil)
+			migrate := func(ctx context.Context, path string, target store.DatabaseIdentity) error {
+				return store.MigrateUpgradeDatabase(ctx, path, database.Kind, target)
+			}
+			return PrepareDatabase(ctx, database, migrate)
 		},
-		SwitchDatabase: ReconcileDatabaseSwitch,
-		Qualify:        qualify,
+		SwitchConfiguration: ReconcileConfigurationSwitch,
+		SwitchDatabase:      ReconcileDatabaseSwitch,
+		Qualify:             qualify,
 	}
 }
 
@@ -76,7 +85,8 @@ func NewActivator(transactionStore *Store, operations ActivationOperations) (*Ac
 	}
 	if operations.StopService == nil || operations.SwitchDefinition == nil ||
 		operations.StartService == nil || operations.ServiceMatches == nil ||
-		operations.AcquireLease == nil || operations.PrepareDatabase == nil ||
+		operations.AcquireLease == nil || operations.PrepareConfiguration == nil ||
+		operations.PrepareDatabase == nil || operations.SwitchConfiguration == nil ||
 		operations.SwitchDatabase == nil || operations.Qualify == nil {
 		return nil, errors.New("upgrade activation operations are incomplete")
 	}
@@ -133,12 +143,12 @@ func (a *Activator) Run(ctx context.Context, transactionID string) (Journal, err
 			return journal, err
 		}
 	}
-	if !journal.Progress.DatabaseSwitched {
+	if !journal.Progress.DatabaseSwitched || !journal.Progress.ConfigurationSwitched {
 		lease, leaseErr := a.operations.AcquireLease(journal)
 		if leaseErr != nil {
 			return a.failForward(journal, "database_lease_failed", leaseErr)
 		}
-		journal, err = a.reconcileStoppedDatabase(ctx, journal, plan)
+		journal, err = a.reconcileStoppedState(ctx, journal, plan)
 		closeErr := lease.Close()
 		if err != nil || closeErr != nil {
 			return a.failForward(journal, "database_switch_failed", errors.Join(err, closeErr))
@@ -194,9 +204,25 @@ func (a *Activator) Run(ctx context.Context, transactionID string) (Journal, err
 	return journal, err
 }
 
-func (a *Activator) reconcileStoppedDatabase(
+func (a *Activator) reconcileStoppedState(
 	ctx context.Context, journal Journal, plan userservice.UpgradePlan,
 ) (Journal, error) {
+	configuration, err := a.operations.PrepareConfiguration(journal.Configuration)
+	if err != nil {
+		return journal, err
+	}
+	if err := a.after(stepConfigurationPrepare); err != nil {
+		return journal, err
+	}
+	if !journal.Progress.ConfigurationPrepared {
+		journal, err = a.store.Update(journal.TransactionID, func(current *Journal) error {
+			current.Progress.ConfigurationPrepared = true
+			return nil
+		})
+		if err != nil {
+			return journal, err
+		}
+	}
 	prepared, err := a.operations.PrepareDatabase(ctx, journal.Database)
 	if err != nil {
 		return journal, err
@@ -226,6 +252,20 @@ func (a *Activator) reconcileStoppedDatabase(
 	}
 	if !journal.Progress.DefinitionSwitched {
 		journal, err = a.updateProgress(journal, func(progress *Progress) { progress.DefinitionSwitched = true })
+		if err != nil {
+			return journal, err
+		}
+	}
+	if _, err := a.operations.SwitchConfiguration(configuration); err != nil {
+		return journal, err
+	}
+	if err := a.after(stepConfigurationSwitch); err != nil {
+		return journal, err
+	}
+	if !journal.Progress.ConfigurationSwitched {
+		journal, err = a.updateProgress(journal, func(progress *Progress) {
+			progress.ConfigurationSwitched = true
+		})
 		if err != nil {
 			return journal, err
 		}

@@ -175,6 +175,85 @@ func Read(path string) (Config, error) {
 	return ReadForRuntime(path, RuntimeCapabilities{})
 }
 
+// ReadForUpgrade reads either the current configuration schema or the one
+// explicitly supported bootstrap predecessor. The returned source bytes are
+// the exact protected file contents; target bytes are a validated current-
+// schema representation. Legacy schema 3 represented only TCP transport, so
+// migration adds that explicit transport and changes no other setting.
+func ReadForUpgrade(
+	path string, capabilities RuntimeCapabilities,
+) (cfg Config, source, target []byte, migrated bool, err error) {
+	source, err = readProtectedConfig(path)
+	if err != nil {
+		return Config{}, nil, nil, false, err
+	}
+	var header struct {
+		SchemaVersion int             `json:"schemaVersion"`
+		Transport     json.RawMessage `json:"transport"`
+	}
+	if err := json.Unmarshal(source, &header); err != nil {
+		return Config{}, nil, nil, false, fmt.Errorf("decode config: %w", err)
+	}
+	switch header.SchemaVersion {
+	case CurrentSchemaVersion:
+		if err := validateTransportJSON(header.Transport); err != nil {
+			return Config{}, nil, nil, false, err
+		}
+		cfg, err = decodeCurrentConfig(source)
+		if err != nil {
+			return Config{}, nil, nil, false, err
+		}
+		if err := cfg.ValidateForRuntime(capabilities); err != nil {
+			return Config{}, nil, nil, false, err
+		}
+		return cfg, source, append([]byte(nil), source...), false, nil
+	case 3:
+		if len(header.Transport) != 0 {
+			return Config{}, nil, nil, false, errors.New("schema-3 config must not contain transport")
+		}
+		var legacy legacyConfigV3
+		decoder := json.NewDecoder(bytes.NewReader(source))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&legacy); err != nil {
+			return Config{}, nil, nil, false, fmt.Errorf("decode schema-3 config: %w", err)
+		}
+		if err := ensureJSONEOF(decoder); err != nil {
+			return Config{}, nil, nil, false, err
+		}
+		cfg = legacy.current()
+		if err := cfg.ValidateForRuntime(capabilities); err != nil {
+			return Config{}, nil, nil, false, fmt.Errorf("validate migrated schema-3 config: %w", err)
+		}
+		target, err = EncodeForRuntime(cfg, capabilities)
+		if err != nil {
+			return Config{}, nil, nil, false, err
+		}
+		return cfg, source, target, true, nil
+	default:
+		return Config{}, nil, nil, false, unsupportedSchemaVersion(header.SchemaVersion)
+	}
+}
+
+type legacyConfigV3 struct {
+	SchemaVersion int           `json:"schemaVersion"`
+	InstanceID    string        `json:"instanceId,omitempty"`
+	HostKind      hostkind.Kind `json:"hostKind,omitempty"`
+	Role          Role          `json:"role"`
+	ControllerID  string        `json:"controllerId"`
+	DeviceID      string        `json:"deviceId,omitempty"`
+	DeviceName    string        `json:"deviceName,omitempty"`
+	Broker        BrokerConfig  `json:"broker"`
+	Peer          PeerConfig    `json:"peer"`
+}
+
+func (c legacyConfigV3) current() Config {
+	return Config{
+		SchemaVersion: CurrentSchemaVersion, InstanceID: c.InstanceID, HostKind: c.HostKind,
+		Role: c.Role, ControllerID: c.ControllerID, DeviceID: c.DeviceID, DeviceName: c.DeviceName,
+		Transport: TransportConfig{Mode: TransportModeTCP}, Broker: c.Broker, Peer: c.Peer,
+	}
+}
+
 // ReadForRuntime reads and validates a configuration against explicitly
 // available runtime transport capabilities.
 func ReadForRuntime(path string, capabilities RuntimeCapabilities) (Config, error) {
@@ -219,20 +298,9 @@ func ReadForRepair(path string, capabilities RuntimeCapabilities) (Config, []byt
 }
 
 func readUnvalidated(path string) (Config, []byte, error) {
-	file, err := openProtectedConfig(path)
+	data, err := readProtectedConfig(path)
 	if err != nil {
-		return Config{}, nil, fmt.Errorf("read config: %w", err)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maximumConfigSize+1))
-	closeErr := file.Close()
-	if err != nil {
-		return Config{}, nil, fmt.Errorf("read config: %w", err)
-	}
-	if closeErr != nil {
-		return Config{}, nil, fmt.Errorf("close config: %w", closeErr)
-	}
-	if len(data) > maximumConfigSize {
-		return Config{}, nil, fmt.Errorf("config exceeds %d-byte limit", maximumConfigSize)
+		return Config{}, nil, err
 	}
 	var header struct {
 		SchemaVersion int             `json:"schemaVersion"`
@@ -247,16 +315,43 @@ func readUnvalidated(path string) (Config, []byte, error) {
 	if err := validateTransportJSON(header.Transport); err != nil {
 		return Config{}, nil, err
 	}
+	cfg, err := decodeCurrentConfig(data)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	return cfg, data, nil
+}
+
+func readProtectedConfig(path string) ([]byte, error) {
+	file, err := openProtectedConfig(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, maximumConfigSize+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("read config: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close config: %w", closeErr)
+	}
+	if len(data) > maximumConfigSize {
+		return nil, fmt.Errorf("config exceeds %d-byte limit", maximumConfigSize)
+	}
+	return data, nil
+}
+
+func decodeCurrentConfig(data []byte) (Config, error) {
 	var cfg Config
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
-		return Config{}, nil, fmt.Errorf("decode config: %w", err)
+		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 	if err := ensureJSONEOF(decoder); err != nil {
-		return Config{}, nil, err
+		return Config{}, err
 	}
-	return cfg, data, nil
+	return cfg, nil
 }
 
 func (c Config) Validate() error {

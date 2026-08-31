@@ -209,8 +209,9 @@ func TestEveryJournalStateValidatesAndSnapshotOmitsSecrets(t *testing.T) {
 
 func fullProgress() Progress {
 	return Progress{
-		ServiceStopped: true, DatabasePrepared: true, DefinitionSwitched: true,
-		DatabaseSwitched: true, ServiceStarted: true, Qualified: true,
+		ServiceStopped: true, ConfigurationPrepared: true, DatabasePrepared: true,
+		DefinitionSwitched: true, ConfigurationSwitched: true, DatabaseSwitched: true,
+		ServiceStarted: true, Qualified: true,
 	}
 }
 
@@ -238,7 +239,8 @@ func testJournal(t *testing.T) Journal {
 		DeviceID:      "123e4567-e89b-42d3-a456-426614174802",
 		SourceVersion: "0.1.0-alpha.7", TargetVersion: "0.1.0-alpha.8",
 		SourceRuntimeDigest: strings.Repeat("1", 64), TargetRuntimeDigest: strings.Repeat("2", 64),
-		ConfigDigest: strings.Repeat("3", 64), Platform: runtime.GOOS, Architecture: runtime.GOARCH,
+		ConfigDigest: strings.Repeat("3", 64), SourceConfigDigest: strings.Repeat("3", 64),
+		SourceReadinessEpoch: 1, Platform: runtime.GOOS, Architecture: runtime.GOARCH,
 		Invocation: Invocation{
 			BinaryPath: filepath.Join(root, "old"), TargetBinaryPath: filepath.Join(root, "new"),
 			ConfigPath:      filepath.Join(root, "peer.json"),
@@ -250,6 +252,14 @@ func testJournal(t *testing.T) Journal {
 			Kind: kind, OldDigest: strings.Repeat("4", 64),
 			NewDigest: strings.Repeat("5", 64), OldPath: filepath.Join(root, "old.service"),
 			NewPath: filepath.Join(root, "new.service"),
+		},
+		Configuration: Configuration{
+			CanonicalPath: filepath.Join(root, "peer.json"),
+			SourcePath:    filepath.Join(root, "source.config.json"),
+			TargetPath:    filepath.Join(root, "target.config.json"),
+			ShadowPath:    filepath.Join(root, ".peer.json.shadow"),
+			RollbackPath:  filepath.Join(root, ".peer.json.rollback"),
+			SourceDigest:  strings.Repeat("6", 64), TargetDigest: strings.Repeat("6", 64),
 		},
 		Database: Database{
 			Kind: store.DatabasePeer, CanonicalPath: filepath.Join(root, "peer.sqlite3"),

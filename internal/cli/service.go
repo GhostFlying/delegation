@@ -128,7 +128,7 @@ func runServiceUpgradeWithDependencies(
 			return writeError(stderr, err)
 		}
 	}
-	cfg, err := runtimeconfig.Read(resolvedConfig)
+	cfg, _, _, _, err := runtimeconfig.ReadForUpgrade(resolvedConfig)
 	if err != nil {
 		return writeError(stderr, err)
 	}
@@ -300,9 +300,9 @@ func runServiceUpgradeActivator(args []string, stderr io.Writer) int {
 	if err := validateUpgradeActivatorRuntime(journal); err != nil {
 		return writeError(stderr, err)
 	}
-	cfg, err := runtimeconfig.Read(journal.Invocation.ConfigPath)
-	if err != nil {
-		return writeError(stderr, err)
+	cfg := delegationconfig.Config{
+		Role: journal.Role, InstanceID: journal.InstanceID, ControllerID: journal.ControllerID,
+		DeviceID: journal.DeviceID,
 	}
 	rootParent := filepath.Dir(filepath.Dir(filepath.Dir(resolvedRoot)))
 	wantRoot, err := localupgrade.RootForConfig(rootParent, cfg)

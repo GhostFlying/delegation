@@ -4,8 +4,9 @@
 
 Add a crash-consistent, resumable local upgrade transaction for an already managed Delegation
 broker or peer service on systemd user services, launchd LaunchAgents, and Windows Scheduled Tasks.
-The transaction changes only the immutable runtime binary path; it preserves the exact
-configuration, environment file, instance, role, user identity, and native service name.
+The transaction changes the immutable runtime binary path and, for the exact alpha.4 predecessor,
+migrates its schema-3 TCP config to schema 4. It preserves the configuration path and semantics,
+environment file, instance, role, user identity, and native service name.
 
 Checkpoint 4 owns local prepare, activation, cancellation, forward recovery, and status. Checkpoint
 5 will own controller-wide drain, participant selection, the global COMMIT decision, peer-first
@@ -31,10 +32,11 @@ prepared -> armed -> activating -> started -> qualified -> committed
                          +-------------+------------+-> forward_recovery_required
 ```
 
-The journal records source and target versions/digests, config identity, immutable invocation, old
-and new service-definition digests, database kind and paths, platform/architecture, activation
-substeps, commit authorization, bounded failure code, and timestamps. It never stores config
-contents, environment values, credentials, or raw service-manager output.
+The journal records source and target versions/digests, source and target config digests and
+protected material paths, immutable invocation, old and new service-definition digests, database
+kind and paths, platform/architecture, activation substeps, commit authorization, bounded failure
+code, and timestamps. It never stores config contents, environment values, credentials, or raw
+service-manager output.
 
 The local transaction remains cancellable while it is `prepared` or `armed`. Legacy rollback states
 remain readable for journal-format compatibility, but the current manager never starts service or
@@ -55,8 +57,10 @@ Preparation must fail closed unless all of the following hold:
 - the target runtime is a strictly newer canonical GitHub release verified through
   `internal/releaseverify`, and its extracted binary reports the exact target version;
 - the new service definition differs only in the binary path;
-- config and platform are supported, including explicit Windows TraeX rejection;
+- config and platform are supported, including explicit Windows TraeX rejection; only current
+  schema or exact alpha.4 schema-3 TCP config may enter this path;
 - broker/peer database schema, managed home, and embedded-Tailscale generation are compatible;
+  only current schema or exact alpha.4 broker-19/peer-15 state may enter this path;
 - no occupied worker, pending operation, workspace transfer, result transfer/finalization, or
   other upgrade-blocking durable work exists.
 
@@ -71,12 +75,14 @@ The one-shot activator reopens and validates the protected journal and reconcile
 before every action. It then:
 
 1. stops only the recorded managed role/instance and waits for its exact process tree to exit;
-2. acquires the role database lease, checkpoints WAL, creates and verifies a same-filesystem shadow
-   database, and retains the old database as rollback material;
+2. acquires the role database lease, creates same-directory config shadow/rollback material,
+   checkpoints WAL, creates and verifies a same-filesystem database shadow, and retains the old
+   database as rollback material;
 3. atomically replaces only the recorded owned service definition;
-4. atomically switches the canonical database to the verified shadow;
+4. atomically switches the canonical configuration and database to the verified shadows;
 5. starts the recorded service and checks local role/instance identity, target version, and target
-   runtime digest;
+   runtime/config digests; a peer must also complete lifecycle synchronization and a strictly newer
+   target-bound execution-readiness epoch before it is dispatchable;
 6. records `started`, performs bounded local qualification, records `qualified`, and commits;
 7. retains rollback material until terminal journal durability and removes the one-shot activator.
 

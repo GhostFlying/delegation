@@ -7,15 +7,19 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/GhostFlying/delegation/internal/buildinfo"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/localupgrade"
+	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/userservice"
+	"github.com/GhostFlying/delegation/internal/workerreadiness"
 )
 
 const upgradeTestTransactionID = "123e4567-e89b-42d3-a456-426614174388"
@@ -129,6 +133,230 @@ func TestServiceUpgradeBootstrapDoesNotRequireLegacyLocalBridge(t *testing.T) {
 	}
 	if called != 1 {
 		t.Fatalf("bootstrap calls = %d, want 1", called)
+	}
+}
+
+func TestServiceUpgradeBootstrapReadsAlpha4Schema3Config(t *testing.T) {
+	configPath, wantConfig := writeStatusTestConfig(t, delegationconfig.RoleBroker)
+	current, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(current, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["schemaVersion"] = json.RawMessage(`3`)
+	delete(document, "transport")
+	legacy, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy = append(legacy, '\n')
+	if err := delegationconfig.ReplaceProtectedFile(configPath, current, legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	called := 0
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runServiceUpgradeWithDependencies([]string{
+		"--config", configPath, "--target-version", "0.1.0-alpha.8",
+		"--bootstrap", "--json", "--timeout", "5s",
+	}, &stdout, &stderr, serviceUpgradeCommandDependencies{
+		bootstrap: func(
+			_ context.Context, got delegationconfig.Config, gotPath, environment, target string,
+		) (localbridge.UpgradeSnapshot, error) {
+			called++
+			if !reflect.DeepEqual(got, wantConfig) || gotPath != configPath ||
+				environment != "" || target != "0.1.0-alpha.8" {
+				t.Fatalf("bootstrap inputs = %#v, %q, %q, %q", got, gotPath, environment, target)
+			}
+			result := upgradeTestSnapshot(localupgrade.StateCommitted)
+			result.CommitAuthorized = true
+			return result, nil
+		},
+	})
+	if code != 0 || stderr.Len() != 0 || called != 1 {
+		t.Fatalf("schema-3 bootstrap = %d, calls %d, stderr %q", code, called, stderr.String())
+	}
+}
+
+func TestQualifyLocalUpgradeRequiresFreshReadySynchronizedPeer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("qualification endpoint isolation is covered by Windows local-bridge tests")
+	}
+	home, err := os.MkdirTemp("/tmp", "du-qualify-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+
+	configPath := filepath.Join(home, "peer.json")
+	environmentPath := filepath.Join(home, "peer.env")
+	if err := os.WriteFile(configPath, []byte("target config\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(environmentPath, []byte("TOKEN=value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtimePath, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimePath, err = filepath.EvalSymlinks(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeDigest, err := workerreadiness.RuntimeDigest(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configDigest, err := workerreadiness.ConfigDigest(configPath, environmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := localupgrade.Journal{
+		Role: delegationconfig.RolePeer, InstanceID: delegationconfig.DefaultInstanceID,
+		ControllerID: statusTestControllerID, DeviceID: statusTestDeviceID,
+		SourceVersion: "0.1.0-alpha.6", TargetVersion: buildinfo.Version,
+		TargetRuntimeDigest: runtimeDigest, ConfigDigest: configDigest, SourceReadinessEpoch: 7,
+		Invocation: localupgrade.Invocation{
+			TargetBinaryPath: runtimePath, ConfigPath: configPath, EnvironmentFile: environmentPath,
+		},
+	}
+	ready := protocol.WorkerReadiness{
+		Epoch: 8, State: protocol.WorkerReadinessReady, AttemptCount: 1,
+		RuntimeDigest: runtimeDigest, ConfigDigest: configDigest,
+		EpochStartedAt: 1, LastAttemptAt: 1, UpdatedAt: 1,
+	}
+	baseStatus := localbridge.StatusSnapshot{
+		TransportStatus: delegationconfig.TransportStatus{Transport: "tcp"},
+		Version:         buildinfo.Version, ControllerID: journal.ControllerID, DeviceID: journal.DeviceID,
+		DeviceName: "upgrade-peer", ServiceRunning: true,
+		ConnectionState: localbridge.ConnectionReady, Connected: true,
+		WorkerRevision: 1, BrokerWorkerRevision: 1, WorkerSyncReady: true,
+		WorkerReady: true, Dispatchable: true, WorkerReadiness: ready, MaxWorkerSlots: 1,
+	}
+	tests := []struct {
+		name   string
+		mutate func(*localbridge.StatusSnapshot, *localbridge.ServiceIdentity)
+		want   string
+	}{
+		{name: "ready"},
+		{name: "stale epoch", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
+			status.WorkerReadiness.Epoch = journal.SourceReadinessEpoch
+		}, want: "new execution-readiness epoch"},
+		{name: "status version", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
+			status.Version = "0.1.0-alpha.6"
+		}, want: "connection and lifecycle synchronization"},
+		{name: "pending", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
+			status.WorkerReadiness.State = protocol.WorkerReadinessPending
+			status.WorkerReadiness.AttemptCount = 0
+			status.WorkerReadiness.LastAttemptAt = 0
+			status.WorkerReadiness.NextAttemptAt = 1
+			status.WorkerReady = false
+			status.Dispatchable = false
+		}, want: "new execution-readiness epoch"},
+		{name: "intervention required", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
+			status.WorkerReadiness.State = protocol.WorkerReadinessInterventionRequired
+			status.WorkerReadiness.FailureCode = protocol.WorkerManagedHomeInvalid
+			status.WorkerReady = false
+			status.Dispatchable = false
+		}, want: "new execution-readiness epoch"},
+		{name: "runtime digest", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
+			status.WorkerReadiness.RuntimeDigest = strings.Repeat("c", 64)
+		}, want: "new execution-readiness epoch"},
+		{name: "config digest", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
+			status.WorkerReadiness.ConfigDigest = strings.Repeat("d", 64)
+		}, want: "new execution-readiness epoch"},
+		{name: "lifecycle synchronizing", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
+			status.ConnectionState = localbridge.ConnectionSynchronizing
+			status.BrokerWorkerRevision = 0
+			status.WorkerSyncReady = false
+			status.Dispatchable = false
+		}, want: "connection and lifecycle synchronization"},
+		{name: "identity mismatch", mutate: func(_ *localbridge.StatusSnapshot, identity *localbridge.ServiceIdentity) {
+			identity.DeviceID = statusTestOtherID
+		}, want: "local bridge identity mismatch"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status := baseStatus
+			identity := localbridge.ServiceIdentity{
+				Role: journal.Role, InstanceID: journal.InstanceID,
+				ControllerID: journal.ControllerID, DeviceID: journal.DeviceID,
+			}
+			if test.mutate != nil {
+				test.mutate(&status, &identity)
+			}
+			stop := startQualificationBridge(t, journal, identity, status)
+			err := qualifyLocalUpgrade(context.Background(), journal)
+			stop()
+			if test.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("qualification error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestQualifyLocalUpgradeBindsBrokerRuntimeConfigAndIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("qualification endpoint isolation is covered by Windows local-bridge tests")
+	}
+	home, err := os.MkdirTemp("/tmp", "du-broker-qualify-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "broker.json")
+	if err := os.WriteFile(configPath, []byte("target config\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtimePath, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimePath, err = filepath.EvalSymlinks(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeDigest, err := workerreadiness.RuntimeDigest(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configDigest, err := workerreadiness.ConfigDigest(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := localupgrade.Journal{
+		Role: delegationconfig.RoleBroker, InstanceID: delegationconfig.DefaultInstanceID,
+		ControllerID: statusTestControllerID, SourceVersion: "0.1.0-alpha.6",
+		TargetVersion: buildinfo.Version, TargetRuntimeDigest: runtimeDigest,
+		ConfigDigest: configDigest, Invocation: localupgrade.Invocation{
+			TargetBinaryPath: runtimePath, ConfigPath: configPath,
+		},
+	}
+	identity := localbridge.ServiceIdentity{
+		Role: delegationconfig.RoleBroker, InstanceID: journal.InstanceID,
+		ControllerID: journal.ControllerID,
+	}
+	stop := startQualificationBridge(t, journal, identity, localbridge.StatusSnapshot{})
+	defer stop()
+	if err := qualifyLocalUpgrade(context.Background(), journal); err != nil {
+		t.Fatal(err)
+	}
+
+	journal.ConfigDigest = strings.Repeat("e", 64)
+	if err := qualifyLocalUpgrade(context.Background(), journal); err == nil ||
+		!strings.Contains(err.Error(), "configuration does not match") {
+		t.Fatalf("broker config mismatch error = %v", err)
 	}
 }
 
@@ -391,6 +619,7 @@ type cliUpgradeManager struct {
 	environmentFile string
 	transactionID   string
 	absent          bool
+	runtimeIdentity localbridge.UpgradeRuntimeIdentity
 }
 
 func (m *cliUpgradeManager) PrepareLocalUpgrade(
@@ -454,9 +683,48 @@ func (m *cliUpgradeManager) LocalUpgrade(context.Context) (*localbridge.UpgradeS
 }
 
 func (m *cliUpgradeManager) LocalUpgradeRuntime(context.Context) (localbridge.UpgradeRuntimeIdentity, error) {
+	if m.runtimeIdentity.Version != "" {
+		return m.runtimeIdentity, nil
+	}
 	return localbridge.UpgradeRuntimeIdentity{
 		Version: "0.1.0-alpha.8", Digest: strings.Repeat("a", 64),
 	}, nil
+}
+
+func startQualificationBridge(
+	t *testing.T, journal localupgrade.Journal, identity localbridge.ServiceIdentity,
+	status localbridge.StatusSnapshot,
+) func() {
+	t.Helper()
+	endpoint, _, err := localUpgradeEndpoint(delegationconfig.Config{
+		Role: journal.Role, InstanceID: journal.InstanceID, ControllerID: journal.ControllerID,
+		DeviceID: journal.DeviceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := &cliUpgradeManager{runtimeIdentity: localbridge.UpgradeRuntimeIdentity{
+		Version: journal.TargetVersion, Digest: journal.TargetRuntimeDigest,
+	}}
+	server, err := localbridge.ListenWithUpgradeManagement(
+		endpoint, identity, statusTestBackend{}, nil, staticLocalStatus{status: status},
+		nil, nil, nil, manager,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	return func() {
+		cancel()
+		if err := server.Close(); err != nil {
+			t.Errorf("close qualification bridge: %v", err)
+		}
+		if err := <-done; err != nil {
+			t.Errorf("serve qualification bridge: %v", err)
+		}
+	}
 }
 
 func upgradeTestSnapshot(state localupgrade.State) localbridge.UpgradeSnapshot {
