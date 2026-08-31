@@ -655,7 +655,7 @@ func authorizeNewResultPackage(
 	if err != nil {
 		return "", err
 	}
-	if spawn.Agent.Status != protocol.AgentSpawnStarted ||
+	if spawn.Agent.SpawnStatus != protocol.AgentSpawnStarted ||
 		spawn.Agent.Principal != principal.Identity() ||
 		spawn.Agent.Principal.ParentAgentID != tree.RootAgentID ||
 		spawn.Agent.Principal.DeviceID != connectedDeviceID {

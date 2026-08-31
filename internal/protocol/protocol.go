@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	Version          = 5
+	Version          = 6
 	MaxMessageSize   = 256 * 1024
 	MaxErrorDataSize = 1024
 )

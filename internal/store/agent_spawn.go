@@ -46,8 +46,20 @@ type AgentPageRequest struct {
 }
 
 type AgentPage struct {
-	Agents       []protocol.AgentSummary
+	Agents       []AgentCurrentRecord
 	NextSequence uint64
+}
+
+type AgentCurrentRecord struct {
+	Spawn     protocol.AgentSummary
+	Lifecycle *AgentLifecycleRecord
+}
+
+type AgentLifecycleRecord struct {
+	TargetRevision uint64
+	Phase          protocol.WorkerLifecyclePhase
+	FailureCode    string
+	ObservedAt     int64
 }
 
 func (s *Store) BeginAgentSpawn(
@@ -194,7 +206,7 @@ WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND sync_id = ?
 				SpawnID:     intent.SpawnID,
 				Principal:   principal.Identity(),
 				TaskName:    intent.TaskName,
-				Status:      protocol.AgentSpawnPending,
+				SpawnStatus: protocol.AgentSpawnPending,
 				WorkspaceID: intent.WorkspaceID,
 				Sequence:    sequence,
 			},
@@ -250,13 +262,13 @@ func (s *Store) finishAgentSpawn(
 		if err != nil {
 			return err
 		}
-		if receipt.Agent.Status == status {
-			if receipt.Agent.FailureCode != failureCode {
+		if receipt.Agent.SpawnStatus == status {
+			if receipt.Agent.SpawnFailureCode != failureCode {
 				return fmt.Errorf("%w: agent terminal result differs", ErrConflict)
 			}
 			return nil
 		}
-		if receipt.Agent.Status != protocol.AgentSpawnPending {
+		if receipt.Agent.SpawnStatus != protocol.AgentSpawnPending {
 			return fmt.Errorf("%w: agent already has a terminal result", ErrConflict)
 		}
 		if timestamp < receipt.CreatedAt {
@@ -268,7 +280,7 @@ SET status = ?, failure_code = ?, updated_at = ?
 WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND spawn_id = ?
   AND status = ?
 `, status, failureCode, timestamp, key.ControllerID, key.TreeID, key.SourceAgentID, key.SpawnID,
-			receipt.Agent.Status)
+			receipt.Agent.SpawnStatus)
 		if err != nil {
 			return fmt.Errorf("finish agent spawn: %w", err)
 		}
@@ -285,8 +297,8 @@ WHERE controller_id = ? AND tree_id = ? AND source_agent_id = ? AND spawn_id = ?
 				return err
 			}
 		}
-		receipt.Agent.Status = status
-		receipt.Agent.FailureCode = failureCode
+		receipt.Agent.SpawnStatus = status
+		receipt.Agent.SpawnFailureCode = failureCode
 		receipt.UpdatedAt = timestamp
 		return nil
 	})
@@ -313,7 +325,7 @@ func (s *Store) ListAgents(
 	if _, err := authorizePrincipal(ctx, transaction, source, control.CapabilityAgentManageDescendants); err != nil {
 		return AgentPage{}, err
 	}
-	rows, err := transaction.QueryContext(ctx, agentSpawnSelect+`
+	rows, err := transaction.QueryContext(ctx, agentListSelect+`
 WHERE r.controller_id = ? AND r.tree_id = ? AND r.sequence > ?
 ORDER BY r.sequence
 LIMIT ?
@@ -321,14 +333,14 @@ LIMIT ?
 	if err != nil {
 		return AgentPage{}, fmt.Errorf("list agents: %w", err)
 	}
-	receipts := make([]AgentSpawnReceipt, 0, request.Limit+1)
+	records := make([]AgentCurrentRecord, 0, request.Limit+1)
 	for rows.Next() {
-		receipt, err := scanAgentSpawnReceipt(rows)
+		record, err := scanAgentCurrentRecord(rows)
 		if err != nil {
 			rows.Close()
 			return AgentPage{}, err
 		}
-		receipts = append(receipts, receipt)
+		records = append(records, record)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -337,12 +349,9 @@ LIMIT ?
 	if err := rows.Close(); err != nil {
 		return AgentPage{}, fmt.Errorf("close agent page: %w", err)
 	}
-	page := AgentPage{Agents: make([]protocol.AgentSummary, 0, min(len(receipts), request.Limit))}
-	for _, receipt := range receipts[:min(len(receipts), request.Limit)] {
-		page.Agents = append(page.Agents, receipt.Agent)
-	}
-	if len(receipts) > request.Limit {
-		page.NextSequence = page.Agents[len(page.Agents)-1].Sequence
+	page := AgentPage{Agents: records[:min(len(records), request.Limit)]}
+	if len(records) > request.Limit {
+		page.NextSequence = page.Agents[len(page.Agents)-1].Spawn.Sequence
 	}
 	if err := transaction.Commit(); err != nil {
 		return AgentPage{}, fmt.Errorf("commit agent page: %w", err)
@@ -430,8 +439,8 @@ func scanAgentSpawnReceipt(scanner rowScanner) (AgentSpawnReceipt, error) {
 		&receipt.Agent.TaskName,
 		&receipt.Agent.WorkspaceID,
 		&digest,
-		&receipt.Agent.Status,
-		&receipt.Agent.FailureCode,
+		&receipt.Agent.SpawnStatus,
+		&receipt.Agent.SpawnFailureCode,
 		&receipt.Agent.Sequence,
 		&receipt.CreatedAt,
 		&receipt.UpdatedAt,
@@ -466,3 +475,85 @@ FROM agent_spawn_receipts AS r
 JOIN principals AS p
   ON p.controller_id = r.controller_id AND p.tree_id = r.tree_id AND p.agent_id = r.agent_id
 `
+
+const agentListSelect = `
+SELECT r.spawn_id, p.controller_id, p.tree_id, p.agent_id, p.parent_agent_id, p.device_id,
+       r.target_device_id,
+       r.task_name, r.workspace_id, r.prompt_digest, r.status, r.failure_code, r.sequence, r.created_at, r.updated_at,
+       l.target_revision, l.phase, l.failure_code, l.observed_at
+FROM agent_spawn_receipts AS r
+JOIN principals AS p
+  ON p.controller_id = r.controller_id AND p.tree_id = r.tree_id AND p.agent_id = r.agent_id
+LEFT JOIN agent_lifecycle_states AS l
+  ON l.controller_id = r.controller_id AND l.tree_id = r.tree_id AND l.agent_id = r.agent_id
+`
+
+func scanAgentCurrentRecord(scanner rowScanner) (AgentCurrentRecord, error) {
+	var receipt AgentSpawnReceipt
+	var digest []byte
+	var targetDeviceID string
+	var lifecycleRevision, lifecycleObservedAt sql.NullInt64
+	var lifecyclePhase, lifecycleFailureCode sql.NullString
+	err := scanner.Scan(
+		&receipt.Agent.SpawnID,
+		&receipt.Agent.Principal.ControllerID,
+		&receipt.Agent.Principal.TreeID,
+		&receipt.Agent.Principal.AgentID,
+		&receipt.Agent.Principal.ParentAgentID,
+		&receipt.Agent.Principal.DeviceID,
+		&targetDeviceID,
+		&receipt.Agent.TaskName,
+		&receipt.Agent.WorkspaceID,
+		&digest,
+		&receipt.Agent.SpawnStatus,
+		&receipt.Agent.SpawnFailureCode,
+		&receipt.Agent.Sequence,
+		&receipt.CreatedAt,
+		&receipt.UpdatedAt,
+		&lifecycleRevision,
+		&lifecyclePhase,
+		&lifecycleFailureCode,
+		&lifecycleObservedAt,
+	)
+	if err != nil {
+		return AgentCurrentRecord{}, fmt.Errorf("scan agent current record: %w", err)
+	}
+	if len(digest) != sha256.Size {
+		return AgentCurrentRecord{}, errors.New("stored agent prompt digest is invalid")
+	}
+	if targetDeviceID != receipt.Agent.Principal.DeviceID {
+		return AgentCurrentRecord{}, errors.New("stored agent target device does not match its principal")
+	}
+	copy(receipt.PromptDigest[:], digest)
+	if err := receipt.Agent.Validate(); err != nil {
+		return AgentCurrentRecord{}, fmt.Errorf("stored agent spawn receipt is invalid: %w", err)
+	}
+	if receipt.CreatedAt < 0 || receipt.UpdatedAt < receipt.CreatedAt {
+		return AgentCurrentRecord{}, errors.New("stored agent spawn timestamps are invalid")
+	}
+	allLifecycleNull := !lifecycleRevision.Valid && !lifecyclePhase.Valid &&
+		!lifecycleFailureCode.Valid && !lifecycleObservedAt.Valid
+	allLifecyclePresent := lifecycleRevision.Valid && lifecyclePhase.Valid &&
+		lifecycleFailureCode.Valid && lifecycleObservedAt.Valid
+	if !allLifecycleNull && !allLifecyclePresent {
+		return AgentCurrentRecord{}, errors.New("stored agent lifecycle join is incomplete")
+	}
+	record := AgentCurrentRecord{Spawn: receipt.Agent}
+	if allLifecycleNull {
+		return record, nil
+	}
+	if lifecycleRevision.Int64 <= 0 || lifecycleObservedAt.Int64 < 0 {
+		return AgentCurrentRecord{}, errors.New("stored agent lifecycle metadata is invalid")
+	}
+	lifecycle := AgentLifecycleRecord{
+		TargetRevision: uint64(lifecycleRevision.Int64),
+		Phase:          protocol.WorkerLifecyclePhase(lifecyclePhase.String),
+		FailureCode:    lifecycleFailureCode.String,
+		ObservedAt:     lifecycleObservedAt.Int64,
+	}
+	if err := lifecycle.Phase.Validate(lifecycle.FailureCode); err != nil {
+		return AgentCurrentRecord{}, fmt.Errorf("stored agent lifecycle state is invalid: %w", err)
+	}
+	record.Lifecycle = &lifecycle
+	return record, nil
+}

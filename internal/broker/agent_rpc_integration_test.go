@@ -408,7 +408,7 @@ func TestAgentRPCSelfDispatchIsDurableIdempotentAndNonBlocking(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if spawned.Agent.Status != protocol.AgentSpawnStarted ||
+	if spawned.Agent.SpawnStatus != protocol.AgentSpawnStarted ||
 		spawned.Outcome != protocol.AgentSpawnOutcomeStarted ||
 		spawned.Agent.Principal.ParentAgentID != root.Principal.AgentID ||
 		spawned.Agent.Principal.DeviceID != brokerTestDeviceID || spawner.calls.Load() != 1 {
@@ -431,7 +431,7 @@ func TestAgentRPCSelfDispatchIsDurableIdempotentAndNonBlocking(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if len(agents.Agents) != 1 || agents.Agents[0] != spawned.Agent {
+	if len(agents.Agents) != 1 || agents.Agents[0].SpawnReceipt() != spawned.Agent {
 		t.Fatalf("agent list = %#v", agents)
 	}
 	changed := params
@@ -494,7 +494,7 @@ func TestAgentRPCRoutesToExplicitRemotePeer(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if spawned.Agent.Status != protocol.AgentSpawnStarted ||
+	if spawned.Agent.SpawnStatus != protocol.AgentSpawnStarted ||
 		spawned.Outcome != protocol.AgentSpawnOutcomeStarted ||
 		spawned.Agent.Principal.DeviceID != agentRPCTargetID ||
 		targetSpawner.calls.Load() != 1 || sourceSpawner.calls.Load() != 0 {
@@ -603,7 +603,7 @@ func TestAgentRPCBusyAttemptRetriesOneDurablePrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := busy.Validate(); err != nil || busy.Outcome != protocol.AgentSpawnOutcomeBusy ||
-		busy.Agent.Status != protocol.AgentSpawnPending {
+		busy.Agent.SpawnStatus != protocol.AgentSpawnPending {
 		t.Fatalf("busy spawn = %#v, error %v", busy, err)
 	}
 
@@ -614,7 +614,7 @@ func TestAgentRPCBusyAttemptRetriesOneDurablePrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := started.Validate(); err != nil || started.Outcome != protocol.AgentSpawnOutcomeStarted ||
-		started.Agent.Status != protocol.AgentSpawnStarted ||
+		started.Agent.SpawnStatus != protocol.AgentSpawnStarted ||
 		started.Agent.Principal != busy.Agent.Principal || started.Agent.Sequence != busy.Agent.Sequence {
 		t.Fatalf("started retry = %#v, busy %#v, error %v", started, busy, err)
 	}
@@ -646,7 +646,7 @@ func TestAgentRPCBusyAttemptRetriesOneDurablePrincipal(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if len(agents.Agents) != 1 || agents.Agents[0] != started.Agent {
+	if len(agents.Agents) != 1 || agents.Agents[0].SpawnReceipt() != started.Agent {
 		t.Fatalf("busy retry durable agents = %#v", agents)
 	}
 }
@@ -690,7 +690,7 @@ func TestAgentRPCOfflineTargetReturnsIndeterminateReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := first.Validate(); err != nil || first.Outcome != protocol.AgentSpawnOutcomeIndeterminate ||
-		first.Agent.Status != protocol.AgentSpawnPending {
+		first.Agent.SpawnStatus != protocol.AgentSpawnPending {
 		t.Fatalf("offline spawn = %#v, error %v", first, err)
 	}
 	var repeated protocol.SpawnAgentResult
@@ -710,7 +710,7 @@ func TestAgentRPCOfflineTargetReturnsIndeterminateReceipt(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if len(agents.Agents) != 1 || agents.Agents[0] != first.Agent {
+	if len(agents.Agents) != 1 || agents.Agents[0].SpawnReceipt() != first.Agent {
 		t.Fatalf("offline durable agents = %#v", agents)
 	}
 }
@@ -867,7 +867,7 @@ func TestAgentRPCReauthenticatesTargetBeforeDispatch(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if initial.Agent.Status != protocol.AgentSpawnPending ||
+	if initial.Agent.SpawnStatus != protocol.AgentSpawnPending ||
 		initial.Outcome != protocol.AgentSpawnOutcomeIndeterminate || targetSpawner.calls.Load() != 1 {
 		t.Fatalf("initial pending spawn = %#v, target calls %d", initial, targetSpawner.calls.Load())
 	}

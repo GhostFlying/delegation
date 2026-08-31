@@ -441,19 +441,24 @@ separate managed thread in the connector's Codex or TraeX app-server. The broker
 worker principal and dispatch receipt before contacting the target, so a lost response can be
 retried with the same spawn ID and exactly the same arguments.
 
-The returned durable status is `started`, `failed`, or `pending`, and the dispatch attempt also has
+The returned `spawn_status` is `started`, `failed`, or `pending`, and the dispatch attempt also has
 an `outcome`. `busy` means the target had no worker slot. `indeterminate` means no definitive target
 result could be confirmed or durably recorded; the worker may already have started. Both retain one
 pending receipt and must be retried with the same spawn ID and exactly the same arguments. `started`
-and `failed` outcomes are terminal. Use `list_agents` to inspect the current tree's durable receipts
-and terminal failure codes. Task names identify agents within a root tree and cannot be reused for
-another spawn.
+and `failed` outcomes are terminal. `list_agents` preserves that immutable receipt as
+`spawn_status` and `spawn_failure_code`, then adds the latest lifecycle phase and observation, its
+`current`, `syncing`, `offline`, or `missing` freshness, a coarse effective state, the selected
+failure authority, and whether the target is currently dispatchable. An offline or synchronizing
+target keeps its last lifecycle visible but reports a non-terminal state as `indeterminate`; a spawn
+failure remains authoritative over a conflicting lifecycle failure. Task names identify agents
+within a root tree and cannot be reused for another spawn.
 
 Use `send_message` to steer a running worker or queue a message for an idle worker,
 `followup_task` to start a new turn for an idle worker, and `interrupt_agent` to stop an active turn.
-`wait_agent` returns bounded lifecycle, worker-message, legacy artifact metadata, and verified result
-package handles; call it again immediately while `has_more` is true before concluding that the
-result is complete. `available` means the package bytes are currently durable in the root peer;
+`wait_agent` returns bounded exact lifecycle transitions, worker-message, legacy artifact metadata,
+and verified result package handles; call it again immediately while `has_more` is true before
+concluding that the result is complete. `available` means the package bytes are currently durable in
+the root peer;
 `evicted` means only broker metadata remains after local retention. Raw rollouts remain local and
 never enter model context. To accept a workspace-backed result, call `apply_agent_changes` with a
 fresh `apply_id` and the available `package_id`. The runtime derives the trusted root cwd locally,

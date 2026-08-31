@@ -35,7 +35,7 @@ func TestAgentSpawnReceiptIsAtomicIdempotentAndPromptFree(t *testing.T) {
 	if created.Agent.SpawnID != intent.SpawnID || created.Agent.Principal.AgentID != intent.AgentID ||
 		created.Agent.Principal.ParentAgentID != root.AgentID ||
 		created.Agent.Principal.DeviceID != agentSpawnTargetID ||
-		created.Agent.Status != protocol.AgentSpawnPending || created.Agent.Sequence != 1 {
+		created.Agent.SpawnStatus != protocol.AgentSpawnPending || created.Agent.Sequence != 1 {
 		t.Fatalf("created agent receipt = %#v", created)
 	}
 	retry := intent
@@ -127,7 +127,7 @@ func TestAgentSpawnTerminalStateAndStablePagination(t *testing.T) {
 	}
 	key := keyForReceipt(receipts[0])
 	started, err := registry.MarkAgentSpawnStarted(ctx, key, time.Unix(30, 0))
-	if err != nil || started.Agent.Status != protocol.AgentSpawnStarted || started.UpdatedAt != 30 {
+	if err != nil || started.Agent.SpawnStatus != protocol.AgentSpawnStarted || started.UpdatedAt != 30 {
 		t.Fatalf("started receipt = %#v, error %v", started, err)
 	}
 	repeated, err := registry.MarkAgentSpawnStarted(ctx, key, time.Unix(31, 0))
@@ -142,8 +142,8 @@ func TestAgentSpawnTerminalStateAndStablePagination(t *testing.T) {
 	failed, err := registry.MarkAgentSpawnFailed(
 		ctx, keyForReceipt(receipts[1]), "mcp_injection_blocked", time.Unix(31, 0),
 	)
-	if err != nil || failed.Agent.Status != protocol.AgentSpawnFailed ||
-		failed.Agent.FailureCode != "mcp_injection_blocked" {
+	if err != nil || failed.Agent.SpawnStatus != protocol.AgentSpawnFailed ||
+		failed.Agent.SpawnFailureCode != "mcp_injection_blocked" {
 		t.Fatalf("failed receipt = %#v, error %v", failed, err)
 	}
 	first, err := registry.ListAgents(ctx, root.Identity(), AgentPageRequest{Limit: 2})
@@ -164,7 +164,7 @@ func TestAgentSpawnTerminalStateAndStablePagination(t *testing.T) {
 	}
 	all := append(append(first.Agents, second.Agents...), last.Agents...)
 	for index, agent := range all {
-		if agent.Sequence != uint64(index+1) || agent.Principal.TreeID != root.TreeID {
+		if agent.Spawn.Sequence != uint64(index+1) || agent.Spawn.Principal.TreeID != root.TreeID {
 			t.Fatalf("agent page entry %d = %#v", index, agent)
 		}
 	}

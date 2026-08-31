@@ -81,7 +81,7 @@ func (s *session) handleSpawnAgent(ctx context.Context, request protocol.Envelop
 	if err != nil {
 		return s.handleAgentStoreError(ctx, request, "begin agent spawn", err)
 	}
-	if receipt.Agent.Status != protocol.AgentSpawnPending {
+	if receipt.Agent.SpawnStatus != protocol.AgentSpawnPending {
 		return s.writeResult(ctx, request, terminalSpawnAgentResult(receipt.Agent))
 	}
 	indeterminate := protocol.SpawnAgentResult{
@@ -152,15 +152,13 @@ func (s *session) handleListAgents(ctx context.Context, request protocol.Envelop
 	if err != nil || params.Validate() != nil {
 		return s.writeError(ctx, request, protocol.ErrorInvalidParams, "invalid agent list payload")
 	}
-	page, err := s.server.registry.ListAgents(ctx, *request.Source, store.AgentPageRequest{
+	page, err := s.server.listAgentStates(ctx, *request.Source, store.AgentPageRequest{
 		AfterSequence: params.AfterSequence, Limit: params.Limit,
 	})
 	if err != nil {
 		return s.handleAgentStoreError(ctx, request, "list agents", err)
 	}
-	return s.writeResult(ctx, request, protocol.ListAgentsResult{
-		Agents: page.Agents, NextSequence: page.NextSequence,
-	})
+	return s.writeResult(ctx, request, page)
 }
 
 func (s *session) handleAgentStoreError(
@@ -206,7 +204,7 @@ func validateTargetWorkerResult(result protocol.SpawnWorkerResult, agent protoco
 
 func terminalSpawnAgentResult(agent protocol.AgentSummary) protocol.SpawnAgentResult {
 	outcome := protocol.AgentSpawnOutcomeStarted
-	if agent.Status == protocol.AgentSpawnFailed {
+	if agent.SpawnStatus == protocol.AgentSpawnFailed {
 		outcome = protocol.AgentSpawnOutcomeFailed
 	}
 	return protocol.SpawnAgentResult{Agent: agent, Outcome: outcome}
