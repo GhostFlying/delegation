@@ -148,13 +148,14 @@ file and every peer retains its issued Delegation token file. Tailnet membership
 Delegation token authentication. Embedded Tailscale requires `--auth-mode token` for every broker
 and peer; no unauthenticated mode is supported.
 
-Embedded Tailscale is supported only for fresh deployments. Do not edit, migrate, upgrade, roll
-back, or reuse an existing TCP or pre-M6 config, database, token domain, Tailscale state directory,
-or native service definition. Create new named instances and qualify them with foreground
-`service run` commands, bounded status polling, and complete process-tree cleanup before installing
-services. A credential-issuance bootstrap broker must be tracked and stopped before the
-qualification broker starts. On Windows, start the resolved native `delegation.exe`, not the
-`.cmd` wrapper, by dot-sourcing the bundled
+Embedded Tailscale setup is supported only for fresh deployments. Do not edit or convert an
+existing TCP or pre-M6 config, database, token domain, or Tailscale state directory. Once a current
+managed native service is installed, the local upgrade transaction described below may move it to
+a newer compatible canonical release without changing those identities. Create new named instances
+and qualify them with foreground `service run` commands, bounded status polling, and complete
+process-tree cleanup before the first installation. A credential-issuance bootstrap broker must be
+tracked and stopped before the qualification broker starts. On Windows, start the resolved native
+`delegation.exe`, not the `.cmd` wrapper, by dot-sourcing the bundled
 `plugins\delegation\scripts\windows-process.ps1` helper and calling
 `Start-DelegationNativeProcess`. It preserves exact argv under Windows PowerShell 5.1 and
 PowerShell 7, supports literal log paths and explicit environment changes, returns the native
@@ -253,11 +254,11 @@ plugins/delegation/scripts/delegation-mcp credential revoke \
 Revocation closes access on the next broker frame and marks the peer offline. Revoked IDs remain
 tombstoned and require a new device UUID.
 
-Pre-1.0 releases provide no migration, in-place upgrade, or rollback support. Config, broker state,
-peer state, embedded Tailscale state, wire protocol, local bridge, and native service definitions
-are versioned independently. Preserve an old deployment only as a separately stopped installation;
-create fresh config, state, credentials, and service identities for the current runtime. The
-runtime never converts, replaces, rolls back, or deletes an earlier deployment automatically.
+Pre-1.0 releases provide no config, transport, identity, or state-domain conversion and no
+downgrade. The supported in-place path is a forward-only transaction for an already managed native
+service whose config, environment, identity, and embedded-Tailscale compatibility generation remain
+unchanged. An older runtime without the upgrade-management protocol needs the explicit local
+bootstrap procedure described below.
 
 Run `doctor --config <path>` after setup. Broker and peer may coexist on one device through
 `broker.json` and `peer.json`; commands that could be ambiguous require an explicit config. Install
@@ -292,10 +293,39 @@ reconciled returns
 Linux requires a working systemd user manager. macOS uses the current GUI launchd domain and thus
 requires that user to have a GUI login. The Windows task uses an interactive user token and likewise
 requires a logged-in user. A nonzero Windows service exit is retried once per minute for up to 255
-attempts; a clean exit is not restarted. M6 does not define an in-place runtime or
-environment-file path update. Create and qualify a fresh named deployment instead. Provider
-credentials may be rotated in the existing protected environment file, followed by a peer-service
-restart.
+attempts; a clean exit is not restarted. Upgrade changes only the runtime binary path. It never
+changes the config or environment-file path. Provider credentials may be rotated in the existing
+protected environment file, followed by a peer-service restart.
+
+Until controller-wide coordination is available, upgrade one idle managed service at a time with
+explicit local authorization. Upgrade every peer first and the broker last:
+
+```bash
+plugins/delegation/scripts/delegation-mcp service upgrade \
+  --config <peer.json> \
+  --environment-file <protected-peer.env> \
+  --target-version <newer-version> \
+  --bootstrap \
+  --timeout 30m \
+  --json
+plugins/delegation/scripts/delegation-mcp service upgrade \
+  --config <broker.json> \
+  --target-version <newer-version> \
+  --bootstrap \
+  --timeout 30m \
+  --json
+```
+
+Preparation accepts only a newer canonical GitHub release whose manifest, Sigstore provenance, tag
+commit, workflow identity, platform, architecture, and binary digest match. It also verifies exact
+native-service ownership, schema compatibility, and the absence of active work. Retrying the same
+target resumes the protected journal. `--bootstrap` can start from the alpha.4 legacy service: the
+new CLI reads and verifies its exact native definition, running process identity, and executable
+version locally, so it does not require the old service to implement the current local-bridge
+protocol or upgrade RPC. `prepared` and `armed` transactions may be cancelled with
+`service upgrade --cancel --config <path> --transaction-id <uuid>`; after durable commit
+authorization, recovery is forward-only. Never substitute an arbitrary URL, binary, repository, or
+development override for a release upgrade.
 
 Inspect either process through its explicit role config:
 
@@ -320,11 +350,12 @@ durable network counters with
 the current synchronized connection set. It includes registered/online/connected/sync-ready device
 counts, current and lifetime dispatch/turn counts, occupied worker slots, and bounded artifact
 counts. Broker result status separates current delivery/detail retention from lifetime delivered,
-source-acknowledged, source-released, and compacted-detail totals. Neither surface includes prompts,
-messages, Git URLs, workspaces, rollout contents, credentials, or provider configuration.
-M6 adds only `transport` and, for embedded Tailscale, `tailscaleHostname` to these status surfaces.
-It does not expose the Tailscale enrollment key or path, Tailscale state or lease paths, Delegation
-tokens, or other local authority paths.
+source-acknowledged, source-released, and compacted-detail totals. Both status surfaces include
+`serviceRunning` and a bounded `upgrade` snapshot when a local transaction exists. If a broker is
+stopped during activation, the CLI reads the protected journal only after acquiring the broker state
+lease and omits unavailable operational counters from human output. Neither surface includes
+prompts, messages, Git URLs, workspaces, rollout contents, credentials, provider configuration,
+release paths, Tailscale enrollment-key paths, Tailscale state or lease paths, or Delegation tokens.
 
 Peer status also reports `workerSyncReady`, `workerReady`, `dispatchable`, and the durable
 `workerReadiness` epoch, attempt count, retry time, and failure code. Qualification uses the

@@ -3,14 +3,22 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/localupgrade"
 	"github.com/GhostFlying/delegation/internal/statuspage"
+	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/userservice"
 )
 
 type statusHTTPDoerFunc func(*http.Request) (*http.Response, error)
@@ -22,7 +30,7 @@ func (f statusHTTPDoerFunc) Do(request *http.Request) (*http.Response, error) {
 func TestReadBrokerStatusUsesBoundedLoopbackJSON(t *testing.T) {
 	want := statuspage.Snapshot{
 		TransportStatus: delegationconfig.TransportStatus{Transport: "tcp"},
-		Version:         "0.2.0-test", ControllerID: statusTestControllerID,
+		Version:         "0.2.0-test", ServiceRunning: true, ControllerID: statusTestControllerID,
 		Devices:      statuspage.DeviceCounts{Registered: 3, Online: 2, Connected: 2, SyncReady: 1},
 		Dispatch:     statuspage.DispatchCounts{Pending: 1, Started: 2, Failed: 3, LifetimeStarted: 4},
 		RunningTurns: 1, OccupiedSlots: 2, LifetimeTurns: 5, Trees: 6,
@@ -90,7 +98,7 @@ func TestStatusCommandRendersBrokerSnapshot(t *testing.T) {
 	configPath, cfg := writeStatusTestConfig(t, "broker")
 	snapshot := statuspage.Snapshot{
 		TransportStatus: delegationconfig.TransportStatus{Transport: "tcp"},
-		Version:         "0.2.0-test", UptimeSeconds: 61, ControllerID: cfg.ControllerID,
+		Version:         "0.2.0-test", ServiceRunning: true, UptimeSeconds: 61, ControllerID: cfg.ControllerID,
 		Devices:      statuspage.DeviceCounts{Registered: 3, Online: 2, Connected: 2, SyncReady: 1},
 		Dispatch:     statuspage.DispatchCounts{Pending: 1, Started: 2, Failed: 3, LifetimeStarted: 4},
 		RunningTurns: 1, OccupiedSlots: 2, LifetimeTurns: 5, Trees: 6,
@@ -103,6 +111,7 @@ func TestStatusCommandRendersBrokerSnapshot(t *testing.T) {
 	wantHuman := `delegation broker status
 version: 0.2.0-test
 transport: tcp
+service running: true
 uptime seconds: 61
 devices:
   registered: 3
@@ -132,7 +141,7 @@ results:
   lifetime source released: 9
   lifetime details compacted: 3
 `
-	wantJSON := `{"transport":"tcp","version":"0.2.0-test","uptimeSeconds":61,"controllerId":"123e4567-e89b-42d3-a456-426614174800","devices":{"registered":3,"online":2,"connected":2,"syncReady":1,"workerReady":0,"dispatchable":0},"dispatch":{"pending":1,"started":2,"failed":3,"lifetimeStarted":4},"runningTurns":1,"occupiedSlots":2,"lifetimeTurns":5,"trees":6,"artifacts":{"available":7,"unchanged":8,"captureFailed":9},"results":{"deliveryPending":10,"detailsRetained":13,"delivered":12,"sourceAcknowledged":11,"sourceReleased":9,"detailsCompacted":3}}` + "\n"
+	wantJSON := `{"transport":"tcp","version":"0.2.0-test","serviceRunning":true,"uptimeSeconds":61,"controllerId":"123e4567-e89b-42d3-a456-426614174800","devices":{"registered":3,"online":2,"connected":2,"syncReady":1,"workerReady":0,"dispatchable":0},"dispatch":{"pending":1,"started":2,"failed":3,"lifetimeStarted":4},"runningTurns":1,"occupiedSlots":2,"lifetimeTurns":5,"trees":6,"artifacts":{"available":7,"unchanged":8,"captureFailed":9},"results":{"deliveryPending":10,"detailsRetained":13,"delivered":12,"sourceAcknowledged":11,"sourceReleased":9,"detailsCompacted":3}}` + "\n"
 	readBroker := func(_ context.Context, address string) (statuspage.Snapshot, error) {
 		if address != cfg.Broker.StatusListen {
 			t.Fatalf("broker status address = %q", address)
@@ -185,6 +194,158 @@ func TestStatusCommandRejectsBrokerTransportMismatch(t *testing.T) {
 			stderr.String(),
 		)
 	}
+}
+
+func TestStatusCommandReadsAuthorizedStoppedBrokerUpgrade(t *testing.T) {
+	home := privateTestDirectory(t)
+	t.Setenv("DELEGATION_HOME", home)
+	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RoleBroker)
+	wantUpgrade := persistBrokerStatusUpgrade(t, home, configPath, cfg)
+	readBroker := func(context.Context, string) (statuspage.Snapshot, error) {
+		return statuspage.Snapshot{}, errors.New("broker stopped")
+	}
+
+	for _, jsonOutput := range []bool{false, true} {
+		args := []string{"--config", configPath}
+		if jsonOutput {
+			args = append(args, "--json")
+		}
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if code := runStatusWithReaders(args, &stdout, &stderr, nil, readBroker); code != 0 || stderr.Len() != 0 {
+			t.Fatalf("stopped broker status = %d, stderr %q", code, stderr.String())
+		}
+		if jsonOutput {
+			var got statuspage.Snapshot
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.ServiceRunning || got.ControllerID != cfg.ControllerID ||
+				got.Upgrade == nil || got.Upgrade.State != string(localupgrade.StateForwardRecoveryRequired) ||
+				got.Upgrade.FailureCode != wantUpgrade.FailureCode || got.UptimeSeconds != 0 ||
+				got.Devices != (statuspage.DeviceCounts{}) {
+				t.Fatalf("stopped broker status = %#v", got)
+			}
+			continue
+		}
+		for _, want := range []string{
+			"service running: false\n",
+			"  state: forward_recovery_required\n",
+			"  failure: database_switch_failed\n",
+		} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Fatalf("stopped broker status = %q, want %q", stdout.String(), want)
+			}
+		}
+		if strings.Contains(stdout.String(), "uptime seconds:") ||
+			strings.Contains(stdout.String(), "devices:") {
+			t.Fatalf("stopped broker status invented unavailable metrics: %q", stdout.String())
+		}
+	}
+}
+
+func TestStatusCommandDoesNotClaimStoppedBrokerWhileLeaseIsHeld(t *testing.T) {
+	home := privateTestDirectory(t)
+	t.Setenv("DELEGATION_HOME", home)
+	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RoleBroker)
+	persistBrokerStatusUpgrade(t, home, configPath, cfg)
+	lease, err := store.AcquireBrokerLease(cfg.Broker.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runStatusWithReaders(
+		[]string{"--config", configPath}, &stdout, &stderr, nil,
+		func(context.Context, string) (statuspage.Snapshot, error) {
+			return statuspage.Snapshot{}, errors.New("temporary HTTP failure")
+		},
+	)
+	if code != exitUnavailable || stdout.Len() != 0 || stderr.String() != brokerStatusUnavailableError {
+		t.Fatalf("status = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func persistBrokerStatusUpgrade(
+	t *testing.T, home, configPath string, cfg delegationconfig.Config,
+) localupgrade.Journal {
+	t.Helper()
+	root, err := localupgrade.RootForConfig(home, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transactionStore, err := localupgrade.OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	databaseIdentity, err := store.CurrentDatabaseIdentity(store.DatabaseBroker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitionKind := userservice.KindSystemd
+	processGroup := "/user.slice/delegation"
+	switch runtime.GOOS {
+	case "darwin":
+		definitionKind = userservice.KindLaunchAgent
+		processGroup = ""
+	case "windows":
+		definitionKind = userservice.KindScheduledTask
+		processGroup = ""
+	}
+	materialRoot := privateTestDirectory(t)
+	now := time.Now().UnixMilli()
+	journal := localupgrade.Journal{
+		SchemaVersion: localupgrade.JournalSchemaVersion, TransactionID: upgradeTestTransactionID,
+		State: localupgrade.StatePrepared, Role: delegationconfig.RoleBroker,
+		InstanceID: cfg.EffectiveInstanceID(), ControllerID: cfg.ControllerID,
+		SourceVersion: "0.1.0-alpha.7", TargetVersion: "0.1.0-alpha.8",
+		SourceRuntimeDigest: strings.Repeat("1", 64),
+		TargetRuntimeDigest: strings.Repeat("2", 64), ConfigDigest: strings.Repeat("3", 64),
+		Platform: runtime.GOOS, Architecture: runtime.GOARCH,
+		Invocation: localupgrade.Invocation{
+			BinaryPath:       filepath.Join(materialRoot, "old"),
+			TargetBinaryPath: filepath.Join(materialRoot, "new"), ConfigPath: configPath,
+			NativeName:     "delegation-broker.service",
+			DefinitionPath: filepath.Join(materialRoot, "delegation-broker.service"),
+			UserIdentity:   "current-user", ProcessIDs: []int{123}, ProcessGroup: processGroup,
+		},
+		Definition: localupgrade.Definition{
+			Kind: definitionKind, OldDigest: strings.Repeat("4", 64),
+			NewDigest: strings.Repeat("5", 64), OldPath: filepath.Join(materialRoot, "old.service"),
+			NewPath: filepath.Join(materialRoot, "new.service"),
+		},
+		Database: localupgrade.Database{
+			Kind: store.DatabaseBroker, CanonicalPath: cfg.Broker.StateFile,
+			ShadowPath: cfg.Broker.StateFile + ".shadow", RollbackPath: cfg.Broker.StateFile + ".rollback",
+			SourceIdentity: databaseIdentity, TargetIdentity: databaseIdentity,
+		},
+		ActivatorPath: filepath.Join(materialRoot, "activate"), CreatedAt: now, UpdatedAt: now,
+	}
+	if _, _, err := transactionStore.CreateOrResume(journal); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*localupgrade.Journal){
+		func(current *localupgrade.Journal) { current.State = localupgrade.StateArmed },
+		func(current *localupgrade.Journal) {
+			current.State = localupgrade.StateActivating
+			current.CommitAuthorized = true
+		},
+		func(current *localupgrade.Journal) {
+			current.State = localupgrade.StateForwardRecoveryRequired
+			current.FailureCode = "database_switch_failed"
+		},
+	} {
+		journal, err = transactionStore.Update(journal.TransactionID, func(current *localupgrade.Journal) error {
+			mutate(current)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return journal
 }
 
 func statusHTTPResponse(status int, contentType string, body string) *http.Response {

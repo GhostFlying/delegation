@@ -73,6 +73,8 @@ func parseTaskDefinition(data []byte) (taskDefinition, error) {
 	canonical := make(map[string]string, 4)
 	var triggerUserID string
 	var principalUserID string
+	var actionCommand string
+	var actionArguments string
 	enabled := true
 	for _, name := range []string{"Triggers", "Principals", "Settings", "Actions"} {
 		child, err := uniqueTaskChild(root, name)
@@ -94,7 +96,12 @@ func parseTaskDefinition(data []byte) (taskDefinition, error) {
 			triggerUserID = userID
 		case "Principals":
 			principalUserID = userID
-		case "Settings", "Actions":
+		case "Actions":
+			actionCommand, actionArguments, err = taskExecAction(child)
+			if err != nil {
+				return taskDefinition{}, err
+			}
+		case "Settings":
 		}
 		canonical[name] = encoded
 	}
@@ -108,7 +115,31 @@ func parseTaskDefinition(data []byte) (taskDefinition, error) {
 		Principals:      canonical["Principals"],
 		Settings:        canonical["Settings"],
 		Actions:         canonical["Actions"],
+		ActionCommand:   actionCommand,
+		ActionArguments: actionArguments,
 	}, nil
+}
+
+func taskExecAction(actions taskXMLNode) (string, string, error) {
+	if len(actions.Children) != 1 {
+		return "", "", nil
+	}
+	exec, err := uniqueTaskChild(actions, "Exec")
+	if err != nil {
+		return "", "", nil
+	}
+	if len(exec.Attributes) != 0 || len(exec.Children) != 2 {
+		return "", "", nil
+	}
+	command, err := uniqueTaskLeaf(exec, "Command")
+	if err != nil {
+		return "", "", err
+	}
+	arguments, err := uniqueTaskLeaf(exec, "Arguments")
+	if err != nil {
+		return "", "", err
+	}
+	return command, arguments, nil
 }
 
 func taskSettingsEnabled(settings taskXMLNode) (bool, error) {

@@ -31,8 +31,10 @@ Embedded Tailscale is fresh-deployment-only:
   Tailscale state directories, hostnames, and native service identities.
 - Do not convert a TCP config, hand-edit an older config, reuse an older database or Tailscale state
   directory, or replace a running service definition.
-- M6 defines no migration, in-place upgrade, downgrade, or rollback procedure. Preserve an earlier
-  deployment only as a separately stopped installation.
+- Do not migrate between TCP and embedded Tailscale, change a deployment identity in place, or
+  downgrade. A current managed native service may move to a newer compatible canonical runtime
+  through the forward-only local upgrade documented in `README.md`; it preserves the config,
+  database, service identity, and Tailscale compatibility generation.
 - Run setup offline, qualify every process in the foreground, clean up the recorded processes, and
   only then install fresh native services.
 
@@ -393,7 +395,8 @@ M6 does not support:
 
 - TraeX brokers, peers, or managed workers on Windows;
 - migration between TCP and embedded Tailscale;
-- in-place upgrade, downgrade, rollback, config conversion, or service replacement;
+- downgrade, config or transport conversion, identity replacement, or rollback after durable
+  upgrade commit authorization;
 - broker federation, broker failover, active/active or active/passive high availability, or
   multiple brokers for one controller domain;
 - Tailscale Funnel, Tailscale Serve, public ingress, public DNS exposure, or an Internet-facing

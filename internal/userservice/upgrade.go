@@ -24,6 +24,20 @@ type UpgradePlan struct {
 	ProcessGroup     string
 }
 
+// DiscoverUpgradeSource reads the exact currently running managed definition
+// and returns its immutable invocation. expected must identify the config,
+// environment, instance, and role, while leaving BinaryPath empty. This is the
+// bootstrap path for services whose older local bridge cannot speak the
+// upgrade protocol.
+func DiscoverUpgradeSource(
+	ctx context.Context, role ServiceRole, expected Invocation,
+) (Invocation, error) {
+	if expected.BinaryPath != "" {
+		return Invocation{}, errors.New("upgrade source discovery requires an empty binary path")
+	}
+	return platformDiscoverUpgradeSource(ctx, role, expected)
+}
+
 // PrepareUpgrade inspects an active managed service and proves that the new
 // definition changes only its runtime executable. It is read-only.
 func PrepareUpgrade(

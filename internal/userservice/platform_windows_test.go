@@ -75,6 +75,43 @@ func TestWindowsUpgradeStopResumesAfterTaskWasDisabled(t *testing.T) {
 	}
 }
 
+func TestWindowsDiscoversLegacyUpgradeSourceWithoutLocalBridge(t *testing.T) {
+	source := testInvocation(
+		ServiceRolePeer, `C:\Delegation\0.1.0-alpha.4\delegation.exe`,
+		`C:\Users\test\peer.json`,
+	)
+	sid, err := windowsUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := RenderScheduledTask(ServiceRolePeer, source, sid, windows.EscapeArg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := encodeTaskXMLUTF16LE(strings.Replace(
+		taskXMLText(t, descriptor.Content), "<Enabled>false</Enabled>", "<Enabled>true</Enabled>", 1,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRunner := runTaskCommand
+	originalQueryPIDs := queryUpgradePIDs
+	t.Cleanup(func() {
+		runTaskCommand = originalRunner
+		queryUpgradePIDs = originalQueryPIDs
+	})
+	runTaskCommand = func(args ...string) (taskCommandResult, error) {
+		return taskCommandResult{Output: enabled}, nil
+	}
+	queryUpgradePIDs = func(ServiceRole, string) ([]int, error) { return []int{4242}, nil }
+	expected := source
+	expected.BinaryPath = ""
+	got, err := DiscoverUpgradeSource(context.Background(), ServiceRolePeer, expected)
+	if err != nil || got != source {
+		t.Fatalf("DiscoverUpgradeSource() = %#v, %v; want %#v", got, err, source)
+	}
+}
+
 func TestWindowsUpgradeRejectsReplacementProcessBeforeDisable(t *testing.T) {
 	source := testInvocation(
 		ServiceRolePeer, `C:\Delegation\0.1.0\delegation.exe`, `C:\Users\test\peer.json`,

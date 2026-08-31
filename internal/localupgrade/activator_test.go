@@ -206,8 +206,17 @@ func createActivationJournal(t *testing.T) (*Store, Journal) {
 	journal := testJournal(t)
 	oldDefinition := []byte("old service definition\n")
 	newDefinition := []byte("new service definition\n")
+	config := []byte("config\n")
+	environment := []byte("environment\n")
+	sourceRuntime := []byte("source runtime\n")
+	targetRuntime := []byte("target runtime\n")
 	for path, content := range map[string][]byte{
-		journal.Definition.OldPath: oldDefinition, journal.Definition.NewPath: newDefinition,
+		journal.Definition.OldPath:          oldDefinition,
+		journal.Definition.NewPath:          newDefinition,
+		journal.Invocation.ConfigPath:       config,
+		journal.Invocation.EnvironmentFile:  environment,
+		journal.Invocation.BinaryPath:       sourceRuntime,
+		journal.Invocation.TargetBinaryPath: targetRuntime,
 	} {
 		if err := os.WriteFile(path, content, 0o600); err != nil {
 			t.Fatal(err)
@@ -215,6 +224,15 @@ func createActivationJournal(t *testing.T) (*Store, Journal) {
 	}
 	journal.Definition.OldDigest = digestBytes(oldDefinition)
 	journal.Definition.NewDigest = digestBytes(newDefinition)
+	journal.SourceRuntimeDigest = digestBytes(sourceRuntime)
+	journal.TargetRuntimeDigest = digestBytes(targetRuntime)
+	configDigest, err := protectedConfigurationDigest(
+		journal.Invocation.ConfigPath, journal.Invocation.EnvironmentFile,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.ConfigDigest = configDigest
 	transactionStore, err := OpenStore(filepath.Join(filepath.Dir(journal.ActivatorPath), "transaction"))
 	if err != nil {
 		t.Fatal(err)

@@ -59,6 +59,7 @@ func TestReadStatusReturnsValidatedLocalSnapshot(t *testing.T) {
 		BrokerWorkerRevision: 5, WorkerSyncReady: true,
 		WorkerReady: true, Dispatchable: true, WorkerReadiness: readyBridgeTestReadiness(),
 		MaxWorkerSlots: 8,
+		Upgrade:        func() *UpgradeSnapshot { value := testUpgradeSnapshot(); return &value }(),
 		Workers: WorkerCounts{
 			Total: 10, Reserved: 1, Pending: 1, Starting: 1, Preflight: 1,
 			Ready: 1, Running: 1, Finalizing: 1, Idle: 1, Interrupted: 1,

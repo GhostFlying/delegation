@@ -77,7 +77,7 @@ func TestStatusCombinesDurableStateWithLiveSynchronizedConnections(t *testing.T)
 	}
 	want := statuspage.Snapshot{
 		TransportStatus: config.TransportStatus{Transport: "tcp"},
-		Version:         buildinfo.Version, UptimeSeconds: 123, ControllerID: brokerTestControllerID,
+		Version:         buildinfo.Version, ServiceRunning: true, UptimeSeconds: 123, ControllerID: brokerTestControllerID,
 		Devices:      statuspage.DeviceCounts{Registered: 3, Online: 2, Connected: 2, SyncReady: 1, WorkerReady: 1, Dispatchable: 1},
 		Dispatch:     statuspage.DispatchCounts{Pending: 5, Started: 6, Failed: 7, LifetimeStarted: 16},
 		RunningTurns: 8, OccupiedSlots: 9, LifetimeTurns: 17, Trees: 4,

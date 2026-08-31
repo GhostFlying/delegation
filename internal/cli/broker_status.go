@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 
+	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/statuspage"
 )
 
@@ -66,6 +67,9 @@ func readBrokerStatusWithClient(
 	if err := json.Unmarshal(body, &snapshot); err != nil {
 		return statuspage.Snapshot{}, fmt.Errorf("decode broker status: %w", err)
 	}
+	// A successful response comes from the running broker even when upgrading
+	// from an older runtime that did not serialize serviceRunning.
+	snapshot.ServiceRunning = true
 	if err := snapshot.Validate(); err != nil {
 		return statuspage.Snapshot{}, fmt.Errorf("validate broker status: %w", err)
 	}
@@ -94,34 +98,38 @@ func writeBrokerStatus(
 		if status.TailscaleHostname != "" {
 			fmt.Fprintf(&rendered, "tailscale hostname: %s\n", status.TailscaleHostname)
 		}
-		fmt.Fprintf(&rendered, "uptime seconds: %d\n", status.UptimeSeconds)
-		fmt.Fprintln(&rendered, "devices:")
-		fmt.Fprintf(&rendered, "  registered: %d\n", status.Devices.Registered)
-		fmt.Fprintf(&rendered, "  online: %d\n", status.Devices.Online)
-		fmt.Fprintf(&rendered, "  connected: %d\n", status.Devices.Connected)
-		fmt.Fprintf(&rendered, "  sync ready: %d\n", status.Devices.SyncReady)
-		fmt.Fprintf(&rendered, "  worker ready: %d\n", status.Devices.WorkerReady)
-		fmt.Fprintf(&rendered, "  dispatchable: %d\n", status.Devices.Dispatchable)
-		fmt.Fprintln(&rendered, "dispatches:")
-		fmt.Fprintf(&rendered, "  pending: %d\n", status.Dispatch.Pending)
-		fmt.Fprintf(&rendered, "  started: %d\n", status.Dispatch.Started)
-		fmt.Fprintf(&rendered, "  failed: %d\n", status.Dispatch.Failed)
-		fmt.Fprintf(&rendered, "  lifetime started: %d\n", status.Dispatch.LifetimeStarted)
-		fmt.Fprintf(&rendered, "running turns: %d\n", status.RunningTurns)
-		fmt.Fprintf(&rendered, "occupied worker slots: %d\n", status.OccupiedSlots)
-		fmt.Fprintf(&rendered, "lifetime turns: %d\n", status.LifetimeTurns)
-		fmt.Fprintf(&rendered, "trees: %d\n", status.Trees)
-		fmt.Fprintln(&rendered, "artifacts:")
-		fmt.Fprintf(&rendered, "  available: %d\n", status.Artifacts.Available)
-		fmt.Fprintf(&rendered, "  unchanged: %d\n", status.Artifacts.Unchanged)
-		fmt.Fprintf(&rendered, "  capture failed: %d\n", status.Artifacts.CaptureFailed)
-		fmt.Fprintln(&rendered, "results:")
-		fmt.Fprintf(&rendered, "  delivery pending: %d\n", status.Results.DeliveryPending)
-		fmt.Fprintf(&rendered, "  details retained: %d\n", status.Results.DetailsRetained)
-		fmt.Fprintf(&rendered, "  lifetime delivered: %d\n", status.Results.Delivered)
-		fmt.Fprintf(&rendered, "  lifetime source acknowledged: %d\n", status.Results.SourceAcknowledged)
-		fmt.Fprintf(&rendered, "  lifetime source released: %d\n", status.Results.SourceReleased)
-		fmt.Fprintf(&rendered, "  lifetime details compacted: %d\n", status.Results.DetailsCompacted)
+		fmt.Fprintf(&rendered, "service running: %t\n", status.ServiceRunning)
+		writeUpgradeStatus(&rendered, fromStatusPageUpgrade(status.Upgrade))
+		if status.ServiceRunning {
+			fmt.Fprintf(&rendered, "uptime seconds: %d\n", status.UptimeSeconds)
+			fmt.Fprintln(&rendered, "devices:")
+			fmt.Fprintf(&rendered, "  registered: %d\n", status.Devices.Registered)
+			fmt.Fprintf(&rendered, "  online: %d\n", status.Devices.Online)
+			fmt.Fprintf(&rendered, "  connected: %d\n", status.Devices.Connected)
+			fmt.Fprintf(&rendered, "  sync ready: %d\n", status.Devices.SyncReady)
+			fmt.Fprintf(&rendered, "  worker ready: %d\n", status.Devices.WorkerReady)
+			fmt.Fprintf(&rendered, "  dispatchable: %d\n", status.Devices.Dispatchable)
+			fmt.Fprintln(&rendered, "dispatches:")
+			fmt.Fprintf(&rendered, "  pending: %d\n", status.Dispatch.Pending)
+			fmt.Fprintf(&rendered, "  started: %d\n", status.Dispatch.Started)
+			fmt.Fprintf(&rendered, "  failed: %d\n", status.Dispatch.Failed)
+			fmt.Fprintf(&rendered, "  lifetime started: %d\n", status.Dispatch.LifetimeStarted)
+			fmt.Fprintf(&rendered, "running turns: %d\n", status.RunningTurns)
+			fmt.Fprintf(&rendered, "occupied worker slots: %d\n", status.OccupiedSlots)
+			fmt.Fprintf(&rendered, "lifetime turns: %d\n", status.LifetimeTurns)
+			fmt.Fprintf(&rendered, "trees: %d\n", status.Trees)
+			fmt.Fprintln(&rendered, "artifacts:")
+			fmt.Fprintf(&rendered, "  available: %d\n", status.Artifacts.Available)
+			fmt.Fprintf(&rendered, "  unchanged: %d\n", status.Artifacts.Unchanged)
+			fmt.Fprintf(&rendered, "  capture failed: %d\n", status.Artifacts.CaptureFailed)
+			fmt.Fprintln(&rendered, "results:")
+			fmt.Fprintf(&rendered, "  delivery pending: %d\n", status.Results.DeliveryPending)
+			fmt.Fprintf(&rendered, "  details retained: %d\n", status.Results.DetailsRetained)
+			fmt.Fprintf(&rendered, "  lifetime delivered: %d\n", status.Results.Delivered)
+			fmt.Fprintf(&rendered, "  lifetime source acknowledged: %d\n", status.Results.SourceAcknowledged)
+			fmt.Fprintf(&rendered, "  lifetime source released: %d\n", status.Results.SourceReleased)
+			fmt.Fprintf(&rendered, "  lifetime details compacted: %d\n", status.Results.DetailsCompacted)
+		}
 		output = rendered.Bytes()
 	}
 	if len(output) == 0 || len(output) > maximumStatusOutput {
@@ -131,4 +139,28 @@ func writeBrokerStatus(
 		return writeFixedStatusError(stderr, statusOutputError, 1)
 	}
 	return 0
+}
+
+func toStatusPageUpgrade(upgrade *localbridge.UpgradeSnapshot) *statuspage.Upgrade {
+	if upgrade == nil {
+		return nil
+	}
+	return &statuspage.Upgrade{
+		TransactionID: upgrade.TransactionID, State: upgrade.State,
+		SourceVersion: upgrade.SourceVersion, TargetVersion: upgrade.TargetVersion,
+		CommitAuthorized: upgrade.CommitAuthorized, FailureCode: upgrade.FailureCode,
+		UpdatedAt: upgrade.UpdatedAt,
+	}
+}
+
+func fromStatusPageUpgrade(upgrade *statuspage.Upgrade) *localbridge.UpgradeSnapshot {
+	if upgrade == nil {
+		return nil
+	}
+	return &localbridge.UpgradeSnapshot{
+		TransactionID: upgrade.TransactionID, State: upgrade.State,
+		SourceVersion: upgrade.SourceVersion, TargetVersion: upgrade.TargetVersion,
+		CommitAuthorized: upgrade.CommitAuthorized, FailureCode: upgrade.FailureCode,
+		UpdatedAt: upgrade.UpdatedAt,
+	}
 }

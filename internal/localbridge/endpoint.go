@@ -31,3 +31,15 @@ func EndpointForInstance(instanceID, controllerID, deviceID string) (string, err
 	name := hex.EncodeToString(digest[:16])
 	return platformEndpoint(name)
 }
+
+func BrokerEndpointForInstance(instanceID, controllerID string) (string, error) {
+	if err := instanceid.Validate(instanceID); err != nil {
+		return "", err
+	}
+	if err := identity.ValidateID(controllerID); err != nil {
+		return "", fmt.Errorf("controllerId %w", err)
+	}
+	namespace := "delegation-localbridge-v3\x00" + instanceID + "\x00broker\x00" + controllerID
+	digest := sha256.Sum256([]byte(namespace))
+	return platformEndpoint(hex.EncodeToString(digest[:16]))
+}

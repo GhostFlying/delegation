@@ -10,10 +10,12 @@ Never download `latest`, skip checksum verification, or expose a broker token to
 child process.
 
 For embedded Tailscale, create only fresh named deployments. Delegation embeds one `tsnet` node in
-each broker or peer process and does not use system `tailscaled`. Do not migrate, upgrade, roll back,
-or replace an existing deployment. Require `--auth-mode token` for every embedded Tailscale broker
-and peer; no unauthenticated Tailscale mode is supported. Keep Codex and TraeX in separate instance,
-broker, controller, token, state, hostname, and service domains.
+each broker or peer process and does not use system `tailscaled`. Do not convert or reuse an old
+config, database, token domain, or Tailscale state directory. A current managed native service may
+move forward through the verified local upgrade transaction, which preserves all those identities.
+Require `--auth-mode token` for every embedded Tailscale broker and peer; no unauthenticated
+Tailscale mode is supported. Keep Codex and TraeX in separate instance, broker, controller, token,
+state, hostname, and service domains.
 
 Windows TraeX is unsupported. M6 supports Codex and TraeX on Linux and macOS, and Codex on
 Windows 11. Stop instead of configuring, qualifying, or installing a Windows TraeX deployment.
@@ -62,6 +64,25 @@ Before installing a fresh user service, read
 and stop when the native service manager reports a foreign, drifted, or indeterminate definition.
 Use the exact named config when installing a named instance; its `instanceId` selects a distinct
 native service identity.
+
+## Upgrade A Managed Service
+
+Read [native services](references/native-services.md) before upgrading. Upgrade only an existing,
+idle managed service to a strictly newer canonical release. The transaction verifies release
+provenance, exact service ownership, immutable config/environment identity, database schemas, and
+embedded-Tailscale compatibility before it can stop the service. It never accepts a caller-selected
+repository, URL, or binary. `DELEGATION_BINARY` and development builds are outside this path.
+
+Until broker coordination is available, use `service upgrade ... --bootstrap` locally on each host,
+peers first and broker last. A peer upgrade also requires its existing protected
+`--environment-file`; a broker upgrade forbids that flag. Retrying the same target resumes the
+journal. Bootstrap discovers and verifies the old runtime through the exact current-user native
+service definition and process identity; it does not require the old service's local bridge to
+support upgrade RPCs, including when starting from alpha.4.
+`service upgrade --cancel --config <path> --transaction-id <uuid>` is valid only before
+durable commit authorization. After authorization, do not downgrade or restore the old definition;
+inspect `status --config <path> --json`, repair the target release, and retry forward. Windows TraeX
+remains unsupported.
 
 ## Verify And Hand Off
 

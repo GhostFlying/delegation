@@ -19,18 +19,30 @@ type Provider func(context.Context) (Snapshot, error)
 // It intentionally contains no credentials, local paths, or per-device data.
 type Snapshot struct {
 	config.TransportStatus
-	Version       string         `json:"version,omitempty"`
-	UptimeSeconds uint64         `json:"uptimeSeconds"`
-	ControllerID  string         `json:"controllerId,omitempty"`
-	InstanceID    string         `json:"instanceId,omitempty"`
-	Devices       DeviceCounts   `json:"devices"`
-	Dispatch      DispatchCounts `json:"dispatch"`
-	RunningTurns  uint64         `json:"runningTurns"`
-	OccupiedSlots uint64         `json:"occupiedSlots"`
-	LifetimeTurns uint64         `json:"lifetimeTurns"`
-	Trees         uint64         `json:"trees"`
-	Artifacts     ArtifactCounts `json:"artifacts"`
-	Results       ResultCounts   `json:"results"`
+	Version        string         `json:"version,omitempty"`
+	ServiceRunning bool           `json:"serviceRunning"`
+	UptimeSeconds  uint64         `json:"uptimeSeconds"`
+	ControllerID   string         `json:"controllerId,omitempty"`
+	InstanceID     string         `json:"instanceId,omitempty"`
+	Devices        DeviceCounts   `json:"devices"`
+	Dispatch       DispatchCounts `json:"dispatch"`
+	RunningTurns   uint64         `json:"runningTurns"`
+	OccupiedSlots  uint64         `json:"occupiedSlots"`
+	LifetimeTurns  uint64         `json:"lifetimeTurns"`
+	Trees          uint64         `json:"trees"`
+	Artifacts      ArtifactCounts `json:"artifacts"`
+	Results        ResultCounts   `json:"results"`
+	Upgrade        *Upgrade       `json:"upgrade,omitempty"`
+}
+
+type Upgrade struct {
+	TransactionID    string `json:"transactionId"`
+	State            string `json:"state"`
+	SourceVersion    string `json:"sourceVersion"`
+	TargetVersion    string `json:"targetVersion"`
+	CommitAuthorized bool   `json:"commitAuthorized"`
+	FailureCode      string `json:"failureCode,omitempty"`
+	UpdatedAt        int64  `json:"updatedAt"`
 }
 
 // DeviceCounts summarizes registered and usable devices without identifying
@@ -99,6 +111,12 @@ func (s Snapshot) Validate() error {
 		s.Results.DetailsCompacted > s.Results.SourceReleased ||
 		s.Results.DeliveryPending > s.Results.DetailsRetained {
 		return errors.New("result package counts are inconsistent")
+	}
+	if s.Upgrade != nil && (!validOptionalText(s.Upgrade.TransactionID) ||
+		!validOptionalText(s.Upgrade.State) || !validOptionalText(s.Upgrade.SourceVersion) ||
+		!validOptionalText(s.Upgrade.TargetVersion) ||
+		!validOptionalText(s.Upgrade.FailureCode) || s.Upgrade.UpdatedAt <= 0) {
+		return errors.New("upgrade status is invalid")
 	}
 	return nil
 }

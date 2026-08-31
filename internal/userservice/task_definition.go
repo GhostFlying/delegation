@@ -17,6 +17,8 @@ type taskDefinition struct {
 	Principals      string
 	Settings        string
 	Actions         string
+	ActionCommand   string
+	ActionArguments string
 }
 
 func taskOwned(task taskDefinition, role ServiceRole, instanceID string) bool {

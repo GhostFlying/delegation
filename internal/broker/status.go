@@ -60,6 +60,7 @@ func (s *Server) buildStatusSnapshot(
 	snapshot := statuspage.Snapshot{
 		TransportStatus: s.transport,
 		Version:         buildinfo.Version,
+		ServiceRunning:  true,
 		UptimeSeconds:   uint64(uptime / time.Second),
 		ControllerID:    s.controllerID,
 		Devices: statuspage.DeviceCounts{

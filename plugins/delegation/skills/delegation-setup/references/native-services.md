@@ -74,9 +74,46 @@ automatically.
 
 Linux requires a working systemd user manager. macOS needs the current user's GUI launchd domain.
 Windows needs an interactive login. A nonzero Windows service exit is retried once per minute for
-up to 255 attempts; a clean exit is not restarted. M6 does not define an in-place path for changing
-the runtime or environment-file path. Create and qualify a fresh named deployment instead of
-replacing an existing native service.
+up to 255 attempts; a clean exit is not restarted. A managed service may move to a strictly newer
+canonical runtime through the local atomic upgrade below. The config and environment-file paths
+remain immutable; use a fresh named deployment when either path or another service identity must
+change.
+
+## Local Atomic Upgrade
+
+The current public path requires explicit local bootstrap authorization. Upgrade every idle peer
+first, then the broker last:
+
+```text
+service upgrade --config <peer.json> --environment-file <peer.env> \
+  --target-version <newer-version> --bootstrap --timeout 30m --json
+service upgrade --config <broker.json> \
+  --target-version <newer-version> --bootstrap --timeout 30m --json
+```
+
+Preparation accepts only the canonical Delegation GitHub release and verifies its manifest,
+Sigstore provenance, tag commit, workflow identity, platform, architecture, and artifact digest. It
+also verifies the exact current-user service definition, executable/config/environment identity,
+database and embedded-Tailscale compatibility, and the absence of occupied workers or unfinished
+operations. The new CLI performs bootstrap discovery directly from that native definition and its
+running process, so an alpha.4 service does not need the current local-bridge protocol or upgrade
+RPC. A same-target retry resumes the existing journal.
+
+Arming installs a transaction-specific one-shot activator without changing the main service.
+Activation first writes durable commit authorization, then the independent activator stops the exact
+process tree, checkpoints and shadows the database, switches the definition and database, starts
+the target, and performs local qualification. `prepared` or `armed` may be cancelled with:
+
+```text
+service upgrade --cancel --config <config> --transaction-id <uuid>
+```
+
+After authorization, recovery is forward-only. `status --config <config> --json` reports the
+bounded transaction even while the service is stopped during activation. A
+`forward_recovery_required` state requires repairing the target-version material and retrying; do
+not silently restore the old runtime. The protected local Unix socket or Windows named pipe is the
+only running-service management channel; broker listeners expose no upgrade API. Windows activators
+invoke the native `delegation.exe` directly.
 
 Each embedded Tailscale service owns one `tsnet` node and one exclusive Tailscale state-directory
 lease. It does not use system `tailscaled`. Keep broker and peer state directories distinct, and
@@ -93,5 +130,5 @@ not defined yet because managed worker state must not be silently discarded or t
 
 Transport status adds only `transport` and optional `tailscaleHostname`; it does not expose the
 enrollment-key path, Tailscale state or lease paths, or Delegation tokens. Native services do not
-add support for migration, upgrade, rollback, replacement, federation, high availability, Funnel,
-Serve, public ingress, or mixed Codex and TraeX networks.
+support downgrade, config/transport conversion, service-identity replacement, federation, high
+availability, Funnel, Serve, public ingress, or mixed Codex and TraeX networks.

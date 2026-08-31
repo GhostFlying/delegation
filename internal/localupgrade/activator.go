@@ -118,6 +118,9 @@ func (a *Activator) Run(ctx context.Context, transactionID string) (Journal, err
 	if err != nil {
 		return a.failForward(journal, "service_plan_invalid", err)
 	}
+	if err := validateActivationMaterial(journal); err != nil {
+		return a.failForward(journal, "activation_material_changed", err)
+	}
 	if !journal.Progress.ServiceStopped {
 		if err := a.operations.StopService(ctx, plan); err != nil {
 			return a.failForward(journal, "service_stop_failed", err)
