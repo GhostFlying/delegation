@@ -221,6 +221,16 @@ func testJournal(t *testing.T) Journal {
 	if err != nil {
 		t.Fatal(err)
 	}
+	kind := userservice.KindSystemd
+	processGroup := "/user.slice/delegation"
+	switch runtime.GOOS {
+	case "darwin":
+		kind = userservice.KindLaunchAgent
+		processGroup = ""
+	case "windows":
+		kind = userservice.KindScheduledTask
+		processGroup = ""
+	}
 	return Journal{
 		SchemaVersion: JournalSchemaVersion, TransactionID: "123e4567-e89b-42d3-a456-426614174800",
 		State: StatePrepared, Role: delegationconfig.RolePeer, InstanceID: "default",
@@ -230,12 +240,14 @@ func testJournal(t *testing.T) Journal {
 		SourceRuntimeDigest: strings.Repeat("1", 64), TargetRuntimeDigest: strings.Repeat("2", 64),
 		ConfigDigest: strings.Repeat("3", 64), Platform: runtime.GOOS, Architecture: runtime.GOARCH,
 		Invocation: Invocation{
-			BinaryPath: filepath.Join(root, "old"), ConfigPath: filepath.Join(root, "peer.json"),
+			BinaryPath: filepath.Join(root, "old"), TargetBinaryPath: filepath.Join(root, "new"),
+			ConfigPath:      filepath.Join(root, "peer.json"),
 			EnvironmentFile: filepath.Join(root, "peer.env"), NativeName: "delegation-peer.service",
 			DefinitionPath: filepath.Join(root, "delegation-peer.service"), UserIdentity: "current-user",
+			ProcessIDs: []int{123}, ProcessGroup: processGroup,
 		},
 		Definition: Definition{
-			Kind: userservice.KindSystemd, OldDigest: strings.Repeat("4", 64),
+			Kind: kind, OldDigest: strings.Repeat("4", 64),
 			NewDigest: strings.Repeat("5", 64), OldPath: filepath.Join(root, "old.service"),
 			NewPath: filepath.Join(root, "new.service"),
 		},
