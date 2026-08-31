@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/GhostFlying/delegation/internal/securefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -86,6 +88,76 @@ func installManagedFile(path string, descriptor Descriptor) (State, error) {
 		return StatePrepared, &CommittedError{Err: fmt.Errorf("sync installed service definition: %w", err)}
 	}
 	return StatePrepared, nil
+}
+
+func replaceManagedFile(path string, kind Kind, expected, replacement []byte) error {
+	if len(expected) == 0 || len(replacement) == 0 ||
+		len(expected) > maxServiceDescriptorSize || len(replacement) > maxServiceDescriptorSize {
+		return errors.New("service upgrade definition is empty or too large")
+	}
+	if !ownsDescriptor(kind, expected) || !ownsDescriptor(kind, replacement) {
+		return errors.New("service upgrade definition lacks valid ownership metadata")
+	}
+	state, current, err := inspectManagedFile(path, kind)
+	if err != nil {
+		return err
+	}
+	if state != StatePrepared {
+		return errors.New("service definition is absent or not managed")
+	}
+	if bytes.Equal(current, replacement) {
+		return nil
+	}
+	if !bytes.Equal(current, expected) {
+		return errors.New("service definition changed before upgrade replacement")
+	}
+	directory, err := securefs.OpenRoot(filepath.Dir(path), nil)
+	if err != nil {
+		return fmt.Errorf("open managed service directory: %w", err)
+	}
+	defer directory.Close()
+	temporary := fmt.Sprintf(".delegation-upgrade-%d.tmp", time.Now().UnixNano())
+	file, err := directory.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = directory.Remove(temporary)
+		}
+	}()
+	writeErr := writeManagedDefinition(file, replacement)
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		return fmt.Errorf("write replacement service definition: %w", err)
+	}
+	if err := directory.VerifyPath(); err != nil {
+		return err
+	}
+	committed, err = directory.Replace(temporary, filepath.Base(path))
+	if err == nil {
+		return nil
+	}
+	state, current, inspectErr := inspectManagedFile(path, kind)
+	if state == StatePrepared && bytes.Equal(current, replacement) {
+		return nil
+	}
+	return errors.Join(err, inspectErr)
+}
+
+func writeManagedDefinition(file *os.File, content []byte) error {
+	for len(content) != 0 {
+		written, err := file.Write(content)
+		if err != nil {
+			return err
+		}
+		if written == 0 {
+			return io.ErrShortWrite
+		}
+		content = content[written:]
+	}
+	return file.Sync()
 }
 
 func inspectManagedFile(path string, kind Kind) (State, []byte, error) {

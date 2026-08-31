@@ -3,6 +3,7 @@
 package userservice
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,44 @@ import (
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 )
+
+func TestDarwinUpgradeRejectsReplacementProcessBeforeBootout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	source := testInvocation(
+		ServiceRolePeer, "/opt/delegation/0.1.0/delegation", filepath.Join(home, "peer.json"),
+	)
+	target := source
+	target.BinaryPath = "/opt/delegation/0.2.0/delegation"
+	prepared, err := Prepare(ServiceRolePeer, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRunner := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = originalRunner })
+	pid := 123
+	bootoutCalled := false
+	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
+		if args[0] == "print" {
+			return launchctlTestStatus(prepared.Artifact, "running", pid, source), nil
+		}
+		if args[0] == "bootout" {
+			bootoutCalled = true
+		}
+		return userServiceCommandResult{}, nil
+	}
+	plan, err := PrepareUpgrade(context.Background(), ServiceRolePeer, source, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid = 456
+	if err := StopUpgrade(context.Background(), plan); err == nil || !strings.Contains(err.Error(), "process changed") {
+		t.Fatalf("StopUpgrade() = %v", err)
+	}
+	if bootoutCalled {
+		t.Fatal("StopUpgrade() unloaded a replacement process")
+	}
+}
 
 func TestDarwinServiceLifecycleUsesLaunchAgents(t *testing.T) {
 	home := t.TempDir()

@@ -3,6 +3,7 @@
 package userservice
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,137 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestLinuxUpgradeLifecycleFencesDefinitionAndProcessTree(t *testing.T) {
+	stubLinuxServiceReadiness(t, nil)
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	source := testInvocation(
+		ServiceRolePeer, "/opt/delegation/0.1.0/delegation",
+		"/home/test/.delegation/peer.json",
+	)
+	target := source
+	target.BinaryPath = "/opt/delegation/0.2.0/delegation"
+	prepared, err := Prepare(ServiceRolePeer, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRunner := runSystemctl
+	t.Cleanup(func() { runSystemctl = originalRunner })
+	active := true
+	var calls [][]string
+	runSystemctl = func(args ...string) (userServiceCommandResult, error) {
+		calls = append(calls, slices.Clone(args))
+		switch {
+		case slices.Contains(args, "show"):
+			state, mainPID := "inactive", 0
+			if active {
+				state, mainPID = "active", 4242
+			}
+			return systemdUpgradeResult(prepared.Artifact, state, mainPID), nil
+		case slices.Contains(args, "stop"):
+			active = false
+		case slices.Contains(args, "start"):
+			active = true
+		}
+		return userServiceCommandResult{}, nil
+	}
+	plan, err := PrepareUpgrade(context.Background(), ServiceRolePeer, source, target)
+	if err != nil || plan.Artifact != prepared.Artifact || !slices.Equal(plan.ProcessIDs, []int{4242}) {
+		t.Fatalf("PrepareUpgrade() = %#v, %v", plan, err)
+	}
+	if err := StopUpgrade(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := SwitchUpgradeDefinition(context.Background(), plan, true); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(plan.Artifact)
+	if err != nil || !strings.Contains(string(content), target.BinaryPath) || strings.Contains(string(content), source.BinaryPath) {
+		t.Fatalf("switched definition = %q, %v", content, err)
+	}
+	if err := StartUpgrade(context.Background(), plan, true); err != nil {
+		t.Fatal(err)
+	}
+	matched, err := UpgradeServiceMatches(context.Background(), plan, true)
+	if err != nil || !matched {
+		t.Fatalf("UpgradeServiceMatches() = %v, %v", matched, err)
+	}
+	if !slices.ContainsFunc(calls, func(call []string) bool { return slices.Contains(call, "stop") }) ||
+		!slices.ContainsFunc(calls, func(call []string) bool { return slices.Contains(call, "daemon-reload") }) ||
+		!slices.ContainsFunc(calls, func(call []string) bool { return slices.Contains(call, "start") }) {
+		t.Fatalf("systemd upgrade calls = %q", calls)
+	}
+}
+
+func TestLinuxUpgradeRejectsDefinitionDriftBeforeStop(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	source := testInvocation(
+		ServiceRolePeer, "/opt/delegation/0.1.0/delegation",
+		"/home/test/.delegation/peer.json",
+	)
+	target := source
+	target.BinaryPath = "/opt/delegation/0.2.0/delegation"
+	prepared, err := Prepare(ServiceRolePeer, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRunner := runSystemctl
+	t.Cleanup(func() { runSystemctl = originalRunner })
+	runSystemctl = func(args ...string) (userServiceCommandResult, error) {
+		return systemdUpgradeResult(prepared.Artifact, "active", 123), nil
+	}
+	plan, err := PrepareUpgrade(context.Background(), ServiceRolePeer, source, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plan.Artifact, []byte("# foreign\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := StopUpgrade(context.Background(), plan); err == nil || !strings.Contains(err.Error(), "changed outside") {
+		t.Fatalf("StopUpgrade() = %v", err)
+	}
+}
+
+func TestLinuxUpgradeRejectsProcessIdentityDriftBeforeStop(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	source := testInvocation(
+		ServiceRolePeer, "/opt/delegation/0.1.0/delegation",
+		"/home/test/.delegation/peer.json",
+	)
+	target := source
+	target.BinaryPath = "/opt/delegation/0.2.0/delegation"
+	prepared, err := Prepare(ServiceRolePeer, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRunner := runSystemctl
+	t.Cleanup(func() { runSystemctl = originalRunner })
+	mainPID := 123
+	stopCalled := false
+	runSystemctl = func(args ...string) (userServiceCommandResult, error) {
+		if slices.Contains(args, "show") {
+			return systemdUpgradeResult(prepared.Artifact, "active", mainPID), nil
+		}
+		if slices.Contains(args, "stop") {
+			stopCalled = true
+		}
+		return userServiceCommandResult{}, nil
+	}
+	plan, err := PrepareUpgrade(context.Background(), ServiceRolePeer, source, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainPID = 456
+	if err := StopUpgrade(context.Background(), plan); err == nil || !strings.Contains(err.Error(), "process identity changed") {
+		t.Fatalf("StopUpgrade() = %v", err)
+	}
+	if stopCalled {
+		t.Fatal("StopUpgrade() stopped a replacement process")
+	}
+}
 
 func TestLinuxServiceLifecycleUsesXDGUserDirectory(t *testing.T) {
 	configHome := t.TempDir()
@@ -295,5 +427,12 @@ func TestLinuxServiceRejectsRelativeXDGConfigHome(t *testing.T) {
 func systemdIdentityResult(fragment, dropIns string) userServiceCommandResult {
 	return userServiceCommandResult{Output: []byte(fmt.Sprintf(
 		"FragmentPath=%s\nDropInPaths=%s\n", fragment, dropIns,
+	))}
+}
+
+func systemdUpgradeResult(fragment, state string, mainPID int) userServiceCommandResult {
+	return userServiceCommandResult{Output: []byte(fmt.Sprintf(
+		"FragmentPath=%s\nDropInPaths=\nControlGroup=/user.slice/delegation\nMainPID=%d\nControlPID=0\nActiveState=%s\nUnitFileState=enabled\n",
+		fragment, mainPID, state,
 	))}
 }
