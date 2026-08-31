@@ -1,8 +1,10 @@
 # M4 Release Trust Contract
 
-This document fixes the future release trust model for signed Delegation runtimes. It is not active
-for the current pre-1.0 alpha series, which publishes deterministic unsigned archives and marks every
-GitHub release as a prerelease. Enabling this contract requires the protected signing environment,
+This document fixes the future release trust model for natively signed Delegation runtimes. The
+native-signing candidate and promotion flow is not active for the current pre-1.0 alpha series,
+which publishes deterministic unsigned archives and marks every GitHub release as a prerelease.
+Current alpha releases do attest their checksum manifest as described below. Enabling the full
+native-signing contract requires the protected signing environment,
 native credentials, the repository variable `DELEGATION_ENABLE_SIGNED_RELEASE=true`, and the
 candidate-and-promotion workflow described below; it does not claim that an existing release was
 retroactively signed.
@@ -24,6 +26,27 @@ A published runtime must have all of the following properties:
 The installer continues to enforce the plugin-bundled SHA-256 without requiring GitHub CLI,
 Sigstore, or network access beyond downloading the selected archive. Attestations provide an
 additional operator-verifiable provenance path; they do not weaken or replace checksum pinning.
+
+## Current Alpha Manifest Attestation
+
+The current `Release` workflow must be dispatched from the exact immutable `v<VERSION>` tag ref.
+After rebuilding and checking the six archives against the tracked manifest, its write-scoped job
+uses the pinned `actions/attest` revision to sign `release-artifacts.sha256`. The custom predicate
+has exactly five fields: schema version 1, canonical repository, canonical workflow path, tag, and
+tag commit. The workflow publishes the resulting bundle as
+`release-provenance.sigstore.json` and rejects an empty or larger-than-1-MiB bundle.
+
+The reusable in-process verifier is deliberately separate from downloading and service upgrade
+orchestration. Given trusted Sigstore root material and a complete GitHub API release snapshot, it
+requires positive unique release and asset IDs, a strictly newer semantic version, the canonical
+repository, an immutable published prerelease in the current alpha channel, the
+exact tag and tag commit, exactly six expected platform archives plus the manifest and provenance
+bundle, GitHub asset digests matching the canonical manifest, and downloaded current-platform
+bytes matching that digest. It then verifies the manifest's DSSE signature, Fulcio chain and SCT,
+Rekor inclusion and observer timestamp, GitHub Actions issuer, exact workflow identity at the tag
+ref and commit, and all custom predicate fields. Any missing, additional, moved, malformed,
+oversized, or mismatched input fails closed. This checkpoint does not switch a running service or
+define upgrade rollback; those remain later milestone work.
 
 ## Why Release Builds Are Promoted
 

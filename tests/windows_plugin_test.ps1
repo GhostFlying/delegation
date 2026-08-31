@@ -55,9 +55,20 @@ function Invoke-ChildProcess {
     $start.RedirectStandardInput = $null -ne $StandardInput
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $start
-    if (-not $process.Start()) {
-        $process.Dispose()
-        throw "failed to start $FilePath"
+    $originalInputEncoding = $null
+    if ($start.RedirectStandardInput) {
+        $originalInputEncoding = [Console]::InputEncoding
+        [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false, $true)
+    }
+    try {
+        if (-not $process.Start()) {
+            $process.Dispose()
+            throw "failed to start $FilePath"
+        }
+    } finally {
+        if ($null -ne $originalInputEncoding) {
+            [Console]::InputEncoding = $originalInputEncoding
+        }
     }
     try {
         $observedJSONRPCResponse = $null -eq $CloseStandardInputAfterJSONRPCResponseID
@@ -66,11 +77,12 @@ function Invoke-ChildProcess {
         $stdout = $null
         $stderr = $null
         if ($null -ne $StandardInput) {
-            $process.StandardInput.Write($StandardInput)
-            $process.StandardInput.Flush()
+            $stdin = $process.StandardInput
+            $stdin.Write($StandardInput)
+            $stdin.Flush()
             if ($null -eq $CloseStandardInputAfterJSONRPCResponseID) {
                 Start-Sleep -Milliseconds 1000
-                $process.StandardInput.Close()
+                $stdin.Close()
             } else {
                 $stdoutBuilder = [System.Text.StringBuilder]::new()
                 $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -104,7 +116,7 @@ function Invoke-ChildProcess {
                         $null = $_
                     }
                 }
-                $process.StandardInput.Close()
+                $stdin.Close()
                 $stdoutRemainderTask = $null
                 if ($null -eq $pendingRead) {
                     $stdoutRemainderTask = $process.StandardOutput.ReadToEndAsync()
@@ -207,6 +219,38 @@ function Invoke-WebRequest {
         DELEGATION_TEST_ARTIFACT = $Artifact
         DELEGATION_TEST_EXPECTED_URL = $ExpectedUrl
         DELEGATION_TEST_INSTALLER_PS1 = $Installer
+    }
+}
+
+function Invoke-WindowsPowerShellLauncherInstall {
+    param(
+        [Parameter(Mandatory = $true)] [string] $PowerShell,
+        [Parameter(Mandatory = $true)] [string] $Launcher,
+        [Parameter(Mandatory = $true)] [string] $Artifact,
+        [Parameter(Mandatory = $true)] [string] $ExpectedUrl,
+        [Parameter(Mandatory = $true)] [string] $DelegationHome
+    )
+    $command = @'
+$ErrorActionPreference = "Stop"
+function Invoke-WebRequest {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Uri,
+        [Parameter(Mandatory = $true)] [string] $OutFile,
+        [switch] $UseBasicParsing
+    )
+    if ($Uri -cne $env:DELEGATION_TEST_EXPECTED_URL) {
+        throw "unexpected download URL: $Uri"
+    }
+    Copy-Item -LiteralPath $env:DELEGATION_TEST_ARTIFACT -Destination $OutFile
+}
+& $env:DELEGATION_TEST_LAUNCHER_PS1 version --json
+'@
+    Invoke-ChildProcess $PowerShell @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $command) @{
+        DELEGATION_BINARY = $null
+        DELEGATION_HOME = $DelegationHome
+        DELEGATION_TEST_ARTIFACT = $Artifact
+        DELEGATION_TEST_EXPECTED_URL = $ExpectedUrl
+        DELEGATION_TEST_LAUNCHER_PS1 = $Launcher
     }
 }
 
@@ -747,19 +791,6 @@ try {
         throw "go build failed with exit code $LASTEXITCODE"
     }
 
-    $missingEnvironment = @{
-        DELEGATION_BINARY = $null
-        DELEGATION_HOME = (Join-Path $tempRoot "missing")
-    }
-    $missingPS = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", $launcherPS, "mcp", "root") $missingEnvironment
-    Assert-True ($missingPS.ExitCode -eq 127) "PowerShell launcher missing-runtime exit was $($missingPS.ExitCode)"
-    Assert-True ($missingPS.Stderr.Contains("runtime $version is not installed")) "PowerShell launcher missing-runtime error was unclear"
-    Assert-True ($missingPS.Stderr.Contains('run $delegation-setup in a new Codex or TraeX task')) "PowerShell launcher setup hint was host-specific"
-
-    $missingCmd = Invoke-BatchFile -Path $launcherCmd -ScriptArguments @("mcp", "root") -Environment $missingEnvironment
-    Assert-True ($missingCmd.ExitCode -eq 127) "cmd launcher missing-runtime exit was $($missingCmd.ExitCode); stdout: $($missingCmd.Stdout); stderr: $($missingCmd.Stderr)"
-    Assert-True ($missingCmd.Stderr.Contains('run $delegation-setup in a new Codex or TraeX task')) "cmd launcher setup hint was host-specific"
-
     $overrideEnvironment = @{
         DELEGATION_BINARY = $runtime
         DELEGATION_HOME = (Join-Path $tempRoot "override")
@@ -776,6 +807,7 @@ try {
         "--device-name", "acceptance-device",
         "--broker-url", "ws://127.0.0.1:8787",
         "--auth-mode", "none",
+        "--codex-binary", $runtime,
         "--json"
     ) $overrideEnvironment
     Assert-True ($overrideSetup.ExitCode -eq 0) "peer setup for MCP launcher failed: $($overrideSetup.Stderr)"
@@ -829,6 +861,38 @@ try {
     Write-ArtifactChecksum $testPlugin $artifact $artifactName
 
     $expectedUrl = "https://github.com/GhostFlying/delegation/releases/download/v$version/$artifactName"
+    $coldHome = Join-Path $tempRoot "cold-launcher-home"
+    $coldLaunch = Invoke-WindowsPowerShellLauncherInstall $pwsh (Join-Path $testPlugin "scripts\delegation-mcp.ps1") $artifact $expectedUrl $coldHome
+    $coldBinary = Join-Path $coldHome "bin\$version\windows-$arch\delegation.exe"
+    Assert-True ($coldLaunch.ExitCode -eq 0) "PowerShell launcher cold installation failed: $($coldLaunch.Stderr)"
+    Assert-True ($coldLaunch.Stdout.Contains($versionJSON)) "PowerShell launcher cold installation polluted or lost runtime output: $($coldLaunch.Stdout)"
+    Assert-True (Test-Path -LiteralPath $coldBinary -PathType Leaf) "PowerShell launcher did not install the exact runtime"
+    $warmLaunch = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", (Join-Path $testPlugin "scripts\delegation-mcp.ps1"), "version", "--json") @{
+        DELEGATION_BINARY = $null
+        DELEGATION_HOME = $coldHome
+    }
+    Assert-True ($warmLaunch.ExitCode -eq 0 -and $warmLaunch.Stdout.Contains($versionJSON)) "PowerShell launcher did not bypass installation for an existing runtime"
+
+    $postconditionPlugin = Join-Path $tempRoot "postcondition-plugin"
+    Copy-Item -LiteralPath $testPlugin -Destination $postconditionPlugin -Recurse
+    Set-Content -LiteralPath (Join-Path $postconditionPlugin "scripts\install-runtime.ps1") -Value "return" -Encoding ascii
+    $postcondition = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", (Join-Path $postconditionPlugin "scripts\delegation-mcp.ps1"), "version") @{
+        DELEGATION_BINARY = $null
+        DELEGATION_HOME = (Join-Path $tempRoot "postcondition-home")
+    }
+    Assert-True ($postcondition.ExitCode -eq 126 -and $postcondition.Stderr -match "is not a regular executable") "PowerShell launcher accepted a missing installer postcondition"
+
+    $tamperedHome = Join-Path $tempRoot "tampered-launcher-home"
+    $tamperedTarget = Join-Path $tamperedHome "bin\$version\windows-$arch"
+    New-ProtectedDelegationHome -Path $tamperedHome
+    New-Item -ItemType Directory -Force -Path $tamperedTarget | Out-Null
+    Set-Content -LiteralPath (Join-Path $tamperedTarget "delegation.exe") -Value "not an executable" -Encoding ascii
+    $tamperedLaunch = Invoke-ChildProcess $pwsh @("-NoLogo", "-NoProfile", "-File", (Join-Path $testPlugin "scripts\delegation-mcp.ps1"), "version") @{
+        DELEGATION_BINARY = $null
+        DELEGATION_HOME = $tamperedHome
+    }
+    Assert-True ($tamperedLaunch.ExitCode -ne 0) "PowerShell launcher accepted a tampered installed runtime"
+
     $windowsPowerShellHome = Join-Path $tempRoot "windows-powershell-home"
     $windowsPowerShellInstall = Invoke-WindowsPowerShellInstall $windowsPowerShell (Join-Path $testPlugin "scripts\install-runtime.ps1") $artifact $expectedUrl $windowsPowerShellHome
     $windowsPowerShellBinary = Join-Path $windowsPowerShellHome "bin\$version\windows-$arch\delegation.exe"
@@ -892,6 +956,7 @@ try {
         "--device-name", "installed-runtime-device",
         "--broker-url", "ws://127.0.0.1:8787",
         "--auth-mode", "none",
+        "--codex-binary", $windowsPowerShellBinary,
         "--json"
     ) $windowsPowerShellEnvironment
     Assert-True ($windowsPowerShellSetup.ExitCode -eq 0) "installed runtime could not initialize its default home: $($windowsPowerShellSetup.Stderr)"

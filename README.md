@@ -45,9 +45,13 @@ traecli plugin marketplace add GhostFlying/delegation
 traecli plugin install delegation@delegation
 ```
 
-Start a new Codex or TraeX task after installation, then invoke `$delegation-setup`. The plugin does
-not silently download native code from its MCP launcher: setup installs the exact runtime version
-after verifying the SHA-256 pinned in the plugin.
+Start a new Codex or TraeX task after installation. On first MCP launch, the plugin automatically
+installs the exact matching runtime if it is absent, verifies the SHA-256 pinned in the plugin, and
+requires the installed binary to report that exact version before execution. A present but invalid
+runtime is never silently replaced. Invoke `$delegation-setup` to configure or diagnose the runtime,
+or to perform explicit recovery after an automatic installation failure. `DELEGATION_BINARY` remains
+an explicit direct-execution override for development, offline, and managed enterprise
+installations; it is not subject to managed-runtime version or symlink policy.
 
 The marketplace snapshot from `main` is the source of truth for the rolling plugin control plane;
 GitHub Releases distribute only immutable native runtime archives. Each tagged release is a
@@ -94,17 +98,21 @@ tagging, rebuild and commit the manifest from the exact release source tree. Lat
 not rewrite the runtime version-to-checksum mapping for an already published version; publish a new
 version instead. The release workflow checks the mapping again at the immutable tag.
 
-After the checksum commit passes CI, create `v<VERSION>` at that exact commit. Dispatch `Release`
-from `main` and provide the tag as its `tag` input. The workflow rejects stable versions, validates
+After the checksum commit passes CI, create `v<VERSION>` at that exact commit. Select that tag as
+the workflow ref when dispatching `Release` and provide the same tag as its `tag` input. The
+workflow rejects stable versions, validates
 that the prerelease tag matches the version and is contained in `main`, rebuilds the six unsigned
 archives at the tagged commit, and verifies them against the tracked manifest before its
-write-scoped job publishes a GitHub prerelease. The `main` merge necessarily precedes that
+write-scoped job creates a custom Sigstore attestation over `release-artifacts.sha256` and publishes
+the bounded bundle as `release-provenance.sigstore.json` with the archives. The signed predicate
+binds the canonical repository and workflow, exact tag, and tag commit; the Fulcio certificate also
+binds the tag ref and commit. The `main` merge necessarily precedes that
 publication. If a marketplace refresh observes the new version during this interval, setup fails
 closed because the exact Release asset is absent; it never substitutes an older runtime. Retry setup
 after the Release workflow succeeds.
 
 Configure the required-reviewer `github-release` environment to accept deployments only from
-`main`. It needs no platform signing credential. Add a tag ruleset that prevents updates and
+protected `v*` tags. It needs no platform signing credential. Add a tag ruleset that prevents updates and
 deletion for `v*`, and enable immutable releases. The signed candidate-and-promotion design remains
 documented in [the M4 release trust contract](docs/m4-release-trust-contract.md), but is not the
 release path for the current unsigned alpha series. Keep the repository variable

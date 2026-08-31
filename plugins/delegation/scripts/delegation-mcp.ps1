@@ -3,6 +3,29 @@ $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content -LiteralPath (Join-Path $pluginRoot "VERSION") -TotalCount 1).Trim()
 
+function Assert-DelegationRuntime {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $Source
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "delegation: $Source is not a regular executable: $Path"
+    }
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "delegation: $Source is not a regular executable: $Path"
+    }
+    $actualVersion = (& $Path version | Out-String).Trim()
+    $versionExitCode = $LASTEXITCODE
+    if ($versionExitCode -ne 0) {
+        throw "delegation: $Source version command failed with exit code $versionExitCode"
+    }
+    if ($actualVersion -cne $version) {
+        throw "delegation: $Source reports version $actualVersion, expected $version"
+    }
+}
+
 if ($env:DELEGATION_BINARY) {
     if (-not (Test-Path -LiteralPath $env:DELEGATION_BINARY -PathType Leaf)) {
         [Console]::Error.WriteLine("delegation: DELEGATION_BINARY does not exist: $env:DELEGATION_BINARY")
@@ -28,10 +51,21 @@ $delegationHome = if ($env:DELEGATION_HOME) {
     Join-Path $HOME ".delegation"
 }
 $binary = Join-Path $delegationHome "bin\$version\windows-$arch\delegation.exe"
-if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
-    [Console]::Error.WriteLine("delegation: runtime $version is not installed for windows-$arch")
-    [Console]::Error.WriteLine('delegation: run $delegation-setup in a new Codex or TraeX task, or set DELEGATION_BINARY')
-    exit 127
+$binaryItem = Get-Item -LiteralPath $binary -Force -ErrorAction SilentlyContinue
+if ($null -eq $binaryItem) {
+    try {
+        & (Join-Path $PSScriptRoot "install-runtime.ps1") | Out-Null
+    } catch {
+        [Console]::Error.WriteLine($_.Exception.Message)
+        [Console]::Error.WriteLine("delegation: automatic runtime installation failed for $version windows-$arch")
+        exit 127
+    }
+}
+try {
+    Assert-DelegationRuntime -Path $binary -Source "runtime $version for windows-$arch"
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 126
 }
 
 & $binary @args

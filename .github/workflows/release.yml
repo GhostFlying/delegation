@@ -38,7 +38,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
           [[ "$RELEASE_TAG" != refs/* ]]
           git check-ref-format "refs/tags/$RELEASE_TAG"
           git fetch --force origin \
@@ -158,7 +158,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: github-release
     permissions:
+      attestations: write
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -177,7 +179,7 @@ jobs:
         with:
           artifact-ids: ${{ needs.build.outputs.artifact_id }}
           path: dist
-      - name: Revalidate and publish tag assets
+      - name: Revalidate tag assets
         shell: bash
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -227,12 +229,57 @@ jobs:
           diff -u "$expected_assets" "$manifest_assets"
           (cd dist && sha256sum --strict -c release-artifacts.sha256)
 
-          mapfile -t asset_names < "$archive_assets"
+      - name: Create release manifest predicate
+        id: release_predicate
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+          TAG_COMMIT: ${{ needs.gate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          predicate_path="$RUNNER_TEMP/release-manifest-predicate.json"
+          jq --null-input --compact-output \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow '.github/workflows/release.yml' \
+            --arg tag "$RELEASE_TAG" \
+            --arg tagCommit "$TAG_COMMIT" \
+            '{schemaVersion: 1, repository: $repository, workflow: $workflow, tag: $tag, tagCommit: $tagCommit}' \
+            > "$predicate_path"
+          test "$(stat -c %s "$predicate_path")" -le 4096
+          printf 'path=%s\n' "$predicate_path" >> "$GITHUB_OUTPUT"
+      - name: Attest release manifest
+        id: release_provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: dist/release-artifacts.sha256
+          subject-name: release-artifacts.sha256
+          predicate-type: https://github.com/GhostFlying/delegation/attestations/release-manifest/v1
+          predicate-path: ${{ steps.release_predicate.outputs.path }}
+      - name: Publish tag assets
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_COMMIT: ${{ needs.gate.outputs.commit }}
+          GH_TOKEN: ${{ github.token }}
+          PROVENANCE_BUNDLE: ${{ steps.release_provenance.outputs.bundle-path }}
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -f "$PROVENANCE_BUNDLE"
+          test ! -L "$PROVENANCE_BUNDLE"
+          test "$(stat -c %s "$PROVENANCE_BUNDLE")" -gt 0
+          test "$(stat -c %s "$PROVENANCE_BUNDLE")" -le 1048576
+          cp --no-clobber "$PROVENANCE_BUNDLE" dist/release-provenance.sigstore.json
+
+          mapfile -t asset_names < <(LC_ALL=C find dist -mindepth 1 -maxdepth 1 -type f \
+            -name 'delegation_*' -printf '%f\n' | LC_ALL=C sort)
+          test "${#asset_names[@]}" -eq 6
           assets=()
           for name in "${asset_names[@]}"; do
             assets+=("dist/$name")
           done
-          assets+=(dist/release-artifacts.sha256)
+          assets+=(dist/release-artifacts.sha256 dist/release-provenance.sigstore.json)
 
           git -C source fetch --force origin \
             "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH" \
@@ -246,7 +293,8 @@ jobs:
             'Verify the downloaded directory:' \
             '```bash' \
             'sha256sum --strict -c release-artifacts.sha256' \
-            '```')
+            '```' \
+            'The release-provenance.sigstore.json bundle attests release-artifacts.sha256 itself.')
 
           gh release create "$RELEASE_TAG" "${assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \

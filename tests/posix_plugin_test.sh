@@ -23,15 +23,11 @@ go_bin=${GO:-go}
 unset DELEGATION_BINARY
 unset DELEGATION_HOME
 
-if DELEGATION_HOME="$tmp/missing" "$plugin_root/scripts/delegation-mcp" mcp root >"$tmp/out" 2>"$tmp/err"; then
-  printf '%s\n' 'expected missing runtime launcher to fail' >&2
-  exit 1
-fi
-grep -F "runtime $version is not installed" "$tmp/err" >/dev/null
-grep -F 'run $delegation-setup in a new Codex or TraeX task' "$tmp/err" >/dev/null
-
 DELEGATION_BINARY="$tmp/delegation" "$plugin_root/scripts/delegation-mcp" version --json >"$tmp/version"
 grep -F "\"version\":\"$version\"" "$tmp/version" >/dev/null
+ln -s "$tmp/delegation" "$tmp/delegation-link"
+DELEGATION_BINARY="$tmp/delegation-link" "$plugin_root/scripts/delegation-mcp" version >"$tmp/override-link-out"
+test "$(sed -n '1p' "$tmp/override-link-out")" = "$version"
 
 cp -R "$plugin_root" "$tmp/plugin"
 mkdir -p "$tmp/payload" "$tmp/fake-bin"
@@ -132,6 +128,31 @@ DELEGATION_TEST_EXPECTED_URL=$expected_url
 DELEGATION_TEST_DOWNLOAD_LOG=$download_log
 export DELEGATION_TEST_EXPECTED_URL DELEGATION_TEST_DOWNLOAD_LOG
 
+cold_home="$tmp/cold-home"
+: >"$download_log"
+PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$cold_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/delegation-mcp" version --json >"$tmp/cold-version"
+grep -F "\"version\":\"$version\"" "$tmp/cold-version" >/dev/null
+test "$(wc -l <"$download_log")" -eq 1
+test -x "$cold_home/bin/$version/$os-$arch/delegation"
+
+: >"$download_log"
+PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$cold_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/delegation-mcp" version --json >"$tmp/warm-version"
+grep -F "\"version\":\"$version\"" "$tmp/warm-version" >/dev/null
+test ! -s "$download_log"
+
+postcondition_plugin="$tmp/postcondition-plugin"
+cp -R "$tmp/plugin" "$postcondition_plugin"
+cat >"$postcondition_plugin/scripts/install-runtime" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod 0755 "$postcondition_plugin/scripts/install-runtime"
+if DELEGATION_HOME="$tmp/postcondition-home" "$postcondition_plugin/scripts/delegation-mcp" version >"$tmp/postcondition-out" 2>"$tmp/postcondition-err"; then
+  printf '%s\n' 'expected launcher to reject a missing installer postcondition' >&2
+  exit 1
+fi
+grep -F 'is not a regular executable' "$tmp/postcondition-err" >/dev/null
+
 cp -R "$tmp/plugin" "$tmp/missing-checksum-plugin"
 printf '%s\n' '# intentionally empty for this test' >"$tmp/missing-checksum-plugin/release-artifacts.sha256"
 : >"$download_log"
@@ -203,6 +224,15 @@ esac
 grep -F "\"version\":\"$version\"" "$tmp/installed-version" >/dev/null
 HOME="$runtime_user_home" "$tmp/plugin/scripts/delegation-mcp" version --json >"$tmp/launcher-installed-version"
 grep -F "\"version\":\"$version\"" "$tmp/launcher-installed-version" >/dev/null
+: >"$download_log"
+chmod 0644 "$installed"
+if PATH="$tmp/fake-bin:$PATH" HOME="$runtime_user_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/delegation-mcp" version >"$tmp/tampered-out" 2>"$tmp/tampered-err"; then
+  printf '%s\n' 'expected launcher to reject a non-executable installed runtime' >&2
+  exit 1
+fi
+grep -F 'is not a regular executable' "$tmp/tampered-err" >/dev/null
+test ! -s "$download_log"
+chmod 0755 "$installed"
 launcher="$tmp/plugin/scripts/delegation-mcp"
 config="$runtime_home/peer.json"
 service_environment="$runtime_home/peer.env"
@@ -299,6 +329,20 @@ delegation"
 test "$(find "$concurrent_barrier" -type f -name 'result.*' | wc -l)" -eq 2
 test "$(grep -l '^0$' "$concurrent_barrier"/result.* | wc -l)" -eq 1
 test "$(grep -L '^0$' "$concurrent_barrier"/result.* | wc -l)" -eq 1
+
+launcher_concurrent_home="$tmp/launcher-concurrent-home"
+launcher_concurrent_barrier="$tmp/launcher-concurrent-barrier"
+: >"$download_log"
+PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$launcher_concurrent_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" DELEGATION_TEST_LINK_BARRIER_DIR="$launcher_concurrent_barrier" "$tmp/plugin/scripts/delegation-mcp" version >"$tmp/launcher-concurrent-first" 2>"$tmp/launcher-concurrent-first-err" &
+first_pid=$!
+PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$launcher_concurrent_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" DELEGATION_TEST_LINK_BARRIER_DIR="$launcher_concurrent_barrier" "$tmp/plugin/scripts/delegation-mcp" version >"$tmp/launcher-concurrent-second" 2>"$tmp/launcher-concurrent-second-err" &
+second_pid=$!
+wait "$first_pid"
+wait "$second_pid"
+test "$(sed -n '1p' "$tmp/launcher-concurrent-first")" = "$version"
+test "$(sed -n '1p' "$tmp/launcher-concurrent-second")" = "$version"
+test -x "$launcher_concurrent_home/bin/$version/$os-$arch/delegation"
+test "$(wc -l <"$download_log")" -eq 2
 
 directory_race_home="$tmp/directory-race-home"
 if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$directory_race_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" DELEGATION_TEST_LINK_RACE=directory "$tmp/plugin/scripts/install-runtime" >"$tmp/directory-race-out" 2>"$tmp/directory-race-err"; then

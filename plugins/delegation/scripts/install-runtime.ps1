@@ -325,7 +325,7 @@ try {
             throw "delegation: installed runtime reports version $installedVersion, expected $version"
         }
         Write-Output $binary
-        exit 0
+        return
     }
 
     $staging = Join-Path $targetParent (".install-windows-$arch-" + [guid]::NewGuid().ToString("N"))
