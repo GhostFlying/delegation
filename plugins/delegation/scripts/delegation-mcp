@@ -5,6 +5,23 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 plugin_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 version=$(sed -n '1p' "$plugin_root/VERSION")
 
+validate_binary() {
+  candidate=$1
+  source=$2
+  if [ ! -f "$candidate" ] || [ -L "$candidate" ] || [ ! -x "$candidate" ]; then
+    printf '%s\n' "delegation: $source is not a regular executable: $candidate" >&2
+    exit 126
+  fi
+  if ! actual_version=$("$candidate" version); then
+    printf '%s\n' "delegation: $source version command failed: $candidate" >&2
+    exit 126
+  fi
+  if [ "$actual_version" != "$version" ]; then
+    printf '%s\n' "delegation: $source reports version $actual_version, expected $version" >&2
+    exit 126
+  fi
+}
+
 if [ -n "${DELEGATION_BINARY:-}" ]; then
   if [ ! -x "$DELEGATION_BINARY" ]; then
     printf '%s\n' "delegation: DELEGATION_BINARY is not executable: $DELEGATION_BINARY" >&2
@@ -33,10 +50,12 @@ esac
 
 delegation_home=${DELEGATION_HOME:-"$HOME/.delegation"}
 binary="$delegation_home/bin/$version/$os-$arch/delegation"
-if [ ! -x "$binary" ]; then
-  printf '%s\n' "delegation: runtime $version is not installed for $os-$arch" >&2
-  printf '%s\n' 'delegation: run $delegation-setup in a new Codex or TraeX task, or set DELEGATION_BINARY' >&2
-  exit 127
+if [ ! -e "$binary" ] && [ ! -L "$binary" ]; then
+  if ! "$script_dir/install-runtime" >/dev/null; then
+    printf '%s\n' "delegation: automatic runtime installation failed for $version $os-$arch" >&2
+    exit 127
+  fi
 fi
 
+validate_binary "$binary" "runtime $version for $os-$arch"
 exec "$binary" "$@"

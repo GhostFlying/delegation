@@ -43,11 +43,11 @@ func TestReleaseCandidateWorkflowUsesProtectedNativeSigningAndProvenance(t *test
 	assertPinnedActions(t, workflow)
 }
 
-func TestReleaseWorkflowPublishesVerifiedUnsignedArtifacts(t *testing.T) {
+func TestReleaseWorkflowPublishesVerifiedAttestedArtifacts(t *testing.T) {
 	workflow := readWorkflow(t, "release.yml")
 	for _, required := range []string{
 		"RELEASE_TAG: ${{ inputs.tag }}",
-		"test \"$GITHUB_REF\" = \"refs/heads/$DEFAULT_BRANCH\"",
+		"test \"$GITHUB_REF\" = \"refs/tags/$RELEASE_TAG\"",
 		"test \"$RELEASE_TAG\" = \"v$version\"",
 		"[[ \"$version_core\" == *-* ]]",
 		"git merge-base --is-ancestor",
@@ -56,6 +56,18 @@ func TestReleaseWorkflowPublishesVerifiedUnsignedArtifacts(t *testing.T) {
 		"source/plugins/delegation/release-artifacts.sha256",
 		"sha256sum --strict -c release-artifacts.sha256",
 		"environment: github-release",
+		"attestations: write",
+		"id-token: write",
+		"actions/attest@a1948c3f048ba23858d222213b7c278aabede763",
+		"subject-path: dist/release-artifacts.sha256",
+		"subject-name: release-artifacts.sha256",
+		"predicate-type: https://github.com/GhostFlying/delegation/attestations/release-manifest/v1",
+		"predicate-path: ${{ steps.release_predicate.outputs.path }}",
+		"{schemaVersion: 1, repository: $repository, workflow: $workflow, tag: $tag, tagCommit: $tagCommit}",
+		"test \"$(stat -c %s \"$predicate_path\")\" -le 4096",
+		"PROVENANCE_BUNDLE: ${{ steps.release_provenance.outputs.bundle-path }}",
+		"test \"$(stat -c %s \"$PROVENANCE_BUNDLE\")\" -le 1048576",
+		"dist/release-provenance.sigstore.json",
 		"test \"$actual_commit\" = \"$EXPECTED_COMMIT\"",
 		"gh release create \"$RELEASE_TAG\"",
 		"--verify-tag",
@@ -72,7 +84,6 @@ func TestReleaseWorkflowPublishesVerifiedUnsignedArtifacts(t *testing.T) {
 		"candidate_artifact_id",
 		"verify-candidate",
 		"verify-promotion",
-		"actions/attest@",
 		"environment: release-signing",
 		"secrets.",
 	} {
@@ -94,6 +105,9 @@ func TestReleaseWorkflowPublishesVerifiedUnsignedArtifacts(t *testing.T) {
 	}
 	if got := strings.Count(workflow, "contents: write"); got != 1 {
 		t.Fatalf("write-scoped contents permission count = %d, want 1", got)
+	}
+	if got := strings.Count(workflow, "actions/attest@"); got != 1 {
+		t.Fatalf("release manifest attestation count = %d, want 1", got)
 	}
 	assertPinnedActions(t, workflow)
 }

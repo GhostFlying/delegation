@@ -26,19 +26,23 @@ version; do not substitute a newer version. Resolve the runtime launcher as
 `scripts/delegation-mcp` on Linux or macOS and `scripts/delegation-mcp.cmd` on Windows. Use that
 launcher for every runtime command below.
 
-## Install The Runtime
+## Acquire Or Recover The Runtime
 
-1. If `DELEGATION_BINARY` is set, run the launcher with `version --json` and verify the reported
-   version. The launcher applies the override for development, offline, or managed enterprise
-   installations.
-2. Otherwise run `scripts/install-runtime` on Linux or macOS, or
-   `scripts/install-runtime.cmd` on Windows. The installer must select the current OS and
-   architecture, fetch the exact GitHub Release version, verify the pinned SHA-256, and install
-   atomically under the user's Delegation home.
-3. Stop on a missing checksum, version mismatch, unsupported platform, or failed verification.
-   Do not fall back to an unverified binary.
-4. Run the launcher with `version --json` after installation. Do not invoke a bare `delegation`
-   command or assume setup created a `PATH` shim; the runtime remains in its versioned directory.
+1. Run the launcher with `version --json`. If the canonical versioned runtime is absent, the
+   launcher invokes the bundled installer automatically. The installer selects the current OS and
+   architecture, fetches the exact GitHub Release version, verifies the SHA-256 pinned in the
+   plugin, and publishes atomically under the user's Delegation home.
+2. The launcher independently requires a non-linked regular executable that reports the exact
+   plugin `VERSION`. A present but invalid runtime fails closed and is not automatically replaced.
+3. If automatic acquisition fails, run `scripts/install-runtime` on Linux or macOS, or
+   `scripts/install-runtime.cmd` on Windows, to see installer diagnostics and recover explicitly.
+   Stop on a missing checksum, version mismatch, unsupported platform, failed verification, or
+   failed postcondition. Do not fall back to an unverified binary.
+4. If `DELEGATION_BINARY` is set, the launcher preserves it as an explicit direct-execution
+   override for development, offline, or managed enterprise installations. Managed-runtime
+   version and symlink policy do not apply to this override.
+5. Do not invoke a bare `delegation` command or assume setup created a `PATH` shim; the runtime
+   remains in its versioned directory.
 
 ## Configure The Installation
 
