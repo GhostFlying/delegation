@@ -69,7 +69,7 @@ func (s *session) handleSyncWorkerLifecycle(
 		return err
 	}
 	if ready {
-		s.server.markWorkerReady(s)
+		s.server.markWorkerSyncReady(s)
 	}
 	return nil
 }

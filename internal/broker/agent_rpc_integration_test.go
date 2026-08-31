@@ -57,6 +57,16 @@ var agentRPCResultPackageChanges = make(chan struct{})
 
 func (agentRPCLifecycleSource) WorkerRevision() uint64 { return 0 }
 
+func (agentRPCLifecycleSource) WorkerReadiness(
+	context.Context,
+) (protocol.WorkerReadiness, error) {
+	return protocol.WorkerReadiness{
+		Epoch: 1, State: protocol.WorkerReadinessReady, AttemptCount: 1,
+		RuntimeDigest: strings.Repeat("a", 64), ConfigDigest: strings.Repeat("b", 64),
+		EpochStartedAt: 1, LastAttemptAt: 1, UpdatedAt: 1,
+	}, nil
+}
+
 func (agentRPCLifecycleSource) WorkerLifecycleChanges() <-chan struct{} { return nil }
 
 func (agentRPCLifecycleSource) ListWorkerLifecycles(
@@ -341,6 +351,7 @@ func TestAgentRPCSelfDispatchIsDurableIdempotentAndNonBlocking(t *testing.T) {
 		WorkerSpawner:         spawner,
 		WorkerController:      agentRPCWorkerController{},
 		WorkerLifecycleSource: agentRPCLifecycleSource{},
+		WorkerReadinessSource: agentRPCLifecycleSource{},
 		ChangesArtifactSource: agentRPCLifecycleSource{},
 		ResultPackageSource:   agentRPCLifecycleSource{},
 		WorkspaceManager:      agentRPCWorkerController{},
@@ -493,6 +504,70 @@ func TestAgentRPCRoutesToExplicitRemotePeer(t *testing.T) {
 			sourceSpawner.calls.Load(),
 			targetSpawner.calls.Load(),
 		)
+	}
+}
+
+func TestAgentRPCRejectsInterventionRequiredBeforeCreatingReceipt(t *testing.T) {
+	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	sourceClient := startAgentRPCConnector(
+		t, harness, brokerTestDeviceID, &basicDispatchSpawner{deviceID: brokerTestDeviceID},
+	)
+	targetSpawner := &basicDispatchSpawner{deviceID: agentRPCTargetID}
+	startAgentRPCConnector(t, harness, agentRPCTargetID, targetSpawner)
+	readiness, err := harness.registry.WorkerReadiness(
+		context.Background(), brokerTestControllerID, agentRPCTargetID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readiness.State = protocol.WorkerReadinessInterventionRequired
+	readiness.NextAttemptAt = 0
+	readiness.FailureCode = protocol.WorkerManagedHomeInvalid
+	readiness.UpdatedAt++
+	if _, err := harness.registry.PutWorkerReadiness(
+		context.Background(), brokerTestControllerID, agentRPCTargetID, readiness,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	callContext, cancelCall := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelCall()
+	var root protocol.EnsureRootTreeResult
+	if err := sourceClient.Call(
+		callContext, protocol.MethodEnsureRootTree, "", nil,
+		protocol.EnsureRootTreeParams{ExternalThreadID: agentRPCRemoteThreadID}, &root,
+	); err != nil {
+		t.Fatal(err)
+	}
+	source := root.Principal.Identity()
+	err = sourceClient.Call(
+		callContext, protocol.MethodSpawnAgent, root.Tree.TreeID, &source,
+		protocol.SpawnAgentParams{
+			SpawnID: agentRPCRemoteSpawnID, TargetDeviceID: agentRPCTargetID,
+			TaskName: "blocked_spawn", Message: "must not create a receipt",
+		},
+		&protocol.SpawnAgentResult{},
+	)
+	var rpcError *connector.RPCError
+	if !errors.As(err, &rpcError) || rpcError.Code != protocol.ErrorUnavailable {
+		t.Fatalf("intervention spawn error = %v", err)
+	}
+	wantData := `{"code":"intervention_required","failureCode":"managed_home_invalid"}`
+	if string(rpcError.Data) != wantData {
+		t.Fatalf("intervention spawn data = %s, want %s", rpcError.Data, wantData)
+	}
+	if targetSpawner.calls.Load() != 0 {
+		t.Fatalf("intervention target calls = %d", targetSpawner.calls.Load())
+	}
+	var agents protocol.ListAgentsResult
+	if err := sourceClient.Call(
+		callContext, protocol.MethodListAgents, root.Tree.TreeID, &source,
+		protocol.ListAgentsParams{Limit: protocol.MaximumAgentPage}, &agents,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.Agents) != 0 {
+		t.Fatalf("intervention spawn created receipts: %#v", agents.Agents)
 	}
 }
 
@@ -870,6 +945,7 @@ func startAgentRPCConnectorWithAuth(
 		WorkerSpawner:         spawner,
 		WorkerController:      agentRPCWorkerController{},
 		WorkerLifecycleSource: agentRPCLifecycleSource{},
+		WorkerReadinessSource: agentRPCLifecycleSource{},
 		ChangesArtifactSource: agentRPCLifecycleSource{},
 		ResultPackageSource:   agentRPCLifecycleSource{},
 		WorkspaceManager:      workspaceManager,

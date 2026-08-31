@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,6 +226,38 @@ func openProtectedConfig(path string) (*os.File, error) {
 		return nil, err
 	}
 	return file, nil
+}
+
+func readProtectedConfigAt(
+	directory *securefs.Root, name string, maximumBytes int,
+) ([]byte, os.FileInfo, error) {
+	before, err := directory.Lstat(name)
+	if err != nil {
+		return nil, nil, fmt.Errorf("inspect config: %w", err)
+	}
+	file, err := directory.OpenFile(name, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open config: %w", err)
+	}
+	after, statErr := file.Stat()
+	if statErr == nil && !os.SameFile(before, after) {
+		statErr = errors.New("config changed while it was being opened")
+	}
+	if statErr == nil {
+		statErr = validateConfigHandle(windows.Handle(file.Fd()), false)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, int64(maximumBytes)+1))
+	closeErr := file.Close()
+	if err := errors.Join(statErr, readErr, closeErr); err != nil {
+		return nil, nil, err
+	}
+	if len(data) > maximumBytes {
+		return nil, nil, fmt.Errorf("protected file exceeds %d-byte limit", maximumBytes)
+	}
+	if err := directory.VerifyPath(); err != nil {
+		return nil, nil, err
+	}
+	return data, after, nil
 }
 
 func validateConfigHandle(handle windows.Handle, directory bool) error {

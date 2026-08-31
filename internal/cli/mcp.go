@@ -9,11 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/pathguard"
+	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/rootmcp"
 	"github.com/GhostFlying/delegation/internal/runtimeconfig"
 	"github.com/GhostFlying/delegation/internal/workermcp"
@@ -147,11 +149,22 @@ func resolveMCPConfig(flags *flag.FlagSet, configPath, instanceID string) (strin
 }
 
 func runRootMCP(ctx context.Context, configPath string, transport mcp.Transport) error {
-	server, err := loadRootMCPServer(configPath)
+	runtime, err := loadRootMCPRuntime(configPath)
 	if err != nil {
 		return err
 	}
-	if err := server.Run(ctx, transport); err != nil {
+	startedAt := time.Now().UnixMilli()
+	baselineCtx, cancelBaseline := context.WithTimeout(ctx, 5*time.Second)
+	baseline, baselineErr := localbridge.ReadWorkerReadiness(
+		baselineCtx, runtime.endpoint,
+	)
+	cancelBaseline()
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	go watchRootMCPInterventions(
+		watchCtx, runtime.endpoint, runtime.notifyIntervention, baseline, baselineErr, startedAt,
+	)
+	if err := runtime.server.Run(ctx, transport); err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
@@ -180,27 +193,103 @@ func runWorkerMCP(
 }
 
 func loadRootMCPServer(configPath string) (*mcp.Server, error) {
-	cfg, err := runtimeconfig.Read(configPath)
+	runtime, err := loadRootMCPRuntime(configPath)
 	if err != nil {
 		return nil, err
 	}
+	return runtime.server, nil
+}
+
+type rootMCPRuntime struct {
+	server             *mcp.Server
+	endpoint           string
+	notifyIntervention rootmcp.InterventionNotifier
+}
+
+func loadRootMCPRuntime(configPath string) (rootMCPRuntime, error) {
+	cfg, err := runtimeconfig.Read(configPath)
+	if err != nil {
+		return rootMCPRuntime{}, err
+	}
 	if cfg.Role != delegationconfig.RolePeer {
-		return nil, errors.New("root MCP requires a peer configuration")
+		return rootMCPRuntime{}, errors.New("root MCP requires a peer configuration")
 	}
 	if err := pathguard.ValidatePeerAuthority(configPath, cfg.Peer.StateFile, cfg.Broker.Auth.TokenFile); err != nil {
-		return nil, err
+		return rootMCPRuntime{}, err
 	}
 	endpoint, err := localbridge.EndpointForInstance(
 		cfg.EffectiveInstanceID(), cfg.ControllerID, cfg.DeviceID,
 	)
 	if err != nil {
-		return nil, err
+		return rootMCPRuntime{}, err
 	}
 	backend, err := localbridge.NewClient(endpoint)
 	if err != nil {
-		return nil, err
+		return rootMCPRuntime{}, err
 	}
-	return rootmcp.NewServer(backend, cfg.ControllerID, cfg.DeviceID)
+	server, notify, err := rootmcp.NewServerWithInterventionNotifications(
+		backend, cfg.ControllerID, cfg.DeviceID,
+	)
+	if err != nil {
+		return rootMCPRuntime{}, err
+	}
+	return rootMCPRuntime{
+		server: server, endpoint: endpoint, notifyIntervention: notify,
+	}, nil
+}
+
+func watchRootMCPInterventions(
+	ctx context.Context, endpoint string, notify rootmcp.InterventionNotifier,
+	baseline protocol.WorkerReadiness, baselineErr error, startedAt int64,
+) {
+	var cursor protocol.WorkerReadinessCursor
+	if baselineErr == nil {
+		cursor = baseline.Cursor()
+	}
+	for ctx.Err() == nil {
+		if cursor.Epoch != 0 {
+			break
+		}
+		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		readiness, err := localbridge.ReadWorkerReadiness(readCtx, endpoint)
+		cancel()
+		if err == nil {
+			cursor = readiness.Cursor()
+			if baselineErr != nil &&
+				readiness.State == protocol.WorkerReadinessInterventionRequired &&
+				readiness.UpdatedAt > startedAt {
+				notify(ctx, readiness)
+			}
+			break
+		}
+		if !waitRootMCPRetry(ctx) {
+			return
+		}
+	}
+	for ctx.Err() == nil {
+		waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		readiness, err := localbridge.WaitWorkerIntervention(waitCtx, endpoint, cursor)
+		cancel()
+		if err != nil {
+			if !waitRootMCPRetry(ctx) {
+				return
+			}
+			continue
+		}
+		cursor = readiness.Cursor()
+		notify(ctx, readiness)
+	}
+}
+
+func waitRootMCPRetry(ctx context.Context) bool {
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func loadWorkerMCPServer(

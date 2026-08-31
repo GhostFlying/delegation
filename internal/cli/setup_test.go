@@ -1048,8 +1048,8 @@ func TestSetupTraeXPeerPersistsExactStructuredLaunchAndPassesDoctor(t *testing.T
 		"--broker-url", "wss://broker.example.test",
 		"--auth-mode", "none",
 		"--cli-command", command,
-		"--cli-argument=-p",
-		"--cli-argument=profile with spaces",
+		"--cli-argument=--model",
+		"--cli-argument=model with spaces",
 		"--cli-argument=",
 		"--cli-launcher", launcher,
 		"--cli-launcher-prefix-argument=run",
@@ -1070,7 +1070,7 @@ func TestSetupTraeXPeerPersistsExactStructuredLaunchAndPassesDoctor(t *testing.T
 	}
 	wantCLI := &delegationconfig.CLIConfig{
 		Command:   command,
-		Arguments: []string{"-p", "profile with spaces", ""},
+		Arguments: []string{"--model", "model with spaces", ""},
 		Launcher: &clilaunch.Spec{
 			Executable:      launcher,
 			PrefixArguments: []string{"run", "--"},
@@ -1105,8 +1105,8 @@ func TestSetupCodexPeerAcceptsDirectStructuredCommand(t *testing.T) {
 		"--broker-url", "wss://broker.example.test",
 		"--auth-mode", "none",
 		"--cli-command", command,
-		"--cli-argument=-p",
-		"--cli-argument=ultra",
+		"--cli-argument=--model",
+		"--cli-argument=test",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
@@ -1117,7 +1117,7 @@ func TestSetupCodexPeerAcceptsDirectStructuredCommand(t *testing.T) {
 	}
 	want := &delegationconfig.CLIConfig{
 		Command:   command,
-		Arguments: []string{"-p", "ultra"},
+		Arguments: []string{"--model", "test"},
 	}
 	if cfg.HostKind != hostkind.Codex || !reflect.DeepEqual(cfg.Peer.CLI, want) {
 		t.Fatalf("Codex structured config = %#v", cfg)

@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/GhostFlying/delegation/internal/hostkind"
+	"github.com/GhostFlying/delegation/internal/securefs"
 )
 
 var forbiddenManagedHomeEntries = []string{
@@ -93,6 +95,87 @@ func validateManagedTraeHome(path, homeName string) error {
 		return err
 	}
 	return validateManagedTraeSkills(path, homeName)
+}
+
+// TraeXRepairEntries returns the managed-home-relative entries that must be
+// quarantined before a TraeX worker can run with isolated configuration.
+// Ancestors are returned instead of descendants when the ancestor itself has
+// an invalid type, so callers can move every result exactly once.
+func TraeXRepairEntries(root *securefs.Root) ([]string, error) {
+	var result []string
+	if root == nil {
+		return nil, errors.New("managed TraeX home root is required")
+	}
+	if err := collectTraeXRepairEntries(root, "", &result); err != nil {
+		return nil, err
+	}
+	info, err := root.Lstat("cli")
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return nil, fmt.Errorf("inspect managed TRAECLI_HOME: %w", err)
+	case info.Mode()&os.ModeSymlink != 0 || !info.IsDir():
+		result = append(result, "cli")
+	default:
+		cliRoot, err := root.OpenRoot("cli", nil)
+		if err != nil {
+			return nil, fmt.Errorf("hold managed TRAECLI_HOME: %w", err)
+		}
+		if err := collectTraeXRepairEntries(cliRoot, "cli", &result); err != nil {
+			_ = cliRoot.Close()
+			return nil, err
+		}
+		if err := cliRoot.Close(); err != nil {
+			return nil, err
+		}
+	}
+	slices.Sort(result)
+	return result, nil
+}
+
+func collectTraeXRepairEntries(root *securefs.Root, prefix string, result *[]string) error {
+	for _, entry := range forbiddenManagedTraeHomeEntries {
+		if _, err := root.Lstat(entry); err == nil {
+			*result = append(*result, filepath.Join(prefix, entry))
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect managed TraeX home entry %s: %w", entry, err)
+		}
+	}
+	entries, err := root.Entries()
+	if err != nil {
+		return fmt.Errorf("inspect managed TraeX home: %w", err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(strings.ToLower(entry.Name()), ".traecli.toml") {
+			*result = append(*result, filepath.Join(prefix, entry.Name()))
+		}
+	}
+	info, err := root.Lstat("skills")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect managed TraeX skills: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		*result = append(*result, filepath.Join(prefix, "skills"))
+		return nil
+	}
+	skillsRoot, err := root.OpenRoot("skills", nil)
+	if err != nil {
+		return fmt.Errorf("hold managed TraeX skills: %w", err)
+	}
+	defer skillsRoot.Close()
+	skills, err := skillsRoot.Entries()
+	if err != nil {
+		return fmt.Errorf("inspect managed TraeX skills: %w", err)
+	}
+	for _, entry := range skills {
+		if entry.Name() != ".system" || !entry.IsDir() {
+			*result = append(*result, filepath.Join(prefix, "skills", entry.Name()))
+		}
+	}
+	return nil
 }
 
 func validateManagedTraeProfiles(path, homeName string) error {

@@ -44,13 +44,19 @@ type Backend interface {
 }
 
 type Root struct {
-	backend      Backend
-	controllerID string
-	deviceID     string
-	waitMu       sync.Mutex
-	waitStates   map[string]*agentWaitState
-	waitUse      uint64
+	backend          Backend
+	controllerID     string
+	deviceID         string
+	waitMu           sync.Mutex
+	waitStates       map[string]*agentWaitState
+	waitUse          uint64
+	sessionMu        sync.Mutex
+	sessionStartedAt map[*mcp.ServerSession]int64
+	notificationMu   sync.Mutex
+	lastIntervention protocol.WorkerReadinessCursor
 }
+
+type InterventionNotifier func(context.Context, protocol.WorkerReadiness)
 
 type ListDevicesInput struct {
 	Cursor string `json:"cursor,omitempty" jsonschema:"opaque cursor returned by a previous list_devices call"`
@@ -87,42 +93,50 @@ type DeviceSummary struct {
 }
 
 func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, error) {
+	server, _, err := NewServerWithInterventionNotifications(backend, controllerID, deviceID)
+	return server, err
+}
+
+func NewServerWithInterventionNotifications(
+	backend Backend, controllerID, deviceID string,
+) (*mcp.Server, InterventionNotifier, error) {
 	if backend == nil {
-		return nil, errors.New("root MCP backend is required")
+		return nil, nil, errors.New("root MCP backend is required")
 	}
 	if err := identity.ValidateID(controllerID); err != nil {
-		return nil, fmt.Errorf("root MCP controllerId %w", err)
+		return nil, nil, fmt.Errorf("root MCP controllerId %w", err)
 	}
 	if err := identity.ValidateID(deviceID); err != nil {
-		return nil, fmt.Errorf("root MCP deviceId %w", err)
+		return nil, nil, fmt.Errorf("root MCP deviceId %w", err)
 	}
 	listInputSchema, describeInputSchema, err := inputSchemas()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	spawnInputSchema, listAgentsInputSchema, err := agentInputSchemas()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	sendInputSchema, followupInputSchema, interruptInputSchema, err := agentControlInputSchemas()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	waitInputSchema, err := agentWaitInputSchema()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	workspaceSchema, err := workspaceInputSchema()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	resultApplySchema, err := resultApplyInputSchema()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	root := &Root{
 		backend: backend, controllerID: controllerID, deviceID: deviceID,
-		waitStates: make(map[string]*agentWaitState),
+		waitStates:       make(map[string]*agentWaitState),
+		sessionStartedAt: make(map[*mcp.ServerSession]int64),
 	}
 	server := mcp.NewServer(
 		&mcp.Implementation{
@@ -130,9 +144,14 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 		},
 		&mcp.ServerOptions{
 			Instructions: serverInstructions,
+			InitializedHandler: func(_ context.Context, request *mcp.InitializedRequest) {
+				root.sessionMu.Lock()
+				root.sessionStartedAt[request.Session] = time.Now().UnixMilli()
+				root.sessionMu.Unlock()
+			},
 			Capabilities: &mcp.ServerCapabilities{Experimental: map[string]any{
 				sandboxStateMetaCapability: map[string]any{},
-			}},
+			}, Logging: &mcp.LoggingCapabilities{}},
 		},
 	)
 	mcp.AddTool(server, &mcp.Tool{
@@ -205,7 +224,56 @@ func NewServer(backend Backend, controllerID, deviceID string) (*mcp.Server, err
 		Annotations: consumingAnnotations(),
 		InputSchema: waitInputSchema,
 	}, root.waitAgent)
-	return server, nil
+	notify := func(ctx context.Context, readiness protocol.WorkerReadiness) {
+		root.notifyIntervention(ctx, server, readiness)
+	}
+	return server, notify, nil
+}
+
+func (r *Root) notifyIntervention(
+	ctx context.Context, server *mcp.Server, readiness protocol.WorkerReadiness,
+) {
+	if readiness.Validate() != nil ||
+		readiness.State != protocol.WorkerReadinessInterventionRequired {
+		return
+	}
+	r.notificationMu.Lock()
+	if r.lastIntervention.Epoch != 0 &&
+		!r.lastIntervention.Before(readiness) {
+		r.notificationMu.Unlock()
+		return
+	}
+	r.lastIntervention = readiness.Cursor()
+	r.notificationMu.Unlock()
+	active := make(map[*mcp.ServerSession]struct{})
+	for session := range server.Sessions() {
+		active[session] = struct{}{}
+	}
+	r.sessionMu.Lock()
+	started := make(map[*mcp.ServerSession]int64, len(r.sessionStartedAt))
+	for session, timestamp := range r.sessionStartedAt {
+		if _, ok := active[session]; ok {
+			started[session] = timestamp
+		} else {
+			delete(r.sessionStartedAt, session)
+		}
+	}
+	r.sessionMu.Unlock()
+	params := &mcp.LoggingMessageParams{
+		Level: "error", Logger: "delegation.worker_readiness",
+		Data: map[string]any{
+			"state": string(readiness.State), "epoch": readiness.Epoch,
+			"failureCode": readiness.FailureCode,
+		},
+	}
+	for session := range active {
+		if timestamp, ok := started[session]; !ok || timestamp >= readiness.UpdatedAt {
+			continue
+		}
+		logCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_ = session.Log(logCtx, params)
+		cancel()
+	}
 }
 
 func (r *Root) listDevices(

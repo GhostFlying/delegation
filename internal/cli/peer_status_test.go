@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,8 +37,13 @@ func (s staticConnectorStatus) Status() connector.Status {
 }
 
 type staticPeerStatusStore struct {
-	status store.PeerStatusSnapshot
-	err    error
+	status    store.PeerStatusSnapshot
+	readiness protocol.WorkerReadiness
+	err       error
+}
+
+func (s staticPeerStatusStore) WorkerReadiness(context.Context) (protocol.WorkerReadiness, error) {
+	return s.readiness, s.err
 }
 
 func (s staticPeerStatusStore) ReadPeerStatusSnapshot(
@@ -70,6 +77,7 @@ func (statusTestBackend) Call(
 }
 
 func TestPeerLocalStatusProviderCombinesLiveAndDurableState(t *testing.T) {
+	readiness := readyStatusTestReadiness()
 	durable := store.PeerStatusSnapshot{
 		WorkerRevision: 77,
 		Workers: store.PeerStatusWorkerCounts{
@@ -95,7 +103,7 @@ func TestPeerLocalStatusProviderCombinesLiveAndDurableState(t *testing.T) {
 		client: staticConnectorStatus{status: connector.Status{
 			Connected: true, RegistryRevision: 42, WorkerRevision: 77,
 		}},
-		state:          staticPeerStatusStore{status: durable},
+		state:          staticPeerStatusStore{status: durable, readiness: readiness},
 		transport:      delegationconfig.TransportStatus{Transport: "tcp"},
 		controllerID:   statusTestControllerID,
 		deviceID:       statusTestDeviceID,
@@ -120,6 +128,9 @@ func TestPeerLocalStatusProviderCombinesLiveAndDurableState(t *testing.T) {
 		WorkerRevision:       77,
 		BrokerWorkerRevision: 77,
 		WorkerSyncReady:      true,
+		WorkerReady:          true,
+		Dispatchable:         true,
+		WorkerReadiness:      readiness,
 		MaxWorkerSlots:       8,
 		Workers: localbridge.WorkerCounts{
 			Total: 10, Reserved: 1, Pending: 1, Starting: 1, Preflight: 1,
@@ -161,7 +172,9 @@ func TestPeerLocalStatusProviderCombinesLiveAndDurableState(t *testing.T) {
 		StateRecoveryRequired: true, RecoveryPeerWorkerRevision: 9,
 		RecoveryBrokerWorkerRevision: 91,
 	}}
-	provider.state = staticPeerStatusStore{status: store.PeerStatusSnapshot{WorkerRevision: 100}}
+	provider.state = staticPeerStatusStore{
+		status: store.PeerStatusSnapshot{WorkerRevision: 100}, readiness: readiness,
+	}
 	got, err = provider.LocalStatus(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -218,6 +231,17 @@ service running: true
 broker connection: ready
 connected: true
 worker sync ready: true
+worker ready: true
+dispatchable: true
+readiness epoch: 1
+readiness state: ready
+readiness attempts: 1/5
+readiness runtime digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+readiness config digest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+readiness epoch started at: 1
+readiness next attempt at: 0
+readiness last attempt at: 1
+readiness updated at: 1
 registry revision: 42
 worker revision: 77
 broker worker revision: 77
@@ -258,7 +282,7 @@ results:
 		{
 			name: "JSON",
 			args: []string{"status", "--config", configPath, "--json"},
-			want: `{"transport":"tcp","version":"0.2.0-test","controllerId":"123e4567-e89b-42d3-a456-426614174800","deviceId":"123e4567-e89b-42d3-a456-426614174801","deviceName":"status-peer","serviceRunning":true,"connectionState":"ready","connectionErrorCode":"","connected":true,"registryRevision":42,"workerRevision":77,"brokerWorkerRevision":77,"recoveryPeerWorkerRevision":0,"workerSyncReady":true,"maxWorkerSlots":8,"workers":{"total":10,"reserved":1,"pending":1,"starting":1,"preflight":1,"ready":1,"running":1,"finalizing":1,"idle":1,"interrupted":1,"failed":1,"occupied":6},"artifacts":{"capturePending":2,"publishPending":3,"retained":4,"retainedBytes":8192},"results":{"outboxCapturePending":1,"outboxPublishPending":2,"outboxDeliveryPending":3,"outboxDelivered":4,"outboxReleasePending":5,"outboxRetainedBytes":16384,"inboxReceiving":5,"inboxAvailable":6,"inboxEvictionPending":7,"inboxEvicted":8,"inboxRetainedBytes":32768,"rolloutCaptureFailed":2,"workspaceCaptureFailed":1}}` + "\n",
+			want: `{"transport":"tcp","version":"0.2.0-test","controllerId":"123e4567-e89b-42d3-a456-426614174800","deviceId":"123e4567-e89b-42d3-a456-426614174801","deviceName":"status-peer","serviceRunning":true,"connectionState":"ready","connectionErrorCode":"","connected":true,"registryRevision":42,"workerRevision":77,"brokerWorkerRevision":77,"recoveryPeerWorkerRevision":0,"workerSyncReady":true,"workerReady":true,"dispatchable":true,"workerReadiness":{"epoch":1,"state":"ready","attemptCount":1,"runtimeDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","configDigest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","epochStartedAt":1,"nextAttemptAt":0,"lastAttemptAt":1,"failureCode":"","updatedAt":1},"maxWorkerSlots":8,"workers":{"total":10,"reserved":1,"pending":1,"starting":1,"preflight":1,"ready":1,"running":1,"finalizing":1,"idle":1,"interrupted":1,"failed":1,"occupied":6},"artifacts":{"capturePending":2,"publishPending":3,"retained":4,"retainedBytes":8192},"results":{"outboxCapturePending":1,"outboxPublishPending":2,"outboxDeliveryPending":3,"outboxDelivered":4,"outboxReleasePending":5,"outboxRetainedBytes":16384,"inboxReceiving":5,"inboxAvailable":6,"inboxEvictionPending":7,"inboxEvicted":8,"inboxRetainedBytes":32768,"rolloutCaptureFailed":2,"workspaceCaptureFailed":1}}` + "\n",
 		},
 	}
 	for _, test := range tests {
@@ -292,14 +316,14 @@ func TestStatusCommandReturnsBoundedRoleAndPeerErrors(t *testing.T) {
 	}{
 		{
 			name: "peer unavailable", config: peerConfig,
-			read: func(context.Context, string) (localbridge.StatusSnapshot, error) {
+			read: func(context.Context, string, localbridge.ServiceIdentity) (localbridge.StatusSnapshot, error) {
 				return localbridge.StatusSnapshot{}, hugeError
 			},
 			wantCode: exitUnavailable, wantErr: peerStatusUnavailableError,
 		},
 		{
 			name: "broker not integrated", config: brokerConfig,
-			read: func(context.Context, string) (localbridge.StatusSnapshot, error) {
+			read: func(context.Context, string, localbridge.ServiceIdentity) (localbridge.StatusSnapshot, error) {
 				t.Fatal("broker status called peer reader")
 				return localbridge.StatusSnapshot{}, nil
 			},
@@ -307,7 +331,7 @@ func TestStatusCommandReturnsBoundedRoleAndPeerErrors(t *testing.T) {
 		},
 		{
 			name: "peer identity mismatch", config: peerConfig,
-			read: func(context.Context, string) (localbridge.StatusSnapshot, error) {
+			read: func(context.Context, string, localbridge.ServiceIdentity) (localbridge.StatusSnapshot, error) {
 				status := statusTestSnapshot(peerCfg)
 				status.DeviceID = statusTestOtherID
 				return status, nil
@@ -316,7 +340,7 @@ func TestStatusCommandReturnsBoundedRoleAndPeerErrors(t *testing.T) {
 		},
 		{
 			name: "peer transport mismatch", config: peerConfig,
-			read: func(context.Context, string) (localbridge.StatusSnapshot, error) {
+			read: func(context.Context, string, localbridge.ServiceIdentity) (localbridge.StatusSnapshot, error) {
 				status := statusTestSnapshot(peerCfg)
 				status.TransportStatus = delegationconfig.TransportStatus{
 					Transport:         "tailscale",
@@ -347,6 +371,237 @@ func TestStatusCommandReturnsBoundedRoleAndPeerErrors(t *testing.T) {
 				t.Fatal("status error leaked provider details")
 			}
 		})
+	}
+}
+
+func TestStatusCommandRendersStoppedProfileInvalidPeerReadiness(t *testing.T) {
+	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RolePeer)
+	cfg.Peer.CLI = &delegationconfig.CLIConfig{
+		Command: testCodexBinary(t), Arguments: []string{"--profile", "legacy"},
+	}
+	cfg.Peer.CodexBinary = ""
+	rewriteStatusTestConfig(t, configPath, cfg)
+	persistStatusTestReadinessFailure(t, cfg, protocol.WorkerProfileUnsupported)
+
+	readCalls := 0
+	read := func(context.Context, string, localbridge.ServiceIdentity) (localbridge.StatusSnapshot, error) {
+		readCalls++
+		return localbridge.StatusSnapshot{}, errors.New("service stopped")
+	}
+	for _, test := range []struct {
+		name       string
+		jsonOutput bool
+	}{
+		{name: "text"},
+		{name: "JSON", jsonOutput: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := []string{"--config", configPath}
+			if test.jsonOutput {
+				args = append(args, "--json")
+			}
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if code := runStatusWithReader(args, &stdout, &stderr, read); code != 0 {
+				t.Fatalf("runStatusWithReader() code = %d, stderr = %q", code, stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+			if test.jsonOutput {
+				var status localbridge.StatusSnapshot
+				if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+					t.Fatal(err)
+				}
+				if status.ServiceRunning || status.Connected || status.WorkerSyncReady ||
+					status.Dispatchable || status.ConnectionState != localbridge.ConnectionConnecting ||
+					status.WorkerReadiness.State != protocol.WorkerReadinessInterventionRequired ||
+					status.WorkerReadiness.FailureCode != protocol.WorkerProfileUnsupported {
+					t.Fatalf("stopped JSON status = %#v", status)
+				}
+				return
+			}
+			for _, want := range []string{
+				"service running: false\n",
+				"connected: false\n",
+				"worker sync ready: false\n",
+				"dispatchable: false\n",
+				"readiness state: intervention_required\n",
+				"readiness failure: profile_arguments_unsupported\n",
+			} {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("stdout %q does not contain %q", stdout.String(), want)
+				}
+			}
+		})
+	}
+	if readCalls != 2 {
+		t.Fatalf("bridge read calls = %d, want 2", readCalls)
+	}
+}
+
+func TestStatusCommandRendersOtherStoppedPeerInterventionFailures(t *testing.T) {
+	for _, failureCode := range []string{
+		protocol.WorkerManagedHomeInvalid,
+		protocol.WorkerHostUnsupported,
+	} {
+		t.Run(failureCode, func(t *testing.T) {
+			configPath, cfg := writeStatusTestConfig(t, delegationconfig.RolePeer)
+			persistStatusTestReadinessFailure(t, cfg, failureCode)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := runStatusWithReader(
+				[]string{"--config", configPath, "--json"}, &stdout, &stderr,
+				func(context.Context, string, localbridge.ServiceIdentity) (localbridge.StatusSnapshot, error) {
+					return localbridge.StatusSnapshot{}, errors.New("service stopped")
+				},
+			)
+			if code != 0 {
+				t.Fatalf("runStatusWithReader() code = %d, stderr = %q", code, stderr.String())
+			}
+			var status localbridge.StatusSnapshot
+			if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+				t.Fatal(err)
+			}
+			if status.ServiceRunning || status.Dispatchable ||
+				status.WorkerReadiness.FailureCode != failureCode {
+				t.Fatalf("stopped status = %#v", status)
+			}
+		})
+	}
+}
+
+func TestStatusCommandDoesNotFallbackAfterReachableIdentityMismatch(t *testing.T) {
+	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RolePeer)
+	persistStatusTestReadinessFailure(t, cfg, protocol.WorkerManagedHomeInvalid)
+	for _, test := range []struct {
+		name string
+		read statusReader
+	}{
+		{
+			name: "returned snapshot",
+			read: func(context.Context, string, localbridge.ServiceIdentity) (localbridge.StatusSnapshot, error) {
+				status := statusTestSnapshot(cfg)
+				status.DeviceID = statusTestOtherID
+				return status, nil
+			},
+		},
+		{
+			name: "identity probe error",
+			read: func(context.Context, string, localbridge.ServiceIdentity) (localbridge.StatusSnapshot, error) {
+				return localbridge.StatusSnapshot{}, fmt.Errorf(
+					"probe: %w", localbridge.ErrServiceIdentityMismatch,
+				)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := runStatusWithReader(
+				[]string{"--config", configPath}, &stdout, &stderr, test.read,
+			)
+			if code != exitUnavailable || stdout.Len() != 0 ||
+				stderr.String() != peerStatusUnavailableError {
+				t.Fatalf("status = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestStatusCommandRejectsReachableForeignBridgeWithoutOfflineFallback(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		home, err := os.MkdirTemp("/tmp", "ds-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(home) })
+		t.Setenv("HOME", home)
+	}
+	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RolePeer)
+	persistStatusTestReadinessFailure(t, cfg, protocol.WorkerManagedHomeInvalid)
+	endpoint, err := localbridge.EndpointForInstance(
+		cfg.EffectiveInstanceID(), cfg.ControllerID, cfg.DeviceID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignIdentity := localbridge.ServiceIdentity{
+		InstanceID: cfg.EffectiveInstanceID(), ControllerID: cfg.ControllerID, DeviceID: statusTestOtherID,
+	}
+	foreignStatus := statusTestSnapshot(cfg)
+	foreignStatus.DeviceID = statusTestOtherID
+	server, err := localbridge.ListenWithStatus(
+		endpoint, foreignIdentity, statusTestBackend{}, nil,
+		staticLocalStatus{status: foreignStatus},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = server.Close()
+		if err := <-done; err != nil {
+			t.Errorf("serve foreign bridge: %v", err)
+		}
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"status", "--config", configPath}, &stdout, &stderr)
+	if code != exitUnavailable || stdout.Len() != 0 || stderr.String() != peerStatusUnavailableError {
+		t.Fatalf("status = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestStatusCommandRejectsUnrelatedValidationErrorBeforeBridgeOrOfflineState(t *testing.T) {
+	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RolePeer)
+	cfg.Peer.MaxWorkerSlots = 0
+	rewriteStatusTestConfig(t, configPath, cfg)
+	bridgeCalls := 0
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runStatusWithReader(
+		[]string{"--config", configPath}, &stdout, &stderr,
+		func(context.Context, string, localbridge.ServiceIdentity) (localbridge.StatusSnapshot, error) {
+			bridgeCalls++
+			return localbridge.StatusSnapshot{}, errors.New("unexpected bridge call")
+		},
+	)
+	if code != 1 || stdout.Len() != 0 || bridgeCalls != 0 ||
+		!strings.Contains(stderr.String(), "peer maxWorkerSlots must be from 1") {
+		t.Fatalf(
+			"status = %d, bridge calls %d, stdout %q, stderr %q",
+			code, bridgeCalls, stdout.String(), stderr.String(),
+		)
+	}
+	if _, err := os.Lstat(cfg.Peer.StateFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid config created or read peer state: %v", err)
+	}
+}
+
+func TestStatusCommandDoesNotReadOfflineStateWhilePeerLeaseIsHeld(t *testing.T) {
+	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RolePeer)
+	persistStatusTestReadinessFailure(t, cfg, protocol.WorkerManagedHomeInvalid)
+	lease, err := store.AcquirePeerLease(cfg.Peer.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runStatusWithReader(
+		[]string{"--config", configPath}, &stdout, &stderr,
+		func(context.Context, string, localbridge.ServiceIdentity) (localbridge.StatusSnapshot, error) {
+			return localbridge.StatusSnapshot{}, errors.New("bridge unavailable")
+		},
+	)
+	if code != exitUnavailable || stdout.Len() != 0 || stderr.String() != peerStatusUnavailableError {
+		t.Fatalf("status = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -418,7 +673,43 @@ func writeStatusTestConfig(
 	return configPath, cfg
 }
 
+func rewriteStatusTestConfig(t *testing.T, path string, cfg delegationconfig.Config) {
+	t.Helper()
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement = append(replacement, '\n')
+	if err := delegationconfig.ReplaceProtectedFile(path, original, replacement); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func persistStatusTestReadinessFailure(
+	t *testing.T, cfg delegationconfig.Config, failureCode string,
+) {
+	t.Helper()
+	state, err := store.OpenPeer(context.Background(), cfg.Peer.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	if _, err := state.EnsureWorkerReadinessEpoch(
+		context.Background(), strings.Repeat("a", 64), strings.Repeat("b", 64), 1,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.FailWorkerReadiness(context.Background(), failureCode, 2); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func statusTestSnapshot(cfg delegationconfig.Config) localbridge.StatusSnapshot {
+	readiness := readyStatusTestReadiness()
 	return localbridge.StatusSnapshot{
 		TransportStatus:      delegationconfig.TransportStatus{Transport: "tcp"},
 		Version:              "0.2.0-test",
@@ -432,6 +723,9 @@ func statusTestSnapshot(cfg delegationconfig.Config) localbridge.StatusSnapshot 
 		WorkerRevision:       77,
 		BrokerWorkerRevision: 77,
 		WorkerSyncReady:      true,
+		WorkerReady:          true,
+		Dispatchable:         true,
+		WorkerReadiness:      readiness,
 		MaxWorkerSlots:       cfg.Peer.MaxWorkerSlots,
 		Workers: localbridge.WorkerCounts{
 			Total: 10, Reserved: 1, Pending: 1, Starting: 1, Preflight: 1,
@@ -451,6 +745,14 @@ func statusTestSnapshot(cfg delegationconfig.Config) localbridge.StatusSnapshot 
 			InboxRetainedBytes:   32768,
 			RolloutCaptureFailed: 2, WorkspaceCaptureFailed: 1,
 		},
+	}
+}
+
+func readyStatusTestReadiness() protocol.WorkerReadiness {
+	return protocol.WorkerReadiness{
+		Epoch: 1, State: protocol.WorkerReadinessReady, AttemptCount: 1,
+		RuntimeDigest: strings.Repeat("a", 64), ConfigDigest: strings.Repeat("b", 64),
+		EpochStartedAt: 1, LastAttemptAt: 1, UpdatedAt: 1,
 	}
 }
 

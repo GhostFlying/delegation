@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -45,6 +46,27 @@ func (s *session) handleSpawnAgent(ctx context.Context, request protocol.Envelop
 	params, err := protocol.DecodePayload[protocol.SpawnAgentParams](request.Payload)
 	if err != nil || params.Validate() != nil {
 		return s.writeError(ctx, request, protocol.ErrorInvalidParams, "invalid agent spawn payload")
+	}
+	readiness, err := s.server.registry.WorkerReadiness(
+		ctx, s.server.controllerID, params.TargetDeviceID,
+	)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		if isContextError(err) {
+			return err
+		}
+		_ = s.writeError(ctx, request, protocol.ErrorUnavailable, "target worker readiness unavailable")
+		return &internalError{operation: "read target worker readiness", err: err}
+	}
+	if err == nil && readiness.State == protocol.WorkerReadinessInterventionRequired {
+		data, marshalErr := json.Marshal(protocol.WorkerInterventionRequiredErrorData{
+			Code: protocol.WorkerInterventionRequiredCode, FailureCode: readiness.FailureCode,
+		})
+		if marshalErr != nil {
+			return &internalError{operation: "encode worker intervention details", err: marshalErr}
+		}
+		return s.writeErrorData(
+			ctx, request, protocol.ErrorUnavailable, "target worker intervention required", data,
+		)
 	}
 	agentID, err := s.server.newID()
 	if err != nil {
@@ -169,7 +191,7 @@ func (s *session) handleAgentStoreError(
 func (s *Server) connection(deviceID string) *session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.workerReadyConnectionLocked(deviceID)
+	return s.dispatchableConnectionLocked(deviceID)
 }
 
 func validateTargetWorkerResult(result protocol.SpawnWorkerResult, agent protocol.AgentSummary) error {

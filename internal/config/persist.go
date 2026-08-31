@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +40,114 @@ func WriteNew(path string, cfg Config) error {
 func WriteNewForRuntime(path string, cfg Config, capabilities RuntimeCapabilities) error {
 	return writeNewForRuntime(path, cfg, capabilities)
 }
+
+// EncodeForRuntime returns the canonical on-disk representation after full
+// runtime-aware validation.
+func EncodeForRuntime(cfg Config, capabilities RuntimeCapabilities) ([]byte, error) {
+	if err := cfg.ValidateForRuntime(capabilities); err != nil {
+		return nil, err
+	}
+	var data bytes.Buffer
+	encoder := json.NewEncoder(&data)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(cfg); err != nil {
+		return nil, fmt.Errorf("encode config: %w", err)
+	}
+	return data.Bytes(), nil
+}
+
+// ReplaceProtectedFile atomically replaces an existing protected regular file
+// only if its bytes still equal expected. This prevents repair from overwriting
+// a concurrent operator edit.
+func ReplaceProtectedFile(path string, expected, replacement []byte) error {
+	if len(replacement) == 0 || len(replacement) > maximumConfigSize {
+		return errors.New("replacement config size is invalid")
+	}
+	directory, err := holdConfigDirectory(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	name := filepath.Base(path)
+	current, _, err := readProtectedConfigAt(directory, name, maximumConfigSize)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(current, expected) {
+		return errors.New("config changed during repair")
+	}
+	tempName, temp, err := createConfigTemp(directory)
+	if err != nil {
+		return fmt.Errorf("create replacement config: %w", err)
+	}
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = directory.Remove(tempName)
+		}
+	}()
+	if _, err := temp.Write(replacement); err != nil {
+		temp.Close()
+		return fmt.Errorf("write replacement config: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return fmt.Errorf("sync replacement config: %w", err)
+	}
+	replacementInfo, err := temp.Stat()
+	if err != nil {
+		temp.Close()
+		return fmt.Errorf("inspect replacement config: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close replacement config: %w", err)
+	}
+	if err := directory.VerifyPath(); err != nil {
+		return err
+	}
+	beforeProtectedFileExchange()
+	if err := directory.Exchange(tempName, name); err != nil {
+		return fmt.Errorf("replace config: %w", err)
+	}
+	displaced, _, displacedErr := readProtectedConfigAt(directory, tempName, maximumConfigSize)
+	installed, installedErr := directory.Lstat(name)
+	if displacedErr != nil || installedErr != nil || !os.SameFile(replacementInfo, installed) ||
+		!bytes.Equal(displaced, expected) {
+		if installedErr != nil || !os.SameFile(replacementInfo, installed) {
+			removeTemp = false
+			return &CommittedError{Err: errors.Join(
+				errors.New("config path changed after replacement"), displacedErr, installedErr,
+			)}
+		}
+		if restoreErr := directory.Exchange(tempName, name); restoreErr != nil {
+			removeTemp = false
+			return &CommittedError{Err: fmt.Errorf(
+				"config changed during repair and restoration failed: %w", restoreErr,
+			)}
+		}
+		if syncErr := directory.Sync(); syncErr != nil {
+			return &CommittedError{Err: fmt.Errorf("sync restored config: %w", syncErr)}
+		}
+		return errors.Join(errors.New("config changed during repair"), displacedErr)
+	}
+	if err := directory.Sync(); err != nil {
+		return &CommittedError{Err: fmt.Errorf("sync replaced config: %w", err)}
+	}
+	if err := directory.Remove(tempName); err != nil {
+		removeTemp = false
+		return &CommittedError{Err: fmt.Errorf("remove displaced config: %w", err)}
+	}
+	removeTemp = false
+	if err := directory.Sync(); err != nil {
+		return &CommittedError{Err: fmt.Errorf("sync displaced config removal: %w", err)}
+	}
+	if err := directory.VerifyPath(); err != nil {
+		return &CommittedError{Err: err}
+	}
+	return nil
+}
+
+var beforeProtectedFileExchange = func() {}
 
 func writeNewForRuntime(path string, cfg Config, capabilities RuntimeCapabilities) error {
 	if err := cfg.ValidateForRuntime(capabilities); err != nil {

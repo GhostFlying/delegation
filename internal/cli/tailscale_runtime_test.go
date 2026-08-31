@@ -234,7 +234,7 @@ func TestStatusRendersSafeTailscaleHumanOutput(t *testing.T) {
 					readBroker,
 				)
 			} else {
-				readPeer := func(context.Context, string) (localbridge.StatusSnapshot, error) {
+				readPeer := func(context.Context, string, localbridge.ServiceIdentity) (localbridge.StatusSnapshot, error) {
 					status := statusTestSnapshot(cfg)
 					status.TransportStatus = cfg.Transport.Status()
 					return status, nil

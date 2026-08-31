@@ -50,6 +50,8 @@ type session struct {
 	errMu              sync.Mutex
 	closeErr           error
 	heartbeatSucceeded atomic.Bool
+	readinessMu        sync.Mutex
+	readinessEpoch     uint64
 	inboundSem         chan struct{}
 	inboundMu          sync.Mutex
 	inbound            map[string]context.CancelFunc
@@ -57,6 +59,16 @@ type session struct {
 	workspaceStopping  bool
 	context            context.Context
 	cancel             context.CancelFunc
+}
+
+func (s *session) claimTerminalReadinessUpdate(epoch uint64) bool {
+	s.readinessMu.Lock()
+	defer s.readinessMu.Unlock()
+	if s.readinessEpoch == epoch {
+		return false
+	}
+	s.readinessEpoch = epoch
+	return true
 }
 
 func newSession(client *Client, connection *websocket.Conn) *session {

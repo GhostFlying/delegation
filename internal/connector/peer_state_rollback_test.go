@@ -128,6 +128,7 @@ func TestConnectorRetainsStartupRollbackWhenLocalRevisionAdvances(t *testing.T) 
 		RuntimeVersion: "0.1.0-alpha.0.m1.1", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: lifecycle,
+		WorkerReadinessSource: testWorkerSpawner{},
 		ChangesArtifactSource: testWorkerSpawner{}, WorkspaceManager: testWorkerSpawner{},
 	})
 	if err != nil {

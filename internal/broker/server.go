@@ -72,6 +72,8 @@ type Registry interface {
 	QueueAgentMessageAndFinishOperation(context.Context, store.AgentOperationKey, string, time.Time) (store.AgentOperationReceipt, store.MailboxDelivery, error)
 	ClaimWorkerLifecycleSession(context.Context, store.WorkerLifecycleSessionClaim) (uint64, error)
 	ApplyWorkerLifecyclePage(context.Context, store.WorkerLifecyclePageApply) (protocol.SyncWorkerLifecycleResult, error)
+	PutWorkerReadiness(context.Context, string, string, protocol.WorkerReadiness) (protocol.WorkerReadiness, error)
+	WorkerReadiness(context.Context, string, string) (protocol.WorkerReadiness, error)
 	ListAgentLifecycleActivity(context.Context, control.PrincipalIdentity, store.AgentLifecyclePageRequest) (store.AgentLifecyclePage, error)
 	PublishChangesArtifact(context.Context, string, control.PrincipalIdentity, protocol.PublishChangesArtifactParams, time.Time) (protocol.PublishChangesArtifactResult, error)
 	ListChangesArtifacts(context.Context, control.PrincipalIdentity, store.ChangesArtifactPageRequest) (store.ChangesArtifactPage, error)
@@ -162,26 +164,29 @@ type peerAuthority struct {
 }
 
 type session struct {
-	server        *Server
-	connection    *websocket.Conn
-	connectionID  string
-	deviceID      string
-	credentialMAC *store.CredentialMAC
-	revision      atomic.Uint64
-	workerInitial uint64
-	workerHigh    atomic.Uint64
-	workerApplied atomic.Uint64
-	workerReady   atomic.Bool
-	asyncSem      chan struct{}
-	async         sync.WaitGroup
-	asyncMu       sync.Mutex
-	asyncCancels  map[string]context.CancelFunc
-	writeMu       sync.Mutex
-	pendingMu     sync.Mutex
-	pending       map[string]peerPendingCall
-	finishOnce    sync.Once
-	done          chan struct{}
-	closeErr      error
+	server            *Server
+	connection        *websocket.Conn
+	connectionID      string
+	deviceID          string
+	credentialMAC     *store.CredentialMAC
+	revision          atomic.Uint64
+	workerInitial     uint64
+	workerHigh        atomic.Uint64
+	workerApplied     atomic.Uint64
+	workerSyncReady   atomic.Bool
+	workerReady       atomic.Bool
+	versionCompatible atomic.Bool
+	draining          atomic.Bool
+	asyncSem          chan struct{}
+	async             sync.WaitGroup
+	asyncMu           sync.Mutex
+	asyncCancels      map[string]context.CancelFunc
+	writeMu           sync.Mutex
+	pendingMu         sync.Mutex
+	pending           map[string]peerPendingCall
+	finishOnce        sync.Once
+	done              chan struct{}
+	closeErr          error
 }
 
 type peerCallResult struct {
@@ -542,7 +547,7 @@ func (s *Server) handleConnect(writer http.ResponseWriter, request *http.Request
 	if previous != nil {
 		_ = previous.connection.CloseNow()
 	}
-	if current.workerReady.Load() {
+	if current.workerSyncReady.Load() {
 		s.resultRelays.schedulePeerReconnect(current.deviceID)
 	}
 	defer s.deactivate(current)
@@ -678,7 +683,23 @@ func (s *Server) acceptHello(
 		return nil, &internalError{operation: "claim worker lifecycle session", err: err}
 	}
 	current.workerApplied.Store(appliedRevision)
-	current.workerReady.Store(appliedRevision == hello.WorkerRevision)
+	current.workerSyncReady.Store(appliedRevision == hello.WorkerRevision)
+	current.versionCompatible.Store(true)
+	persistedReadiness, err := s.registry.PutWorkerReadiness(
+		ctx, s.controllerID, current.deviceID, hello.WorkerReadiness,
+	)
+	if err != nil {
+		s.releaseLease(current)
+		code := protocol.ErrorUnavailable
+		message := "broker failed to persist worker readiness"
+		if errors.Is(err, store.ErrWorkerReadinessStale) {
+			code = protocol.ErrorConflict
+			message = "worker readiness is behind broker state"
+		}
+		_ = s.writeError(ctx, connection, envelope, code, message)
+		return nil, &internalError{operation: "persist hello worker readiness", err: err}
+	}
+	current.workerReady.Store(persistedReadiness.IsReady())
 	result := protocol.HelloResult{
 		ConnectionID:          connectionID,
 		HostKind:              s.hostKind,
@@ -686,6 +707,7 @@ func (s *Server) acceptHello(
 		HeartbeatIntervalMS:   s.heartbeatInterval.Milliseconds(),
 		Revision:              device.Revision,
 		WorkerAppliedRevision: appliedRevision,
+		WorkerReadiness:       persistedReadiness,
 	}
 	if err := s.writeResult(ctx, connection, envelope, result); err != nil {
 		s.releaseLease(current)
@@ -705,6 +727,7 @@ func brokerProtocolFeatures() []string {
 		protocol.FeatureResultApply,
 		protocol.FeatureResultPackage,
 		protocol.FeatureWorkerLifecycle,
+		protocol.FeatureWorkerReadiness,
 		protocol.FeatureWorkspaceSync,
 		protocol.FeatureWorkspaceTransfer,
 	}
@@ -778,11 +801,11 @@ func (s *Server) deactivate(current *session) {
 	s.releaseLease(current)
 }
 
-func (s *Server) markWorkerReady(current *session) {
+func (s *Server) markWorkerSyncReady(current *session) {
 	s.mu.Lock()
 	scheduleReconnect := false
-	if !current.workerReady.Load() {
-		current.workerReady.Store(true)
+	if !current.workerSyncReady.Load() {
+		current.workerSyncReady.Store(true)
 		if s.currentConnectionLocked(current.deviceID) == current {
 			s.statusGeneration++
 			scheduleReconnect = true
@@ -802,9 +825,18 @@ func (s *Server) currentConnectionLocked(deviceID string) *session {
 	return current
 }
 
-func (s *Server) workerReadyConnectionLocked(deviceID string) *session {
+func (s *Server) workerSyncReadyConnectionLocked(deviceID string) *session {
 	current := s.currentConnectionLocked(deviceID)
-	if current == nil || !current.workerReady.Load() {
+	if current == nil || !current.workerSyncReady.Load() {
+		return nil
+	}
+	return current
+}
+
+func (s *Server) dispatchableConnectionLocked(deviceID string) *session {
+	current := s.workerSyncReadyConnectionLocked(deviceID)
+	if current == nil || !current.workerReady.Load() ||
+		!current.versionCompatible.Load() || current.draining.Load() {
 		return nil
 	}
 	return current
@@ -973,6 +1005,8 @@ func (s *session) handleEnvelope(
 		return false, s.startAgentOperation(ctx, sessionContext, envelope)
 	case protocol.MethodSyncWorkerLifecycle:
 		return false, s.handleSyncWorkerLifecycle(ctx, envelope)
+	case protocol.MethodUpdateWorkerReadiness:
+		return false, s.handleUpdateWorkerReadiness(ctx, envelope)
 	case protocol.MethodPublishChangesArtifact:
 		return false, s.handlePublishChangesArtifact(ctx, envelope)
 	case protocol.MethodPublishResultPackage:
@@ -1356,6 +1390,16 @@ func (s *session) writeError(
 	code int,
 	message string,
 ) error {
+	return s.writeErrorData(ctx, request, code, message, nil)
+}
+
+func (s *session) writeErrorData(
+	ctx context.Context,
+	request protocol.Envelope,
+	code int,
+	message string,
+	data json.RawMessage,
+) error {
 	requestID, err := protocol.NewRequestID(protocol.DirectionBroker)
 	if err != nil {
 		return err
@@ -1367,7 +1411,7 @@ func (s *session) writeError(
 		ReplyTo:         request.RequestID,
 		ControllerID:    s.server.controllerID,
 		TreeID:          request.TreeID,
-		Error:           &protocol.Error{Code: code, Message: message},
+		Error:           &protocol.Error{Code: code, Message: message, Data: data},
 	})
 }
 

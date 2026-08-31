@@ -28,6 +28,10 @@ const (
 	MaximumWorkerSlots   = 64
 )
 
+var ErrPeerCLIProfileArgumentsUnsupported = errors.New(
+	"peer CLI profile arguments are unsupported",
+)
+
 type Role string
 
 const (
@@ -174,47 +178,85 @@ func Read(path string) (Config, error) {
 // ReadForRuntime reads and validates a configuration against explicitly
 // available runtime transport capabilities.
 func ReadForRuntime(path string, capabilities RuntimeCapabilities) (Config, error) {
-	file, err := openProtectedConfig(path)
+	cfg, _, err := readUnvalidated(path)
 	if err != nil {
-		return Config{}, fmt.Errorf("read config: %w", err)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maximumConfigSize+1))
-	closeErr := file.Close()
-	if err != nil {
-		return Config{}, fmt.Errorf("read config: %w", err)
-	}
-	if closeErr != nil {
-		return Config{}, fmt.Errorf("close config: %w", closeErr)
-	}
-	if len(data) > maximumConfigSize {
-		return Config{}, fmt.Errorf("config exceeds %d-byte limit", maximumConfigSize)
-	}
-	var header struct {
-		SchemaVersion int             `json:"schemaVersion"`
-		Transport     json.RawMessage `json:"transport"`
-	}
-	if err := json.Unmarshal(data, &header); err != nil {
-		return Config{}, fmt.Errorf("decode config: %w", err)
-	}
-	if header.SchemaVersion != CurrentSchemaVersion {
-		return Config{}, unsupportedSchemaVersion(header.SchemaVersion)
-	}
-	if err := validateTransportJSON(header.Transport); err != nil {
-		return Config{}, err
-	}
-	var cfg Config
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&cfg); err != nil {
-		return Config{}, fmt.Errorf("decode config: %w", err)
-	}
-	if err := ensureJSONEOF(decoder); err != nil {
 		return Config{}, err
 	}
 	if err := cfg.ValidateForRuntime(capabilities); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// ReadForStartupClassification strictly decodes a protected configuration and
+// returns the decoded identity even when runtime validation fails. Callers must
+// never execute the returned configuration unless validationErr is nil; the
+// invalid result exists only so a recognized startup failure can be recorded in
+// that peer's protected state.
+func ReadForStartupClassification(
+	path string, capabilities RuntimeCapabilities,
+) (cfg Config, data []byte, validationErr error) {
+	cfg, data, err := readUnvalidated(path)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	return cfg, data, cfg.ValidateForRuntime(capabilities)
+}
+
+// ReadForRepair reads a protected configuration and removes only CLI profile
+// selectors before applying normal validation. It exists solely so the repair
+// command can recover configurations rejected by the current profile policy.
+func ReadForRepair(path string, capabilities RuntimeCapabilities) (Config, []byte, int, error) {
+	cfg, data, err := readUnvalidated(path)
+	if err != nil {
+		return Config{}, nil, 0, err
+	}
+	removed := removePeerProfileSelectors(&cfg.Peer)
+	if err := cfg.ValidateForRuntime(capabilities); err != nil {
+		return Config{}, nil, 0, err
+	}
+	return cfg, data, removed, nil
+}
+
+func readUnvalidated(path string) (Config, []byte, error) {
+	file, err := openProtectedConfig(path)
+	if err != nil {
+		return Config{}, nil, fmt.Errorf("read config: %w", err)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maximumConfigSize+1))
+	closeErr := file.Close()
+	if err != nil {
+		return Config{}, nil, fmt.Errorf("read config: %w", err)
+	}
+	if closeErr != nil {
+		return Config{}, nil, fmt.Errorf("close config: %w", closeErr)
+	}
+	if len(data) > maximumConfigSize {
+		return Config{}, nil, fmt.Errorf("config exceeds %d-byte limit", maximumConfigSize)
+	}
+	var header struct {
+		SchemaVersion int             `json:"schemaVersion"`
+		Transport     json.RawMessage `json:"transport"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return Config{}, nil, fmt.Errorf("decode config: %w", err)
+	}
+	if header.SchemaVersion != CurrentSchemaVersion {
+		return Config{}, nil, unsupportedSchemaVersion(header.SchemaVersion)
+	}
+	if err := validateTransportJSON(header.Transport); err != nil {
+		return Config{}, nil, err
+	}
+	var cfg Config
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
+		return Config{}, nil, fmt.Errorf("decode config: %w", err)
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return Config{}, nil, err
+	}
+	return cfg, data, nil
 }
 
 func (c Config) Validate() error {
@@ -353,6 +395,10 @@ func (p PeerConfig) validateCLI() error {
 	if !filepath.IsAbs(p.CLI.Command) {
 		return errors.New("peer cli command must be an absolute path")
 	}
+	if containsProfileSelector(p.CLI.Arguments) ||
+		p.CLI.Launcher != nil && containsProfileSelector(p.CLI.Launcher.PrefixArguments) {
+		return ErrPeerCLIProfileArgumentsUnsupported
+	}
 	launch := clilaunch.Spec{
 		Executable:      p.CLI.Command,
 		PrefixArguments: p.CLI.Arguments,
@@ -372,6 +418,51 @@ func (p PeerConfig) validateCLI() error {
 		launch.PrefixArguments = append(launch.PrefixArguments, p.CLI.Arguments...)
 	}
 	return clilaunch.Validate(launch)
+}
+
+func containsProfileSelector(arguments []string) bool {
+	for _, argument := range arguments {
+		if argument == "-p" || argument == "--profile" || strings.HasPrefix(argument, "--profile=") {
+			return true
+		}
+	}
+	return false
+}
+
+func removePeerProfileSelectors(peer *PeerConfig) int {
+	if peer.CLI == nil {
+		return 0
+	}
+	var removed int
+	peer.CLI.Arguments, removed = removeProfileSelectors(peer.CLI.Arguments)
+	if peer.CLI.Launcher != nil {
+		var launcherRemoved int
+		peer.CLI.Launcher.PrefixArguments, launcherRemoved = removeProfileSelectors(
+			peer.CLI.Launcher.PrefixArguments,
+		)
+		removed += launcherRemoved
+	}
+	return removed
+}
+
+func removeProfileSelectors(arguments []string) ([]string, int) {
+	result := make([]string, 0, len(arguments))
+	removed := 0
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		switch {
+		case argument == "-p" || argument == "--profile":
+			removed++
+			if index+1 < len(arguments) {
+				index++
+			}
+		case strings.HasPrefix(argument, "--profile="):
+			removed++
+		default:
+			result = append(result, argument)
+		}
+	}
+	return result, removed
 }
 
 func unsupportedSchemaVersion(version int) error {

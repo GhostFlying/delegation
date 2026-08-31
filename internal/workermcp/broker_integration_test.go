@@ -108,6 +108,16 @@ var integrationResultPackageChanges = make(chan struct{})
 
 func (integrationWorkerLifecycleSource) WorkerRevision() uint64 { return 0 }
 
+func (integrationWorkerLifecycleSource) WorkerReadiness(
+	context.Context,
+) (protocol.WorkerReadiness, error) {
+	return protocol.WorkerReadiness{
+		Epoch: 1, State: protocol.WorkerReadinessReady, AttemptCount: 1,
+		RuntimeDigest: strings.Repeat("a", 64), ConfigDigest: strings.Repeat("b", 64),
+		EpochStartedAt: 1, LastAttemptAt: 1, UpdatedAt: 1,
+	}, nil
+}
+
 func (integrationWorkerLifecycleSource) WorkerLifecycleChanges() <-chan struct{} { return nil }
 
 func (integrationWorkerLifecycleSource) ListWorkerLifecycles(
@@ -351,6 +361,7 @@ func TestWorkerMCPMailboxThroughRealBrokerAndConnector(t *testing.T) {
 		WorkerSpawner:         integrationWorkerSpawner{},
 		WorkerController:      integrationWorkerController{},
 		WorkerLifecycleSource: integrationWorkerLifecycleSource{},
+		WorkerReadinessSource: integrationWorkerLifecycleSource{},
 		ChangesArtifactSource: integrationWorkerLifecycleSource{},
 		ResultPackageSource:   integrationWorkerLifecycleSource{},
 		WorkspaceManager:      integrationWorkerController{},

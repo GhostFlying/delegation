@@ -35,6 +35,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runCredential(args[1:], stdout, stderr)
 	case "service":
 		return runService(args[1:], stdout, stderr)
+	case "worker":
+		return runWorker(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stderr)
 	default:
@@ -74,5 +76,6 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "  status --config PATH [--json]  report bounded runtime status")
 	fmt.Fprintln(w, "  credential <action>  issue or revoke a peer credential")
 	fmt.Fprintln(w, "  service <action>  prepare or run the user service")
+	fmt.Fprintln(w, "  worker recheck --config PATH [--json]  requalify managed worker execution")
 	fmt.Fprintln(w, "  mcp root          start the root MCP server")
 }

@@ -90,6 +90,10 @@ type WorkerLifecycleSource interface {
 	ListWorkerLifecycles(context.Context) ([]protocol.WorkerLifecycleSnapshot, error)
 }
 
+type WorkerReadinessSource interface {
+	WorkerReadiness(context.Context) (protocol.WorkerReadiness, error)
+}
+
 type workerLifecycleStartupSource interface {
 	StartupWorkerRevision() uint64
 }
@@ -247,6 +251,7 @@ type Options struct {
 	WorkerSpawner            WorkerSpawner
 	WorkerController         WorkerController
 	WorkerLifecycleSource    WorkerLifecycleSource
+	WorkerReadinessSource    WorkerReadinessSource
 	ChangesArtifactSource    ChangesArtifactSource
 	ResultPackageSource      ResultPackageSource
 	WorkspaceManager         WorkspaceManager
@@ -264,6 +269,7 @@ type Status struct {
 	StateRecoveryRequired        bool
 	RecoveryPeerWorkerRevision   uint64
 	RecoveryBrokerWorkerRevision uint64
+	WorkerReadiness              protocol.WorkerReadiness
 }
 
 type RPCError struct {
@@ -292,6 +298,7 @@ type Client struct {
 	workerSpawner           WorkerSpawner
 	workerController        WorkerController
 	workerLifecycle         WorkerLifecycleSource
+	workerReadiness         WorkerReadinessSource
 	changesArtifacts        ChangesArtifactSource
 	artifactChanges         <-chan struct{}
 	resultSource            ResultPackageSource
@@ -350,6 +357,13 @@ func New(options Options) (*Client, error) {
 	if options.WorkerLifecycleSource == nil {
 		return nil, errors.New("connector worker lifecycle source is required")
 	}
+	readinessSource := options.WorkerReadinessSource
+	if readinessSource == nil {
+		readinessSource, _ = options.WorkerLifecycleSource.(WorkerReadinessSource)
+	}
+	if readinessSource == nil {
+		return nil, errors.New("connector worker readiness source is required")
+	}
 	if options.ChangesArtifactSource == nil {
 		return nil, errors.New("connector changes artifact source is required")
 	}
@@ -382,16 +396,21 @@ func New(options Options) (*Client, error) {
 	if !ok {
 		return nil, errors.New("connector workspace transfer manager is required")
 	}
+	readiness, err := readinessSource.WorkerReadiness(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("read connector worker readiness: %w", err)
+	}
 	features := connectorProtocolFeatures()
 	hello := protocol.Hello{
-		ControllerID:   options.ControllerID,
-		DeviceID:       options.DeviceID,
-		DeviceName:     options.DeviceName,
-		HostKind:       options.HostKind,
-		OS:             options.OperatingSystem,
-		Arch:           options.Architecture,
-		RuntimeVersion: options.RuntimeVersion,
-		Features:       features,
+		ControllerID:    options.ControllerID,
+		DeviceID:        options.DeviceID,
+		DeviceName:      options.DeviceName,
+		HostKind:        options.HostKind,
+		OS:              options.OperatingSystem,
+		Arch:            options.Architecture,
+		RuntimeVersion:  options.RuntimeVersion,
+		Features:        features,
+		WorkerReadiness: readiness,
 	}
 	if err := hello.Validate(); err != nil {
 		return nil, fmt.Errorf("connector identity: %w", err)
@@ -456,6 +475,7 @@ func New(options Options) (*Client, error) {
 		workerSpawner:    options.WorkerSpawner,
 		workerController: workerController,
 		workerLifecycle:  options.WorkerLifecycleSource,
+		workerReadiness:  readinessSource,
 		changesArtifacts: options.ChangesArtifactSource,
 		artifactChanges:  artifactChanges,
 		resultSource:     resultSource,
@@ -576,6 +596,45 @@ func (c *Client) Call(
 	return nil
 }
 
+func (c *Client) UpdateWorkerReadiness(
+	ctx context.Context, readiness protocol.WorkerReadiness,
+) error {
+	if err := readiness.Validate(); err != nil {
+		return err
+	}
+	c.mu.RLock()
+	current := c.session
+	c.mu.RUnlock()
+	if current == nil {
+		return ErrUnavailable
+	}
+	if readiness.State != protocol.WorkerReadinessPending &&
+		!current.claimTerminalReadinessUpdate(readiness.Epoch) {
+		return nil
+	}
+	payload, err := current.call(
+		ctx, protocol.MethodUpdateWorkerReadiness, "", nil,
+		protocol.UpdateWorkerReadinessParams{Readiness: readiness},
+	)
+	if err != nil {
+		return err
+	}
+	var result protocol.UpdateWorkerReadinessResult
+	if err := decodeResult(payload, &result); err != nil {
+		return fmt.Errorf("decode broker worker readiness result: %w", err)
+	}
+	if err := result.Validate(); err != nil || result.Readiness != readiness {
+		return errors.New("broker returned mismatched worker readiness")
+	}
+	c.mu.Lock()
+	if c.session == current {
+		c.status.WorkerReadiness = result.Readiness
+		c.notifyLocked()
+	}
+	c.mu.Unlock()
+	return nil
+}
+
 func (c *Client) Status() Status {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -634,7 +693,15 @@ func (c *Client) runSession(ctx context.Context) (healthy bool, returnErr error)
 			c.cleanupPending.Store(false)
 		}
 	}()
+	c.mu.RLock()
 	hello := c.hello
+	c.mu.RUnlock()
+	readiness, err := c.workerReadiness.WorkerReadiness(connectContext)
+	if err != nil {
+		current.close(err)
+		return false, fmt.Errorf("read connector worker readiness: %w", err)
+	}
+	hello.WorkerReadiness = readiness
 	hello.WorkerBaselineRevision = c.nextHelloWorkerBaselineRevision()
 	hello.WorkerRevision = c.workerLifecycle.WorkerRevision()
 	if err := hello.Validate(); err != nil {
@@ -696,6 +763,7 @@ func (c *Client) publish(current *session, result protocol.HelloResult) {
 		HeartbeatInterval: time.Duration(result.HeartbeatIntervalMS) * time.Millisecond,
 		Features:          slices.Clone(result.Features),
 		WorkerRevision:    result.WorkerAppliedRevision,
+		WorkerReadiness:   result.WorkerReadiness,
 	}
 	c.notifyLocked()
 	c.mu.Unlock()
@@ -838,6 +906,9 @@ func validateHelloResult(result protocol.HelloResult, hello protocol.Hello) erro
 	if result.WorkerAppliedRevision > hello.WorkerRevision {
 		return errors.New("broker worker lifecycle cursor is ahead of the peer")
 	}
+	if err := result.WorkerReadiness.Validate(); err != nil {
+		return fmt.Errorf("broker worker readiness: %w", err)
+	}
 	return nil
 }
 
@@ -852,6 +923,7 @@ func connectorProtocolFeatures() []string {
 		protocol.FeatureResultApply,
 		protocol.FeatureResultPackage,
 		protocol.FeatureWorkerLifecycle,
+		protocol.FeatureWorkerReadiness,
 		protocol.FeatureWorkspaceSync,
 		protocol.FeatureWorkspaceTransfer,
 	}

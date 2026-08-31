@@ -544,6 +544,21 @@ func TestRootMCPReturnsRecoverableBridgeErrors(t *testing.T) {
 	}
 }
 
+func TestRootMCPExplainsInterventionRequiredWithFailureCode(t *testing.T) {
+	data, err := json.Marshal(protocol.WorkerInterventionRequiredErrorData{
+		Code: protocol.WorkerInterventionRequiredCode, FailureCode: protocol.WorkerManagedHomeInvalid,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := explainAgentError(&localbridge.RPCError{
+		Code: protocol.ErrorUnavailable, Message: "target worker intervention required", Data: data,
+	})
+	if got.Error() != "target worker intervention required (failure code: managed_home_invalid)" {
+		t.Fatalf("intervention explanation = %q", got)
+	}
+}
+
 func TestRootMCPExplainsRootBindingConflict(t *testing.T) {
 	backend := &fakeRootBackend{err: &localbridge.RPCError{
 		Code: protocol.ErrorConflict, Message: "root device mismatch",
@@ -890,6 +905,87 @@ func connectRootMCP(t *testing.T, backend Backend) (context.Context, *mcp.Client
 		if err := serverSession.Close(); err != nil {
 			t.Errorf("close MCP server: %v", err)
 		}
+	}
+}
+
+func TestInterventionNotificationTargetsOnlyActiveSessionsAndDeduplicates(t *testing.T) {
+	backend := &fakeRootBackend{}
+	server, notify, err := NewServerWithInterventionNotifications(
+		backend, rootMCPControllerID, rootMCPDeviceID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := make(chan *mcp.LoggingMessageParams, 4)
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(
+		&mcp.Implementation{Name: "test", Version: "1"},
+		&mcp.ClientOptions{LoggingMessageHandler: func(
+			_ context.Context, request *mcp.LoggingMessageRequest,
+		) {
+			messages <- request.Params
+		}},
+	)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		_ = serverSession.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = clientSession.Close()
+		_ = serverSession.Close()
+	})
+	if err := clientSession.SetLoggingLevel(
+		ctx, &mcp.SetLoggingLevelParams{Level: "error"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	terminal := protocol.WorkerReadiness{
+		Epoch: 2, State: protocol.WorkerReadinessInterventionRequired, AttemptCount: 1,
+		RuntimeDigest: strings.Repeat("a", 64), ConfigDigest: strings.Repeat("b", 64),
+		EpochStartedAt: time.Now().Add(-time.Second).UnixMilli(), LastAttemptAt: time.Now().UnixMilli(),
+		FailureCode: protocol.WorkerManagedHomeInvalid, UpdatedAt: time.Now().UnixMilli(),
+	}
+	if terminal.LastAttemptAt < terminal.EpochStartedAt {
+		terminal.LastAttemptAt = terminal.EpochStartedAt
+	}
+	if terminal.UpdatedAt < terminal.LastAttemptAt {
+		terminal.UpdatedAt = terminal.LastAttemptAt
+	}
+	notify(ctx, terminal)
+	select {
+	case message := <-messages:
+		data, ok := message.Data.(map[string]any)
+		if !ok || message.Level != "error" ||
+			data["state"] != string(protocol.WorkerReadinessInterventionRequired) ||
+			data["failureCode"] != protocol.WorkerManagedHomeInvalid {
+			t.Fatalf("intervention log = %#v", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active MCP session did not receive intervention log")
+	}
+	notify(ctx, terminal)
+	select {
+	case duplicate := <-messages:
+		t.Fatalf("duplicate intervention log = %#v", duplicate)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if err := clientSession.Close(); err != nil {
+		t.Fatal(err)
+	}
+	terminal.UpdatedAt++
+	notify(ctx, terminal)
+	select {
+	case inactive := <-messages:
+		t.Fatalf("closed MCP session received intervention log = %#v", inactive)
+	case <-time.After(20 * time.Millisecond):
 	}
 }
 

@@ -432,6 +432,7 @@ func newTestClientWithWorkerManager(
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 		WorkerSpawner: manager, WorkerController: manager,
 		WorkerLifecycleSource: testWorkerSpawner{}, WorkspaceManager: testWorkerSpawner{},
+		WorkerReadinessSource: testWorkerSpawner{},
 		ChangesArtifactSource: testWorkerSpawner{},
 		ResultPackageSource:   testWorkerSpawner{},
 		ResultPackageManager:  testWorkerSpawner{},

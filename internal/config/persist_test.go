@@ -298,6 +298,38 @@ func TestWriteNewRetrySyncsExistingDirectoryAnchor(t *testing.T) {
 	}
 }
 
+func TestReplaceProtectedFileDoesNotOverwriteConcurrentEdit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("repair replacement is unsupported on Windows")
+	}
+	directory := filepath.Join(t.TempDir(), "private")
+	if err := PreparePrivateDirectory(directory); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "config.json")
+	original := []byte("original\n")
+	concurrent := []byte("operator edit\n")
+	replacement := []byte("replacement\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalHook := beforeProtectedFileExchange
+	t.Cleanup(func() { beforeProtectedFileExchange = originalHook })
+	beforeProtectedFileExchange = func() {
+		if err := os.WriteFile(path, concurrent, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := ReplaceProtectedFile(path, original, replacement)
+	if err == nil || IsCommitted(err) || !strings.Contains(err.Error(), "config changed during repair") {
+		t.Fatalf("ReplaceProtectedFile() error = %v", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil || !reflect.DeepEqual(got, concurrent) {
+		t.Fatalf("config after concurrent edit = %q, %v", got, readErr)
+	}
+}
+
 func tailscaleBrokerWriteConfig(t *testing.T) Config {
 	t.Helper()
 	cfg := protectedTestConfig(t)

@@ -15,6 +15,12 @@ func explainBridgeError(err error) error {
 	}
 	var rpcError *localbridge.RPCError
 	if errors.As(err, &rpcError) {
+		if intervention, ok := decodeInterventionRequired(rpcError); ok {
+			return fmt.Errorf(
+				"target worker intervention required (failure code: %s)",
+				intervention.FailureCode,
+			)
+		}
 		switch rpcError.Code {
 		case protocol.ErrorConflict:
 			return errors.New("the device registry changed; call list_devices again without a cursor")
@@ -29,6 +35,19 @@ func explainBridgeError(err error) error {
 		}
 	}
 	return errors.New("the local delegation connector is unavailable; run delegation doctor and ensure its service is running")
+}
+
+func decodeInterventionRequired(
+	rpcError *localbridge.RPCError,
+) (protocol.WorkerInterventionRequiredErrorData, bool) {
+	if rpcError == nil || rpcError.Code != protocol.ErrorUnavailable || len(rpcError.Data) == 0 {
+		return protocol.WorkerInterventionRequiredErrorData{}, false
+	}
+	details, err := protocol.DecodePayload[protocol.WorkerInterventionRequiredErrorData](rpcError.Data)
+	if err != nil || details.Validate() != nil {
+		return protocol.WorkerInterventionRequiredErrorData{}, false
+	}
+	return details, true
 }
 
 func explainEnsureRootError(err error) error {
@@ -48,6 +67,12 @@ func explainAgentError(err error) error {
 	}
 	var rpcError *localbridge.RPCError
 	if errors.As(err, &rpcError) {
+		if intervention, ok := decodeInterventionRequired(rpcError); ok {
+			return fmt.Errorf(
+				"target worker intervention required (failure code: %s)",
+				intervention.FailureCode,
+			)
+		}
 		switch rpcError.Code {
 		case protocol.ErrorConflict:
 			return errors.New("the agent request conflicts with an existing spawn_id, message_id, operation_id, task_name, or tree binding")

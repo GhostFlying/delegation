@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -158,6 +159,47 @@ func openProtectedConfig(path string) (*os.File, error) {
 		return fail(err)
 	}
 	return file, nil
+}
+
+func readProtectedConfigAt(
+	directory *securefs.Root, name string, maximumBytes int,
+) ([]byte, os.FileInfo, error) {
+	before, err := directory.Lstat(name)
+	if err != nil {
+		return nil, nil, fmt.Errorf("inspect config: %w", err)
+	}
+	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, errors.New("config must be a regular file, not a symbolic link")
+	}
+	file, err := directory.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open config: %w", err)
+	}
+	after, statErr := file.Stat()
+	if statErr == nil && !os.SameFile(before, after) {
+		statErr = errors.New("config changed while it was being opened")
+	}
+	if statErr == nil && after.Mode().Perm() != 0o600 {
+		statErr = errors.New("config must have mode 0600")
+	}
+	if statErr == nil {
+		stat, ok := after.Sys().(*syscall.Stat_t)
+		if !ok || stat.Uid != uint32(os.Geteuid()) {
+			statErr = errors.New("config must be owned by the current user")
+		}
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, int64(maximumBytes)+1))
+	closeErr := file.Close()
+	if err := errors.Join(statErr, readErr, closeErr); err != nil {
+		return nil, nil, err
+	}
+	if len(data) > maximumBytes {
+		return nil, nil, fmt.Errorf("protected file exceeds %d-byte limit", maximumBytes)
+	}
+	if err := directory.VerifyPath(); err != nil {
+		return nil, nil, err
+	}
+	return data, after, nil
 }
 
 var afterConfigPathValidation = func() {}

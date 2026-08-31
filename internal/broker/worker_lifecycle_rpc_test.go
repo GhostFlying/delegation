@@ -240,7 +240,7 @@ func waitForBrokerConnectionState(
 		server.mu.Lock()
 		current := server.connections[deviceID]
 		active := current != nil
-		ready := active && current.workerReady.Load()
+		ready := active && current.workerSyncReady.Load()
 		server.mu.Unlock()
 		if active && ready == wantReady {
 			return

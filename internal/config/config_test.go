@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -56,6 +58,30 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 	if got.Peer.EffectiveCLI().Command != cfg.Peer.CodexBinary {
 		t.Fatalf("legacy effective CLI = %#v", got.Peer.EffectiveCLI())
+	}
+}
+
+func TestReadForStartupClassificationReturnsStrictDecodedIdentityWithValidationError(t *testing.T) {
+	cfg := testPeerConfig(t)
+	cfg.Peer.CLI = &CLIConfig{
+		Command:   cfg.Peer.CodexBinary,
+		Arguments: []string{"--profile", "legacy"},
+	}
+	cfg.Peer.CodexBinary = ""
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "private", "peer.json")
+	writeProtectedConfigFixture(t, path, data)
+
+	got, raw, err := ReadForStartupClassification(path, RuntimeCapabilities{})
+	if !errors.Is(err, ErrPeerCLIProfileArgumentsUnsupported) {
+		t.Fatalf("startup classification error = %v", err)
+	}
+	if got.Peer.StateFile != cfg.Peer.StateFile || got.ControllerID != cfg.ControllerID ||
+		!bytes.Equal(raw, data) {
+		t.Fatalf("startup classification = %#v, %q", got, raw)
 	}
 }
 
@@ -608,7 +634,7 @@ func TestStructuredCLIConfigRoundTrip(t *testing.T) {
 	cfg.Peer.CodexBinary = ""
 	cfg.Peer.CLI = &CLIConfig{
 		Command:   command,
-		Arguments: []string{"-p", "profile with spaces"},
+		Arguments: []string{"--model", "model with spaces"},
 		Launcher: &clilaunch.Spec{
 			Executable:      filepath.Join(filepath.Dir(command), "launcher"),
 			PrefixArguments: []string{"run", "--"},
@@ -689,6 +715,39 @@ func TestPeerCLIConfigValidation(t *testing.T) {
 				}
 			},
 			want: "must not contain NUL",
+		},
+		{
+			name: "short profile argument",
+			mutate: func(peer *PeerConfig) {
+				command := peer.CodexBinary
+				peer.CodexBinary = ""
+				peer.CLI = &CLIConfig{Command: command, Arguments: []string{"-p", "profile"}}
+			},
+			want: "profile arguments are unsupported",
+		},
+		{
+			name: "long profile argument",
+			mutate: func(peer *PeerConfig) {
+				command := peer.CodexBinary
+				peer.CodexBinary = ""
+				peer.CLI = &CLIConfig{Command: command, Arguments: []string{"--profile=profile"}}
+			},
+			want: "profile arguments are unsupported",
+		},
+		{
+			name: "launcher profile argument",
+			mutate: func(peer *PeerConfig) {
+				command := peer.CodexBinary
+				peer.CodexBinary = ""
+				peer.CLI = &CLIConfig{
+					Command: command,
+					Launcher: &clilaunch.Spec{
+						Executable:      filepath.Join(filepath.Dir(command), "launcher"),
+						PrefixArguments: []string{"--profile", "profile"},
+					},
+				}
+			},
+			want: "profile arguments are unsupported",
 		},
 		{
 			name: "combined argument count",
@@ -796,7 +855,7 @@ func TestTraeXPeerConfigRequiresStructuredLauncher(t *testing.T) {
 				peer.CodexBinary = ""
 				peer.CLI = &CLIConfig{
 					Command:   command,
-					Arguments: []string{"-p", "ultra"},
+					Arguments: []string{"--model", "test"},
 					Launcher: &clilaunch.Spec{
 						Executable:      filepath.Join(filepath.Dir(command), "warmpool"),
 						PrefixArguments: []string{"run", "--"},

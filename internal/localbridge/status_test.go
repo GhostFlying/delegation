@@ -2,8 +2,11 @@ package localbridge
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/protocol"
@@ -12,6 +15,34 @@ import (
 type staticStatusProvider struct {
 	status StatusSnapshot
 	err    error
+}
+
+type staticReadinessManager struct {
+	readiness protocol.WorkerReadiness
+	err       error
+	wait      chan protocol.WorkerReadiness
+}
+
+func (m staticReadinessManager) WorkerReadiness(context.Context) (protocol.WorkerReadiness, error) {
+	return m.readiness, m.err
+}
+
+func (m staticReadinessManager) RecheckWorkerReadiness(context.Context) (protocol.WorkerReadiness, error) {
+	return m.readiness, m.err
+}
+
+func (m staticReadinessManager) WaitWorkerIntervention(
+	ctx context.Context, _ protocol.WorkerReadinessCursor,
+) (protocol.WorkerReadiness, error) {
+	if m.wait == nil {
+		return protocol.WorkerReadiness{}, m.err
+	}
+	select {
+	case <-ctx.Done():
+		return protocol.WorkerReadiness{}, ctx.Err()
+	case readiness := <-m.wait:
+		return readiness, nil
+	}
 }
 
 func (p staticStatusProvider) LocalStatus(context.Context) (StatusSnapshot, error) {
@@ -26,6 +57,7 @@ func TestReadStatusReturnsValidatedLocalSnapshot(t *testing.T) {
 		DeviceName: "test-peer", ServiceRunning: true, ConnectionState: ConnectionReady,
 		Connected: true, RegistryRevision: 7, WorkerRevision: 5,
 		BrokerWorkerRevision: 5, WorkerSyncReady: true,
+		WorkerReady: true, Dispatchable: true, WorkerReadiness: readyBridgeTestReadiness(),
 		MaxWorkerSlots: 8,
 		Workers: WorkerCounts{
 			Total: 10, Reserved: 1, Pending: 1, Starting: 1, Preflight: 1,
@@ -69,6 +101,127 @@ func TestReadStatusReturnsValidatedLocalSnapshot(t *testing.T) {
 	}
 }
 
+func TestReadStatusForIdentityRejectsReachableForeignBridge(t *testing.T) {
+	foreign := ServiceIdentity{
+		ControllerID: bridgeTestControllerID,
+		DeviceID:     bridgeTestDeviceID,
+	}
+	status := StatusSnapshot{
+		TransportStatus: config.TransportStatus{Transport: "tcp"},
+		Version:         "0.1.0-test",
+		ControllerID:    foreign.ControllerID,
+		DeviceID:        foreign.DeviceID,
+		DeviceName:      "test-peer",
+		ServiceRunning:  true,
+		ConnectionState: ConnectionConnecting,
+		WorkerReadiness: pendingBridgeTestReadiness(),
+		MaxWorkerSlots:  4,
+	}
+	endpoint := testEndpoint(t)
+	server, err := ListenWithStatus(
+		endpoint, foreign, &fakeBackend{}, nil, staticStatusProvider{status: status},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = server.Close()
+		<-done
+	})
+	expected := foreign
+	expected.DeviceID = "123e4567-e89b-42d3-a456-426614174399"
+	if _, err := ReadStatusForIdentity(context.Background(), endpoint, expected); !errors.Is(err, ErrServiceIdentityMismatch) {
+		t.Fatalf("ReadStatusForIdentity() error = %v, want identity mismatch", err)
+	}
+}
+
+func TestRecheckWorkerUsesProtectedManagementEndpoint(t *testing.T) {
+	identity := ServiceIdentity{ControllerID: bridgeTestControllerID, DeviceID: bridgeTestDeviceID}
+	want := pendingBridgeTestReadiness()
+	want.Epoch = 2
+	server, err := ListenWithManagement(
+		testEndpoint(t), identity, &fakeBackend{}, nil, nil, nil, nil,
+		staticReadinessManager{readiness: want},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = server.Close()
+		<-done
+	})
+
+	got, err := RecheckWorker(context.Background(), server.listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RecheckWorker() = %#v, want %#v", got, want)
+	}
+}
+
+func TestWorkerInterventionWaitUsesProtectedWaitAdmission(t *testing.T) {
+	identity := ServiceIdentity{ControllerID: bridgeTestControllerID, DeviceID: bridgeTestDeviceID}
+	baseline := pendingBridgeTestReadiness()
+	terminal := baseline
+	terminal.State = protocol.WorkerReadinessInterventionRequired
+	terminal.AttemptCount = 1
+	terminal.LastAttemptAt = baseline.UpdatedAt + 1
+	terminal.UpdatedAt = baseline.UpdatedAt + 2
+	terminal.NextAttemptAt = 0
+	terminal.FailureCode = protocol.WorkerManagedHomeInvalid
+	wait := make(chan protocol.WorkerReadiness, 1)
+	endpoint := testEndpoint(t)
+	server, err := ListenWithManagement(
+		endpoint, identity, &fakeBackend{}, nil, nil, nil, nil,
+		staticReadinessManager{readiness: baseline, wait: wait},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = server.Close()
+		<-done
+	})
+	gotBaseline, err := ReadWorkerReadiness(context.Background(), endpoint)
+	if err != nil || !reflect.DeepEqual(gotBaseline, baseline) {
+		t.Fatalf("ReadWorkerReadiness() = %#v, %v", gotBaseline, err)
+	}
+	result := make(chan protocol.WorkerReadiness, 1)
+	errors := make(chan error, 1)
+	go func() {
+		got, err := WaitWorkerIntervention(context.Background(), endpoint, baseline.Cursor())
+		if err != nil {
+			errors <- err
+			return
+		}
+		result <- got
+	}()
+	wait <- terminal
+	select {
+	case err := <-errors:
+		t.Fatal(err)
+	case got := <-result:
+		if !reflect.DeepEqual(got, terminal) {
+			t.Fatalf("WaitWorkerIntervention() = %#v, want %#v", got, terminal)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker intervention wait did not complete")
+	}
+}
+
 func TestStatusSnapshotRejectsInconsistentCountsAndSynchronization(t *testing.T) {
 	valid := StatusSnapshot{
 		TransportStatus: config.TransportStatus{Transport: "tcp"},
@@ -76,6 +229,7 @@ func TestStatusSnapshotRejectsInconsistentCountsAndSynchronization(t *testing.T)
 		DeviceName: "test-peer", ServiceRunning: true, ConnectionState: ConnectionReady,
 		Connected: true, WorkerRevision: 8,
 		BrokerWorkerRevision: 8, WorkerSyncReady: true, MaxWorkerSlots: 4,
+		WorkerReady: true, Dispatchable: true, WorkerReadiness: readyBridgeTestReadiness(),
 		Workers: WorkerCounts{Total: 2, Ready: 1, Idle: 1, Occupied: 1},
 	}
 	tests := []struct {
@@ -153,6 +307,7 @@ func TestStatusSnapshotAcceptsConnectionStates(t *testing.T) {
 		TransportStatus: config.TransportStatus{Transport: "tcp"},
 		Version:         "0.1.0-test", ControllerID: bridgeTestControllerID, DeviceID: bridgeTestDeviceID,
 		DeviceName: "test-peer", ServiceRunning: true, MaxWorkerSlots: 4,
+		WorkerReadiness: pendingBridgeTestReadiness(),
 	}
 	tests := map[string]StatusSnapshot{
 		"connecting": func() StatusSnapshot {
@@ -194,6 +349,44 @@ func TestStatusSnapshotAcceptsConnectionStates(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestStatusSnapshotAcceptsStoppedPeerWithDurableReadiness(t *testing.T) {
+	readiness := pendingBridgeTestReadiness()
+	readiness.State = protocol.WorkerReadinessInterventionRequired
+	readiness.NextAttemptAt = 0
+	readiness.FailureCode = protocol.WorkerProfileUnsupported
+	status := StatusSnapshot{
+		TransportStatus: config.TransportStatus{Transport: "tcp"},
+		Version:         "0.1.0-test",
+		ControllerID:    bridgeTestControllerID,
+		DeviceID:        bridgeTestDeviceID,
+		DeviceName:      "test-peer",
+		ServiceRunning:  false,
+		ConnectionState: ConnectionConnecting,
+		WorkerRevision:  8,
+		WorkerReadiness: readiness,
+		MaxWorkerSlots:  4,
+	}
+	if err := status.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	status.RegistryRevision = 1
+	if err := status.Validate(); err == nil {
+		t.Fatal("Validate() accepted a stopped peer with a live registry revision")
+	}
+}
+
+func pendingBridgeTestReadiness() protocol.WorkerReadiness {
+	return protocol.NewPendingWorkerReadiness(strings.Repeat("a", 64), strings.Repeat("b", 64), 1)
+}
+
+func readyBridgeTestReadiness() protocol.WorkerReadiness {
+	return protocol.WorkerReadiness{
+		Epoch: 1, State: protocol.WorkerReadinessReady, AttemptCount: 1,
+		RuntimeDigest: strings.Repeat("a", 64), ConfigDigest: strings.Repeat("b", 64),
+		EpochStartedAt: 1, LastAttemptAt: 1, UpdatedAt: 1,
 	}
 }
 

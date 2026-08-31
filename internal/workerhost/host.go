@@ -50,6 +50,30 @@ var (
 	errTurnStartAmbiguous  = errors.New("managed turn start outcome remains ambiguous")
 )
 
+type readinessFailure struct {
+	code string
+	err  error
+}
+
+func (e *readinessFailure) Error() string {
+	return e.err.Error()
+}
+
+func (e *readinessFailure) Unwrap() error {
+	return e.err
+}
+
+func (e *readinessFailure) WorkerReadinessFailureCode() string {
+	return e.code
+}
+
+func permanentReadinessFailure(code string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &readinessFailure{code: code, err: err}
+}
+
 var hostAuthEnvironment = []string{
 	"CODEX_ACCESS_TOKEN",
 	"CODEX_API_KEY",

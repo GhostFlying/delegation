@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -795,6 +796,105 @@ func TestConnectorAuthorityAppliesManagedHomePolicyByHostKind(t *testing.T) {
 	if _, err := loadConnectorAuthority(configPath, cfg); err == nil ||
 		!strings.Contains(err.Error(), "config.toml") {
 		t.Fatalf("TraeX connector authority error = %v", err)
+	}
+}
+
+func TestConnectorPersistsManagedHomeFailureInCurrentEpoch(t *testing.T) {
+	configPath, cfg := setupConnectorRuntimeTest(
+		t, runtimeDeviceID, "managed-home-readiness", "wss://broker.example.test",
+	)
+	if err := os.WriteFile(
+		filepath.Join(cfg.Peer.CodexHome, "config.toml"), []byte("model = \"user\"\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		err := runConnectorServiceWithProviderEnvironment(
+			context.Background(), configPath, cfg, "",
+			func() (serviceenv.Resolved, error) { return serviceenv.Resolved{}, nil },
+			io.Discard, connectorRuntimeOptions{},
+		)
+		if err == nil || !strings.Contains(err.Error(), "config.toml") ||
+			!strings.Contains(err.Error(), "state=intervention_required") ||
+			!strings.Contains(err.Error(), "failureCode=managed_home_invalid") {
+			t.Fatalf("managed-home startup %d error = %v", attempt+1, err)
+		}
+	}
+	state, err := store.OpenPeer(context.Background(), cfg.Peer.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	readiness, err := state.WorkerReadiness(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readiness.Epoch != 1 || readiness.State != protocol.WorkerReadinessInterventionRequired ||
+		readiness.FailureCode != protocol.WorkerManagedHomeInvalid {
+		t.Fatalf("managed-home readiness = %#v", readiness)
+	}
+}
+
+func TestConnectorPersistsActualLocalBridgeIdentityMismatch(t *testing.T) {
+	temporaryRoot := ""
+	if runtime.GOOS != "windows" {
+		temporaryRoot = "/tmp"
+	}
+	home, err := os.MkdirTemp(temporaryRoot, "delegation-identity-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	configPath, cfg := setupConnectorRuntimeTest(
+		t, runtimeDeviceID, "identity-readiness", "wss://broker.example.test",
+	)
+	endpoint, err := localbridge.EndpointForInstance(
+		cfg.EffectiveInstanceID(), cfg.ControllerID, cfg.DeviceID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := localbridge.Listen(endpoint, localbridge.ServiceIdentity{
+		ControllerID: "123e4567-e89b-42d3-a456-426614174799",
+		DeviceID:     cfg.DeviceID,
+	}, statusTestBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveContext, cancelServe := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- foreign.Serve(serveContext) }()
+	defer func() {
+		cancelServe()
+		_ = foreign.Close()
+		<-serveDone
+	}()
+
+	err = runConnectorServiceWithProviderEnvironment(
+		context.Background(), configPath, cfg, "",
+		func() (serviceenv.Resolved, error) { return serviceenv.Resolved{}, nil },
+		io.Discard, connectorRuntimeOptions{},
+	)
+	if !errors.Is(err, localbridge.ErrServiceIdentityMismatch) {
+		t.Fatalf("identity mismatch startup error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "state=intervention_required") ||
+		!strings.Contains(err.Error(), "failureCode=service_identity_invalid") {
+		t.Fatalf("identity mismatch startup log = %v", err)
+	}
+	state, err := store.OpenPeer(context.Background(), cfg.Peer.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	readiness, err := state.WorkerReadiness(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readiness.State != protocol.WorkerReadinessInterventionRequired ||
+		readiness.FailureCode != protocol.WorkerServiceIdentityInvalid {
+		t.Fatalf("service identity readiness = %#v", readiness)
 	}
 }
 

@@ -268,6 +268,46 @@ func TestHostAdaptsThreadStartProtocolByHostKind(t *testing.T) {
 	}
 }
 
+func TestHostQualifyUsesOneFreshThreadAndPersistentManagedRoots(t *testing.T) {
+	application := newFakeApplication()
+	host, _, paths := newTestHostForKind(t, hostkind.Codex, 1, application)
+
+	if err := host.Qualify(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record := application.snapshot()
+	if len(record.starts) != 1 {
+		t.Fatalf("qualification thread starts = %#v", record.starts)
+	}
+	if len(record.resumes) != 0 || len(record.turns) != 0 || len(record.reads) != 0 {
+		t.Fatalf(
+			"qualification used resume/read/turn: resumes %#v, reads %#v, turns %#v",
+			record.resumes, record.reads, record.turns,
+		)
+	}
+	if record.preflights != 1 || len(record.mcpTools) != 0 {
+		t.Fatalf("qualification MCP checks = inventory %d, tools %#v",
+			record.preflights, record.mcpTools)
+	}
+	workspace := host.workspaceRoot.Name()
+	start := record.starts[0]
+	if start.CWD != workspace ||
+		!reflect.DeepEqual(start.RuntimeWorkspaceRoots, []string{workspace}) {
+		t.Fatalf("qualification workspace = cwd %q, roots %#v, want %q",
+			start.CWD, start.RuntimeWorkspaceRoots, workspace)
+	}
+	if paths.launchOptions.CodexHome != paths.codexHome ||
+		paths.launchOptions.RuntimeHomeEnvironment["CODEX_HOME"] != paths.codexHome {
+		t.Fatalf("qualification managed home = %#v, want %q",
+			paths.launchOptions, paths.codexHome)
+	}
+	mcpConfig, ok := start.Config["mcp_servers."+workerServerName].(map[string]any)
+	if !ok || mcpConfig["command"] != paths.delegationBinary ||
+		mcpConfig["required"] != true {
+		t.Fatalf("qualification worker MCP config = %#v", mcpConfig)
+	}
+}
+
 func TestTraeXWorkerMCPPreflightProbesOnlyRequiredTools(t *testing.T) {
 	application := newFakeApplication()
 	host, _, _ := newTestHostForKind(t, hostkind.TraeX, 1, application)

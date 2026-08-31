@@ -53,7 +53,9 @@ func TestStatusCombinesDurableStateWithLiveSynchronizedConnections(t *testing.T)
 	}}
 	ready := &session{deviceID: readyDevice}
 	ready.revision.Store(2)
+	ready.workerSyncReady.Store(true)
 	ready.workerReady.Store(true)
+	ready.versionCompatible.Store(true)
 	syncing := &session{deviceID: syncingDevice}
 	syncing.revision.Store(2)
 	server := &Server{
@@ -76,7 +78,7 @@ func TestStatusCombinesDurableStateWithLiveSynchronizedConnections(t *testing.T)
 	want := statuspage.Snapshot{
 		TransportStatus: config.TransportStatus{Transport: "tcp"},
 		Version:         buildinfo.Version, UptimeSeconds: 123, ControllerID: brokerTestControllerID,
-		Devices:      statuspage.DeviceCounts{Registered: 3, Online: 2, Connected: 2, SyncReady: 1},
+		Devices:      statuspage.DeviceCounts{Registered: 3, Online: 2, Connected: 2, SyncReady: 1, WorkerReady: 1, Dispatchable: 1},
 		Dispatch:     statuspage.DispatchCounts{Pending: 5, Started: 6, Failed: 7, LifetimeStarted: 16},
 		RunningTurns: 8, OccupiedSlots: 9, LifetimeTurns: 17, Trees: 4,
 		Artifacts: statuspage.ArtifactCounts{Available: 10, Unchanged: 11, CaptureFailed: 12},
@@ -100,7 +102,9 @@ func TestStatusAllowsConnectedSessionAfterDurableCredentialRevocation(t *testing
 	}}
 	connected := &session{deviceID: deviceID}
 	connected.revision.Store(1)
+	connected.workerSyncReady.Store(true)
 	connected.workerReady.Store(true)
+	connected.versionCompatible.Store(true)
 	server := &Server{
 		controllerID: brokerTestControllerID,
 		transport:    config.TransportStatus{Transport: "tcp"},
@@ -120,7 +124,7 @@ func TestStatusAllowsConnectedSessionAfterDurableCredentialRevocation(t *testing
 	if err := snapshot.Validate(); err != nil {
 		t.Fatalf("status rejected transient connected/offline session: %v", err)
 	}
-	want := statuspage.DeviceCounts{Registered: 1, Online: 0, Connected: 1, SyncReady: 1}
+	want := statuspage.DeviceCounts{Registered: 1, Online: 0, Connected: 1, SyncReady: 1, WorkerReady: 1, Dispatchable: 1}
 	if snapshot.Devices != want {
 		t.Fatalf("device status = %#v, want %#v", snapshot.Devices, want)
 	}

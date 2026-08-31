@@ -3,6 +3,7 @@ package protocol
 import (
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/GhostFlying/delegation/internal/hostkind"
@@ -14,6 +15,25 @@ const (
 	lifecycleThreadID = "123e4567-e89b-42d3-a456-426614175002"
 	lifecycleTurnID   = "123e4567-e89b-42d3-a456-426614175003"
 )
+
+func TestWorkerInterventionRequiredErrorDataValidation(t *testing.T) {
+	valid := WorkerInterventionRequiredErrorData{
+		Code: WorkerInterventionRequiredCode, FailureCode: WorkerManagedHomeInvalid,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid intervention error data: %v", err)
+	}
+	invalidCode := valid
+	invalidCode.Code = "pending"
+	if err := invalidCode.Validate(); err == nil {
+		t.Fatal("invalid intervention code was accepted")
+	}
+	invalidFailure := valid
+	invalidFailure.FailureCode = ""
+	if err := invalidFailure.Validate(); err == nil {
+		t.Fatal("empty intervention failure code was accepted")
+	}
+}
 
 func TestWorkerLifecyclePhaseValidatesFailureCode(t *testing.T) {
 	for _, phase := range []WorkerLifecyclePhase{
@@ -166,7 +186,8 @@ func TestHelloRejectsUnrepresentableWorkerRevision(t *testing.T) {
 		ControllerID: testControllerID, DeviceID: testDeviceID, DeviceName: "builder",
 		HostKind: hostkind.Codex, OS: "linux", Arch: "amd64",
 		RuntimeVersion: "0.1.0", Features: []string{},
-		WorkerRevision: math.MaxInt64 + 1,
+		WorkerRevision:  math.MaxInt64 + 1,
+		WorkerReadiness: NewPendingWorkerReadiness(strings.Repeat("a", 64), strings.Repeat("b", 64), 1),
 	}
 	if err := hello.Validate(); err == nil {
 		t.Fatal("hello accepted an unrepresentable worker revision")
