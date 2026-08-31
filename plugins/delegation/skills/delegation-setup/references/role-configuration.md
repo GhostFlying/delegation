@@ -14,8 +14,10 @@ default resource namespace.
 
 Embedded Tailscale is a fresh-deployment transport. Each role runs an independent userspace `tsnet`
 node; Delegation does not use system `tailscaled`. Do not convert an existing TCP deployment or
-reuse its config, database, token domain, state, or service definition. M6 has no migration,
-in-place upgrade, or rollback workflow.
+reuse its config, database, token domain, state, or service definition. M6 has no transport,
+identity, or configuration migration and no downgrade workflow. A current managed native service
+may move to a newer compatible canonical runtime through the forward-only local upgrade described
+in the native-service reference.
 
 M6 supports Codex and TraeX on Linux and macOS, and Codex on Windows 11. Windows TraeX is
 unsupported. Do not create a Windows TraeX broker, peer, managed home, or native service.

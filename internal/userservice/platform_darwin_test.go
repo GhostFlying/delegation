@@ -54,6 +54,35 @@ func TestDarwinUpgradeRejectsReplacementProcessBeforeBootout(t *testing.T) {
 	}
 }
 
+func TestDarwinDiscoversLegacyUpgradeSourceWithoutLocalBridge(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	source := testInvocation(
+		ServiceRolePeer, "/opt/delegation/0.1.0-alpha.4/delegation",
+		filepath.Join(home, "peer.json"),
+	)
+	prepared, err := Prepare(ServiceRolePeer, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRunner := runLaunchctl
+	t.Cleanup(func() { runLaunchctl = originalRunner })
+	runLaunchctl = func(args ...string) (userServiceCommandResult, error) {
+		return launchctlTestStatus(prepared.Artifact, "running", 4242, source), nil
+	}
+	expected := source
+	expected.BinaryPath = ""
+	got, err := DiscoverUpgradeSource(context.Background(), ServiceRolePeer, expected)
+	if err != nil || got != source {
+		t.Fatalf("DiscoverUpgradeSource() = %#v, %v; want %#v", got, err, source)
+	}
+	wrong := expected
+	wrong.EnvironmentFile = filepath.Join(home, "other.env")
+	if _, err := DiscoverUpgradeSource(context.Background(), ServiceRolePeer, wrong); err == nil {
+		t.Fatal("DiscoverUpgradeSource() accepted a mismatched environment path")
+	}
+}
+
 func TestDarwinServiceLifecycleUsesLaunchAgents(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

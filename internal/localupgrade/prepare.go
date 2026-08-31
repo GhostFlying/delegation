@@ -235,9 +235,8 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 	if err != nil {
 		return PrepareResult{}, fmt.Errorf("inspect source database compatibility: %w", err)
 	}
-	if sourceIdentity.ApplicationID != compatibility.DatabaseIdentity.ApplicationID ||
-		sourceIdentity.SchemaVersion > compatibility.DatabaseIdentity.SchemaVersion {
-		return PrepareResult{}, errors.New("source database cannot migrate to the target runtime")
+	if sourceIdentity != compatibility.DatabaseIdentity {
+		return PrepareResult{}, errors.New("source database schema is not directly compatible with the target runtime")
 	}
 	blockers, err := dependencies.ReadBlockers(ctx)
 	if err != nil {
@@ -314,7 +313,7 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 			RollbackPath:   filepath.Join(filepath.Dir(databasePath), "."+filepath.Base(databasePath)+"-upgrade-"+transactionID+".rollback"),
 			SourceIdentity: sourceIdentity, TargetIdentity: compatibility.DatabaseIdentity,
 		},
-		ActivatorPath: filepath.Join(materialRoot, activatorDefinitionName()), CreatedAt: now, UpdatedAt: now,
+		ActivatorPath: filepath.Join(materialRoot, activatorDefinitionName(transactionID)), CreatedAt: now, UpdatedAt: now,
 	}
 	created, resumed, err := options.Store.CreateOrResume(journal)
 	if err != nil {
@@ -386,6 +385,28 @@ func protectedConfigurationDigest(paths ...string) (string, error) {
 }
 
 func regularFileDigest(path string) (string, error) { return workerreadiness.RuntimeDigest(path) }
+
+func validateActivationMaterial(journal Journal) error {
+	configDigest, err := protectedConfigurationDigest(
+		journal.Invocation.ConfigPath, journal.Invocation.EnvironmentFile,
+	)
+	if err != nil || configDigest != journal.ConfigDigest {
+		return errors.Join(err, errors.New("upgrade configuration changed after preparation"))
+	}
+	for label, material := range map[string]struct {
+		path   string
+		digest string
+	}{
+		"source": {journal.Invocation.BinaryPath, journal.SourceRuntimeDigest},
+		"target": {journal.Invocation.TargetBinaryPath, journal.TargetRuntimeDigest},
+	} {
+		digest, digestErr := regularFileDigest(material.path)
+		if digestErr != nil || digest != material.digest {
+			return errors.Join(digestErr, fmt.Errorf("%s runtime changed after preparation", label))
+		}
+	}
+	return nil
+}
 
 func writeProtectedMaterial(rootPath, name string, data []byte) error {
 	root, err := securefs.OpenRoot(rootPath, nil)
@@ -465,16 +486,16 @@ func serviceRole(role delegationconfig.Role) (userservice.ServiceRole, error) {
 	}
 }
 
-func activatorDefinitionName() string {
+func activatorDefinitionName(transactionID string) string {
 	switch runtime.GOOS {
 	case "linux":
-		return "activator.service"
+		return "delegation-upgrade-" + transactionID + ".service"
 	case "darwin":
-		return "activator.plist"
+		return "com.github.ghostflying.delegation.upgrade." + transactionID + ".plist"
 	case "windows":
-		return "activator.xml"
+		return "delegation-upgrade-" + transactionID + ".xml"
 	default:
-		return "activator.definition"
+		return "delegation-upgrade-" + transactionID + ".definition"
 	}
 }
 

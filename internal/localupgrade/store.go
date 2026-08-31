@@ -38,6 +38,19 @@ func OpenStore(path string) (*Store, error) {
 	return &Store{path: path, now: time.Now}, nil
 }
 
+// OpenExistingStore opens a protected upgrade root without creating any path.
+// Hidden activators and read-only status use it so attacker-selected arguments
+// cannot cause filesystem mutations before canonical identity is established.
+func OpenExistingStore(path string) (*Store, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, errors.New("upgrade root must be an absolute clean path")
+	}
+	if err := delegationconfig.ValidatePrivateDirectory(path); err != nil {
+		return nil, fmt.Errorf("validate protected upgrade root: %w", err)
+	}
+	return &Store{path: path, now: time.Now}, nil
+}
+
 func (s *Store) Path() string {
 	if s == nil {
 		return ""

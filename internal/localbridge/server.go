@@ -13,7 +13,9 @@ import (
 	"github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/protocol"
+	"golang.org/x/mod/semver"
 )
 
 const (
@@ -23,6 +25,7 @@ const (
 	maximumConcurrentCalls        = maximumConcurrentWaitCalls + maximumConcurrentControlCalls
 	localCallTimeout              = 130 * time.Second
 	localWorkspaceCallTimeout     = 30*time.Minute + 5*time.Second
+	localUpgradeCallTimeout       = 30*time.Minute + 5*time.Second
 )
 
 type Backend interface {
@@ -68,6 +71,7 @@ type Server struct {
 	authorizer    Authorizer
 	status        StatusProvider
 	readiness     WorkerReadinessManager
+	upgrade       UpgradeManager
 	results       ResultPackageAvailabilityProvider
 	apply         ResultApplyProvider
 	connectionSem chan struct{}
@@ -141,10 +145,26 @@ func ListenWithManagement(
 	apply ResultApplyProvider,
 	readiness WorkerReadinessManager,
 ) (*Server, error) {
+	return ListenWithUpgradeManagement(
+		endpoint, identity, backend, authorizer, status, results, apply, readiness, nil,
+	)
+}
+
+func ListenWithUpgradeManagement(
+	endpoint string,
+	identity ServiceIdentity,
+	backend Backend,
+	authorizer Authorizer,
+	status StatusProvider,
+	results ResultPackageAvailabilityProvider,
+	apply ResultApplyProvider,
+	readiness WorkerReadinessManager,
+	upgrade UpgradeManager,
+) (*Server, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
-	if backend == nil {
+	if backend == nil && upgrade == nil {
 		return nil, errors.New("local bridge backend is required")
 	}
 	listener, err := listen(endpoint)
@@ -156,6 +176,7 @@ func ListenWithManagement(
 		results:       results,
 		apply:         apply,
 		readiness:     readiness,
+		upgrade:       upgrade,
 		connectionSem: make(chan struct{}, maximumConcurrentCalls),
 		waitSem:       make(chan struct{}, maximumConcurrentWaitCalls),
 		controlSem:    make(chan struct{}, maximumConcurrentControlCalls),
@@ -270,6 +291,9 @@ func (s *Server) handle(serverContext context.Context, connection net.Conn) {
 	callTimeout := localCallTimeout
 	if request.Method == protocol.MethodSyncWorkspace || request.Method == MethodApplyAgentChanges {
 		callTimeout = localWorkspaceCallTimeout
+	}
+	if isUpgradeMethod(request.Method) {
+		callTimeout = localUpgradeCallTimeout
 	}
 	ctx, cancel := context.WithTimeout(serverContext, callTimeout)
 	defer cancel()
@@ -428,6 +452,9 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		}
 		return result, nil
 	}
+	if isUpgradeMethod(request.Method) {
+		return s.callUpgrade(ctx, request)
+	}
 	if request.Method == MethodApplyAgentChanges {
 		return s.applyAgentChanges(ctx, request)
 	}
@@ -475,6 +502,9 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 			return nil, &protocol.Error{Code: protocol.ErrorForbidden, Message: "managed worker is not authorized"}
 		}
 	}
+	if s.backend == nil {
+		return nil, &protocol.Error{Code: protocol.ErrorMethodNotFound, Message: "method not found"}
+	}
 	var result json.RawMessage
 	err := s.backend.Call(
 		ctx, request.Method, request.TreeID, request.Source, request.Payload, &result,
@@ -513,6 +543,96 @@ func (s *Server) readLocalStatus(ctx context.Context) (StatusSnapshot, *protocol
 		return StatusSnapshot{}, &protocol.Error{Code: protocol.ErrorInternal, Message: "local status identity mismatch"}
 	}
 	return status, nil
+}
+
+func isUpgradeMethod(method string) bool {
+	switch method {
+	case methodUpgradePrepare, methodUpgradeArm, methodUpgradeActivate,
+		methodUpgradeCancel, methodUpgradeStatus, methodUpgradeRuntime:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) callUpgrade(
+	ctx context.Context, request request,
+) (json.RawMessage, *protocol.Error) {
+	if request.TreeID != "" || request.Source != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid local upgrade request"}
+	}
+	if s.upgrade == nil {
+		return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "local upgrade management unavailable"}
+	}
+	var (
+		snapshot UpgradeSnapshot
+		err      error
+	)
+	switch request.Method {
+	case methodUpgradePrepare:
+		var params upgradePrepareParams
+		if decodeResult(request.Payload, &params) != nil ||
+			!semver.IsValid("v"+params.TargetVersion) || params.ConfigPath == "" {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidParams, Message: "invalid local upgrade target"}
+		}
+		snapshot, err = s.upgrade.PrepareLocalUpgrade(
+			ctx, params.TargetVersion, params.ConfigPath, params.EnvironmentFile,
+		)
+	case methodUpgradeArm, methodUpgradeActivate, methodUpgradeCancel:
+		var params upgradeTransactionParams
+		if decodeResult(request.Payload, &params) != nil || identity.ValidateID(params.TransactionID) != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidParams, Message: "invalid local upgrade transaction"}
+		}
+		switch request.Method {
+		case methodUpgradeArm:
+			snapshot, err = s.upgrade.ArmLocalUpgrade(ctx, params.TransactionID)
+		case methodUpgradeActivate:
+			snapshot, err = s.upgrade.ActivateLocalUpgrade(ctx, params.TransactionID)
+		case methodUpgradeCancel:
+			snapshot, err = s.upgrade.CancelLocalUpgrade(ctx, params.TransactionID)
+		}
+	case methodUpgradeStatus:
+		var params struct{}
+		if decodeResult(request.Payload, &params) != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidParams, Message: "invalid local upgrade status request"}
+		}
+		current, statusErr := s.upgrade.LocalUpgrade(ctx)
+		if statusErr != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "local upgrade status unavailable"}
+		}
+		result, encodeErr := json.Marshal(struct {
+			Upgrade *UpgradeSnapshot `json:"upgrade"`
+		}{Upgrade: current})
+		if encodeErr != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode local upgrade status"}
+		}
+		return result, nil
+	case methodUpgradeRuntime:
+		var params struct{}
+		if decodeResult(request.Payload, &params) != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidParams, Message: "invalid local upgrade runtime request"}
+		}
+		runtimeIdentity, runtimeErr := s.upgrade.LocalUpgradeRuntime(ctx)
+		if runtimeErr != nil || runtimeIdentity.Validate() != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "local upgrade runtime identity unavailable"}
+		}
+		result, encodeErr := json.Marshal(runtimeIdentity)
+		if encodeErr != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode local upgrade runtime identity"}
+		}
+		return result, nil
+	}
+	if err != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorConflict, Message: "local upgrade request rejected"}
+	}
+	if err := snapshot.Validate(); err != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "local upgrade result invalid"}
+	}
+	result, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode local upgrade result"}
+	}
+	return result, nil
 }
 
 func (s *Server) applyAgentChanges(

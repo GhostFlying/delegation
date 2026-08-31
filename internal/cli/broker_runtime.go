@@ -8,10 +8,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/broker"
+	"github.com/GhostFlying/delegation/internal/buildinfo"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
@@ -51,6 +54,8 @@ type brokerRuntimeResources struct {
 	serveDone        <-chan error
 	statusServeDone  <-chan error
 	tailscale        embeddedTailscaleRuntime
+	localBridge      *localbridge.Server
+	localBridgeDone  <-chan error
 }
 
 func runBrokerService(
@@ -154,6 +159,41 @@ func runBrokerService(
 	if ctx.Err() != nil {
 		return nil
 	}
+	runtimeBinary, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve delegation executable: %w", err)
+	}
+	runtimeBinary, err = filepath.Abs(runtimeBinary)
+	if err != nil {
+		return fmt.Errorf("resolve delegation executable: %w", err)
+	}
+	runtimeBinary, err = filepath.EvalSymlinks(runtimeBinary)
+	if err != nil {
+		return fmt.Errorf("resolve delegation executable: %w", err)
+	}
+	upgradeManager, err := newServiceUpgradeManager(
+		cfg, configPath, "", runtimeBinary, buildinfo.Version,
+	)
+	if err != nil {
+		return fmt.Errorf("initialize broker upgrade management: %w", err)
+	}
+	bridgeEndpoint, bridgeIdentity, err := localUpgradeEndpoint(cfg)
+	if err != nil {
+		return err
+	}
+	resources.localBridge, err = localbridge.ListenWithUpgradeManagement(
+		bridgeEndpoint, bridgeIdentity, nil, nil, nil, nil, nil, nil, upgradeManager,
+	)
+	if err != nil {
+		probeContext, cancelProbe := context.WithTimeout(ctx, 2*time.Second)
+		identityErr := localbridge.Probe(probeContext, bridgeEndpoint, bridgeIdentity)
+		cancelProbe()
+		return errors.Join(err, identityErr)
+	}
+	localBridgeDone := make(chan error, 1)
+	resources.localBridgeDone = localBridgeDone
+	go func() { localBridgeDone <- resources.localBridge.Serve(ctx) }()
+	go runCommittedUpgradeCleanup(ctx, upgradeManager)
 	brokerServer, err := broker.New(broker.Options{
 		ControllerID: cfg.ControllerID,
 		InstanceID:   cfg.EffectiveInstanceID(),
@@ -246,6 +286,12 @@ func runBrokerService(
 			return nil
 		}
 		return fmt.Errorf("serve broker status HTTP: %w", err)
+	case err := <-localBridgeDone:
+		resources.localBridgeDone = nil
+		if ctx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("serve broker local bridge: %w", err)
 	case <-ctx.Done():
 		return nil
 	}
@@ -318,6 +364,11 @@ func validateExistingBrokerStateHost(cfg delegationconfig.Config) error {
 
 func (r *brokerRuntimeResources) close() error {
 	var failures []error
+	if r.localBridge != nil {
+		if err := r.localBridge.Close(); !ignorableNetworkClose(err) {
+			failures = append(failures, fmt.Errorf("close broker local bridge: %w", err))
+		}
+	}
 	if r.listener != nil {
 		if err := r.listener.Close(); !ignorableNetworkClose(err) {
 			failures = append(failures, fmt.Errorf("close broker listener: %w", err))
@@ -351,6 +402,11 @@ func (r *brokerRuntimeResources) close() error {
 	if r.statusServeDone != nil {
 		if err := <-r.statusServeDone; !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			failures = append(failures, fmt.Errorf("stop broker status HTTP: %w", err))
+		}
+	}
+	if r.localBridgeDone != nil {
+		if err := <-r.localBridgeDone; err != nil && !errors.Is(err, net.ErrClosed) {
+			failures = append(failures, fmt.Errorf("stop broker local bridge: %w", err))
 		}
 	}
 	if r.tailscale != nil {

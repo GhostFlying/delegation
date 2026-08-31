@@ -75,6 +75,35 @@ func TestLinuxUpgradeLifecycleFencesDefinitionAndProcessTree(t *testing.T) {
 	}
 }
 
+func TestLinuxDiscoversLegacyUpgradeSourceWithoutLocalBridge(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	source := testInvocation(
+		ServiceRolePeer, "/opt/delegation/0.1.0-alpha.4/delegation",
+		"/home/test/.delegation/peer.json",
+	)
+	prepared, err := Prepare(ServiceRolePeer, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRunner := runSystemctl
+	t.Cleanup(func() { runSystemctl = originalRunner })
+	runSystemctl = func(args ...string) (userServiceCommandResult, error) {
+		return systemdUpgradeResult(prepared.Artifact, "active", 4242), nil
+	}
+	expected := source
+	expected.BinaryPath = ""
+	got, err := DiscoverUpgradeSource(context.Background(), ServiceRolePeer, expected)
+	if err != nil || got != source {
+		t.Fatalf("DiscoverUpgradeSource() = %#v, %v; want %#v", got, err, source)
+	}
+	wrong := expected
+	wrong.ConfigPath = "/home/test/.delegation/other.json"
+	if _, err := DiscoverUpgradeSource(context.Background(), ServiceRolePeer, wrong); err == nil {
+		t.Fatal("DiscoverUpgradeSource() accepted a mismatched config path")
+	}
+}
+
 func TestLinuxUpgradeRejectsDefinitionDriftBeforeStop(t *testing.T) {
 	configHome := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", configHome)

@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/localbridge"
+	"github.com/GhostFlying/delegation/internal/localupgrade"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/runtimeconfig"
 	"github.com/GhostFlying/delegation/internal/statuspage"
@@ -46,6 +48,7 @@ type peerLocalStatusProvider struct {
 	deviceID       string
 	deviceName     string
 	maxWorkerSlots int
+	upgrade        localbridge.UpgradeManager
 }
 
 func (p peerLocalStatusProvider) LocalStatus(ctx context.Context) (localbridge.StatusSnapshot, error) {
@@ -95,6 +98,12 @@ func (p peerLocalStatusProvider) LocalStatus(ctx context.Context) (localbridge.S
 		MaxWorkerSlots:             p.maxWorkerSlots,
 	}
 	setDurablePeerStatus(&status, durable, durableReadiness)
+	if p.upgrade != nil {
+		status.Upgrade, err = p.upgrade.LocalUpgrade(ctx)
+		if err != nil {
+			return localbridge.StatusSnapshot{}, fmt.Errorf("read local upgrade status: %w", err)
+		}
+	}
 	if err := status.Validate(); err != nil {
 		return localbridge.StatusSnapshot{}, fmt.Errorf("build peer status: %w", err)
 	}
@@ -199,10 +208,11 @@ type statusReader func(
 	context.Context, string, localbridge.ServiceIdentity,
 ) (localbridge.StatusSnapshot, error)
 type brokerStatusReader func(context.Context, string) (statuspage.Snapshot, error)
+type upgradeStatusReader func(context.Context, string) (*localbridge.UpgradeSnapshot, error)
 
 func runStatus(args []string, stdout, stderr io.Writer) int {
-	return runStatusWithReaders(
-		args, stdout, stderr, localbridge.ReadStatusForIdentity, readBrokerStatus,
+	return runStatusWithAllReaders(
+		args, stdout, stderr, localbridge.ReadStatusForIdentity, readBrokerStatus, localbridge.ReadUpgrade,
 	)
 }
 
@@ -212,7 +222,7 @@ func runStatusWithReader(
 	stderr io.Writer,
 	read statusReader,
 ) int {
-	return runStatusWithReaders(args, stdout, stderr, read, nil)
+	return runStatusWithAllReaders(args, stdout, stderr, read, nil, nil)
 }
 
 func runStatusWithReaders(
@@ -221,6 +231,17 @@ func runStatusWithReaders(
 	stderr io.Writer,
 	readPeer statusReader,
 	readBroker brokerStatusReader,
+) int {
+	return runStatusWithAllReaders(args, stdout, stderr, readPeer, readBroker, nil)
+}
+
+func runStatusWithAllReaders(
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+	readPeer statusReader,
+	readBroker brokerStatusReader,
+	readUpgrade upgradeStatusReader,
 ) int {
 	flags := flag.NewFlagSet("delegation status", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -261,20 +282,46 @@ func runStatusWithReaders(
 		cfg = repaired
 	}
 	if cfg.Role == delegationconfig.RoleBroker {
-		if cfg.Broker.StatusListen == "" || readBroker == nil {
+		if readBroker == nil {
 			return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
 		}
+		if cfg.Broker.StatusListen == "" {
+			offline, offlineErr := readStoppedBrokerStatus(cfg, resolvedConfig)
+			if offlineErr != nil {
+				return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
+			}
+			return writeBrokerStatus(stdout, stderr, offline, *jsonOutput)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), peerStatusReadTimeout)
+		defer cancel()
 		status, err := readBroker(ctx, cfg.Broker.StatusListen)
-		cancel()
+		if err != nil {
+			offline, offlineErr := readStoppedBrokerStatus(cfg, resolvedConfig)
+			if offlineErr != nil {
+				return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
+			}
+			return writeBrokerStatus(stdout, stderr, offline, *jsonOutput)
+		}
 		statusInstanceID := status.InstanceID
 		if statusInstanceID == "" {
 			statusInstanceID = delegationconfig.DefaultInstanceID
 		}
-		if err != nil || status.Validate() != nil || status.ControllerID != cfg.ControllerID ||
+		if status.Validate() != nil || status.ControllerID != cfg.ControllerID ||
 			statusInstanceID != cfg.EffectiveInstanceID() ||
 			status.TransportStatus != cfg.Transport.Status() {
 			return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
+		}
+		status.ServiceRunning = true
+		if readUpgrade != nil {
+			endpoint, _, endpointErr := localUpgradeEndpoint(cfg)
+			if endpointErr != nil {
+				return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
+			}
+			upgrade, upgradeErr := readUpgrade(ctx, endpoint)
+			if upgradeErr != nil {
+				return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
+			}
+			status.Upgrade = toStatusPageUpgrade(upgrade)
 		}
 		return writeBrokerStatus(stdout, stderr, status, *jsonOutput)
 	}
@@ -313,7 +360,75 @@ func runStatusWithReaders(
 	if offlineErr != nil {
 		return writeFixedStatusError(stderr, peerStatusUnavailableError, exitUnavailable)
 	}
+	if upgrade, upgradeErr := readStoppedUpgrade(cfg, resolvedConfig); upgradeErr == nil {
+		offline.Upgrade = upgrade
+	} else if !errors.Is(upgradeErr, os.ErrNotExist) {
+		return writeFixedStatusError(stderr, peerStatusUnavailableError, exitUnavailable)
+	}
 	return writePeerStatus(stdout, stderr, offline, *jsonOutput)
+}
+
+func readStoppedBrokerStatus(
+	cfg delegationconfig.Config, configPath string,
+) (status statuspage.Snapshot, err error) {
+	// Establish that a protected matching transaction exists before touching
+	// the broker lease path, then hold the lease and read it again.
+	if _, err := readStoppedUpgrade(cfg, configPath); err != nil {
+		return statuspage.Snapshot{}, err
+	}
+	lease, err := store.AcquireBrokerLease(cfg.Broker.StateFile)
+	if err != nil {
+		return statuspage.Snapshot{}, err
+	}
+	defer func() { err = errors.Join(err, lease.Close()) }()
+	upgrade, err := readStoppedUpgrade(cfg, configPath)
+	if err != nil {
+		return statuspage.Snapshot{}, err
+	}
+	status = statuspage.Snapshot{
+		TransportStatus: cfg.Transport.Status(), Version: buildinfo.Version,
+		ControllerID: cfg.ControllerID, ServiceRunning: false,
+		Upgrade: toStatusPageUpgrade(upgrade),
+	}
+	if cfg.EffectiveInstanceID() != delegationconfig.DefaultInstanceID {
+		status.InstanceID = cfg.EffectiveInstanceID()
+	}
+	if err := status.Validate(); err != nil {
+		return statuspage.Snapshot{}, fmt.Errorf("build stopped broker status: %w", err)
+	}
+	return status, nil
+}
+
+func readStoppedUpgrade(
+	cfg delegationconfig.Config, configPath string,
+) (*localbridge.UpgradeSnapshot, error) {
+	home, err := delegationconfig.DefaultHome()
+	if err != nil {
+		return nil, err
+	}
+	home, err = filepath.Abs(home)
+	if err != nil {
+		return nil, err
+	}
+	root, err := localupgrade.RootForConfig(home, cfg)
+	if err != nil {
+		return nil, err
+	}
+	transactionStore, err := localupgrade.OpenExistingStore(root)
+	if err != nil {
+		return nil, err
+	}
+	j, err := transactionStore.Load()
+	if err != nil {
+		return nil, err
+	}
+	if j.Role != cfg.Role || j.InstanceID != cfg.EffectiveInstanceID() ||
+		j.ControllerID != cfg.ControllerID || j.DeviceID != cfg.DeviceID ||
+		filepath.Clean(j.Invocation.ConfigPath) != filepath.Clean(configPath) {
+		return nil, errors.New("upgrade journal does not match the requested service identity")
+	}
+	snapshot := bridgeUpgradeSnapshot(j)
+	return &snapshot, nil
 }
 
 func writePeerStatus(
@@ -366,6 +481,7 @@ func writePeerStatus(
 		if status.ConnectionState == localbridge.ConnectionStateRecoveryRequired {
 			fmt.Fprintf(&rendered, "rejected peer worker revision: %d\n", status.RecoveryPeerWorkerRevision)
 		}
+		writeUpgradeStatus(&rendered, status.Upgrade)
 		fmt.Fprintf(
 			&rendered,
 			"worker slots: %d/%d occupied\n",
@@ -412,6 +528,20 @@ func writePeerStatus(
 		return writeFixedStatusError(stderr, statusOutputError, 1)
 	}
 	return 0
+}
+
+func writeUpgradeStatus(rendered *bytes.Buffer, upgrade *localbridge.UpgradeSnapshot) {
+	if upgrade == nil {
+		return
+	}
+	fmt.Fprintln(rendered, "upgrade:")
+	fmt.Fprintf(rendered, "  transaction: %s\n", upgrade.TransactionID)
+	fmt.Fprintf(rendered, "  state: %s\n", upgrade.State)
+	fmt.Fprintf(rendered, "  version: %s -> %s\n", upgrade.SourceVersion, upgrade.TargetVersion)
+	fmt.Fprintf(rendered, "  commit authorized: %t\n", upgrade.CommitAuthorized)
+	if upgrade.FailureCode != "" {
+		fmt.Fprintf(rendered, "  failure: %s\n", upgrade.FailureCode)
+	}
 }
 
 func writeFixedStatusError(stderr io.Writer, message string, code int) int {

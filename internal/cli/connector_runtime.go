@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GhostFlying/delegation/internal/buildinfo"
 	"github.com/GhostFlying/delegation/internal/clicommand"
 	"github.com/GhostFlying/delegation/internal/clilaunch"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
@@ -320,6 +321,12 @@ func runConnectorServiceWithProviderEnvironment(
 	if err != nil {
 		return err
 	}
+	upgradeManager, err := newServiceUpgradeManager(
+		cfg, configPath, environmentFile, runtimeBinary, buildinfo.Version,
+	)
+	if err != nil {
+		return fmt.Errorf("initialize local upgrade management: %w", err)
+	}
 	endpoint, err := localbridge.EndpointForInstance(
 		cfg.EffectiveInstanceID(), cfg.ControllerID, cfg.DeviceID,
 	)
@@ -327,13 +334,14 @@ func runConnectorServiceWithProviderEnvironment(
 		return err
 	}
 	bridgeIdentity := localbridge.ServiceIdentity{
+		Role:         delegationconfig.RolePeer,
 		ControllerID: cfg.ControllerID,
 		DeviceID:     cfg.DeviceID,
 	}
 	if cfg.EffectiveInstanceID() != delegationconfig.DefaultInstanceID {
 		bridgeIdentity.InstanceID = cfg.EffectiveInstanceID()
 	}
-	bridge, err := localbridge.ListenWithManagement(
+	bridge, err := localbridge.ListenWithUpgradeManagement(
 		endpoint,
 		bridgeIdentity,
 		client,
@@ -345,10 +353,12 @@ func runConnectorServiceWithProviderEnvironment(
 			transport:    cfg.Transport.Status(),
 			controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 			deviceName: cfg.DeviceName, maxWorkerSlots: cfg.Peer.MaxWorkerSlots,
+			upgrade: upgradeManager,
 		},
 		localResultPackageAvailabilityProvider{manager: resultPackages},
 		resultApplies,
 		readinessController,
+		upgradeManager,
 	)
 	if err != nil {
 		probeContext, cancelProbe := context.WithTimeout(ctx, 2*time.Second)
@@ -366,6 +376,7 @@ func runConnectorServiceWithProviderEnvironment(
 	}
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
+	go runCommittedUpgradeCleanup(runContext, upgradeManager)
 	connectorDone := make(chan error, 1)
 	bridgeDone := make(chan error, 1)
 	readinessDone := make(chan error, 1)

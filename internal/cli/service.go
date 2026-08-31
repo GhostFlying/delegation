@@ -15,8 +15,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GhostFlying/delegation/internal/buildinfo"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/hostkind"
+	"github.com/GhostFlying/delegation/internal/localbridge"
+	"github.com/GhostFlying/delegation/internal/localupgrade"
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/runtimeconfig"
@@ -51,7 +54,7 @@ type serviceRepairDependencies struct {
 
 func runService(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: delegation service <install|repair|run> [options]")
+		fmt.Fprintln(stderr, "usage: delegation service <install|repair|upgrade|run> [options]")
 		return exitUsage
 	}
 	switch args[0] {
@@ -61,10 +64,266 @@ func runService(args []string, stdout, stderr io.Writer) int {
 		return runServiceRuntime(args[1:], stderr)
 	case "repair":
 		return runServiceRepair(args[1:], stdout, stderr)
+	case "upgrade":
+		return runServiceUpgrade(args[1:], stdout, stderr)
+	case "upgrade-compatibility":
+		return runServiceUpgradeCompatibility(args[1:], stdout, stderr)
+	case "upgrade-activate":
+		return runServiceUpgradeActivator(args[1:], stderr)
 	default:
 		fmt.Fprintf(stderr, "delegation: unsupported service action %q\n", args[0])
 		return exitUsage
 	}
+}
+
+func runServiceUpgrade(args []string, stdout, stderr io.Writer) int {
+	return runServiceUpgradeWithDependencies(args, stdout, stderr, serviceUpgradeCommandDependencies{})
+}
+
+type serviceUpgradeCommandDependencies struct {
+	bootstrap func(context.Context, delegationconfig.Config, string, string, string) (localbridge.UpgradeSnapshot, error)
+	cancel    func(context.Context, delegationconfig.Config, string, string) (localbridge.UpgradeSnapshot, error)
+}
+
+func runServiceUpgradeWithDependencies(
+	args []string, stdout, stderr io.Writer, dependencies serviceUpgradeCommandDependencies,
+) int {
+	if dependencies.bootstrap == nil {
+		dependencies.bootstrap = bootstrapServiceUpgrade
+	}
+	if dependencies.cancel == nil {
+		dependencies.cancel = cancelServiceUpgrade
+	}
+	flags := flag.NewFlagSet("delegation service upgrade", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configPath := flags.String("config", "", "broker or peer configuration file path (required)")
+	targetVersion := flags.String("target-version", "", "canonical target release version")
+	environmentFile := flags.String("environment-file", "", "protected peer provider environment file")
+	bootstrap := flags.Bool("bootstrap", false, "authorize this local service upgrade")
+	cancelUpgrade := flags.Bool("cancel", false, "cancel a pre-COMMIT transaction")
+	transactionID := flags.String("transaction-id", "", "upgrade transaction ID")
+	timeout := flags.Duration("timeout", 30*time.Minute, "bounded upgrade request timeout")
+	jsonOutput := flags.Bool("json", false, "print upgrade result as JSON")
+	if code := parseFlags(flags, args); code >= 0 {
+		return code
+	}
+	if *configPath == "" || *timeout <= 0 {
+		return writeError(stderr, errors.New("--config and a positive --timeout are required"))
+	}
+	if *cancelUpgrade {
+		if *transactionID == "" || *targetVersion != "" || *environmentFile != "" || *bootstrap {
+			return writeError(stderr, errors.New("--cancel requires --transaction-id and excludes --target-version, --environment-file, and --bootstrap"))
+		}
+	} else if *targetVersion == "" || *transactionID != "" {
+		return writeError(stderr, errors.New("upgrade requires --target-version and excludes --transaction-id"))
+	}
+	resolvedConfig, err := absolutePath(*configPath)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	resolvedEnvironment := ""
+	if *environmentFile != "" {
+		resolvedEnvironment, err = absolutePath(*environmentFile)
+		if err != nil {
+			return writeError(stderr, err)
+		}
+	}
+	cfg, err := runtimeconfig.Read(resolvedConfig)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	if cfg.Role == delegationconfig.RolePeer && !*cancelUpgrade {
+		if resolvedEnvironment == "" {
+			return writeError(stderr, errors.New("peer service upgrade requires --environment-file"))
+		}
+		if !*cancelUpgrade && !*bootstrap {
+			return writeError(stderr, errors.New("peer service upgrade requires --bootstrap or broker coordination"))
+		}
+	} else if cfg.Role == delegationconfig.RoleBroker && resolvedEnvironment != "" {
+		return writeError(stderr, errors.New("broker service upgrade must not use --environment-file"))
+	}
+	if !*cancelUpgrade && !*bootstrap {
+		return writeError(stderr, errors.New("coordinated broker upgrade is not available without --bootstrap"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	var result localbridge.UpgradeSnapshot
+	if *cancelUpgrade {
+		result, err = dependencies.cancel(ctx, cfg, resolvedConfig, *transactionID)
+	} else {
+		result, err = dependencies.bootstrap(
+			ctx, cfg, resolvedConfig, resolvedEnvironment, *targetVersion,
+		)
+	}
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	return writeServiceUpgradeResult(stdout, stderr, result, *jsonOutput)
+}
+
+func activateAndWaitForLocalUpgrade(
+	ctx context.Context, endpoint string, current localbridge.UpgradeSnapshot,
+) (localbridge.UpgradeSnapshot, error) {
+	return activateAndWaitForUpgrade(
+		ctx, current,
+		func(ctx context.Context, transactionID string) (localbridge.UpgradeSnapshot, error) {
+			return localbridge.ActivateUpgrade(ctx, endpoint, transactionID)
+		},
+		func(ctx context.Context) (*localbridge.UpgradeSnapshot, error) {
+			return localbridge.ReadUpgrade(ctx, endpoint)
+		},
+	)
+}
+
+func activateAndWaitForUpgrade(
+	ctx context.Context, current localbridge.UpgradeSnapshot,
+	activate func(context.Context, string) (localbridge.UpgradeSnapshot, error),
+	read func(context.Context) (*localbridge.UpgradeSnapshot, error),
+) (localbridge.UpgradeSnapshot, error) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	last := current
+	var lastActivationErr error
+	for {
+		switch last.State {
+		case string(localupgrade.StateCommitted):
+			return last, nil
+		case string(localupgrade.StateRolledBack), string(localupgrade.StateRollbackFailed):
+			return last, fmt.Errorf("local upgrade ended in %s", last.State)
+		case string(localupgrade.StateArmed), string(localupgrade.StateActivating),
+			string(localupgrade.StateForwardRecoveryRequired):
+			next, err := activate(ctx, last.TransactionID)
+			if err == nil {
+				last = next
+				lastActivationErr = nil
+			} else {
+				lastActivationErr = err
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return last, errors.Join(
+				fmt.Errorf("wait for local upgrade transaction %s: %w", last.TransactionID, ctx.Err()),
+				lastActivationErr,
+			)
+		case <-ticker.C:
+		}
+		next, err := read(ctx)
+		if err != nil {
+			continue
+		}
+		if next == nil || next.TransactionID != current.TransactionID {
+			return last, errors.New("local upgrade status changed transaction identity")
+		}
+		last = *next
+	}
+}
+
+func writeServiceUpgradeResult(
+	stdout, stderr io.Writer, result localbridge.UpgradeSnapshot, jsonOutput bool,
+) int {
+	if jsonOutput {
+		if err := json.NewEncoder(stdout).Encode(result); err != nil {
+			return writeError(stderr, err)
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "upgrade transaction: %s\n", result.TransactionID)
+	fmt.Fprintf(stdout, "state: %s\n", result.State)
+	fmt.Fprintf(stdout, "version: %s -> %s\n", result.SourceVersion, result.TargetVersion)
+	fmt.Fprintf(stdout, "commit authorized: %t\n", result.CommitAuthorized)
+	if result.FailureCode != "" {
+		fmt.Fprintf(stdout, "failure: %s\n", result.FailureCode)
+	}
+	return 0
+}
+
+func runServiceUpgradeCompatibility(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("delegation service upgrade-compatibility", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configPath := flags.String("config", "", "configuration path")
+	environmentFile := flags.String("environment-file", "", "peer environment path")
+	jsonOutput := flags.Bool("json", false, "print JSON")
+	if code := parseFlags(flags, args); code >= 0 {
+		return code
+	}
+	if *configPath == "" || !*jsonOutput {
+		return writeError(stderr, errors.New("--config and --json are required"))
+	}
+	resolvedConfig, err := absolutePath(*configPath)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	cfg, err := runtimeconfig.Read(resolvedConfig)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	if cfg.Role == delegationconfig.RolePeer && *environmentFile == "" {
+		return writeError(stderr, errors.New("peer compatibility probe requires --environment-file"))
+	}
+	if cfg.Role == delegationconfig.RoleBroker && *environmentFile != "" {
+		return writeError(stderr, errors.New("broker compatibility probe must not use --environment-file"))
+	}
+	compatibility, err := localupgrade.CurrentCompatibility(cfg.Role, buildinfo.Version)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	if err := json.NewEncoder(stdout).Encode(compatibility); err != nil {
+		return writeError(stderr, err)
+	}
+	return 0
+}
+
+func runServiceUpgradeActivator(args []string, stderr io.Writer) int {
+	flags := flag.NewFlagSet("delegation service upgrade-activate", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	upgradeRoot := flags.String("upgrade-root", "", "protected upgrade root")
+	transactionID := flags.String("transaction-id", "", "upgrade transaction ID")
+	if code := parseFlags(flags, args); code >= 0 {
+		return code
+	}
+	if *upgradeRoot == "" || *transactionID == "" {
+		return writeError(stderr, errors.New("--upgrade-root and --transaction-id are required"))
+	}
+	resolvedRoot, err := absolutePath(*upgradeRoot)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	transactionStore, err := localupgrade.OpenExistingStore(resolvedRoot)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	journal, err := transactionStore.Load()
+	if err != nil || journal.TransactionID != *transactionID {
+		return writeError(stderr, errors.Join(err, errors.New("activator transaction identity mismatch")))
+	}
+	if err := validateUpgradeActivatorRuntime(journal); err != nil {
+		return writeError(stderr, err)
+	}
+	cfg, err := runtimeconfig.Read(journal.Invocation.ConfigPath)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	rootParent := filepath.Dir(filepath.Dir(filepath.Dir(resolvedRoot)))
+	wantRoot, err := localupgrade.RootForConfig(rootParent, cfg)
+	if err != nil || wantRoot != resolvedRoot || cfg.Role != journal.Role ||
+		cfg.ControllerID != journal.ControllerID || cfg.DeviceID != journal.DeviceID ||
+		cfg.EffectiveInstanceID() != journal.InstanceID {
+		return writeError(stderr, errors.Join(err, errors.New("activator root or service identity mismatch")))
+	}
+	activator, err := localupgrade.NewActivator(
+		transactionStore, localupgrade.DefaultActivationOperations(qualifyLocalUpgrade),
+	)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	_, err = activator.Run(ctx, *transactionID)
+	if err != nil {
+		return writeError(stderr, err)
+	}
+	return 0
 }
 
 func runServiceRepair(args []string, stdout, stderr io.Writer) int {

@@ -107,6 +107,7 @@ type StatusSnapshot struct {
 	Workers                    WorkerCounts             `json:"workers"`
 	Artifacts                  ArtifactCounts           `json:"artifacts"`
 	Results                    ResultCounts             `json:"results"`
+	Upgrade                    *UpgradeSnapshot         `json:"upgrade,omitempty"`
 }
 
 func (s StatusSnapshot) Validate() error {
@@ -174,6 +175,11 @@ func (s StatusSnapshot) Validate() error {
 	}
 	if err := s.WorkerReadiness.Validate(); err != nil {
 		return fmt.Errorf("worker readiness: %w", err)
+	}
+	if s.Upgrade != nil {
+		if err := s.Upgrade.Validate(); err != nil {
+			return fmt.Errorf("upgrade: %w", err)
+		}
 	}
 	if s.WorkerReady != s.WorkerReadiness.IsReady() {
 		return errors.New("worker readiness state is inconsistent")
