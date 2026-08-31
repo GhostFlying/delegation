@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -730,7 +731,7 @@ func TestValidateListResultRejectsRevisionSkew(t *testing.T) {
 
 func TestRootMCPOutputIsBounded(t *testing.T) {
 	if maximumDevicePage > 4 || listFeatureLimit != 0 || maximumListBytes > 4*1024 ||
-		maximumDetailBytes > 8*1024 || maximumAgentListBytes > 16*1024 ||
+		maximumDetailBytes > 8*1024 || maximumAgentListBytes > 32*1024 ||
 		maximumWorkspaceOutputBytes > 16*1024 || len(serverInstructions) > 1536 {
 		t.Fatalf(
 			"root MCP bounds = page %d, features %d, list %d bytes, detail %d bytes, instructions %d bytes",
@@ -804,6 +805,41 @@ func TestRootMCPOutputIsBounded(t *testing.T) {
 	}, listFeatureLimit, rootMCPDeviceID)
 	if len(summary.Features) != 0 || !summary.FeaturesTruncated {
 		t.Fatalf("bounded summary = %#v", summary)
+	}
+}
+
+func TestMaximumAgentListPageFitsOutputLimit(t *testing.T) {
+	agents := make([]AgentOutput, 0, protocol.MaximumAgentPage)
+	for index := range protocol.MaximumAgentPage {
+		agents = append(agents, AgentOutput{
+			SpawnID:       fmt.Sprintf("123e4567-e89b-42d3-a456-%012x", 0x500+index),
+			AgentID:       fmt.Sprintf("123e4567-e89b-42d3-a456-%012x", 0x600+index),
+			ParentAgentID: rootMCPAgentID, TargetDeviceID: rootMCPWorkerID,
+			TaskName:                strings.Repeat("a", protocol.MaximumAgentTaskNameBytes),
+			SpawnStatus:             protocol.AgentSpawnFailed,
+			SpawnFailureCode:        strings.Repeat("s", protocol.MaximumFailureCodeBytes),
+			LifecyclePhase:          protocol.WorkerLifecycleFailed,
+			LifecycleFailureCode:    strings.Repeat("l", protocol.MaximumFailureCodeBytes),
+			LifecycleTargetRevision: math.MaxInt64, LifecycleObservedAt: math.MaxInt64,
+			LifecycleFreshness:   protocol.AgentLifecycleCurrent,
+			EffectiveStatus:      protocol.AgentEffectiveFailed,
+			EffectiveFailureCode: strings.Repeat("s", protocol.MaximumFailureCodeBytes),
+			FailureSource:        protocol.AgentFailureSourceSpawn, TargetDispatchable: true,
+			WorkspaceID: fmt.Sprintf("123e4567-e89b-42d3-a456-%012x", 0x700+index),
+		})
+	}
+	output := ListAgentsOutput{
+		Agents: agents,
+		NextCursor: base64.RawURLEncoding.EncodeToString(
+			[]byte(strings.Repeat("x", maximumCursorBytes)),
+		),
+	}
+	data, err := json.Marshal(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enforceOutputLimit(output, maximumAgentListBytes); err != nil {
+		t.Fatalf("maximum valid agent list page is %d bytes: %v", len(data), err)
 	}
 }
 
