@@ -69,6 +69,9 @@ func PrepareDatabase(
 	); err != nil {
 		return Database{}, err
 	}
+	if err := removeDatabaseSidecars(root, canonicalName); err != nil {
+		return Database{}, fmt.Errorf("remove checkpointed canonical database sidecars: %w", err)
+	}
 	canonicalDigest, err = digestAt(root, canonicalName)
 	if err != nil {
 		return Database{}, err
@@ -109,6 +112,9 @@ func PrepareDatabase(
 			return Database{}, fmt.Errorf("sync removed incomplete shadow database: %w", err)
 		}
 	}
+	if err := removeDatabaseSidecars(root, shadowName); err != nil {
+		return Database{}, fmt.Errorf("remove incomplete shadow database sidecars: %w", err)
+	}
 	if err := copyDatabase(root, canonicalName, shadowName); err != nil {
 		return Database{}, fmt.Errorf("create shadow database: %w", err)
 	}
@@ -116,6 +122,14 @@ func PrepareDatabase(
 		if err := migrate(ctx, database.ShadowPath, database.TargetIdentity); err != nil {
 			return Database{}, fmt.Errorf("migrate shadow database: %w", err)
 		}
+	}
+	if _, err := store.CheckpointUpgradeDatabase(
+		ctx, database.ShadowPath, database.Kind, database.TargetIdentity,
+	); err != nil {
+		return Database{}, fmt.Errorf("checkpoint migrated shadow database: %w", err)
+	}
+	if err := removeDatabaseSidecars(root, shadowName); err != nil {
+		return Database{}, fmt.Errorf("remove checkpointed shadow database sidecars: %w", err)
 	}
 	if err := store.ValidateUpgradeDatabase(ctx, database.ShadowPath, database.Kind, database.TargetIdentity); err != nil {
 		return Database{}, fmt.Errorf("validate shadow database: %w", err)
@@ -158,6 +172,12 @@ func reconcileDatabase(
 	defer root.Close()
 	canonicalName := filepath.Base(database.CanonicalPath)
 	materialName := filepath.Base(materialPath)
+	if err := rejectDatabaseSidecars(root, canonicalName); err != nil {
+		return false, fmt.Errorf("canonical database has uncheckpointed sidecars: %w", err)
+	}
+	if err := rejectDatabaseSidecars(root, materialName); err != nil {
+		return false, fmt.Errorf("upgrade database material has sidecars: %w", err)
+	}
 	canonicalDigest, err := digestAt(root, canonicalName)
 	if err == nil && canonicalDigest == expectedDigest {
 		if err := store.ValidateUpgradeDatabase(
@@ -282,6 +302,37 @@ func existingMaterial(root *securefs.Root, name string) (bool, string, error) {
 	}
 	digest, err := digestAt(root, name)
 	return true, digest, err
+}
+
+func removeDatabaseSidecars(root *securefs.Root, name string) error {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		sidecar := name + suffix
+		info, err := root.Lstat(sidecar)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("database sidecar %s is not a regular file", suffix)
+		}
+		if err := root.Remove(sidecar); err != nil {
+			return err
+		}
+	}
+	return root.Sync()
+}
+
+func rejectDatabaseSidecars(root *securefs.Root, name string) error {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := root.Lstat(name + suffix); err == nil {
+			return fmt.Errorf("unexpected %s sidecar", suffix)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateDatabasePaths(database Database) error {
