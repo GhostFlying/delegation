@@ -161,3 +161,32 @@ Post-integration acceptance after the exact fast-forward and evidence commit:
 
 Round-1 reviewer verification passed the focused packages, full Linux suite, vet, focused race,
 Darwin and Windows cross-compilation, and `git diff --check`.
+
+### Review Round 2
+
+- Frozen commit: `cdf7c9b2b9631198bb334e3d2a2f5dea760d84f3`
+- Frozen tree: `c0a1674053c51ef1ecaef7c9c5ec8c3471c00765`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `CLEAN`
+- Findings: none
+- Confirmed dispositions: the exact alpha.4 config/database bootstrap path and target-bound peer
+  qualification findings from round 1 are resolved and covered by regression tests
+- Residual risks: native systemd, launchd, and Windows Scheduled Task behavior remains
+  fixture/fake tested; deliberate protected-state corruption and hostile same-UID protocol forgery
+  remain outside ordinary supported workflows
+- Disposition: accepted for serial fast-forward into the integration branch
+
+Executable acceptance at the accepted frozen revision:
+
+- `go test -count=1 ./internal/config ./internal/store ./internal/localupgrade ./internal/cli`
+  and the corresponding focused race run passed.
+- The real alpha.4 config/database migration, configuration switch/resume/rollback, and peer/broker
+  qualification regression tests passed repeated runs.
+- `go test -count=1 -tags=ts_omit_logtail -timeout=30m ./...` and
+  `go vet -tags=ts_omit_logtail ./...` passed.
+- Linux amd64, macOS arm64, and Windows amd64 compile validation passed with `CGO_ENABLED=0`.
+- Integration-tagged Codex peer E2E compilation, the POSIX plugin smoke test, and
+  `git diff --check` passed.
+- The independent reviewer reran focused packages and race tests, the full Linux suite, vet, all
+  three platform compile checks, integration-tagged E2E compilation, and a credential-pattern scan.
+- Validation used `go1.26.5 linux/amd64`; the detached review worktree remained clean.
