@@ -190,3 +190,20 @@ Executable acceptance at the accepted frozen revision:
 - The independent reviewer reran focused packages and race tests, the full Linux suite, vet, all
   three platform compile checks, integration-tagged E2E compilation, and a credential-pattern scan.
 - Validation used `go1.26.5 linux/amd64`; the detached review worktree remained clean.
+
+Post-integration acceptance after the exact fast-forward and evidence commit:
+
+- Accepted review range:
+  `9d4b444292a32e5a2b9ef83a16e9f489e79da582..cdf7c9b2b9631198bb334e3d2a2f5dea760d84f3`
+- Integration method: fast-forward; no rebase, conflict, or semantic adjustment occurred.
+- Integration commit before this evidence commit: `299b8355bd591693ebcc2b4d64a3bb74ad66fb4e`
+- Integration tree before this evidence commit: `ecad55322c298c514cc62e4e8dbce37d364efdc6`
+- Focused config, store, local-upgrade, local-bridge, user-service, and CLI tests and their race
+  variants passed.
+- `go test -count=1 -tags=ts_omit_logtail -timeout=30m ./...` and
+  `go vet -tags=ts_omit_logtail ./...` passed.
+- Linux amd64, macOS arm64, and Windows amd64 compile validation passed with `CGO_ENABLED=0`.
+- Integration-tagged Codex peer E2E compilation, the POSIX plugin smoke test, and
+  `git diff --check` passed.
+- Validation used `go1.26.5 linux/amd64`; the integration worktree remained clean before this
+  evidence-only update.
