@@ -138,6 +138,35 @@ func TestSameTargetTerminalJournalResumesAndHigherTargetMayReplace(t *testing.T)
 	}
 }
 
+func TestControllerTransactionBindingIsDurableAndImmutable(t *testing.T) {
+	transactionStore, err := OpenStore(filepath.Join(t.TempDir(), "upgrade"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := testJournal(t)
+	created, _, err := transactionStore.CreateOrResume(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controllerID := "123e4567-e89b-42d3-a456-426614174991"
+	bound, err := transactionStore.BindControllerTransaction(created.TransactionID, controllerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.ControllerTransactionID != controllerID {
+		t.Fatalf("controller transaction = %q", bound.ControllerTransactionID)
+	}
+	if repeated, err := transactionStore.BindControllerTransaction(created.TransactionID, controllerID); err != nil ||
+		repeated.ControllerTransactionID != controllerID {
+		t.Fatalf("repeat controller binding = %#v, %v", repeated, err)
+	}
+	if _, err := transactionStore.BindControllerTransaction(
+		created.TransactionID, "123e4567-e89b-42d3-a456-426614174992",
+	); err == nil {
+		t.Fatal("controller transaction binding was replaced")
+	}
+}
+
 func TestJournalRejectsImmutableMutationAndUnknownFields(t *testing.T) {
 	transactionStore, err := OpenStore(filepath.Join(t.TempDir(), "upgrade"))
 	if err != nil {

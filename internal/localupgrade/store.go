@@ -12,6 +12,7 @@ import (
 	"time"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/securefs"
 	"golang.org/x/mod/semver"
 )
@@ -158,6 +159,31 @@ func (s *Store) Update(transactionID string, mutate func(*Journal) error) (Journ
 	return after, nil
 }
 
+// BindControllerTransaction durably assigns a peer-local prepared transaction
+// to exactly one controller-wide transaction. The binding is immutable once
+// set and must precede ARM so a restarted peer cannot be enrolled by a
+// different coordinator.
+func (s *Store) BindControllerTransaction(
+	transactionID, controllerTransactionID string,
+) (Journal, error) {
+	if err := identity.ValidateID(controllerTransactionID); err != nil {
+		return Journal{}, fmt.Errorf("controller transaction ID: %w", err)
+	}
+	return s.Update(transactionID, func(current *Journal) error {
+		if current.ControllerTransactionID != "" {
+			if current.ControllerTransactionID != controllerTransactionID {
+				return errors.New("local upgrade is bound to another controller transaction")
+			}
+			return nil
+		}
+		if current.State != StatePrepared || current.CommitAuthorized {
+			return errors.New("local upgrade can only be controller-bound while prepared")
+		}
+		current.ControllerTransactionID = controllerTransactionID
+		return nil
+	})
+}
+
 func (s *Store) write(journal Journal, replace bool) error {
 	data, err := json.Marshal(journal)
 	if err != nil {
@@ -239,6 +265,14 @@ func validateMutation(before, after Journal) error {
 	immutableBefore.UpdatedAt, immutableAfter.UpdatedAt = 0, 0
 	immutableBefore.Database.SourceDigest, immutableAfter.Database.SourceDigest = "", ""
 	immutableBefore.Database.TargetDigest, immutableAfter.Database.TargetDigest = "", ""
+	controllerBindingChanged := immutableBefore.ControllerTransactionID != immutableAfter.ControllerTransactionID
+	if controllerBindingChanged {
+		if immutableBefore.ControllerTransactionID != "" || immutableAfter.ControllerTransactionID == "" ||
+			before.State != StatePrepared || after.State != StatePrepared || before.CommitAuthorized || after.CommitAuthorized {
+			return errors.New("upgrade controller transaction binding is immutable")
+		}
+		immutableBefore.ControllerTransactionID = immutableAfter.ControllerTransactionID
+	}
 	if !reflect.DeepEqual(immutableBefore, immutableAfter) {
 		return errors.New("upgrade journal immutable identity changed")
 	}

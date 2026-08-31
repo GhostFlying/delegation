@@ -95,6 +95,102 @@ func (m *serviceUpgradeManager) PrepareLocalUpgrade(
 	return bridgeUpgradeSnapshot(result.Journal), nil
 }
 
+func (m *serviceUpgradeManager) PrepareCoordinatedUpgrade(
+	ctx context.Context, params protocol.PrepareUpgradeParams,
+) (protocol.UpgradeSnapshot, error) {
+	if err := params.Validate(); err != nil {
+		return protocol.UpgradeSnapshot{}, err
+	}
+	prepared, err := m.PrepareLocalUpgrade(
+		ctx, params.TargetVersion, m.configPath, m.environmentFile,
+	)
+	if err != nil {
+		return protocol.UpgradeSnapshot{}, err
+	}
+	journal, err := m.store.BindControllerTransaction(
+		prepared.TransactionID, params.ControllerTransactionID,
+	)
+	if err != nil {
+		return protocol.UpgradeSnapshot{}, err
+	}
+	return coordinatedUpgradeSnapshot(journal), nil
+}
+
+func (m *serviceUpgradeManager) ArmCoordinatedUpgrade(
+	ctx context.Context, params protocol.UpgradeTransactionParams,
+) (protocol.UpgradeSnapshot, error) {
+	return m.runCoordinatedUpgrade(ctx, params, m.manager.Arm)
+}
+
+func (m *serviceUpgradeManager) ActivateCoordinatedUpgrade(
+	ctx context.Context, params protocol.UpgradeTransactionParams,
+) (protocol.UpgradeSnapshot, error) {
+	return m.runCoordinatedUpgrade(ctx, params, m.manager.AuthorizeAndLaunch)
+}
+
+func (m *serviceUpgradeManager) CancelCoordinatedUpgrade(
+	ctx context.Context, params protocol.UpgradeTransactionParams,
+) (protocol.UpgradeSnapshot, error) {
+	return m.runCoordinatedUpgrade(ctx, params, m.manager.Cancel)
+}
+
+func (m *serviceUpgradeManager) CoordinatedUpgradeStatus(
+	_ context.Context, params protocol.UpgradeTransactionParams,
+) (protocol.UpgradeSnapshot, error) {
+	if err := params.Validate(); err != nil {
+		return protocol.UpgradeSnapshot{}, err
+	}
+	journal, err := m.loadCoordinatedUpgrade(params)
+	if err != nil {
+		return protocol.UpgradeSnapshot{}, err
+	}
+	return coordinatedUpgradeSnapshot(journal), nil
+}
+
+func (m *serviceUpgradeManager) runCoordinatedUpgrade(
+	ctx context.Context, params protocol.UpgradeTransactionParams,
+	operation func(context.Context, string) (localupgrade.Journal, error),
+) (protocol.UpgradeSnapshot, error) {
+	if err := params.Validate(); err != nil {
+		return protocol.UpgradeSnapshot{}, err
+	}
+	if _, err := m.loadCoordinatedUpgrade(params); err != nil {
+		return protocol.UpgradeSnapshot{}, err
+	}
+	journal, err := operation(ctx, params.TransactionID)
+	return coordinatedUpgradeSnapshot(journal), err
+}
+
+func (m *serviceUpgradeManager) loadCoordinatedUpgrade(
+	params protocol.UpgradeTransactionParams,
+) (localupgrade.Journal, error) {
+	journal, err := m.store.Load()
+	if err != nil {
+		return localupgrade.Journal{}, err
+	}
+	if journal.TransactionID != params.TransactionID ||
+		journal.ControllerTransactionID != params.ControllerTransactionID {
+		return localupgrade.Journal{}, errors.New("coordinated upgrade transaction identity does not match")
+	}
+	return journal, nil
+}
+
+func coordinatedUpgradeSnapshot(journal localupgrade.Journal) protocol.UpgradeSnapshot {
+	return protocol.UpgradeSnapshot{
+		ControllerTransactionID: journal.ControllerTransactionID,
+		TransactionID:           journal.TransactionID,
+		State:                   string(journal.State),
+		SourceVersion:           journal.SourceVersion,
+		TargetVersion:           journal.TargetVersion,
+		TargetRuntimeDigest:     journal.TargetRuntimeDigest,
+		ConfigDigest:            journal.ConfigDigest,
+		SourceReadinessEpoch:    journal.SourceReadinessEpoch,
+		CommitAuthorized:        journal.CommitAuthorized,
+		FailureCode:             journal.FailureCode,
+		UpdatedAt:               journal.UpdatedAt,
+	}
+}
+
 type legacyBootstrapDependencies struct {
 	discoverSource func(context.Context, userservice.ServiceRole, userservice.Invocation) (userservice.Invocation, error)
 	probeVersion   func(context.Context, string) (string, error)
@@ -312,6 +408,9 @@ func (b *boundedUpgradeOutput) Write(data []byte) (int, error) {
 func (m *serviceUpgradeManager) ArmLocalUpgrade(
 	ctx context.Context, transactionID string,
 ) (localbridge.UpgradeSnapshot, error) {
+	if err := m.rejectControllerBoundLocalOperation(transactionID); err != nil {
+		return localbridge.UpgradeSnapshot{}, err
+	}
 	j, err := m.manager.Arm(ctx, transactionID)
 	return bridgeUpgradeSnapshot(j), err
 }
@@ -319,6 +418,9 @@ func (m *serviceUpgradeManager) ArmLocalUpgrade(
 func (m *serviceUpgradeManager) ActivateLocalUpgrade(
 	ctx context.Context, transactionID string,
 ) (localbridge.UpgradeSnapshot, error) {
+	if err := m.rejectControllerBoundLocalOperation(transactionID); err != nil {
+		return localbridge.UpgradeSnapshot{}, err
+	}
 	j, err := m.manager.AuthorizeAndLaunch(ctx, transactionID)
 	return bridgeUpgradeSnapshot(j), err
 }
@@ -326,8 +428,25 @@ func (m *serviceUpgradeManager) ActivateLocalUpgrade(
 func (m *serviceUpgradeManager) CancelLocalUpgrade(
 	ctx context.Context, transactionID string,
 ) (localbridge.UpgradeSnapshot, error) {
+	if err := m.rejectControllerBoundLocalOperation(transactionID); err != nil {
+		return localbridge.UpgradeSnapshot{}, err
+	}
 	j, err := m.manager.Cancel(ctx, transactionID)
 	return bridgeUpgradeSnapshot(j), err
+}
+
+func (m *serviceUpgradeManager) rejectControllerBoundLocalOperation(transactionID string) error {
+	journal, err := m.store.Load()
+	if err != nil {
+		return err
+	}
+	if journal.TransactionID != transactionID {
+		return errors.New("upgrade transaction ID does not match the active journal")
+	}
+	if journal.ControllerTransactionID != "" {
+		return errors.New("controller-coordinated upgrade must use the controller transaction")
+	}
+	return nil
 }
 
 func (m *serviceUpgradeManager) LocalUpgrade(context.Context) (*localbridge.UpgradeSnapshot, error) {
