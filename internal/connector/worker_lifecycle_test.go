@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,6 +30,25 @@ type lifecycleTestSource struct {
 	changes   chan struct{}
 }
 
+type mutableReadinessSource struct {
+	mu        sync.Mutex
+	readiness protocol.WorkerReadiness
+}
+
+func (s *mutableReadinessSource) WorkerReadiness(
+	context.Context,
+) (protocol.WorkerReadiness, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.readiness, nil
+}
+
+func (s *mutableReadinessSource) set(readiness protocol.WorkerReadiness) {
+	s.mu.Lock()
+	s.readiness = readiness
+	s.mu.Unlock()
+}
+
 func newLifecycleTestSource(
 	revision uint64,
 	snapshots []protocol.WorkerLifecycleSnapshot,
@@ -42,6 +62,10 @@ func (s *lifecycleTestSource) WorkerRevision() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.revision
+}
+
+func (s *lifecycleTestSource) WorkerReadiness(context.Context) (protocol.WorkerReadiness, error) {
+	return defaultTestWorkerReadiness(), nil
 }
 
 func (s *lifecycleTestSource) WorkerLifecycleChanges() <-chan struct{} {
@@ -275,6 +299,152 @@ func TestConnectorReconnectRetainsStartupBaselineUntilLifecycleAck(t *testing.T)
 	}
 }
 
+func TestConnectorPublishesTerminalReadinessOncePerActiveConnection(t *testing.T) {
+	lifecycle := newLifecycleTestSource(0, nil)
+	pending := protocol.NewPendingWorkerReadiness(
+		strings.Repeat("a", 64), strings.Repeat("b", 64), 1,
+	)
+	readiness := &mutableReadinessSource{readiness: pending}
+	updateSeen := make(chan protocol.WorkerReadiness, 2)
+	hold := make(chan struct{})
+	server := newLifecycleBrokerDynamic(t, func(
+		connection *websocket.Conn, helloRequest protocol.Envelope, hello protocol.Hello,
+	) {
+		writeLifecycleHelloWithReadiness(t, connection, helloRequest, 0, hello.WorkerReadiness)
+		request := readTestEnvelope(t, connection)
+		if request.Method != protocol.MethodUpdateWorkerReadiness {
+			t.Errorf("terminal update method = %q", request.Method)
+			return
+		}
+		params, err := protocol.DecodePayload[protocol.UpdateWorkerReadinessParams](request.Payload)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		updateSeen <- params.Readiness
+		writeTestResult(t, connection, request, protocol.UpdateWorkerReadinessResult{
+			Readiness: params.Readiness,
+		})
+		<-hold
+	})
+	defer server.Close()
+	defer close(hold)
+	client := newLifecycleClientWithReadiness(
+		t, websocketURL(server.URL), lifecycle, readiness,
+	)
+	runContext, cancelRun := context.WithCancel(context.Background())
+	done := runClient(client, runContext)
+	waitReady(t, client)
+	terminal := pending
+	terminal.State = protocol.WorkerReadinessReady
+	terminal.AttemptCount = 1
+	terminal.NextAttemptAt = 0
+	terminal.LastAttemptAt = 2
+	terminal.UpdatedAt = 2
+	readiness.set(terminal)
+	if err := client.UpdateWorkerReadiness(context.Background(), terminal); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UpdateWorkerReadiness(context.Background(), terminal); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-updateSeen:
+		if got != terminal {
+			t.Fatalf("terminal update = %#v, want %#v", got, terminal)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal readiness update was not sent")
+	}
+	select {
+	case duplicate := <-updateSeen:
+		t.Fatalf("duplicate terminal readiness update = %#v", duplicate)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancelRun()
+	if err := waitClient(done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConnectorLostTerminalAcknowledgementUsesReconnectHelloWithoutResend(t *testing.T) {
+	lifecycle := newLifecycleTestSource(0, nil)
+	pending := protocol.NewPendingWorkerReadiness(
+		strings.Repeat("c", 64), strings.Repeat("d", 64), 1,
+	)
+	readiness := &mutableReadinessSource{readiness: pending}
+	firstUpdate := make(chan struct{})
+	secondHello := make(chan protocol.Hello, 1)
+	hold := make(chan struct{})
+	var connections atomic.Int32
+	server := newLifecycleBrokerDynamic(t, func(
+		connection *websocket.Conn, helloRequest protocol.Envelope, hello protocol.Hello,
+	) {
+		sequence := connections.Add(1)
+		writeLifecycleHelloWithReadiness(t, connection, helloRequest, 0, hello.WorkerReadiness)
+		if sequence == 1 {
+			request := readTestEnvelope(t, connection)
+			if request.Method != protocol.MethodUpdateWorkerReadiness {
+				t.Errorf("terminal update method = %q", request.Method)
+			}
+			close(firstUpdate)
+			return
+		}
+		secondHello <- hello
+		readContext, cancelRead := context.WithTimeout(context.Background(), 75*time.Millisecond)
+		defer cancelRead()
+		if _, _, err := connection.Read(readContext); err == nil {
+			t.Error("connector resent terminal readiness after reconnect")
+		}
+		<-hold
+	})
+	defer server.Close()
+	defer close(hold)
+	client := newLifecycleClientWithReadiness(
+		t, websocketURL(server.URL), lifecycle, readiness,
+	)
+	runContext, cancelRun := context.WithCancel(context.Background())
+	done := runClient(client, runContext)
+	waitReady(t, client)
+	terminal := pending
+	terminal.State = protocol.WorkerReadinessInterventionRequired
+	terminal.AttemptCount = 1
+	terminal.NextAttemptAt = 0
+	terminal.LastAttemptAt = 2
+	terminal.FailureCode = protocol.WorkerManagedHomeInvalid
+	terminal.UpdatedAt = 2
+	readiness.set(terminal)
+	updateErr := make(chan error, 1)
+	go func() {
+		updateErr <- client.UpdateWorkerReadiness(context.Background(), terminal)
+	}()
+	select {
+	case <-firstUpdate:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first terminal readiness update was not sent")
+	}
+	select {
+	case err := <-updateErr:
+		if err == nil {
+			t.Fatal("lost terminal acknowledgement unexpectedly succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("lost terminal acknowledgement did not unblock caller")
+	}
+	select {
+	case hello := <-secondHello:
+		if hello.WorkerReadiness != terminal {
+			t.Fatalf("reconnect hello readiness = %#v, want %#v", hello.WorkerReadiness, terminal)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("connector did not reconnect with durable terminal readiness")
+	}
+	cancelRun()
+	if err := waitClient(done); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestConnectorSynchronizesLifecycleChangesAfterReadiness(t *testing.T) {
 	source := newLifecycleTestSource(0, nil)
 	synced := make(chan protocol.SyncWorkerLifecycleParams, 1)
@@ -360,6 +530,14 @@ func newLifecycleClient(
 	brokerURL string,
 	source WorkerLifecycleSource,
 ) *Client {
+	return newLifecycleClientWithReadiness(
+		t, brokerURL, source, testWorkerSpawner{},
+	)
+}
+
+func newLifecycleClientWithReadiness(
+	t *testing.T, brokerURL string, source WorkerLifecycleSource, readiness WorkerReadinessSource,
+) *Client {
 	t.Helper()
 	manager := testWorkerSpawner{}
 	client, err := New(Options{
@@ -368,6 +546,7 @@ func newLifecycleClient(
 		RuntimeVersion: "lifecycle-test", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 		WorkerSpawner: manager, WorkerController: manager, WorkerLifecycleSource: source,
+		WorkerReadinessSource: readiness,
 		ChangesArtifactSource: manager,
 		WorkspaceManager:      manager,
 	})
@@ -420,6 +599,15 @@ func writeLifecycleHello(
 	request protocol.Envelope,
 	appliedRevision uint64,
 ) {
+	writeLifecycleHelloWithReadiness(
+		t, connection, request, appliedRevision, defaultTestWorkerReadiness(),
+	)
+}
+
+func writeLifecycleHelloWithReadiness(
+	t *testing.T, connection *websocket.Conn, request protocol.Envelope,
+	appliedRevision uint64, readiness protocol.WorkerReadiness,
+) {
 	writeTestResult(t, connection, request, protocol.HelloResult{
 		ConnectionID: connectorTestConnectionID,
 		HostKind:     hostkind.Codex,
@@ -433,12 +621,14 @@ func writeLifecycleHello(
 			protocol.FeatureResultApply,
 			protocol.FeatureResultPackage,
 			protocol.FeatureWorkerLifecycle,
+			protocol.FeatureWorkerReadiness,
 			protocol.FeatureWorkspaceSync,
 			protocol.FeatureWorkspaceTransfer,
 		},
 		HeartbeatIntervalMS:   time.Hour.Milliseconds(),
 		Revision:              1,
 		WorkerAppliedRevision: appliedRevision,
+		WorkerReadiness:       readiness,
 	})
 }
 

@@ -1001,13 +1001,14 @@ func helloRequest(t *testing.T) protocol.Envelope {
 
 func hello() protocol.Hello {
 	return protocol.Hello{
-		ControllerID:   brokerTestControllerID,
-		DeviceID:       brokerTestDeviceID,
-		DeviceName:     "builder",
-		HostKind:       hostkind.Codex,
-		OS:             "linux",
-		Arch:           "amd64",
-		RuntimeVersion: "0.1.0-alpha.0.m1.1",
+		ControllerID:    brokerTestControllerID,
+		DeviceID:        brokerTestDeviceID,
+		DeviceName:      "builder",
+		HostKind:        hostkind.Codex,
+		OS:              "linux",
+		Arch:            "amd64",
+		RuntimeVersion:  "0.1.0-alpha.0.m1.1",
+		WorkerReadiness: protocol.WorkerReadiness{Epoch: 1, State: protocol.WorkerReadinessReady, AttemptCount: 1, RuntimeDigest: strings.Repeat("a", 64), ConfigDigest: strings.Repeat("b", 64), EpochStartedAt: 1, LastAttemptAt: 1, UpdatedAt: 1},
 		Features: []string{
 			protocol.FeatureChangesArtifact,
 			protocol.FeatureDeviceRegistry,
@@ -1018,9 +1019,50 @@ func hello() protocol.Hello {
 			protocol.FeatureResultApply,
 			protocol.FeatureResultPackage,
 			protocol.FeatureWorkerLifecycle,
+			protocol.FeatureWorkerReadiness,
 			protocol.FeatureWorkspaceSync,
 			protocol.FeatureWorkspaceTransfer,
 		},
+	}
+}
+
+func TestWorkerReadinessPendingUpdateRevokesDispatchability(t *testing.T) {
+	harness := newBrokerHarness(t, config.AuthModeNone, time.Second)
+	connection, _, err := dialBroker(harness, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	if result := sendHello(t, connection); !result.WorkerReadiness.IsReady() {
+		t.Fatalf("hello readiness = %#v", result.WorkerReadiness)
+	}
+	harness.server.mu.Lock()
+	current := harness.server.connections[brokerTestDeviceID]
+	dispatchableBefore := current != nil && current.workerSyncReady.Load() && current.workerReady.Load()
+	harness.server.mu.Unlock()
+	if !dispatchableBefore {
+		t.Fatal("ready connected session was not dispatchable")
+	}
+	pending := protocol.NewPendingWorkerReadiness(
+		strings.Repeat("c", 64), strings.Repeat("d", 64), 2,
+	)
+	response := writeAndRead(t, connection, request(
+		t, protocol.MethodUpdateWorkerReadiness,
+		protocol.UpdateWorkerReadinessParams{Readiness: pending},
+	))
+	if response.Error != nil {
+		t.Fatalf("pending readiness update error = %#v", response.Error)
+	}
+	result := decodeResult[protocol.UpdateWorkerReadinessResult](t, response)
+	if result.Readiness != pending {
+		t.Fatalf("pending readiness update = %#v, want %#v", result.Readiness, pending)
+	}
+	harness.server.mu.Lock()
+	current = harness.server.connections[brokerTestDeviceID]
+	dispatchableAfter := current != nil && current.workerSyncReady.Load() && current.workerReady.Load()
+	harness.server.mu.Unlock()
+	if dispatchableAfter {
+		t.Fatal("pending recheck epoch remained dispatchable")
 	}
 }
 

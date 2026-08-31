@@ -135,6 +135,26 @@ func TestProtocolAcceptsImplementationDefinedServerError(t *testing.T) {
 	}
 }
 
+func TestProtocolErrorDataIsBoundedJSON(t *testing.T) {
+	valid := Error{
+		Code: ErrorUnavailable, Message: "target worker intervention required",
+		Data: json.RawMessage(`{"code":"intervention_required","failureCode":"managed_home_invalid"}`),
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid protocol error data: %v", err)
+	}
+	invalidJSON := valid
+	invalidJSON.Data = json.RawMessage(`{`)
+	if err := invalidJSON.Validate(); err == nil {
+		t.Fatal("invalid protocol error data was accepted")
+	}
+	oversized := valid
+	oversized.Data = json.RawMessage(`"` + strings.Repeat("x", MaxErrorDataSize) + `"`)
+	if err := oversized.Validate(); err == nil {
+		t.Fatal("oversized protocol error data was accepted")
+	}
+}
+
 func TestReadRejectsOversizedMessageBeforeDecoding(t *testing.T) {
 	_, err := Read(strings.NewReader(strings.Repeat(" ", MaxMessageSize+1)))
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
@@ -177,14 +197,15 @@ func TestDecodePayloadRejectsUnknownAndTrailingData(t *testing.T) {
 
 func TestHelloDescriptorExcludesBrokerPresence(t *testing.T) {
 	hello := Hello{
-		ControllerID:   testControllerID,
-		DeviceID:       testDeviceID,
-		DeviceName:     "builder",
-		HostKind:       hostkind.Codex,
-		OS:             "windows",
-		Arch:           "amd64",
-		RuntimeVersion: "0.1.0-alpha.0.m1.1",
-		Features:       []string{FeatureDeviceRegistry},
+		ControllerID:    testControllerID,
+		DeviceID:        testDeviceID,
+		DeviceName:      "builder",
+		HostKind:        hostkind.Codex,
+		OS:              "windows",
+		Arch:            "amd64",
+		RuntimeVersion:  "0.1.0-alpha.0.m1.1",
+		Features:        []string{FeatureDeviceRegistry},
+		WorkerReadiness: NewPendingWorkerReadiness(strings.Repeat("a", 64), strings.Repeat("b", 64), 1),
 	}
 	if err := hello.Validate(); err != nil {
 		t.Fatal(err)

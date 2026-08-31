@@ -388,6 +388,7 @@ func runResultPackageRPC(
 		RuntimeVersion: "test", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: testWorkerSpawner{},
+		WorkerReadinessSource: testWorkerSpawner{},
 		ChangesArtifactSource: testWorkerSpawner{},
 		WorkspaceManager:      &workspaceTransferRPCManager{},
 		ResultPackageManager:  manager,

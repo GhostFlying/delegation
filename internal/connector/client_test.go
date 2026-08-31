@@ -541,6 +541,7 @@ func TestConnectorRequiresEveryBrokerFeatureBeforePublishingReadiness(t *testing
 		protocol.FeatureResultApply,
 		protocol.FeatureResultPackage,
 		protocol.FeatureWorkerLifecycle,
+		protocol.FeatureWorkerReadiness,
 		protocol.FeatureWorkspaceSync,
 		protocol.FeatureWorkspaceTransfer,
 	}
@@ -976,6 +977,7 @@ func TestConnectorValidatesStaticOptionsAndOfflineCalls(t *testing.T) {
 		Architecture:          "amd64",
 		WorkerSpawner:         testWorkerSpawner{},
 		WorkerLifecycleSource: testWorkerSpawner{},
+		WorkerReadinessSource: testWorkerSpawner{},
 		ChangesArtifactSource: testWorkerSpawner{},
 		WorkspaceManager:      testWorkerSpawner{},
 	}
@@ -1337,6 +1339,7 @@ func newTestClient(
 		RuntimeVersion: "0.1.0-alpha.0.m1.1", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 		WorkerSpawner: testWorkerSpawner{}, WorkerLifecycleSource: testWorkerSpawner{},
+		WorkerReadinessSource: testWorkerSpawner{},
 		ChangesArtifactSource: testWorkerSpawner{},
 		WorkspaceManager:      testWorkerSpawner{},
 	})
@@ -1358,6 +1361,10 @@ var testArtifactChanges = make(chan struct{})
 var testResultPackageChanges = make(chan struct{})
 
 func (testWorkerSpawner) WorkerRevision() uint64 { return 0 }
+
+func (testWorkerSpawner) WorkerReadiness(context.Context) (protocol.WorkerReadiness, error) {
+	return defaultTestWorkerReadiness(), nil
+}
 
 func (testWorkerSpawner) WorkerLifecycleChanges() <-chan struct{} { return nil }
 
@@ -1680,6 +1687,7 @@ func newFakeBroker(t *testing.T, afterHello func(*websocket.Conn)) *httptest.Ser
 		protocol.FeatureResultApply,
 		protocol.FeatureResultPackage,
 		protocol.FeatureWorkerLifecycle,
+		protocol.FeatureWorkerReadiness,
 		protocol.FeatureWorkspaceSync,
 		protocol.FeatureWorkspaceTransfer,
 	}, afterHello)
@@ -1705,9 +1713,18 @@ func newFakeBrokerWithFeatures(
 			Features:            append([]string(nil), features...),
 			HeartbeatIntervalMS: time.Hour.Milliseconds(),
 			Revision:            1,
+			WorkerReadiness:     defaultTestWorkerReadiness(),
 		})
 		afterHello(connection)
 	}))
+}
+
+func defaultTestWorkerReadiness() protocol.WorkerReadiness {
+	return protocol.WorkerReadiness{
+		Epoch: 1, State: protocol.WorkerReadinessReady, AttemptCount: 1,
+		RuntimeDigest: strings.Repeat("a", 64), ConfigDigest: strings.Repeat("b", 64),
+		EpochStartedAt: 1, LastAttemptAt: 1, UpdatedAt: 1,
+	}
 }
 
 func readTestEnvelope(t *testing.T, connection *websocket.Conn) protocol.Envelope {

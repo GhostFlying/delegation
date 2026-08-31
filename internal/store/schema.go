@@ -215,6 +215,24 @@ CREATE TABLE peer_worker_sync_cursors (
 		REFERENCES devices(controller_id, device_id) ON DELETE CASCADE
 ) STRICT;
 
+CREATE TABLE device_worker_readiness (
+	controller_id TEXT NOT NULL,
+	device_id TEXT NOT NULL,
+	epoch INTEGER NOT NULL CHECK (epoch BETWEEN 1 AND 9223372036854775807),
+	state TEXT NOT NULL CHECK (state IN ('pending', 'ready', 'intervention_required')),
+	attempt_count INTEGER NOT NULL CHECK (attempt_count BETWEEN 0 AND 5),
+	runtime_digest TEXT NOT NULL CHECK (length(runtime_digest) = 64 AND runtime_digest NOT GLOB '*[^0-9a-f]*'),
+	config_digest TEXT NOT NULL CHECK (length(config_digest) = 64 AND config_digest NOT GLOB '*[^0-9a-f]*'),
+	epoch_started_at INTEGER NOT NULL CHECK (epoch_started_at > 0),
+	next_attempt_at INTEGER NOT NULL CHECK (next_attempt_at >= 0),
+	last_attempt_at INTEGER NOT NULL CHECK (last_attempt_at >= 0),
+	failure_code TEXT NOT NULL CHECK (length(CAST(failure_code AS BLOB)) <= 64),
+	updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+	PRIMARY KEY (controller_id, device_id),
+	FOREIGN KEY (controller_id, device_id)
+		REFERENCES devices(controller_id, device_id) ON DELETE CASCADE
+) STRICT;
+
 CREATE TABLE agent_lifecycle_states (
 	controller_id TEXT NOT NULL,
 	tree_id TEXT NOT NULL,

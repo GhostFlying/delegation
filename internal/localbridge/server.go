@@ -38,6 +38,14 @@ type StatusProvider interface {
 	LocalStatus(context.Context) (StatusSnapshot, error)
 }
 
+type WorkerReadinessManager interface {
+	WorkerReadiness(context.Context) (protocol.WorkerReadiness, error)
+	RecheckWorkerReadiness(context.Context) (protocol.WorkerReadiness, error)
+	WaitWorkerIntervention(
+		context.Context, protocol.WorkerReadinessCursor,
+	) (protocol.WorkerReadiness, error)
+}
+
 type ResultPackageAvailabilityLookup struct {
 	Root     control.PrincipalIdentity
 	Manifest protocol.ResultManifest
@@ -59,6 +67,7 @@ type Server struct {
 	backend       Backend
 	authorizer    Authorizer
 	status        StatusProvider
+	readiness     WorkerReadinessManager
 	results       ResultPackageAvailabilityProvider
 	apply         ResultApplyProvider
 	connectionSem chan struct{}
@@ -117,6 +126,21 @@ func ListenWithResultApply(
 	results ResultPackageAvailabilityProvider,
 	apply ResultApplyProvider,
 ) (*Server, error) {
+	return ListenWithManagement(
+		endpoint, identity, backend, authorizer, status, results, apply, nil,
+	)
+}
+
+func ListenWithManagement(
+	endpoint string,
+	identity ServiceIdentity,
+	backend Backend,
+	authorizer Authorizer,
+	status StatusProvider,
+	results ResultPackageAvailabilityProvider,
+	apply ResultApplyProvider,
+	readiness WorkerReadinessManager,
+) (*Server, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
@@ -131,6 +155,7 @@ func ListenWithResultApply(
 		listener: listener, identity: identity, backend: backend, authorizer: authorizer, status: status,
 		results:       results,
 		apply:         apply,
+		readiness:     readiness,
 		connectionSem: make(chan struct{}, maximumConcurrentCalls),
 		waitSem:       make(chan struct{}, maximumConcurrentWaitCalls),
 		controlSem:    make(chan struct{}, maximumConcurrentControlCalls),
@@ -300,6 +325,28 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		}
 		return result, nil
 	}
+	if request.Method == methodIdentityBoundStatus {
+		if request.TreeID != "" || request.Source != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid identity-bound bridge status request"}
+		}
+		var params identityBoundStatusParams
+		if err := decodeResult(request.Payload, &params); err != nil ||
+			params.ExpectedIdentity.Validate() != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid identity-bound bridge status request"}
+		}
+		if !s.identity.Equal(params.ExpectedIdentity) {
+			return nil, &protocol.Error{Code: protocol.ErrorConflict, Message: "local bridge identity mismatch"}
+		}
+		status, rpcErr := s.readLocalStatus(ctx)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		result, err := json.Marshal(identityBoundStatusResult{Identity: s.identity, Status: status})
+		if err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode identity-bound local status"}
+		}
+		return result, nil
+	}
 	if request.Method == methodStatus {
 		if request.TreeID != "" || request.Source != nil {
 			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid bridge status request"}
@@ -308,19 +355,76 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 		if err := decodeResult(request.Payload, &params); err != nil {
 			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid bridge status request"}
 		}
-		if s.status == nil {
-			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "local status unavailable"}
-		}
-		status, err := s.status.LocalStatus(ctx)
-		if err != nil {
-			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "local status unavailable"}
-		}
-		if err := status.Validate(); err != nil {
-			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "local status invalid"}
+		status, rpcErr := s.readLocalStatus(ctx)
+		if rpcErr != nil {
+			return nil, rpcErr
 		}
 		result, err := json.Marshal(status)
 		if err != nil {
 			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode local status"}
+		}
+		return result, nil
+	}
+	if request.Method == methodWorkerRecheck {
+		if request.TreeID != "" || request.Source != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid worker recheck request"}
+		}
+		var params struct{}
+		if err := decodeResult(request.Payload, &params); err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid worker recheck request"}
+		}
+		if s.readiness == nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "worker readiness management unavailable"}
+		}
+		readiness, err := s.readiness.RecheckWorkerReadiness(ctx)
+		if err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "worker recheck failed"}
+		}
+		result, err := json.Marshal(readiness)
+		if err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode worker recheck result"}
+		}
+		return result, nil
+	}
+	if request.Method == methodWorkerReadiness {
+		if request.TreeID != "" || request.Source != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid worker readiness request"}
+		}
+		var params struct{}
+		if err := decodeResult(request.Payload, &params); err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid worker readiness request"}
+		}
+		if s.readiness == nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "worker readiness management unavailable"}
+		}
+		readiness, err := s.readiness.WorkerReadiness(ctx)
+		if err != nil || readiness.Validate() != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "worker readiness unavailable"}
+		}
+		result, err := json.Marshal(readiness)
+		if err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode worker readiness"}
+		}
+		return result, nil
+	}
+	if request.Method == methodWaitWorkerIntervention {
+		if request.TreeID != "" || request.Source != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid worker intervention wait request"}
+		}
+		var params waitWorkerInterventionParams
+		if err := decodeResult(request.Payload, &params); err != nil || params.After.Validate() != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid worker intervention wait request"}
+		}
+		if s.readiness == nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "worker readiness management unavailable"}
+		}
+		readiness, err := s.readiness.WaitWorkerIntervention(ctx, params.After)
+		if err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "worker intervention wait unavailable"}
+		}
+		result, err := json.Marshal(readiness)
+		if err != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode worker intervention wait result"}
 		}
 		return result, nil
 	}
@@ -383,12 +487,32 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 	}
 	var brokerError *connector.RPCError
 	if errors.As(err, &brokerError) {
-		return nil, &protocol.Error{Code: brokerError.Code, Message: brokerError.Message}
+		return nil, &protocol.Error{
+			Code: brokerError.Code, Message: brokerError.Message,
+			Data: append(json.RawMessage(nil), brokerError.Data...),
+		}
 	}
 	if errors.Is(err, connector.ErrUnavailable) || errors.Is(err, connector.ErrBusy) || isContextError(err) {
 		return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "delegation service unavailable"}
 	}
 	return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "delegation service failed"}
+}
+
+func (s *Server) readLocalStatus(ctx context.Context) (StatusSnapshot, *protocol.Error) {
+	if s.status == nil {
+		return StatusSnapshot{}, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "local status unavailable"}
+	}
+	status, err := s.status.LocalStatus(ctx)
+	if err != nil {
+		return StatusSnapshot{}, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "local status unavailable"}
+	}
+	if err := status.Validate(); err != nil {
+		return StatusSnapshot{}, &protocol.Error{Code: protocol.ErrorInternal, Message: "local status invalid"}
+	}
+	if status.ControllerID != s.identity.ControllerID || status.DeviceID != s.identity.DeviceID {
+		return StatusSnapshot{}, &protocol.Error{Code: protocol.ErrorInternal, Message: "local status identity mismatch"}
+	}
+	return status, nil
 }
 
 func (s *Server) applyAgentChanges(
@@ -529,7 +653,8 @@ func (s *Server) decorateAgentWait(
 
 func (s *Server) admitCall(method string) (func(), bool) {
 	pool := s.controlSem
-	if method == protocol.MethodWaitMailbox || method == protocol.MethodWaitAgent {
+	if method == protocol.MethodWaitMailbox || method == protocol.MethodWaitAgent ||
+		method == methodWaitWorkerIntervention {
 		pool = s.waitSem
 	}
 	select {

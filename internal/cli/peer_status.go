@@ -8,12 +8,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
 	"github.com/GhostFlying/delegation/internal/localbridge"
+	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/runtimeconfig"
 	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
@@ -33,6 +35,7 @@ type connectorStatusSource interface {
 
 type peerStatusStore interface {
 	ReadPeerStatusSnapshot(context.Context, string, string) (store.PeerStatusSnapshot, error)
+	WorkerReadiness(context.Context) (protocol.WorkerReadiness, error)
 }
 
 type peerLocalStatusProvider struct {
@@ -52,6 +55,10 @@ func (p peerLocalStatusProvider) LocalStatus(ctx context.Context) (localbridge.S
 	durable, err := p.state.ReadPeerStatusSnapshot(ctx, p.controllerID, p.deviceID)
 	if err != nil {
 		return localbridge.StatusSnapshot{}, fmt.Errorf("read durable peer status: %w", err)
+	}
+	durableReadiness, err := p.state.WorkerReadiness(ctx)
+	if err != nil {
+		return localbridge.StatusSnapshot{}, fmt.Errorf("read durable worker readiness: %w", err)
 	}
 	connected := p.client.Status()
 	brokerWorkerRevision := connected.WorkerRevision
@@ -83,55 +90,119 @@ func (p peerLocalStatusProvider) LocalStatus(ctx context.Context) (localbridge.S
 		BrokerWorkerRevision:       brokerWorkerRevision,
 		RecoveryPeerWorkerRevision: connected.RecoveryPeerWorkerRevision,
 		WorkerSyncReady:            workerSyncReady,
+		WorkerReady:                durableReadiness.IsReady(),
+		Dispatchable:               workerSyncReady && durableReadiness.IsReady(),
 		MaxWorkerSlots:             p.maxWorkerSlots,
-		Workers: localbridge.WorkerCounts{
-			Total:       int64(durable.Workers.Total),
-			Reserved:    int64(durable.Workers.Reserved),
-			Pending:     int64(durable.Workers.Pending),
-			Starting:    int64(durable.Workers.Starting),
-			Preflight:   int64(durable.Workers.Preflight),
-			Ready:       int64(durable.Workers.Ready),
-			Running:     int64(durable.Workers.Running),
-			Finalizing:  int64(durable.Workers.Finalizing),
-			Idle:        int64(durable.Workers.Idle),
-			Interrupted: int64(durable.Workers.Interrupted),
-			Failed:      int64(durable.Workers.Failed),
-			Occupied:    int64(durable.Workers.Occupied),
-		},
-		Artifacts: localbridge.ArtifactCounts{
-			CapturePending: int64(durable.Artifacts.CaptureBacklog),
-			PublishPending: int64(durable.Artifacts.PublishBacklog),
-			Retained:       int64(durable.Artifacts.Retained),
-			RetainedBytes:  durable.Artifacts.RetainedBytes,
-		},
-		Results: localbridge.ResultCounts{
-			OutboxCapturePending:   int64(durable.Results.OutboxCapturePending),
-			OutboxPublishPending:   int64(durable.Results.OutboxPublishPending),
-			OutboxDeliveryPending:  int64(durable.Results.OutboxDeliveryPending),
-			OutboxDelivered:        int64(durable.Results.OutboxDelivered),
-			OutboxReleasePending:   int64(durable.Results.OutboxReleasePending),
-			OutboxRetainedBytes:    durable.Results.OutboxRetainedBytes,
-			InboxReceiving:         int64(durable.Results.InboxReceiving),
-			InboxAvailable:         int64(durable.Results.InboxAvailable),
-			InboxEvictionPending:   int64(durable.Results.InboxEvictionPending),
-			InboxEvicted:           int64(durable.Results.InboxEvicted),
-			InboxRetainedBytes:     durable.Results.InboxRetainedBytes,
-			RolloutCaptureFailed:   int64(durable.Results.RolloutCaptureFailed),
-			WorkspaceCaptureFailed: int64(durable.Results.WorkspaceCaptureFailed),
-		},
 	}
+	setDurablePeerStatus(&status, durable, durableReadiness)
 	if err := status.Validate(); err != nil {
 		return localbridge.StatusSnapshot{}, fmt.Errorf("build peer status: %w", err)
 	}
 	return status, nil
 }
 
-type statusReader func(context.Context, string) (localbridge.StatusSnapshot, error)
+func setDurablePeerStatus(
+	status *localbridge.StatusSnapshot,
+	durable store.PeerStatusSnapshot,
+	readiness protocol.WorkerReadiness,
+) {
+	status.WorkerRevision = durable.WorkerRevision
+	status.WorkerReadiness = readiness
+	status.Workers = localbridge.WorkerCounts{
+		Total:       int64(durable.Workers.Total),
+		Reserved:    int64(durable.Workers.Reserved),
+		Pending:     int64(durable.Workers.Pending),
+		Starting:    int64(durable.Workers.Starting),
+		Preflight:   int64(durable.Workers.Preflight),
+		Ready:       int64(durable.Workers.Ready),
+		Running:     int64(durable.Workers.Running),
+		Finalizing:  int64(durable.Workers.Finalizing),
+		Idle:        int64(durable.Workers.Idle),
+		Interrupted: int64(durable.Workers.Interrupted),
+		Failed:      int64(durable.Workers.Failed),
+		Occupied:    int64(durable.Workers.Occupied),
+	}
+	status.Artifacts = localbridge.ArtifactCounts{
+		CapturePending: int64(durable.Artifacts.CaptureBacklog),
+		PublishPending: int64(durable.Artifacts.PublishBacklog),
+		Retained:       int64(durable.Artifacts.Retained),
+		RetainedBytes:  durable.Artifacts.RetainedBytes,
+	}
+	status.Results = localbridge.ResultCounts{
+		OutboxCapturePending:   int64(durable.Results.OutboxCapturePending),
+		OutboxPublishPending:   int64(durable.Results.OutboxPublishPending),
+		OutboxDeliveryPending:  int64(durable.Results.OutboxDeliveryPending),
+		OutboxDelivered:        int64(durable.Results.OutboxDelivered),
+		OutboxReleasePending:   int64(durable.Results.OutboxReleasePending),
+		OutboxRetainedBytes:    durable.Results.OutboxRetainedBytes,
+		InboxReceiving:         int64(durable.Results.InboxReceiving),
+		InboxAvailable:         int64(durable.Results.InboxAvailable),
+		InboxEvictionPending:   int64(durable.Results.InboxEvictionPending),
+		InboxEvicted:           int64(durable.Results.InboxEvicted),
+		InboxRetainedBytes:     durable.Results.InboxRetainedBytes,
+		RolloutCaptureFailed:   int64(durable.Results.RolloutCaptureFailed),
+		WorkspaceCaptureFailed: int64(durable.Results.WorkspaceCaptureFailed),
+	}
+}
+
+func readStoppedPeerStatus(
+	ctx context.Context, cfg delegationconfig.Config,
+) (status localbridge.StatusSnapshot, err error) {
+	lease, err := store.AcquirePeerLease(cfg.Peer.StateFile)
+	if err != nil {
+		return localbridge.StatusSnapshot{}, err
+	}
+	defer func() { err = errors.Join(err, lease.Close()) }()
+	if err := store.ValidatePath(cfg.Peer.StateFile); err != nil {
+		return localbridge.StatusSnapshot{}, err
+	}
+	info, err := os.Lstat(cfg.Peer.StateFile)
+	if err != nil {
+		return localbridge.StatusSnapshot{}, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return localbridge.StatusSnapshot{}, errors.New("peer state must be a regular file")
+	}
+
+	state, err := store.OpenPeer(ctx, cfg.Peer.StateFile)
+	if err != nil {
+		return localbridge.StatusSnapshot{}, err
+	}
+	defer func() { err = errors.Join(err, state.Close()) }()
+	durable, err := state.ReadPeerStatusSnapshot(ctx, cfg.ControllerID, cfg.DeviceID)
+	if err != nil {
+		return localbridge.StatusSnapshot{}, err
+	}
+	readiness, err := state.WorkerReadiness(ctx)
+	if err != nil {
+		return localbridge.StatusSnapshot{}, err
+	}
+	status = localbridge.StatusSnapshot{
+		TransportStatus: cfg.Transport.Status(),
+		Version:         buildinfo.Version,
+		ControllerID:    cfg.ControllerID,
+		DeviceID:        cfg.DeviceID,
+		DeviceName:      cfg.DeviceName,
+		ServiceRunning:  false,
+		ConnectionState: localbridge.ConnectionConnecting,
+		WorkerReady:     readiness.IsReady(),
+		MaxWorkerSlots:  cfg.Peer.MaxWorkerSlots,
+	}
+	setDurablePeerStatus(&status, durable, readiness)
+	if err := status.Validate(); err != nil {
+		return localbridge.StatusSnapshot{}, fmt.Errorf("build stopped peer status: %w", err)
+	}
+	return status, nil
+}
+
+type statusReader func(
+	context.Context, string, localbridge.ServiceIdentity,
+) (localbridge.StatusSnapshot, error)
 type brokerStatusReader func(context.Context, string) (statuspage.Snapshot, error)
 
 func runStatus(args []string, stdout, stderr io.Writer) int {
 	return runStatusWithReaders(
-		args, stdout, stderr, localbridge.ReadStatus, readBrokerStatus,
+		args, stdout, stderr, localbridge.ReadStatusForIdentity, readBrokerStatus,
 	)
 }
 
@@ -165,9 +236,29 @@ func runStatusWithReaders(
 	if err != nil {
 		return writeError(stderr, err)
 	}
-	cfg, err := runtimeconfig.Read(resolvedConfig)
-	if err != nil {
-		return writeError(stderr, err)
+	cfg, validationErr := runtimeconfig.Read(resolvedConfig)
+	if validationErr != nil {
+		if !errors.Is(
+			validationErr, delegationconfig.ErrPeerCLIProfileArgumentsUnsupported,
+		) {
+			return writeError(stderr, validationErr)
+		}
+		classified, _, classificationErr := runtimeconfig.ReadForStartupClassification(resolvedConfig)
+		if !errors.Is(
+			classificationErr, delegationconfig.ErrPeerCLIProfileArgumentsUnsupported,
+		) {
+			return writeError(stderr, validationErr)
+		}
+		repaired, _, removed, repairErr := runtimeconfig.ReadForRepair(resolvedConfig)
+		if repairErr != nil || removed == 0 {
+			return writeError(stderr, validationErr)
+		}
+		if repaired.ControllerID != classified.ControllerID ||
+			repaired.DeviceID != classified.DeviceID ||
+			repaired.EffectiveInstanceID() != classified.EffectiveInstanceID() {
+			return writeError(stderr, validationErr)
+		}
+		cfg = repaired
 	}
 	if cfg.Role == delegationconfig.RoleBroker {
 		if cfg.Broker.StatusListen == "" || readBroker == nil {
@@ -197,14 +288,32 @@ func runStatusWithReaders(
 		return writeFixedStatusError(stderr, peerStatusUnavailableError, exitUnavailable)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), peerStatusReadTimeout)
-	status, err := readPeer(ctx, endpoint)
+	expectedIdentity := localbridge.ServiceIdentity{
+		InstanceID: cfg.EffectiveInstanceID(), ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
+	}
+	status, err := readPeer(ctx, endpoint, expectedIdentity)
 	cancel()
-	if err != nil || status.Validate() != nil ||
-		status.ControllerID != cfg.ControllerID || status.DeviceID != cfg.DeviceID ||
-		status.TransportStatus != cfg.Transport.Status() {
+	if err == nil {
+		if !status.ServiceRunning || status.Validate() != nil ||
+			status.ControllerID != cfg.ControllerID || status.DeviceID != cfg.DeviceID ||
+			status.TransportStatus != cfg.Transport.Status() {
+			return writeFixedStatusError(stderr, peerStatusUnavailableError, exitUnavailable)
+		}
+		return writePeerStatus(stdout, stderr, status, *jsonOutput)
+	}
+	if errors.Is(err, localbridge.ErrStatusSnapshotInvalid) ||
+		errors.Is(err, localbridge.ErrServiceIdentityMismatch) {
 		return writeFixedStatusError(stderr, peerStatusUnavailableError, exitUnavailable)
 	}
-	return writePeerStatus(stdout, stderr, status, *jsonOutput)
+	offlineCtx, offlineCancel := context.WithTimeout(
+		context.Background(), peerStatusReadTimeout,
+	)
+	offline, offlineErr := readStoppedPeerStatus(offlineCtx, cfg)
+	offlineCancel()
+	if offlineErr != nil {
+		return writeFixedStatusError(stderr, peerStatusUnavailableError, exitUnavailable)
+	}
+	return writePeerStatus(stdout, stderr, offline, *jsonOutput)
 }
 
 func writePeerStatus(
@@ -237,6 +346,20 @@ func writePeerStatus(
 		}
 		fmt.Fprintf(&rendered, "connected: %t\n", status.Connected)
 		fmt.Fprintf(&rendered, "worker sync ready: %t\n", status.WorkerSyncReady)
+		fmt.Fprintf(&rendered, "worker ready: %t\n", status.WorkerReady)
+		fmt.Fprintf(&rendered, "dispatchable: %t\n", status.Dispatchable)
+		fmt.Fprintf(&rendered, "readiness epoch: %d\n", status.WorkerReadiness.Epoch)
+		fmt.Fprintf(&rendered, "readiness state: %s\n", status.WorkerReadiness.State)
+		fmt.Fprintf(&rendered, "readiness attempts: %d/%d\n", status.WorkerReadiness.AttemptCount, protocol.MaximumReadinessAttempts)
+		fmt.Fprintf(&rendered, "readiness runtime digest: %s\n", status.WorkerReadiness.RuntimeDigest)
+		fmt.Fprintf(&rendered, "readiness config digest: %s\n", status.WorkerReadiness.ConfigDigest)
+		fmt.Fprintf(&rendered, "readiness epoch started at: %d\n", status.WorkerReadiness.EpochStartedAt)
+		fmt.Fprintf(&rendered, "readiness next attempt at: %d\n", status.WorkerReadiness.NextAttemptAt)
+		fmt.Fprintf(&rendered, "readiness last attempt at: %d\n", status.WorkerReadiness.LastAttemptAt)
+		if status.WorkerReadiness.FailureCode != "" {
+			fmt.Fprintf(&rendered, "readiness failure: %s\n", status.WorkerReadiness.FailureCode)
+		}
+		fmt.Fprintf(&rendered, "readiness updated at: %d\n", status.WorkerReadiness.UpdatedAt)
 		fmt.Fprintf(&rendered, "registry revision: %d\n", status.RegistryRevision)
 		fmt.Fprintf(&rendered, "worker revision: %d\n", status.WorkerRevision)
 		fmt.Fprintf(&rendered, "broker worker revision: %d\n", status.BrokerWorkerRevision)

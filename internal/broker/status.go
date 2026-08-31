@@ -45,6 +45,8 @@ type connectionStatusSnapshot struct {
 	generation         uint64
 	connected          int
 	syncReadyDeviceIDs []string
+	workerReady        int
+	dispatchable       int
 }
 
 func (s *Server) buildStatusSnapshot(
@@ -61,10 +63,12 @@ func (s *Server) buildStatusSnapshot(
 		UptimeSeconds:   uint64(uptime / time.Second),
 		ControllerID:    s.controllerID,
 		Devices: statuspage.DeviceCounts{
-			Registered: uint64(durable.Devices.Total),
-			Online:     uint64(durable.Devices.Online),
-			Connected:  uint64(connections.connected),
-			SyncReady:  uint64(len(connections.syncReadyDeviceIDs)),
+			Registered:   uint64(durable.Devices.Total),
+			Online:       uint64(durable.Devices.Online),
+			Connected:    uint64(connections.connected),
+			SyncReady:    uint64(len(connections.syncReadyDeviceIDs)),
+			WorkerReady:  uint64(connections.workerReady),
+			Dispatchable: uint64(connections.dispatchable),
 		},
 		Dispatch: statuspage.DispatchCounts{
 			Pending:         uint64(durable.Dispatches.Pending),
@@ -104,12 +108,19 @@ func (s *Server) captureConnectionStatus() connectionStatusSnapshot {
 		syncReadyDeviceIDs: make([]string, 0, len(s.connections)),
 	}
 	for deviceID := range s.connections {
-		if s.currentConnectionLocked(deviceID) == nil {
+		current := s.currentConnectionLocked(deviceID)
+		if current == nil {
 			continue
 		}
 		snapshot.connected++
-		if s.workerReadyConnectionLocked(deviceID) != nil {
+		if s.workerSyncReadyConnectionLocked(deviceID) != nil {
 			snapshot.syncReadyDeviceIDs = append(snapshot.syncReadyDeviceIDs, deviceID)
+		}
+		if current.workerReady.Load() {
+			snapshot.workerReady++
+		}
+		if s.dispatchableConnectionLocked(deviceID) != nil {
+			snapshot.dispatchable++
 		}
 	}
 	return snapshot

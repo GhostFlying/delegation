@@ -444,6 +444,25 @@ func TestBridgeEnforcesRoleShapeAllowlistAndErrorMapping(t *testing.T) {
 	}
 }
 
+func TestBridgePreservesBrokerProtocolErrorData(t *testing.T) {
+	want := json.RawMessage(`{"code":"intervention_required","failureCode":"managed_home_invalid"}`)
+	backend := &fakeBackend{err: &connector.RPCError{
+		Code: protocol.ErrorUnavailable, Message: "target worker intervention required", Data: want,
+	}}
+	client, stop := startTestBridge(t, backend)
+	defer stop()
+	err := client.Call(
+		context.Background(), protocol.MethodEnsureRootTree, "", nil,
+		protocol.EnsureRootTreeParams{ExternalThreadID: bridgeTestTreeID}, nil,
+	)
+	var rpcError *RPCError
+	if !errors.As(err, &rpcError) || rpcError.Code != protocol.ErrorUnavailable ||
+		rpcError.Message != "target worker intervention required" ||
+		!bytes.Equal(rpcError.Data, want) {
+		t.Fatalf("bridge protocol error = %#v, %v", rpcError, err)
+	}
+}
+
 func TestBridgeRequiresLocalReservationAuthorizationForWorkerCalls(t *testing.T) {
 	backend := &fakeBackend{result: json.RawMessage(`{
         "messageId":"123e4567-e89b-42d3-a456-426614174309",

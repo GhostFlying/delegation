@@ -11,6 +11,8 @@ import (
 	"github.com/GhostFlying/delegation/internal/control"
 )
 
+var ErrServiceIdentityMismatch = errors.New("local bridge identity mismatch")
+
 type Client struct {
 	endpoint string
 }
@@ -18,6 +20,7 @@ type Client struct {
 type RPCError struct {
 	Code    int
 	Message string
+	Data    json.RawMessage
 }
 
 // Probe verifies that the endpoint serves the expected configured connector.
@@ -38,7 +41,8 @@ func Probe(ctx context.Context, endpoint string, expected ServiceIdentity) error
 	}
 	if !actual.Equal(expected) {
 		return fmt.Errorf(
-			"local bridge identity mismatch: got instance %s controller %s device %s",
+			"%w: got instance %s controller %s device %s",
+			ErrServiceIdentityMismatch,
 			actual.EffectiveInstanceID(),
 			actual.ControllerID,
 			actual.DeviceID,
@@ -113,7 +117,10 @@ func (c *Client) Call(
 		return errors.New("local bridge response does not match its request")
 	}
 	if reply.Error != nil {
-		return &RPCError{Code: reply.Error.Code, Message: reply.Error.Message}
+		return &RPCError{
+			Code: reply.Error.Code, Message: reply.Error.Message,
+			Data: append(json.RawMessage(nil), reply.Error.Data...),
+		}
 	}
 	if result == nil {
 		return nil

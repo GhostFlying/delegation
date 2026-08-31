@@ -36,10 +36,12 @@ type Snapshot struct {
 // DeviceCounts summarizes registered and usable devices without identifying
 // any individual device.
 type DeviceCounts struct {
-	Registered uint64 `json:"registered"`
-	Online     uint64 `json:"online"`
-	Connected  uint64 `json:"connected"`
-	SyncReady  uint64 `json:"syncReady"`
+	Registered   uint64 `json:"registered"`
+	Online       uint64 `json:"online"`
+	Connected    uint64 `json:"connected"`
+	SyncReady    uint64 `json:"syncReady"`
+	WorkerReady  uint64 `json:"workerReady"`
+	Dispatchable uint64 `json:"dispatchable"`
 }
 
 // DispatchCounts summarizes current dispatch states and lifetime starts.
@@ -83,7 +85,10 @@ func (s Snapshot) Validate() error {
 	}
 	if s.Devices.Online > s.Devices.Registered ||
 		s.Devices.Connected > s.Devices.Registered ||
-		s.Devices.SyncReady > s.Devices.Connected {
+		s.Devices.SyncReady > s.Devices.Connected ||
+		s.Devices.WorkerReady > s.Devices.Connected ||
+		s.Devices.Dispatchable > s.Devices.SyncReady ||
+		s.Devices.Dispatchable > s.Devices.WorkerReady {
 		return errors.New("device counts are inconsistent")
 	}
 	if s.RunningTurns > s.OccupiedSlots {

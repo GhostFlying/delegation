@@ -13,7 +13,13 @@ import (
 	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
-const methodStatus = "bridge.status"
+const (
+	methodStatus                 = "bridge.status"
+	methodIdentityBoundStatus    = "bridge.status.identity"
+	methodWorkerRecheck          = "worker.recheck"
+	methodWorkerReadiness        = "worker.readiness"
+	methodWaitWorkerIntervention = "worker.readiness.wait_intervention"
+)
 
 const maximumStatusVersionBytes = 128
 
@@ -25,6 +31,21 @@ const (
 	ConnectionReady                 ConnectionState = "ready"
 	ConnectionStateRecoveryRequired ConnectionState = "stateRecoveryRequired"
 )
+
+var ErrStatusSnapshotInvalid = errors.New("local bridge status snapshot is invalid")
+
+type identityBoundStatusParams struct {
+	ExpectedIdentity ServiceIdentity `json:"expectedIdentity"`
+}
+
+type identityBoundStatusResult struct {
+	Identity ServiceIdentity `json:"identity"`
+	Status   StatusSnapshot  `json:"status"`
+}
+
+type waitWorkerInterventionParams struct {
+	After protocol.WorkerReadinessCursor `json:"after"`
+}
 
 type WorkerCounts struct {
 	Total       int64 `json:"total"`
@@ -66,23 +87,26 @@ type ResultCounts struct {
 
 type StatusSnapshot struct {
 	config.TransportStatus
-	Version                    string          `json:"version"`
-	ControllerID               string          `json:"controllerId"`
-	DeviceID                   string          `json:"deviceId"`
-	DeviceName                 string          `json:"deviceName"`
-	ServiceRunning             bool            `json:"serviceRunning"`
-	ConnectionState            ConnectionState `json:"connectionState"`
-	ConnectionErrorCode        string          `json:"connectionErrorCode"`
-	Connected                  bool            `json:"connected"`
-	RegistryRevision           uint64          `json:"registryRevision"`
-	WorkerRevision             uint64          `json:"workerRevision"`
-	BrokerWorkerRevision       uint64          `json:"brokerWorkerRevision"`
-	RecoveryPeerWorkerRevision uint64          `json:"recoveryPeerWorkerRevision"`
-	WorkerSyncReady            bool            `json:"workerSyncReady"`
-	MaxWorkerSlots             int             `json:"maxWorkerSlots"`
-	Workers                    WorkerCounts    `json:"workers"`
-	Artifacts                  ArtifactCounts  `json:"artifacts"`
-	Results                    ResultCounts    `json:"results"`
+	Version                    string                   `json:"version"`
+	ControllerID               string                   `json:"controllerId"`
+	DeviceID                   string                   `json:"deviceId"`
+	DeviceName                 string                   `json:"deviceName"`
+	ServiceRunning             bool                     `json:"serviceRunning"`
+	ConnectionState            ConnectionState          `json:"connectionState"`
+	ConnectionErrorCode        string                   `json:"connectionErrorCode"`
+	Connected                  bool                     `json:"connected"`
+	RegistryRevision           uint64                   `json:"registryRevision"`
+	WorkerRevision             uint64                   `json:"workerRevision"`
+	BrokerWorkerRevision       uint64                   `json:"brokerWorkerRevision"`
+	RecoveryPeerWorkerRevision uint64                   `json:"recoveryPeerWorkerRevision"`
+	WorkerSyncReady            bool                     `json:"workerSyncReady"`
+	WorkerReady                bool                     `json:"workerReady"`
+	Dispatchable               bool                     `json:"dispatchable"`
+	WorkerReadiness            protocol.WorkerReadiness `json:"workerReadiness"`
+	MaxWorkerSlots             int                      `json:"maxWorkerSlots"`
+	Workers                    WorkerCounts             `json:"workers"`
+	Artifacts                  ArtifactCounts           `json:"artifacts"`
+	Results                    ResultCounts             `json:"results"`
 }
 
 func (s StatusSnapshot) Validate() error {
@@ -105,9 +129,6 @@ func (s StatusSnapshot) Validate() error {
 	}
 	if err := control.ValidateDeviceName(s.DeviceName); err != nil {
 		return fmt.Errorf("deviceName: %w", err)
-	}
-	if !s.ServiceRunning {
-		return errors.New("local bridge status must describe a running peer service")
 	}
 	if s.MaxWorkerSlots < 1 || s.MaxWorkerSlots > config.MaximumWorkerSlots ||
 		s.Workers.Occupied > int64(s.MaxWorkerSlots) {
@@ -151,29 +172,46 @@ func (s StatusSnapshot) Validate() error {
 		(!s.Connected || s.BrokerWorkerRevision != s.WorkerRevision) {
 		return errors.New("worker synchronization state is inconsistent")
 	}
-	switch s.ConnectionState {
-	case ConnectionConnecting:
-		if s.Connected || s.WorkerSyncReady || s.ConnectionErrorCode == protocol.PeerStateRollbackCode ||
-			s.RecoveryPeerWorkerRevision != 0 {
-			return errors.New("connecting peer status is inconsistent")
+	if err := s.WorkerReadiness.Validate(); err != nil {
+		return fmt.Errorf("worker readiness: %w", err)
+	}
+	if s.WorkerReady != s.WorkerReadiness.IsReady() {
+		return errors.New("worker readiness state is inconsistent")
+	}
+	if s.Dispatchable != (s.Connected && s.WorkerSyncReady && s.WorkerReady) {
+		return errors.New("peer dispatchable state is inconsistent")
+	}
+	if !s.ServiceRunning {
+		if s.ConnectionState != ConnectionConnecting || s.ConnectionErrorCode != "" ||
+			s.Connected || s.RegistryRevision != 0 || s.BrokerWorkerRevision != 0 ||
+			s.RecoveryPeerWorkerRevision != 0 || s.WorkerSyncReady || s.Dispatchable {
+			return errors.New("stopped peer status is inconsistent")
 		}
-	case ConnectionSynchronizing:
-		if !s.Connected || s.WorkerSyncReady || s.ConnectionErrorCode != "" ||
-			s.RecoveryPeerWorkerRevision != 0 {
-			return errors.New("synchronizing peer status is inconsistent")
+	} else {
+		switch s.ConnectionState {
+		case ConnectionConnecting:
+			if s.Connected || s.WorkerSyncReady || s.ConnectionErrorCode == protocol.PeerStateRollbackCode ||
+				s.RecoveryPeerWorkerRevision != 0 {
+				return errors.New("connecting peer status is inconsistent")
+			}
+		case ConnectionSynchronizing:
+			if !s.Connected || s.WorkerSyncReady || s.ConnectionErrorCode != "" ||
+				s.RecoveryPeerWorkerRevision != 0 {
+				return errors.New("synchronizing peer status is inconsistent")
+			}
+		case ConnectionReady:
+			if !s.Connected || !s.WorkerSyncReady || s.ConnectionErrorCode != "" ||
+				s.RecoveryPeerWorkerRevision != 0 {
+				return errors.New("ready peer status is inconsistent")
+			}
+		case ConnectionStateRecoveryRequired:
+			if s.Connected || s.WorkerSyncReady || s.ConnectionErrorCode != protocol.PeerStateRollbackCode ||
+				s.BrokerWorkerRevision == 0 || s.RecoveryPeerWorkerRevision >= s.BrokerWorkerRevision {
+				return errors.New("state-loss recovery status is inconsistent")
+			}
+		default:
+			return errors.New("peer connection state is invalid")
 		}
-	case ConnectionReady:
-		if !s.Connected || !s.WorkerSyncReady || s.ConnectionErrorCode != "" ||
-			s.RecoveryPeerWorkerRevision != 0 {
-			return errors.New("ready peer status is inconsistent")
-		}
-	case ConnectionStateRecoveryRequired:
-		if s.Connected || s.WorkerSyncReady || s.ConnectionErrorCode != protocol.PeerStateRollbackCode ||
-			s.BrokerWorkerRevision == 0 || s.RecoveryPeerWorkerRevision >= s.BrokerWorkerRevision {
-			return errors.New("state-loss recovery status is inconsistent")
-		}
-	default:
-		return errors.New("peer connection state is invalid")
 	}
 	outboxCount, ok := sumCounts(
 		s.Results.OutboxCapturePending, s.Results.OutboxPublishPending,
@@ -224,7 +262,115 @@ func ReadStatus(ctx context.Context, endpoint string) (StatusSnapshot, error) {
 		return StatusSnapshot{}, fmt.Errorf("read local delegation status: %w", err)
 	}
 	if err := status.Validate(); err != nil {
-		return StatusSnapshot{}, fmt.Errorf("invalid local delegation status: %w", err)
+		return StatusSnapshot{}, fmt.Errorf("%w: %v", ErrStatusSnapshotInvalid, err)
 	}
 	return status, nil
+}
+
+// ReadStatusForIdentity obtains identity and status in one bridge request and
+// rejects a reachable service that does not own the expected peer identity.
+func ReadStatusForIdentity(
+	ctx context.Context, endpoint string, expected ServiceIdentity,
+) (StatusSnapshot, error) {
+	if err := expected.Validate(); err != nil {
+		return StatusSnapshot{}, fmt.Errorf("expected local bridge identity: %w", err)
+	}
+	client, err := NewClient(endpoint)
+	if err != nil {
+		return StatusSnapshot{}, err
+	}
+	var result identityBoundStatusResult
+	err = client.Call(
+		ctx, methodIdentityBoundStatus, "", nil,
+		identityBoundStatusParams{ExpectedIdentity: expected}, &result,
+	)
+	if err != nil {
+		var rpcErr *RPCError
+		if errors.As(err, &rpcErr) {
+			if rpcErr.Code == protocol.ErrorConflict {
+				return StatusSnapshot{}, fmt.Errorf("%w: %v", ErrServiceIdentityMismatch, err)
+			}
+			if rpcErr.Code == protocol.ErrorUnavailable {
+				return StatusSnapshot{}, fmt.Errorf("read identity-bound local delegation status: %w", err)
+			}
+			return StatusSnapshot{}, fmt.Errorf("%w: %v", ErrStatusSnapshotInvalid, err)
+		}
+		return StatusSnapshot{}, fmt.Errorf("read identity-bound local delegation status: %w", err)
+	}
+	if err := result.Identity.Validate(); err != nil {
+		return StatusSnapshot{}, fmt.Errorf("%w: invalid service identity: %v", ErrStatusSnapshotInvalid, err)
+	}
+	if !result.Identity.Equal(expected) {
+		return StatusSnapshot{}, fmt.Errorf(
+			"%w: got instance %s controller %s device %s",
+			ErrServiceIdentityMismatch, result.Identity.EffectiveInstanceID(),
+			result.Identity.ControllerID, result.Identity.DeviceID,
+		)
+	}
+	if err := result.Status.Validate(); err != nil {
+		return StatusSnapshot{}, fmt.Errorf("%w: %v", ErrStatusSnapshotInvalid, err)
+	}
+	if result.Status.ControllerID != result.Identity.ControllerID ||
+		result.Status.DeviceID != result.Identity.DeviceID {
+		return StatusSnapshot{}, fmt.Errorf("%w: status identity mismatch", ErrStatusSnapshotInvalid)
+	}
+	return result.Status, nil
+}
+
+func RecheckWorker(ctx context.Context, endpoint string) (protocol.WorkerReadiness, error) {
+	client, err := NewClient(endpoint)
+	if err != nil {
+		return protocol.WorkerReadiness{}, err
+	}
+	var readiness protocol.WorkerReadiness
+	if err := client.Call(ctx, methodWorkerRecheck, "", nil, struct{}{}, &readiness); err != nil {
+		return protocol.WorkerReadiness{}, fmt.Errorf("recheck local worker readiness: %w", err)
+	}
+	if err := readiness.Validate(); err != nil {
+		return protocol.WorkerReadiness{}, fmt.Errorf("invalid rechecked worker readiness: %w", err)
+	}
+	return readiness, nil
+}
+
+func ReadWorkerReadiness(
+	ctx context.Context, endpoint string,
+) (protocol.WorkerReadiness, error) {
+	client, err := NewClient(endpoint)
+	if err != nil {
+		return protocol.WorkerReadiness{}, err
+	}
+	var readiness protocol.WorkerReadiness
+	if err := client.Call(ctx, methodWorkerReadiness, "", nil, struct{}{}, &readiness); err != nil {
+		return protocol.WorkerReadiness{}, fmt.Errorf("read local worker readiness: %w", err)
+	}
+	if err := readiness.Validate(); err != nil {
+		return protocol.WorkerReadiness{}, fmt.Errorf("invalid local worker readiness: %w", err)
+	}
+	return readiness, nil
+}
+
+func WaitWorkerIntervention(
+	ctx context.Context, endpoint string, after protocol.WorkerReadinessCursor,
+) (protocol.WorkerReadiness, error) {
+	if err := after.Validate(); err != nil {
+		return protocol.WorkerReadiness{}, fmt.Errorf("worker readiness cursor: %w", err)
+	}
+	client, err := NewClient(endpoint)
+	if err != nil {
+		return protocol.WorkerReadiness{}, err
+	}
+	var readiness protocol.WorkerReadiness
+	err = client.Call(
+		ctx, methodWaitWorkerIntervention, "", nil,
+		waitWorkerInterventionParams{After: after}, &readiness,
+	)
+	if err != nil {
+		return protocol.WorkerReadiness{}, fmt.Errorf("wait for local worker intervention: %w", err)
+	}
+	if err := readiness.Validate(); err != nil ||
+		readiness.State != protocol.WorkerReadinessInterventionRequired ||
+		!after.Before(readiness) {
+		return protocol.WorkerReadiness{}, errors.New("invalid local worker intervention")
+	}
+	return readiness, nil
 }

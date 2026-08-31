@@ -307,9 +307,13 @@ plugins/delegation/scripts/delegation-mcp status --config <peer.json> --json
 Peer status is read from the same-user local connector bridge and distinguishes local worker state
 from the revision acknowledged by the broker. A successful status read proves the peer service is
 running; `connectionState=ready` separately proves that its broker connection and worker lifecycle
-sync are usable. Protocol v4 identifies the CLI host family and sends both the pre-recovery startup
-baseline and the current worker revision: the broker uses the baseline for rollback detection but
-does not make the peer dispatchable until it has acknowledged the current revision. A replaced peer
+sync are usable. Protocol v5 identifies the CLI host family, sends both the pre-recovery startup
+baseline and the current worker revision, and requires the `workerReadinessV1` feature plus a
+complete durable execution-readiness snapshot in every Hello. The major version bump prevents a
+v4 broker or peer from treating lifecycle synchronization alone as proof that fresh managed workers
+can execute. The broker uses the baseline for rollback detection but does not make the peer
+dispatchable until it has acknowledged the current revision and the worker readiness state is
+`ready`. A replaced peer
 database is reported as `stateRecoveryRequired` with `peer_worker_revision_rollback` and both the
 local and broker worker revisions instead of as a generic disconnect. Broker status combines
 durable network counters with
@@ -321,6 +325,41 @@ messages, Git URLs, workspaces, rollout contents, credentials, or provider confi
 M6 adds only `transport` and, for embedded Tailscale, `tailscaleHostname` to these status surfaces.
 It does not expose the Tailscale enrollment key or path, Tailscale state or lease paths, Delegation
 tokens, or other local authority paths.
+
+Peer status also reports `workerSyncReady`, `workerReady`, `dispatchable`, and the durable
+`workerReadiness` epoch, attempt count, retry time, and failure code. Qualification uses the
+persistent managed home, starts a fresh app-server thread, and verifies the complete worker MCP
+surface without resuming a historical thread or starting a turn. Transient failures retain one
+five-attempt budget across service restarts and broker reconnects. A permanent failure or an
+exhausted budget reports `intervention_required`; new spawns targeting that peer are rejected with
+the durable readiness failure code before a spawn receipt is created. A newly persisted terminal
+transition is logged once by the peer service and is also sent once, best effort, to root MCP
+sessions active at the transition; restarting either process does not replay an old transition.
+
+An operator can explicitly begin a new qualification epoch after correcting an external problem:
+
+```bash
+plugins/delegation/scripts/delegation-mcp worker recheck --config <peer.json>
+plugins/delegation/scripts/delegation-mcp worker recheck --config <peer.json> --json
+```
+
+TraeX peer configurations reject `-p NAME`, `--profile NAME`, and `--profile=NAME`, because profile
+loading can contaminate the managed worker authority surface. With the peer service stopped, the
+known profile arguments and managed-home contamination can be repaired transactionally:
+
+```bash
+plugins/delegation/scripts/delegation-mcp service repair \
+  --config <peer.json> \
+  --environment-file <peer.env> \
+  --json
+```
+
+Repair moves prohibited managed-home entries into a same-filesystem, current-user-only quarantine,
+writes a mode/type/digest manifest, atomically replaces the corrected configuration, and runs a
+doctor plus fresh-thread smoke check. A failed repair restores the original configuration and
+entries; an unsafe restoration conflict remains quarantined and is reported as `rollback_failed`.
+Successful repair and explicit recheck create a new readiness epoch. Ordinary reconnects and
+restarts do not reset the retry budget.
 
 When status reports `stateRecoveryRequired`, stop the peer service and restore the original peer
 database before restarting it. An automated reset policy is intentionally not defined yet because

@@ -303,6 +303,7 @@ func newResultPackageSourceClient(
 		RuntimeVersion: "result-package-source-test", OperatingSystem: "linux", Architecture: "amd64",
 		ReconnectMin: 5 * time.Millisecond, ReconnectMax: 10 * time.Millisecond,
 		WorkerSpawner: manager, WorkerController: manager, WorkerLifecycleSource: manager,
+		WorkerReadinessSource: testWorkerSpawner{},
 		ChangesArtifactSource: manager, ResultPackageSource: source,
 		WorkspaceManager: manager, ResultPackageManager: manager,
 	})

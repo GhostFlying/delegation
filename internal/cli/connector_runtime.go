@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/pathguard"
+	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
 	"github.com/GhostFlying/delegation/internal/rootapply"
 	"github.com/GhostFlying/delegation/internal/serviceenv"
@@ -29,6 +31,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/tailscaleruntime"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 	"github.com/GhostFlying/delegation/internal/workerhost"
+	"github.com/GhostFlying/delegation/internal/workerreadiness"
 )
 
 type connectorRuntimeOptions struct {
@@ -81,12 +84,18 @@ func runConnectorServiceWithProviderEnvironment(
 	stderr io.Writer,
 	options connectorRuntimeOptions,
 ) (resultErr error) {
-	authority, err := loadConnectorAuthority(configPath, cfg)
-	if err != nil {
-		return err
-	}
 	if err := writeInsecureTransportWarning(stderr, cfg); err != nil {
 		return err
+	}
+	authority, authorityErr := loadConnectorAuthority(configPath, cfg)
+	var managedHomeErr error
+	if authorityErr != nil {
+		managedHomeErr = codexconfig.ValidateManagedRuntimeHome(
+			cfg.EffectiveHostKind(), cfg.Peer.CodexHome,
+		)
+		if managedHomeErr == nil {
+			return authorityErr
+		}
 	}
 	if ctx.Err() != nil {
 		return nil
@@ -117,6 +126,45 @@ func runConnectorServiceWithProviderEnvironment(
 	defer func() {
 		resultErr = errors.Join(resultErr, closeResources())
 	}()
+	runtimeBinary, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve delegation executable: %w", err)
+	}
+	runtimeBinary, err = filepath.Abs(runtimeBinary)
+	if err != nil {
+		return fmt.Errorf("resolve delegation executable: %w", err)
+	}
+	if target, evalErr := filepath.EvalSymlinks(runtimeBinary); evalErr == nil {
+		runtimeBinary = target
+	} else {
+		return fmt.Errorf("resolve delegation executable: %w", evalErr)
+	}
+	runtimeDigest, err := workerreadiness.RuntimeDigest(runtimeBinary)
+	if err != nil {
+		return err
+	}
+	configDigest, err := workerreadiness.ConfigDigest(configPath, environmentFile)
+	if err != nil {
+		return err
+	}
+	if _, err := peerState.EnsureWorkerReadinessEpoch(
+		ctx, runtimeDigest, configDigest, time.Now().UnixMilli(),
+	); err != nil {
+		return fmt.Errorf("initialize worker readiness: %w", err)
+	}
+	if runtime.GOOS == "windows" && cfg.EffectiveHostKind() == hostkind.TraeX {
+		unsupportedErr := errors.New("TraeX worker host is unsupported on Windows")
+		return errors.Join(
+			unsupportedErr,
+			failOpenPeerReadiness(ctx, peerState, protocol.WorkerHostUnsupported),
+		)
+	}
+	if managedHomeErr != nil {
+		return errors.Join(
+			authorityErr,
+			failOpenPeerReadiness(ctx, peerState, protocol.WorkerManagedHomeInvalid),
+		)
+	}
 	var tailscale embeddedTailscaleRuntime
 	if cfg.Transport.Mode == delegationconfig.TransportModeTailscale {
 		newTailscale := options.newTailscale
@@ -150,19 +198,6 @@ func runConnectorServiceWithProviderEnvironment(
 	}
 	for name, value := range providerEnvironment.Environment {
 		codexEnvironment[name] = value
-	}
-	runtimeBinary, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve delegation executable: %w", err)
-	}
-	runtimeBinary, err = filepath.Abs(runtimeBinary)
-	if err != nil {
-		return fmt.Errorf("resolve delegation executable: %w", err)
-	}
-	if target, evalErr := filepath.EvalSymlinks(runtimeBinary); evalErr == nil {
-		runtimeBinary = target
-	} else {
-		return fmt.Errorf("resolve delegation executable: %w", evalErr)
 	}
 	var stderrMu sync.Mutex
 	writeStderr := func(format string, args ...any) error {
@@ -259,6 +294,7 @@ func runConnectorServiceWithProviderEnvironment(
 		WorkerLifecycleSource: managedWorkerLifecycleSource{
 			host: workers, controllerID: cfg.ControllerID, deviceID: cfg.DeviceID,
 		},
+		WorkerReadinessSource: peerState,
 		ChangesArtifactSource: changesSource,
 		ResultPackageSource:   resultSource,
 		WorkspaceManager:      workerManager,
@@ -271,6 +307,16 @@ func runConnectorServiceWithProviderEnvironment(
 		clientOptions.DialContext = tailscale.Dial
 	}
 	client, err := connector.New(clientOptions)
+	if err != nil {
+		return err
+	}
+	readinessController, err := workerreadiness.New(workerreadiness.Options{
+		Store: peerState, Probe: workers, Publisher: client,
+		RuntimeDigest: runtimeDigest, ConfigDigest: configDigest,
+		ReportError: func(err error) {
+			_ = writeStderr("delegation: managed worker readiness: %v\n", err)
+		},
+	})
 	if err != nil {
 		return err
 	}
@@ -287,7 +333,7 @@ func runConnectorServiceWithProviderEnvironment(
 	if cfg.EffectiveInstanceID() != delegationconfig.DefaultInstanceID {
 		bridgeIdentity.InstanceID = cfg.EffectiveInstanceID()
 	}
-	bridge, err := localbridge.ListenWithResultApply(
+	bridge, err := localbridge.ListenWithManagement(
 		endpoint,
 		bridgeIdentity,
 		client,
@@ -302,25 +348,42 @@ func runConnectorServiceWithProviderEnvironment(
 		},
 		localResultPackageAvailabilityProvider{manager: resultPackages},
 		resultApplies,
+		readinessController,
 	)
 	if err != nil {
+		probeContext, cancelProbe := context.WithTimeout(ctx, 2*time.Second)
+		identityErr := localbridge.Probe(probeContext, endpoint, bridgeIdentity)
+		cancelProbe()
+		if errors.Is(identityErr, localbridge.ErrServiceIdentityMismatch) {
+			return errors.Join(
+				err, identityErr,
+				failOpenPeerReadiness(
+					ctx, peerState, protocol.WorkerServiceIdentityInvalid,
+				),
+			)
+		}
 		return err
 	}
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	connectorDone := make(chan error, 1)
 	bridgeDone := make(chan error, 1)
+	readinessDone := make(chan error, 1)
 	go func() {
 		connectorDone <- client.Run(runContext)
 	}()
 	go func() {
 		bridgeDone <- bridge.Serve(runContext)
 	}()
+	go func() {
+		readinessDone <- readinessController.Run(runContext)
+	}()
 	if err := writeStderr("delegation: %s connector service started\n", cfg.Role); err != nil {
 		cancel()
 		_ = bridge.Close()
 		<-connectorDone
 		<-bridgeDone
+		<-readinessDone
 		return fmt.Errorf("write connector readiness: %w", err)
 	}
 
@@ -332,30 +395,55 @@ func runConnectorServiceWithProviderEnvironment(
 		firstName = "connector"
 	case firstErr = <-bridgeDone:
 		firstName = "local bridge"
+	case firstErr = <-readinessDone:
+		firstName = "worker readiness"
 	case <-workers.Done():
 		firstName = "managed worker host"
 		firstErr = workers.Err()
 	}
 	cancel()
 	closeErr := bridge.Close()
-	var connectorErr, bridgeErr error
+	var connectorErr, bridgeErr, readinessErr error
 	if firstName == "connector" {
 		connectorErr = firstErr
 		bridgeErr = <-bridgeDone
+		readinessErr = <-readinessDone
 	} else if firstName == "local bridge" {
 		bridgeErr = firstErr
 		connectorErr = <-connectorDone
+		readinessErr = <-readinessDone
+	} else if firstName == "worker readiness" {
+		readinessErr = firstErr
+		connectorErr = <-connectorDone
+		bridgeErr = <-bridgeDone
 	} else {
 		connectorErr = <-connectorDone
 		bridgeErr = <-bridgeDone
+		readinessErr = <-readinessDone
 	}
 	if ctx.Err() != nil {
-		return errors.Join(closeErr, connectorErr, bridgeErr)
+		return errors.Join(closeErr, connectorErr, bridgeErr, readinessErr)
 	}
 	if firstErr == nil {
 		firstErr = errors.New("stopped unexpectedly")
 	}
-	return errors.Join(fmt.Errorf("%s stopped: %w", firstName, firstErr), closeErr, connectorErr, bridgeErr)
+	return errors.Join(fmt.Errorf("%s stopped: %w", firstName, firstErr), closeErr, connectorErr, bridgeErr, readinessErr)
+}
+
+func failOpenPeerReadiness(
+	ctx context.Context, state *store.PeerStore, failureCode string,
+) error {
+	readiness, err := state.FailWorkerReadiness(ctx, failureCode, time.Now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("persist %s worker readiness: %w", failureCode, err)
+	}
+	return readinessInterventionError(readiness)
+}
+
+func readinessInterventionError(readiness protocol.WorkerReadiness) error {
+	return fmt.Errorf(
+		"worker readiness state=%s failureCode=%s", readiness.State, readiness.FailureCode,
+	)
 }
 
 func reportConnectorError(writeStderr func(string, ...any) error, err error) error {
@@ -363,6 +451,79 @@ func reportConnectorError(writeStderr func(string, ...any) error, err error) err
 		return writeStderr("delegation: connector halted; state recovery required: %v\n", err)
 	}
 	return writeStderr("delegation: connector reconnecting: %v\n", err)
+}
+
+func qualifyTraeXRepair(
+	ctx context.Context,
+	configPath string,
+	environmentFile string,
+	cfg delegationconfig.Config,
+	quarantinePath string,
+) (resultErr error) {
+	authority, err := loadConnectorAuthority(configPath, cfg)
+	if err != nil {
+		return err
+	}
+	providerEnvironment, err := serviceenv.LoadProtectedFile(environmentFile)
+	if err != nil {
+		return err
+	}
+	runtimeBinary, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve delegation executable: %w", err)
+	}
+	runtimeBinary, err = filepath.Abs(runtimeBinary)
+	if err != nil {
+		return fmt.Errorf("resolve delegation executable: %w", err)
+	}
+	runtimeBinary, err = filepath.EvalSymlinks(runtimeBinary)
+	if err != nil {
+		return fmt.Errorf("resolve delegation executable: %w", err)
+	}
+	temporaryRoot, err := os.MkdirTemp(quarantinePath, "qualification-")
+	if err != nil {
+		return fmt.Errorf("create repair qualification state: %w", err)
+	}
+	if err := os.Chmod(temporaryRoot, 0o700); err != nil {
+		_ = os.RemoveAll(temporaryRoot)
+		return fmt.Errorf("protect repair qualification state: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(temporaryRoot)) }()
+	temporaryState, err := store.OpenPeer(ctx, filepath.Join(temporaryRoot, "peer.sqlite3"))
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, temporaryState.Close()) }()
+	resultPackages, err := resultpackagefiles.New(ctx, resultpackagefiles.Options{
+		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID,
+		WorkspaceRoot: cfg.Peer.WorkspaceRoot, Store: temporaryState,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, resultPackages.Close()) }()
+	codexEnvironment := make(map[string]string, len(authority.cliLaunch.Environment)+len(providerEnvironment.Environment))
+	for name, value := range authority.cliLaunch.Environment {
+		codexEnvironment[name] = value
+	}
+	for name, value := range providerEnvironment.Environment {
+		codexEnvironment[name] = value
+	}
+	workers, err := workerhost.New(ctx, workerhost.Options{
+		ControllerID: cfg.ControllerID, DeviceID: cfg.DeviceID, HostKind: cfg.EffectiveHostKind(),
+		PeerConfigPath: configPath, DelegationBinary: runtimeBinary,
+		CLILaunch: authority.appServerLaunch, CLIRuntimeExecutable: authority.cliLaunch.RuntimePath,
+		GitBinary: cfg.Peer.GitBinary, CodexHome: cfg.Peer.CodexHome,
+		CodexEnvironment: codexEnvironment, CodexUnsetEnvironment: authority.cliLaunch.UnsetEnvironment,
+		ProviderEnvironmentFile: environmentFile, WorkspaceRoot: cfg.Peer.WorkspaceRoot,
+		MaxWorkerSlots: cfg.Peer.MaxWorkerSlots, CodexConfig: providerEnvironment.Config,
+		Store: temporaryState, ResultPackages: resultPackages,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, closeWorkerHost(workers, 30*time.Second)) }()
+	return workers.Qualify(ctx)
 }
 
 func resolveConfiguredCLILaunch(

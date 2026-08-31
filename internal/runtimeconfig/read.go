@@ -20,8 +20,26 @@ func Read(path string) (delegationconfig.Config, error) {
 	return delegationconfig.ReadForRuntime(path, Capabilities())
 }
 
+// ReadForStartupClassification preserves a strictly decoded configuration
+// alongside its validation error for narrowly scoped durable failure reporting.
+func ReadForStartupClassification(
+	path string,
+) (delegationconfig.Config, []byte, error) {
+	return delegationconfig.ReadForStartupClassification(path, Capabilities())
+}
+
+// ReadForRepair permits only the profile-selector migration performed by the
+// TraeX service repair transaction, then applies normal runtime validation.
+func ReadForRepair(path string) (delegationconfig.Config, []byte, int, error) {
+	return delegationconfig.ReadForRepair(path, Capabilities())
+}
+
 // WriteNew atomically writes new configuration after validating it against the
 // transports linked into this executable.
 func WriteNew(path string, cfg delegationconfig.Config) error {
 	return delegationconfig.WriteNewForRuntime(path, cfg, Capabilities())
+}
+
+func Encode(cfg delegationconfig.Config) ([]byte, error) {
+	return delegationconfig.EncodeForRuntime(cfg, Capabilities())
 }

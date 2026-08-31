@@ -13,6 +13,8 @@ import (
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/control"
+	"github.com/GhostFlying/delegation/internal/localbridge"
+	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/rootmcp"
 	"github.com/GhostFlying/delegation/internal/workermcp"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -78,6 +80,187 @@ func TestRootMCPRejectsBrokerConfiguration(t *testing.T) {
 	_, err := loadRootMCPServer(writeRootMCPConfig(t, delegationconfig.RoleBroker))
 	if err == nil || !strings.Contains(err.Error(), "peer configuration") {
 		t.Fatalf("loadRootMCPServer() error = %v", err)
+	}
+}
+
+func TestRootMCPDoesNotReplayPreexistingWorkerIntervention(t *testing.T) {
+	configPath := writeRootMCPConfig(t, delegationconfig.RolePeer)
+	endpoint, err := localbridge.Endpoint(mcpTestControllerID, mcpTestDeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := protocol.WorkerReadiness{
+		Epoch: 1, State: protocol.WorkerReadinessInterventionRequired, AttemptCount: 1,
+		RuntimeDigest: strings.Repeat("a", 64), ConfigDigest: strings.Repeat("b", 64),
+		EpochStartedAt: 1, LastAttemptAt: 2, FailureCode: protocol.WorkerManagedHomeInvalid,
+		UpdatedAt: 3,
+	}
+	bridge, err := localbridge.ListenWithManagement(
+		endpoint, localbridge.ServiceIdentity{
+			ControllerID: mcpTestControllerID, DeviceID: mcpTestDeviceID,
+		}, statusTestBackend{}, nil, nil, nil, nil,
+		staticMCPReadiness{readiness: terminal},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridgeCtx, stopBridge := context.WithCancel(context.Background())
+	bridgeDone := make(chan error, 1)
+	go func() { bridgeDone <- bridge.Serve(bridgeCtx) }()
+	defer func() {
+		stopBridge()
+		_ = bridge.Close()
+		<-bridgeDone
+	}()
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- runRootMCP(context.Background(), configPath, serverTransport)
+	}()
+	messages := make(chan *mcp.LoggingMessageParams, 1)
+	client := mcp.NewClient(
+		&mcp.Implementation{Name: "test", Version: "1"},
+		&mcp.ClientOptions{LoggingMessageHandler: func(
+			_ context.Context, request *mcp.LoggingMessageRequest,
+		) {
+			messages <- request.Params
+		}},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SetLoggingLevel(ctx, &mcp.SetLoggingLevelParams{Level: "error"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case message := <-messages:
+		t.Fatalf("preexisting intervention was replayed: %#v", message)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("root MCP did not stop")
+	}
+}
+
+func TestRootMCPNotifiesActiveSessionOfNewWorkerIntervention(t *testing.T) {
+	configPath := writeRootMCPConfig(t, delegationconfig.RolePeer)
+	endpoint, err := localbridge.Endpoint(mcpTestControllerID, mcpTestDeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := protocol.NewPendingWorkerReadiness(
+		strings.Repeat("a", 64), strings.Repeat("b", 64), time.Now().UnixMilli(),
+	)
+	wait := make(chan protocol.WorkerReadiness, 1)
+	manager := staticMCPReadiness{readiness: baseline, wait: wait}
+	bridge, err := localbridge.ListenWithManagement(
+		endpoint, localbridge.ServiceIdentity{
+			ControllerID: mcpTestControllerID, DeviceID: mcpTestDeviceID,
+		}, statusTestBackend{}, nil, nil, nil, nil, manager,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridgeCtx, stopBridge := context.WithCancel(context.Background())
+	bridgeDone := make(chan error, 1)
+	go func() { bridgeDone <- bridge.Serve(bridgeCtx) }()
+	defer func() {
+		stopBridge()
+		_ = bridge.Close()
+		<-bridgeDone
+	}()
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- runRootMCP(context.Background(), configPath, serverTransport)
+	}()
+	messages := make(chan *mcp.LoggingMessageParams, 1)
+	client := mcp.NewClient(
+		&mcp.Implementation{Name: "test", Version: "1"},
+		&mcp.ClientOptions{LoggingMessageHandler: func(
+			_ context.Context, request *mcp.LoggingMessageRequest,
+		) {
+			messages <- request.Params
+		}},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SetLoggingLevel(ctx, &mcp.SetLoggingLevelParams{Level: "error"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	terminal := baseline
+	terminal.State = protocol.WorkerReadinessInterventionRequired
+	terminal.AttemptCount = 1
+	terminal.LastAttemptAt = time.Now().UnixMilli()
+	terminal.UpdatedAt = terminal.LastAttemptAt
+	terminal.NextAttemptAt = 0
+	terminal.FailureCode = protocol.WorkerManagedHomeInvalid
+	wait <- terminal
+	select {
+	case message := <-messages:
+		data, ok := message.Data.(map[string]any)
+		if !ok || data["failureCode"] != protocol.WorkerManagedHomeInvalid {
+			t.Fatalf("intervention log = %#v", message)
+		}
+	case <-ctx.Done():
+		t.Fatal("active root MCP session did not receive intervention notification")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("root MCP did not stop")
+	}
+}
+
+type staticMCPReadiness struct {
+	readiness protocol.WorkerReadiness
+	wait      chan protocol.WorkerReadiness
+}
+
+func (s staticMCPReadiness) WorkerReadiness(context.Context) (protocol.WorkerReadiness, error) {
+	return s.readiness, nil
+}
+
+func (s staticMCPReadiness) RecheckWorkerReadiness(context.Context) (protocol.WorkerReadiness, error) {
+	return s.readiness, nil
+}
+
+func (s staticMCPReadiness) WaitWorkerIntervention(
+	ctx context.Context, _ protocol.WorkerReadinessCursor,
+) (protocol.WorkerReadiness, error) {
+	if s.wait == nil {
+		<-ctx.Done()
+		return protocol.WorkerReadiness{}, ctx.Err()
+	}
+	select {
+	case readiness := <-s.wait:
+		return readiness, nil
+	case <-ctx.Done():
+		return protocol.WorkerReadiness{}, ctx.Err()
 	}
 }
 

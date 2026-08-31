@@ -14,6 +14,8 @@ import (
 	"github.com/GhostFlying/delegation/internal/appserver"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	"github.com/GhostFlying/delegation/internal/hostkind"
+	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
@@ -28,6 +30,12 @@ const (
 	workerMCPTimeout        = 10
 	maximumMCPPages         = 16
 	mcpPageSize             = 100
+)
+
+const (
+	qualificationTreeID   = "00000000-0000-4000-8000-000000000001"
+	qualificationAgentID  = "00000000-0000-4000-8000-000000000002"
+	qualificationParentID = "00000000-0000-4000-8000-000000000003"
 )
 
 var requiredWorkerTools = []string{"send_upstream_message", "wait_for_upstream_message"}
@@ -134,6 +142,62 @@ func (h *Host) verifyWorkerMCP(
 		return verifyTraeXWorkerMCP(ctx, client, threadID)
 	}
 	return verifyWorkerMCPInventory(ctx, client, threadID)
+}
+
+// Qualify starts a fresh managed thread and verifies the complete worker MCP
+// authority surface. It intentionally never resumes a thread or starts a turn.
+func (h *Host) Qualify(ctx context.Context) error {
+	release, err := h.acquireOperation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := h.validateRuntimeDirectories(); err != nil {
+		return permanentReadinessFailure(protocol.WorkerManagedHomeInvalid, err)
+	}
+	client, err := h.ensureClient(ctx)
+	if err != nil {
+		return err
+	}
+	workspace := h.workspaceRoot.Name()
+	worker := store.WorkerReservation{
+		WorkerKey: store.WorkerKey{
+			ControllerID: h.controllerID,
+			TreeID:       qualificationTreeID,
+			AgentID:      qualificationAgentID,
+		},
+		ParentAgentID: qualificationParentID, DeviceID: h.deviceID,
+		WorkspacePath: workspace, ProfileVersion: workerProfileVersion,
+	}
+	var result threadResult
+	err = client.ThreadStart(ctx, threadStartParams{
+		CWD: workspace, RuntimeWorkspaceRoots: []string{workspace},
+		ApprovalPolicy: "never", Config: h.managedConfig(worker),
+		ServiceName: "delegation", ThreadSource: h.workerSource(),
+		DeveloperMessage: workerInstructions,
+	}, &result)
+	if err != nil {
+		if h.shouldRetire(client, err) {
+			h.retireClient(client, err)
+		}
+		return fmt.Errorf("start qualification thread: %w", err)
+	}
+	if err := identity.ValidateID(result.Thread.ID); err != nil {
+		protocolErr := fmt.Errorf("app-server returned invalid qualification threadId: %w", err)
+		h.retireClient(client, protocolErr)
+		return protocolErr
+	}
+	if err := h.validateThreadWorkspace(result, worker); err != nil {
+		h.retireClient(client, err)
+		return err
+	}
+	if err := h.verifyWorkerMCP(ctx, client, result.Thread.ID); err != nil {
+		if h.shouldRetire(client, err) || errors.Is(err, ErrMCPInjectionBlocked) {
+			h.retireClient(client, err)
+		}
+		return fmt.Errorf("verify qualification worker MCP: %w", err)
+	}
+	return nil
 }
 
 func verifyTraeXWorkerMCP(

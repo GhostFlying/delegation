@@ -109,6 +109,8 @@ devices:
   online: 2
   connected: 2
   sync ready: 1
+  worker ready: 0
+  dispatchable: 0
 dispatches:
   pending: 1
   started: 2
@@ -130,7 +132,7 @@ results:
   lifetime source released: 9
   lifetime details compacted: 3
 `
-	wantJSON := `{"transport":"tcp","version":"0.2.0-test","uptimeSeconds":61,"controllerId":"123e4567-e89b-42d3-a456-426614174800","devices":{"registered":3,"online":2,"connected":2,"syncReady":1},"dispatch":{"pending":1,"started":2,"failed":3,"lifetimeStarted":4},"runningTurns":1,"occupiedSlots":2,"lifetimeTurns":5,"trees":6,"artifacts":{"available":7,"unchanged":8,"captureFailed":9},"results":{"deliveryPending":10,"detailsRetained":13,"delivered":12,"sourceAcknowledged":11,"sourceReleased":9,"detailsCompacted":3}}` + "\n"
+	wantJSON := `{"transport":"tcp","version":"0.2.0-test","uptimeSeconds":61,"controllerId":"123e4567-e89b-42d3-a456-426614174800","devices":{"registered":3,"online":2,"connected":2,"syncReady":1,"workerReady":0,"dispatchable":0},"dispatch":{"pending":1,"started":2,"failed":3,"lifetimeStarted":4},"runningTurns":1,"occupiedSlots":2,"lifetimeTurns":5,"trees":6,"artifacts":{"available":7,"unchanged":8,"captureFailed":9},"results":{"deliveryPending":10,"detailsRetained":13,"delivered":12,"sourceAcknowledged":11,"sourceReleased":9,"detailsCompacted":3}}` + "\n"
 	readBroker := func(_ context.Context, address string) (statuspage.Snapshot, error) {
 		if address != cfg.Broker.StatusListen {
 			t.Fatalf("broker status address = %q", address)

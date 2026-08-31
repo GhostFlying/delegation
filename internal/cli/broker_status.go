@@ -100,6 +100,8 @@ func writeBrokerStatus(
 		fmt.Fprintf(&rendered, "  online: %d\n", status.Devices.Online)
 		fmt.Fprintf(&rendered, "  connected: %d\n", status.Devices.Connected)
 		fmt.Fprintf(&rendered, "  sync ready: %d\n", status.Devices.SyncReady)
+		fmt.Fprintf(&rendered, "  worker ready: %d\n", status.Devices.WorkerReady)
+		fmt.Fprintf(&rendered, "  dispatchable: %d\n", status.Devices.Dispatchable)
 		fmt.Fprintln(&rendered, "dispatches:")
 		fmt.Fprintf(&rendered, "  pending: %d\n", status.Dispatch.Pending)
 		fmt.Fprintf(&rendered, "  started: %d\n", status.Dispatch.Started)

@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	Version        = 4
-	MaxMessageSize = 256 * 1024
+	Version          = 5
+	MaxMessageSize   = 256 * 1024
+	MaxErrorDataSize = 1024
 )
 
 type Kind string
@@ -88,6 +89,7 @@ const (
 	MethodFollowupWorker          = "worker.followup"
 	MethodInterruptWorker         = "worker.interrupt"
 	MethodSyncWorkerLifecycle     = "worker.lifecycle.sync"
+	MethodUpdateWorkerReadiness   = "worker.readiness.update"
 	MethodSyncWorkspace           = "workspace.sync"
 	MethodInspectWorkspace        = "workspace.inspect"
 	MethodPrepareWorkspace        = "workspace.prepare"
@@ -132,6 +134,7 @@ const (
 	FeatureMailbox           = "mailboxV1"
 	FeatureWorkerDispatch    = "managedWorkerDispatchV1"
 	FeatureWorkerLifecycle   = "workerLifecycleV1"
+	FeatureWorkerReadiness   = "workerReadinessV1"
 	FeaturePeerRoot          = "peerRootV1"
 	FeatureWorkspaceSync     = "workspaceSyncV1"
 	FeatureWorkspaceTransfer = "workspaceTransferV1"
@@ -238,6 +241,12 @@ func (e Error) Validate() error {
 	if strings.TrimSpace(e.Message) == "" || len(e.Message) > 512 {
 		return errors.New("protocol error message must contain 1 through 512 bytes")
 	}
+	if len(e.Data) > MaxErrorDataSize {
+		return fmt.Errorf("protocol error data exceeds %d bytes", MaxErrorDataSize)
+	}
+	if len(e.Data) != 0 && !json.Valid(e.Data) {
+		return errors.New("protocol error data must be valid JSON")
+	}
 	return nil
 }
 
@@ -303,17 +312,18 @@ func validateRequestID(value string) error {
 }
 
 type Hello struct {
-	ControllerID           string        `json:"controllerId"`
-	DeviceID               string        `json:"deviceId"`
-	DeviceName             string        `json:"deviceName"`
-	HostKind               hostkind.Kind `json:"hostKind"`
-	OS                     string        `json:"os"`
-	Arch                   string        `json:"arch"`
-	RuntimeVersion         string        `json:"runtimeVersion"`
-	Features               []string      `json:"features"`
-	Cursor                 uint64        `json:"cursor"`
-	WorkerBaselineRevision uint64        `json:"workerBaselineRevision"`
-	WorkerRevision         uint64        `json:"workerRevision"`
+	ControllerID           string          `json:"controllerId"`
+	DeviceID               string          `json:"deviceId"`
+	DeviceName             string          `json:"deviceName"`
+	HostKind               hostkind.Kind   `json:"hostKind"`
+	OS                     string          `json:"os"`
+	Arch                   string          `json:"arch"`
+	RuntimeVersion         string          `json:"runtimeVersion"`
+	Features               []string        `json:"features"`
+	Cursor                 uint64          `json:"cursor"`
+	WorkerBaselineRevision uint64          `json:"workerBaselineRevision"`
+	WorkerRevision         uint64          `json:"workerRevision"`
+	WorkerReadiness        WorkerReadiness `json:"workerReadiness"`
 }
 
 func (h Hello) Descriptor() control.DeviceDescriptor {
@@ -342,16 +352,20 @@ func (h Hello) Validate() error {
 	if h.WorkerRevision > math.MaxInt64 {
 		return errors.New("workerRevision exceeds the supported range")
 	}
+	if err := h.WorkerReadiness.Validate(); err != nil {
+		return err
+	}
 	return nil
 }
 
 type HelloResult struct {
-	ConnectionID          string        `json:"connectionId"`
-	HostKind              hostkind.Kind `json:"hostKind"`
-	Features              []string      `json:"features"`
-	HeartbeatIntervalMS   int64         `json:"heartbeatIntervalMs"`
-	Revision              uint64        `json:"revision"`
-	WorkerAppliedRevision uint64        `json:"workerAppliedRevision"`
+	ConnectionID          string          `json:"connectionId"`
+	HostKind              hostkind.Kind   `json:"hostKind"`
+	Features              []string        `json:"features"`
+	HeartbeatIntervalMS   int64           `json:"heartbeatIntervalMs"`
+	Revision              uint64          `json:"revision"`
+	WorkerAppliedRevision uint64          `json:"workerAppliedRevision"`
+	WorkerReadiness       WorkerReadiness `json:"workerReadiness"`
 }
 
 type Heartbeat struct{}

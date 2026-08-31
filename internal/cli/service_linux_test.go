@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,18 +12,329 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GhostFlying/delegation/internal/broker"
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 	"github.com/GhostFlying/delegation/internal/codexconfig"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/hostkind"
+	"github.com/GhostFlying/delegation/internal/protocol"
+	"github.com/GhostFlying/delegation/internal/runtimeconfig"
+	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/userservice"
 )
 
 const serviceTestControllerID = "123e4567-e89b-42d3-a456-426614174720"
 
 const serviceTestProviderConfig = `{"model":"mock-model","model_provider":"mock","model_providers.mock":{"name":"Mock provider","base_url":"https://gateway.example.test/v1","wire_api":"responses","requires_openai_auth":false,"env_key":"GATEWAY_KEY"}}`
+
+func TestServiceRepairRequiresStoppedPeerLease(t *testing.T) {
+	configPath, cfg := setupConnectorRuntimeTest(
+		t, "123e4567-e89b-42d3-a456-426614174722", "repair-running",
+		"wss://broker.example.test/v1/connect",
+	)
+	cfg.HostKind = hostkind.TraeX
+	cfg.Peer.CLI = &delegationconfig.CLIConfig{
+		Command: testCodexBinary(t), Arguments: []string{"--profile", "legacy"},
+		Launcher: &clilaunch.Spec{Executable: testCodexBinary(t)},
+	}
+	cfg.Peer.CodexBinary = ""
+	rewriteRepairConfig(t, configPath, cfg)
+	environmentPath := filepath.Join(filepath.Dir(configPath), "peer.env")
+	writePeerServiceEnvironment(t, environmentPath, strings.Join([]string{
+		codexconfig.EnvironmentVariable + "=" + serviceTestProviderConfig,
+		"GATEWAY_KEY=secret",
+		"",
+	}, "\n"))
+	writeFileForServiceRepair(t, filepath.Join(cfg.Peer.CodexHome, "AGENTS.md"), []byte("legacy"))
+	lease, err := store.AcquirePeerLease(cfg.Peer.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{
+		"service", "repair", "--config", configPath,
+		"--environment-file", environmentPath,
+	}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), store.ErrPeerLeaseHeld.Error()) {
+		t.Fatalf("service repair = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("service repair changed config while the peer lease was held")
+	}
+	if _, err := os.Stat(filepath.Join(cfg.Peer.CodexHome, "AGENTS.md")); err != nil {
+		t.Fatalf("service repair moved managed-home state while the peer lease was held: %v", err)
+	}
+}
+
+func TestServiceRepairCLICommitsInjectedFreshThreadQualification(t *testing.T) {
+	configPath, cfg, environmentPath, pollutedPath := serviceRepairCLIFixture(t, "success")
+	var smokeCalls int
+	var stdout, stderr bytes.Buffer
+	code := runServiceRepairWithDependencies([]string{
+		"--config", configPath, "--environment-file", environmentPath, "--json",
+	}, &stdout, &stderr, serviceRepairDependencies{
+		qualify: func(
+			_ context.Context, gotConfig, gotEnvironment string, got delegationconfig.Config,
+			quarantinePath string,
+		) error {
+			smokeCalls++
+			if gotConfig != configPath || gotEnvironment != environmentPath ||
+				got.Peer.StateFile != cfg.Peer.StateFile || quarantinePath == "" {
+				t.Fatalf("qualification inputs = %q, %q, %#v, %q",
+					gotConfig, gotEnvironment, got, quarantinePath)
+			}
+			return nil
+		},
+	})
+	if code != 0 || stderr.Len() != 0 || smokeCalls != 1 {
+		t.Fatalf("service repair = %d, stdout %q, stderr %q, smoke %d",
+			code, stdout.String(), stderr.String(), smokeCalls)
+	}
+	var result serviceRepairResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.State != "repaired" || result.ProfilesRemoved != 1 ||
+		result.QuarantinePath == "" || result.ManifestPath == "" {
+		t.Fatalf("repair result = %#v", result)
+	}
+	if _, err := os.Stat(pollutedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("polluted managed-home entry remains: %v", err)
+	}
+	repaired, err := runtimeconfig.Read(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(repaired.Peer.CLI.Arguments, "--profile") {
+		t.Fatalf("repaired arguments = %#v", repaired.Peer.CLI.Arguments)
+	}
+	state, err := store.OpenPeer(context.Background(), cfg.Peer.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	readiness, err := state.WorkerReadiness(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readiness.Epoch != 1 || readiness.State != protocol.WorkerReadinessPending {
+		t.Fatalf("successful repair readiness = %#v", readiness)
+	}
+}
+
+func TestServiceRepairCLIRollsBackInjectedQualificationFailure(t *testing.T) {
+	configPath, _, environmentPath, pollutedPath := serviceRepairCLIFixture(t, "failure")
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	smokeErr := errors.New("injected qualification failure")
+	var stdout, stderr bytes.Buffer
+	code := runServiceRepairWithDependencies([]string{
+		"--config", configPath, "--environment-file", environmentPath,
+	}, &stdout, &stderr, serviceRepairDependencies{
+		qualify: func(context.Context, string, string, delegationconfig.Config, string) error {
+			return smokeErr
+		},
+	})
+	if code == 0 || !strings.Contains(stderr.String(), smokeErr.Error()) {
+		t.Fatalf("service repair = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	rolledBack, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rolledBack, original) {
+		t.Fatalf("rolled-back config = %q, want %q", rolledBack, original)
+	}
+	if got, err := os.ReadFile(pollutedPath); err != nil || string(got) != "legacy" {
+		t.Fatalf("rolled-back managed-home entry = %q, %v", got, err)
+	}
+}
+
+func serviceRepairCLIFixture(
+	t *testing.T, suffix string,
+) (string, delegationconfig.Config, string, string) {
+	t.Helper()
+	configPath, cfg := setupConnectorRuntimeTest(
+		t, "123e4567-e89b-42d3-a456-426614174725", "repair-"+suffix,
+		"wss://broker.example.test/v1/connect",
+	)
+	cfg.HostKind = hostkind.TraeX
+	cfg.Peer.CLI = &delegationconfig.CLIConfig{
+		Command: testCodexBinary(t), Arguments: []string{"--profile", "legacy", "serve"},
+		Launcher: &clilaunch.Spec{Executable: testCodexBinary(t)},
+	}
+	cfg.Peer.CodexBinary = ""
+	rewriteRepairConfig(t, configPath, cfg)
+	environmentPath := filepath.Join(filepath.Dir(configPath), "peer.env")
+	writePeerServiceEnvironment(t, environmentPath, strings.Join([]string{
+		codexconfig.EnvironmentVariable + "=" + serviceTestProviderConfig,
+		"GATEWAY_KEY=secret",
+		"",
+	}, "\n"))
+	pollutedPath := filepath.Join(cfg.Peer.CodexHome, "AGENTS.md")
+	writeFileForServiceRepair(t, pollutedPath, []byte("legacy"))
+	return configPath, cfg, environmentPath, pollutedPath
+}
+
+func TestPersistRepairRollbackFailureInitializesAndPreservesEpoch(t *testing.T) {
+	root := privateTestDirectory(t)
+	configPath := filepath.Join(root, "peer.json")
+	environmentPath := filepath.Join(root, "peer.env")
+	statePath := filepath.Join(root, "state", "peer.sqlite3")
+	writeFileForServiceRepair(t, configPath, []byte("config\n"))
+	writeFileForServiceRepair(t, environmentPath, []byte("environment\n"))
+	if err := persistRepairRollbackFailure(statePath, configPath, environmentPath); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.OpenPeer(context.Background(), statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := state.WorkerReadiness(context.Background())
+	if err != nil {
+		state.Close()
+		t.Fatal(err)
+	}
+	if first.Epoch != 1 || first.State != protocol.WorkerReadinessInterventionRequired ||
+		first.FailureCode != protocol.WorkerRepairRollbackFailed {
+		state.Close()
+		t.Fatalf("initial rollback readiness = %#v", first)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	if err := persistRepairRollbackFailure(statePath, configPath, environmentPath); err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.OpenPeer(context.Background(), statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	second, err := state.WorkerReadiness(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Epoch != first.Epoch || second.UpdatedAt <= first.UpdatedAt ||
+		second.FailureCode != protocol.WorkerRepairRollbackFailed {
+		t.Fatalf("repeated rollback readiness = %#v, first %#v", second, first)
+	}
+}
+
+func TestServiceRuntimePersistsProfileFailureWithoutResettingEpoch(t *testing.T) {
+	configPath, cfg := setupConnectorRuntimeTest(
+		t, "123e4567-e89b-42d3-a456-426614174723", "profile-startup",
+		"wss://broker.example.test/v1/connect",
+	)
+	cfg.HostKind = hostkind.TraeX
+	cfg.Peer.CLI = &delegationconfig.CLIConfig{
+		Command: testCodexBinary(t), Arguments: []string{"--profile=legacy"},
+		Launcher: &clilaunch.Spec{Executable: testCodexBinary(t)},
+	}
+	cfg.Peer.CodexBinary = ""
+	rewriteRepairConfig(t, configPath, cfg)
+	environmentPath := filepath.Join(filepath.Dir(configPath), "peer.env")
+	writeFileForServiceRepair(t, environmentPath, []byte("provider=test\n"))
+
+	for attempt := 0; attempt < 2; attempt++ {
+		_, err := readServiceRuntimeConfig(configPath, environmentPath, "linux")
+		if !errors.Is(err, delegationconfig.ErrPeerCLIProfileArgumentsUnsupported) {
+			t.Fatalf("startup classification %d error = %v", attempt+1, err)
+		}
+		if !strings.Contains(err.Error(), "state=intervention_required") ||
+			!strings.Contains(err.Error(), "failureCode=profile_arguments_unsupported") {
+			t.Fatalf("startup classification %d log = %v", attempt+1, err)
+		}
+	}
+	state, err := store.OpenPeer(context.Background(), cfg.Peer.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	readiness, err := state.WorkerReadiness(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readiness.Epoch != 1 || readiness.State != protocol.WorkerReadinessInterventionRequired ||
+		readiness.FailureCode != protocol.WorkerProfileUnsupported {
+		t.Fatalf("profile startup readiness = %#v", readiness)
+	}
+}
+
+func TestServiceRuntimePersistsUnsupportedWindowsTraeXHost(t *testing.T) {
+	configPath, cfg := setupConnectorRuntimeTest(
+		t, "123e4567-e89b-42d3-a456-426614174724", "windows-traex",
+		"wss://broker.example.test/v1/connect",
+	)
+	cfg.HostKind = hostkind.TraeX
+	cfg.Peer.CLI = &delegationconfig.CLIConfig{
+		Command:  testCodexBinary(t),
+		Launcher: &clilaunch.Spec{Executable: testCodexBinary(t)},
+	}
+	cfg.Peer.CodexBinary = ""
+	rewriteRepairConfig(t, configPath, cfg)
+
+	_, err := readServiceRuntimeConfig(configPath, "", "windows")
+	if err == nil || !strings.Contains(err.Error(), "unsupported on Windows") {
+		t.Fatalf("Windows TraeX startup error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "state=intervention_required") ||
+		!strings.Contains(err.Error(), "failureCode=unsupported_host") {
+		t.Fatalf("Windows TraeX startup log = %v", err)
+	}
+	state, err := store.OpenPeer(context.Background(), cfg.Peer.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	readiness, err := state.WorkerReadiness(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readiness.State != protocol.WorkerReadinessInterventionRequired ||
+		readiness.FailureCode != protocol.WorkerHostUnsupported {
+		t.Fatalf("unsupported host readiness = %#v", readiness)
+	}
+}
+
+func rewriteRepairConfig(t *testing.T, path string, cfg delegationconfig.Config) {
+	t.Helper()
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFileForServiceRepair(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestPeerServiceInstallValidatesEnvironmentBeforeWritingArtifact(t *testing.T) {
 	configPath, cfg := setupConnectorRuntimeTest(

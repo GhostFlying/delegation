@@ -778,13 +778,14 @@ func waitForBrokerStop(t *testing.T, done <-chan error) {
 func sendRuntimeHello(t *testing.T, connection *websocket.Conn, deviceID string) {
 	t.Helper()
 	payload, err := json.Marshal(protocol.Hello{
-		ControllerID:   runtimeControllerID,
-		DeviceID:       deviceID,
-		DeviceName:     "runtime-worker",
-		HostKind:       hostkind.Codex,
-		OS:             "linux",
-		Arch:           "amd64",
-		RuntimeVersion: "0.1.0-alpha.0.m1.1",
+		ControllerID:    runtimeControllerID,
+		DeviceID:        deviceID,
+		DeviceName:      "runtime-worker",
+		HostKind:        hostkind.Codex,
+		OS:              "linux",
+		Arch:            "amd64",
+		RuntimeVersion:  "0.1.0-alpha.0.m1.1",
+		WorkerReadiness: protocol.WorkerReadiness{Epoch: 1, State: protocol.WorkerReadinessReady, AttemptCount: 1, RuntimeDigest: strings.Repeat("a", 64), ConfigDigest: strings.Repeat("b", 64), EpochStartedAt: 1, LastAttemptAt: 1, UpdatedAt: 1},
 		Features: []string{
 			protocol.FeatureChangesArtifact,
 			protocol.FeatureDeviceRegistry,
@@ -795,6 +796,7 @@ func sendRuntimeHello(t *testing.T, connection *websocket.Conn, deviceID string)
 			protocol.FeatureResultApply,
 			protocol.FeatureResultPackage,
 			protocol.FeatureWorkerLifecycle,
+			protocol.FeatureWorkerReadiness,
 			protocol.FeatureWorkspaceSync,
 			protocol.FeatureWorkspaceTransfer,
 		},
