@@ -46,12 +46,15 @@ const (
 )
 
 type Invocation struct {
-	BinaryPath      string `json:"binaryPath"`
-	ConfigPath      string `json:"configPath"`
-	EnvironmentFile string `json:"environmentFile,omitempty"`
-	NativeName      string `json:"nativeName"`
-	DefinitionPath  string `json:"definitionPath"`
-	UserIdentity    string `json:"userIdentity"`
+	BinaryPath       string `json:"binaryPath"`
+	TargetBinaryPath string `json:"targetBinaryPath"`
+	ConfigPath       string `json:"configPath"`
+	EnvironmentFile  string `json:"environmentFile,omitempty"`
+	NativeName       string `json:"nativeName"`
+	DefinitionPath   string `json:"definitionPath"`
+	UserIdentity     string `json:"userIdentity"`
+	ProcessIDs       []int  `json:"processIds"`
+	ProcessGroup     string `json:"processGroup,omitempty"`
 }
 
 type Definition struct {
@@ -184,7 +187,8 @@ func (j Journal) Validate() error {
 		}
 	}
 	paths := []string{
-		j.Invocation.BinaryPath, j.Invocation.ConfigPath, j.Invocation.DefinitionPath,
+		j.Invocation.BinaryPath, j.Invocation.TargetBinaryPath, j.Invocation.ConfigPath,
+		j.Invocation.DefinitionPath,
 		j.Definition.OldPath, j.Definition.NewPath, j.Database.CanonicalPath,
 		j.Database.ShadowPath, j.Database.RollbackPath, j.ActivatorPath,
 	}
@@ -218,10 +222,35 @@ func (j Journal) Validate() error {
 		j.Invocation.UserIdentity == "" || !validBoundedText(j.Invocation.UserIdentity, 256) {
 		return errors.New("upgrade native service identity is invalid")
 	}
+	if len(j.Invocation.ProcessIDs) == 0 || len(j.Invocation.ProcessIDs) > 2 {
+		return errors.New("upgrade source process identity is invalid")
+	}
+	seenPIDs := make(map[int]struct{}, len(j.Invocation.ProcessIDs))
+	for _, pid := range j.Invocation.ProcessIDs {
+		if pid <= 0 {
+			return errors.New("upgrade source process identity is invalid")
+		}
+		if _, exists := seenPIDs[pid]; exists {
+			return errors.New("upgrade source process identity contains duplicates")
+		}
+		seenPIDs[pid] = struct{}{}
+	}
 	switch j.Definition.Kind {
-	case userservice.KindSystemd, userservice.KindLaunchAgent, userservice.KindScheduledTask:
+	case userservice.KindSystemd:
+		if !validBoundedText(j.Invocation.ProcessGroup, 4096) {
+			return errors.New("systemd upgrade process group is invalid")
+		}
+	case userservice.KindLaunchAgent, userservice.KindScheduledTask:
+		if j.Invocation.ProcessGroup != "" {
+			return errors.New("non-systemd upgrade contains a process group")
+		}
 	default:
 		return fmt.Errorf("unsupported service definition kind %q", j.Definition.Kind)
+	}
+	if (runtime.GOOS == "linux" && j.Definition.Kind != userservice.KindSystemd) ||
+		(runtime.GOOS == "darwin" && j.Definition.Kind != userservice.KindLaunchAgent) ||
+		(runtime.GOOS == "windows" && j.Definition.Kind != userservice.KindScheduledTask) {
+		return errors.New("upgrade service definition does not match this platform")
 	}
 	if j.FailureCode != "" && !validFailureCode(j.FailureCode) {
 		return errors.New("upgrade failure code is invalid")
