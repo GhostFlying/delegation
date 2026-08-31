@@ -94,6 +94,83 @@ func TestWALCrashHelper(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestPrepareDatabaseCheckpointsCrashedMigrationWAL(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(directory, "peer.sqlite3")
+	peer, err := store.OpenPeer(ctx, canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TABLE upgrade_fixture(value TEXT); INSERT INTO upgrade_fixture VALUES ('source')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CurrentDatabaseIdentity(store.DatabasePeer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shadow := filepath.Join(directory, "peer.shadow.sqlite3")
+	prepared, err := PrepareDatabase(ctx, Database{
+		Kind: store.DatabasePeer, CanonicalPath: canonical, ShadowPath: shadow,
+		RollbackPath:   filepath.Join(directory, "peer.rollback.sqlite3"),
+		SourceIdentity: identity, TargetIdentity: identity,
+	}, func(_ context.Context, path string, _ store.DatabaseIdentity) error {
+		command := exec.Command(os.Args[0], "-test.run=TestMigrationWALCrashHelper")
+		command.Env = append(os.Environ(), "DELEGATION_TEST_MIGRATION_WAL_PATH="+path)
+		if output, err := command.CombinedOutput(); err != nil {
+			return fmt.Errorf("migration WAL helper: %w: %s", err, output)
+		}
+		wal, err := os.Stat(path + "-wal")
+		if err != nil || wal.Size() == 0 {
+			return fmt.Errorf("migration helper left no WAL: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := os.Lstat(shadow + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("shadow sidecar %s remains after preparation: %v", suffix, err)
+		}
+	}
+	if switched, err := ReconcileDatabaseSwitch(prepared); err != nil || !switched {
+		t.Fatalf("switch = %v, %v", switched, err)
+	}
+	if count := fixtureRowCount(t, canonical); count != 2 {
+		t.Fatalf("switched row count = %d, want 2", count)
+	}
+}
+
+func TestMigrationWALCrashHelper(t *testing.T) {
+	path := os.Getenv("DELEGATION_TEST_MIGRATION_WAL_PATH")
+	if path == "" {
+		return
+	}
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		os.Exit(20)
+	}
+	if _, err := database.Exec(`PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; INSERT INTO upgrade_fixture VALUES ('target')`); err != nil {
+		os.Exit(21)
+	}
+	// Deliberately bypass Close so the migration commit survives only in WAL.
+	os.Exit(0)
+}
+
 func TestDifferentSchemaMigrationAndResumeAfterCanonicalSwitch(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()
