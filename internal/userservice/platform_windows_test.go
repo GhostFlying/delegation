@@ -4,6 +4,7 @@ package userservice
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -16,6 +17,117 @@ import (
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"golang.org/x/sys/windows"
 )
+
+func TestWindowsUpgradeStopResumesAfterTaskWasDisabled(t *testing.T) {
+	source := testInvocation(
+		ServiceRolePeer, `C:\Delegation\0.1.0\delegation.exe`, `C:\Users\test\peer.json`,
+	)
+	target := source
+	target.BinaryPath = `C:\Delegation\0.2.0\delegation.exe`
+	sid, err := windowsUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := RenderScheduledTask(ServiceRolePeer, source, sid, windows.EscapeArg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := encodeTaskXMLUTF16LE(strings.Replace(
+		taskXMLText(t, descriptor.Content), "<Enabled>false</Enabled>", "<Enabled>true</Enabled>", 1,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled := descriptor.Content
+	originalRunner := runTaskCommand
+	originalQueryPIDs := queryUpgradePIDs
+	originalTaskkill := runTaskkill
+	t.Cleanup(func() {
+		runTaskCommand = originalRunner
+		queryUpgradePIDs = originalQueryPIDs
+		runTaskkill = originalTaskkill
+	})
+	current := enabled
+	var mutations [][]string
+	runTaskCommand = func(args ...string) (taskCommandResult, error) {
+		if args[0] == "/Query" {
+			return taskCommandResult{Output: current}, nil
+		}
+		mutations = append(mutations, slices.Clone(args))
+		return taskCommandResult{}, nil
+	}
+	queryUpgradePIDs = func(ServiceRole, string) ([]int, error) { return []int{123}, nil }
+	plan, err := PrepareUpgrade(context.Background(), ServiceRolePeer, source, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current = disabled
+	queryUpgradePIDs = func(ServiceRole, string) ([]int, error) { return nil, nil }
+	runTaskkill = func(int) (taskCommandResult, error) {
+		t.Fatal("resumed stop attempted to kill an already stopped process")
+		return taskCommandResult{}, nil
+	}
+	if err := StopUpgrade(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(mutations) != 0 {
+		t.Fatalf("resumed stop mutated Scheduled Task: %q", mutations)
+	}
+}
+
+func TestWindowsUpgradeRejectsReplacementProcessBeforeDisable(t *testing.T) {
+	source := testInvocation(
+		ServiceRolePeer, `C:\Delegation\0.1.0\delegation.exe`, `C:\Users\test\peer.json`,
+	)
+	target := source
+	target.BinaryPath = `C:\Delegation\0.2.0\delegation.exe`
+	sid, err := windowsUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := RenderScheduledTask(ServiceRolePeer, source, sid, windows.EscapeArg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := encodeTaskXMLUTF16LE(strings.Replace(
+		taskXMLText(t, descriptor.Content), "<Enabled>false</Enabled>", "<Enabled>true</Enabled>", 1,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRunner := runTaskCommand
+	originalQueryPIDs := queryUpgradePIDs
+	t.Cleanup(func() {
+		runTaskCommand = originalRunner
+		queryUpgradePIDs = originalQueryPIDs
+	})
+	mutated := false
+	runTaskCommand = func(args ...string) (taskCommandResult, error) {
+		if args[0] == "/Query" {
+			return taskCommandResult{Output: enabled}, nil
+		}
+		mutated = true
+		return taskCommandResult{}, nil
+	}
+	queryCalls := 0
+	queryUpgradePIDs = func(ServiceRole, string) ([]int, error) {
+		queryCalls++
+		if queryCalls == 1 {
+			return []int{123}, nil
+		}
+		return []int{456}, nil
+	}
+	plan, err := PrepareUpgrade(context.Background(), ServiceRolePeer, source, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := StopUpgrade(context.Background(), plan); err == nil || !strings.Contains(err.Error(), "process identity changed") {
+		t.Fatalf("StopUpgrade() = %v", err)
+	}
+	if mutated {
+		t.Fatal("StopUpgrade() disabled a replacement process")
+	}
+}
 
 func TestWindowsInstallCreatesTaskWithoutForce(t *testing.T) {
 	originalRunner := runTaskCommand
