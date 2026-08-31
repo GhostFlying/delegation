@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"reflect"
@@ -959,7 +960,8 @@ func TestClientRejectsLegacyLocalBridgeResponse(t *testing.T) {
 		context.Background(), protocol.MethodEnsureRootTree, "", nil,
 		protocol.EnsureRootTreeParams{ExternalThreadID: bridgeTestTreeID}, nil,
 	)
-	if err == nil || !strings.Contains(err.Error(), "unsupported local bridge version 2") {
+	want := fmt.Sprintf("unsupported local bridge version %d", Version-1)
+	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("legacy response error = %v", err)
 	}
 	select {

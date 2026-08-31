@@ -11,7 +11,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const maximumAgentListBytes = 16 * 1024
+const maximumAgentListBytes = 32 * 1024
 
 type SpawnAgentInput struct {
 	SpawnID        string `json:"spawn_id" jsonschema:"fresh UUID used to retry this exact dispatch safely"`
