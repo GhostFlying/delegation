@@ -37,6 +37,187 @@ func CurrentDatabaseIdentity(kind DatabaseKind) (DatabaseIdentity, error) {
 	}
 }
 
+// SupportedUpgradeSource reports whether source can be migrated directly by
+// this runtime. Pre-release upgrade support is deliberately an exact one-step
+// allow-list rather than a general schema converter.
+func SupportedUpgradeSource(kind DatabaseKind, source, target DatabaseIdentity) bool {
+	current, err := CurrentDatabaseIdentity(kind)
+	if err != nil || target != current || source.ApplicationID != target.ApplicationID {
+		return false
+	}
+	return source.SchemaVersion == target.SchemaVersion ||
+		kind == DatabaseBroker && source.SchemaVersion == 19 && target.SchemaVersion == 20 ||
+		kind == DatabasePeer && source.SchemaVersion == 15 && target.SchemaVersion == 16
+}
+
+// MigrateUpgradeDatabase applies the only supported stopped-shadow schema
+// transitions. The canonical database is never passed to this function.
+func MigrateUpgradeDatabase(
+	ctx context.Context, path string, kind DatabaseKind, target DatabaseIdentity,
+) error {
+	source, err := InspectUpgradeDatabase(ctx, path, kind)
+	if err != nil {
+		return err
+	}
+	if !SupportedUpgradeSource(kind, source, target) {
+		return fmt.Errorf(
+			"unsupported %s database migration from application ID %d schema %d to %d/%d",
+			kind, source.ApplicationID, source.SchemaVersion,
+			target.ApplicationID, target.SchemaVersion,
+		)
+	}
+	if source == target {
+		return nil
+	}
+	database, err := sql.Open("sqlite", dataSourceName(filepath.Clean(path)))
+	if err != nil {
+		return fmt.Errorf("open upgrade shadow database: %w", err)
+	}
+	defer database.Close()
+	description := string(kind) + " upgrade"
+	return withImmediateTransaction(ctx, database, description, func(connection *sql.Conn) error {
+		var statement string
+		switch kind {
+		case DatabaseBroker:
+			statement = `
+CREATE TABLE device_worker_readiness (
+ controller_id TEXT NOT NULL,
+ device_id TEXT NOT NULL,
+ epoch INTEGER NOT NULL CHECK (epoch BETWEEN 1 AND 9223372036854775807),
+ state TEXT NOT NULL CHECK (state IN ('pending', 'ready', 'intervention_required')),
+ attempt_count INTEGER NOT NULL CHECK (attempt_count BETWEEN 0 AND 5),
+ runtime_digest TEXT NOT NULL CHECK (length(runtime_digest) = 64 AND runtime_digest NOT GLOB '*[^0-9a-f]*'),
+ config_digest TEXT NOT NULL CHECK (length(config_digest) = 64 AND config_digest NOT GLOB '*[^0-9a-f]*'),
+ epoch_started_at INTEGER NOT NULL CHECK (epoch_started_at > 0),
+ next_attempt_at INTEGER NOT NULL CHECK (next_attempt_at >= 0),
+ last_attempt_at INTEGER NOT NULL CHECK (last_attempt_at >= 0),
+ failure_code TEXT NOT NULL CHECK (length(CAST(failure_code AS BLOB)) <= 64),
+ updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+ PRIMARY KEY (controller_id, device_id),
+ FOREIGN KEY (controller_id, device_id)
+  REFERENCES devices(controller_id, device_id) ON DELETE CASCADE
+) STRICT;
+PRAGMA user_version = 20;
+`
+		case DatabasePeer:
+			statement = `
+CREATE TABLE worker_readiness (
+ singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+ epoch INTEGER NOT NULL CHECK (epoch BETWEEN 1 AND 9223372036854775807),
+ state TEXT NOT NULL CHECK (state IN ('pending', 'ready', 'intervention_required')),
+ attempt_count INTEGER NOT NULL CHECK (attempt_count BETWEEN 0 AND 5),
+ runtime_digest TEXT NOT NULL CHECK (length(runtime_digest) = 64 AND runtime_digest NOT GLOB '*[^0-9a-f]*'),
+ config_digest TEXT NOT NULL CHECK (length(config_digest) = 64 AND config_digest NOT GLOB '*[^0-9a-f]*'),
+ epoch_started_at INTEGER NOT NULL CHECK (epoch_started_at > 0),
+ next_attempt_at INTEGER NOT NULL CHECK (next_attempt_at >= 0),
+ last_attempt_at INTEGER NOT NULL CHECK (last_attempt_at >= 0),
+ failure_code TEXT NOT NULL CHECK (length(CAST(failure_code AS BLOB)) <= 64),
+ updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+) STRICT;
+PRAGMA user_version = 16;
+`
+		default:
+			return fmt.Errorf("unsupported database kind %q", kind)
+		}
+		if _, err := connection.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("apply %s database migration: %w", kind, err)
+		}
+		identity, err := readSchemaIdentity(ctx, connection)
+		if err != nil {
+			return err
+		}
+		if identity.applicationID != target.ApplicationID || identity.version != target.SchemaVersion {
+			return errors.New("upgrade database migration did not reach its target identity")
+		}
+		return nil
+	})
+}
+
+// ReadUpgradeBlockers reads the common pre-upgrade work tables from either
+// the current schema or its exact supported predecessor without initializing
+// or migrating the live database.
+func ReadUpgradeBlockers(
+	ctx context.Context, path string, kind DatabaseKind, controllerID, deviceID string,
+) (UpgradeBlockers, error) {
+	identity, err := InspectUpgradeDatabase(ctx, path, kind)
+	if err != nil {
+		return UpgradeBlockers{}, err
+	}
+	target, err := CurrentDatabaseIdentity(kind)
+	if err != nil {
+		return UpgradeBlockers{}, err
+	}
+	if !SupportedUpgradeSource(kind, identity, target) {
+		return UpgradeBlockers{}, errors.New("upgrade blocker schema is unsupported")
+	}
+	database, err := sql.Open("sqlite", dataSourceName(filepath.Clean(path)))
+	if err != nil {
+		return UpgradeBlockers{}, err
+	}
+	defer database.Close()
+	transaction, err := database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return UpgradeBlockers{}, err
+	}
+	defer transaction.Rollback()
+	var blockers UpgradeBlockers
+	switch kind {
+	case DatabaseBroker:
+		queries := []struct {
+			destination *int
+			query       string
+		}{
+			{&blockers.OccupiedWorkers, "SELECT count(*) FROM agent_lifecycle_states WHERE controller_id = ? AND phase IN (" + occupiedWorkerStatesSQL + ")"},
+			{&blockers.PendingSpawns, "SELECT count(*) FROM agent_spawn_receipts WHERE controller_id = ? AND status = 'pending'"},
+			{&blockers.PendingOperations, "SELECT count(*) FROM agent_operation_receipts WHERE controller_id = ? AND outcome = 'pending'"},
+			{&blockers.WorkspaceTransfers, "SELECT count(*) FROM workspace_sync_receipts WHERE controller_id = ? AND status <> 'prepared'"},
+			{&blockers.ResultFinalizations, "SELECT count(*) FROM result_packages WHERE controller_id = ? AND (state = 'deliveryPending' OR source_released_at = 0)"},
+		}
+		for _, query := range queries {
+			if err := transaction.QueryRowContext(ctx, query.query, controllerID).Scan(query.destination); err != nil {
+				return UpgradeBlockers{}, fmt.Errorf("read broker upgrade blockers: %w", err)
+			}
+		}
+	case DatabasePeer:
+		queries := []struct {
+			destination *int
+			query       string
+			arguments   []any
+		}{
+			{&blockers.OccupiedWorkers, "SELECT count(*) FROM worker_reservations WHERE controller_id = ? AND device_id = ? AND status IN (" + occupiedWorkerStatesSQL + ")", []any{controllerID, deviceID}},
+			{&blockers.PendingOperations, `
+SELECT count(*) FROM worker_operation_receipts AS operation
+JOIN worker_reservations AS worker
+ ON worker.controller_id = operation.controller_id
+ AND worker.tree_id = operation.tree_id AND worker.agent_id = operation.agent_id
+WHERE operation.controller_id = ? AND worker.device_id = ? AND operation.status = 'pending'`, []any{controllerID, deviceID}},
+			{&blockers.ResultFinalizations, `
+SELECT
+ (SELECT count(*) FROM peer_changes_artifacts AS artifact
+  JOIN worker_reservations AS worker
+   ON worker.controller_id = artifact.controller_id
+   AND worker.tree_id = artifact.tree_id AND worker.agent_id = artifact.agent_id
+  WHERE artifact.controller_id = ? AND worker.device_id = ? AND artifact.state <> 'published') +
+ (SELECT count(*) FROM peer_result_outbox
+  WHERE controller_id = ? AND source_device_id = ? AND state <> 'releasePending') +
+ (SELECT count(*) FROM peer_result_inbox
+  WHERE controller_id = ? AND root_device_id = ? AND state = 'receiving')`,
+				[]any{controllerID, deviceID, controllerID, deviceID, controllerID, deviceID}},
+		}
+		for _, query := range queries {
+			if err := transaction.QueryRowContext(ctx, query.query, query.arguments...).Scan(query.destination); err != nil {
+				return UpgradeBlockers{}, fmt.Errorf("read peer upgrade blockers: %w", err)
+			}
+		}
+	default:
+		return UpgradeBlockers{}, fmt.Errorf("unsupported database kind %q", kind)
+	}
+	if err := transaction.Commit(); err != nil {
+		return UpgradeBlockers{}, err
+	}
+	return blockers, nil
+}
+
 // OpenUpgradeDatabaseRoot pins and validates the protected directory that
 // owns a configured database and all same-directory upgrade material.
 func OpenUpgradeDatabaseRoot(path string) (*securefs.Root, error) {

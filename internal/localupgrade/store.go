@@ -260,8 +260,10 @@ func validateMutation(before, after Journal) error {
 
 func progressMonotonic(before, after Progress) bool {
 	return (!before.ServiceStopped || after.ServiceStopped) &&
+		(!before.ConfigurationPrepared || after.ConfigurationPrepared) &&
 		(!before.DatabasePrepared || after.DatabasePrepared) &&
 		(!before.DefinitionSwitched || after.DefinitionSwitched) &&
+		(!before.ConfigurationSwitched || after.ConfigurationSwitched) &&
 		(!before.DatabaseSwitched || after.DatabaseSwitched) &&
 		(!before.ServiceStarted || after.ServiceStarted) &&
 		(!before.Qualified || after.Qualified)

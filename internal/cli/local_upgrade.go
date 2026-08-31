@@ -16,6 +16,7 @@ import (
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/localupgrade"
+	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/userservice"
 	"github.com/GhostFlying/delegation/internal/workerreadiness"
 )
@@ -413,9 +414,6 @@ func qualifyLocalUpgrade(ctx context.Context, journal localupgrade.Journal) erro
 	if err != nil {
 		return err
 	}
-	if err := localbridge.Probe(ctx, endpoint, expected); err != nil {
-		return fmt.Errorf("qualify target service identity: %w", err)
-	}
 	runtimeIdentity, err := localbridge.ReadUpgradeRuntime(ctx, endpoint)
 	if err != nil {
 		return fmt.Errorf("qualify target runtime identity: %w", err)
@@ -423,6 +421,35 @@ func qualifyLocalUpgrade(ctx context.Context, journal localupgrade.Journal) erro
 	if runtimeIdentity.Version != journal.TargetVersion ||
 		runtimeIdentity.Digest != journal.TargetRuntimeDigest {
 		return errors.New("running service does not match the target runtime identity")
+	}
+	configDigest, err := workerreadiness.ConfigDigest(
+		journal.Invocation.ConfigPath, journal.Invocation.EnvironmentFile,
+	)
+	if err != nil || configDigest != journal.ConfigDigest {
+		return errors.Join(err, errors.New("running service configuration does not match the upgrade target"))
+	}
+	if journal.Role == delegationconfig.RoleBroker {
+		if err := localbridge.Probe(ctx, endpoint, expected); err != nil {
+			return fmt.Errorf("qualify target service identity: %w", err)
+		}
+		return nil
+	}
+	status, err := localbridge.ReadStatusForIdentity(ctx, endpoint, expected)
+	if err != nil {
+		return fmt.Errorf("qualify target peer status: %w", err)
+	}
+	readiness := status.WorkerReadiness
+	if status.Version != journal.TargetVersion || !status.ServiceRunning ||
+		status.ConnectionState != localbridge.ConnectionReady || !status.Connected ||
+		!status.WorkerSyncReady {
+		return errors.New("target peer has not completed connection and lifecycle synchronization")
+	}
+	if readiness.Epoch <= journal.SourceReadinessEpoch ||
+		readiness.State != protocol.WorkerReadinessReady ||
+		readiness.RuntimeDigest != journal.TargetRuntimeDigest ||
+		readiness.ConfigDigest != journal.ConfigDigest ||
+		!status.WorkerReady || !status.Dispatchable {
+		return errors.New("target peer has not completed the required new execution-readiness epoch")
 	}
 	return nil
 }

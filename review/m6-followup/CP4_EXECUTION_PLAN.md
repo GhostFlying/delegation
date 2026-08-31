@@ -28,3 +28,31 @@ Base: `9d4b444292a32e5a2b9ef83a16e9f489e79da582`
    definition/process contracts with fakes, CLI/local transport restrictions,
    and pre/post-COMMIT recovery. Run focused race, full suite, vet, and compile
    checks for Linux amd64, macOS arm64, and Windows amd64 using Go 1.26.5.
+
+## Round 1 Finding Disposition Plan
+
+The frozen round-1 review found two actionable gaps. Before freezing round 2:
+
+1. Make the alpha.4 bootstrap path consume exactly the known schema-3 TCP
+   configuration, validate it as an alpha.4 document, and derive a schema-4
+   target configuration by adding only the explicit TCP transport. Record the
+   source/target config identities and protected same-directory shadow and
+   rollback paths in the journal. The activator must prepare and atomically
+   switch this config after stopping the service, reconcile every crash point,
+   and retain the source bytes for forward recovery. Current-schema upgrades
+   keep one identical source/target configuration.
+2. Accept only the known alpha.4 database identities (broker 19, peer 15) or
+   the exact target identity. On the stopped shadow copy, apply only the audited
+   one-step schema addition for broker 19-to-20 or peer 15-to-16, set the target
+   user version, checkpoint, and validate before switching. Reject every other
+   source identity or version gap without touching canonical state.
+3. For peers, capture the source readiness epoch during preparation. Target
+   qualification must read one identity-bound local status snapshot and require
+   the target runtime version, ready connection/lifecycle synchronization,
+   dispatchability, a strictly newer ready readiness epoch, and matching target
+   runtime/config digests. Broker qualification remains role-local and binds
+   role, instance, version, runtime digest, and target config digest; CP5 owns
+   controller-wide peer reconnection after the broker switches.
+4. Add real alpha.4 config/database fixtures, config and database switch crash
+   coverage, unsupported-gap rejection, readiness pending/failure/stale-epoch/
+   digest/sync rejection, and successful peer/broker qualification tests.

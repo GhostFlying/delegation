@@ -20,6 +20,14 @@ func Read(path string) (delegationconfig.Config, error) {
 	return delegationconfig.ReadForRuntime(path, Capabilities())
 }
 
+// ReadForUpgrade accepts the current schema or the exact supported bootstrap
+// predecessor and returns protected source plus validated target bytes.
+func ReadForUpgrade(path string) (
+	delegationconfig.Config, []byte, []byte, bool, error,
+) {
+	return delegationconfig.ReadForUpgrade(path, Capabilities())
+}
+
 // ReadForStartupClassification preserves a strictly decoded configuration
 // alongside its validation error for narrowly scoped durable failure reporting.
 func ReadForStartupClassification(
