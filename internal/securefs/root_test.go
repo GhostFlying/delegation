@@ -75,3 +75,37 @@ func TestPublishNoReplaceAtomicallyMovesTemporaryFile(t *testing.T) {
 		t.Fatalf("destination = %q, want value", data)
 	}
 }
+
+func TestReplaceAtomicallyOverwritesDestination(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authority")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := OpenRoot(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	for name, value := range map[string]string{"temporary": "new", "destination": "old"} {
+		file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.WriteString(value); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if committed, err := root.Replace("temporary", "destination"); err != nil || !committed {
+		t.Fatalf("Replace() = %v, %v", committed, err)
+	}
+	data, err := os.ReadFile(filepath.Join(path, "destination"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "new" {
+		t.Fatalf("destination = %q, want new", data)
+	}
+}

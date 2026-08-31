@@ -197,6 +197,19 @@ func (r *Root) Rename(oldName, newName string) error {
 	return r.root.Rename(oldName, newName)
 }
 
+// Replace atomically publishes one direct child over another. The returned
+// boolean reports whether the replacement was committed, including when a
+// later durability flush fails.
+func (r *Root) Replace(temporary, destination string) (bool, error) {
+	if err := validateLeaf(temporary); err != nil {
+		return false, err
+	}
+	if err := validateLeaf(destination); err != nil {
+		return false, err
+	}
+	return replace(r.root, temporary, destination)
+}
+
 // Exchange atomically swaps two leaves within the held directory.
 func (r *Root) Exchange(first, second string) error {
 	if err := validateLeaf(first); err != nil {
