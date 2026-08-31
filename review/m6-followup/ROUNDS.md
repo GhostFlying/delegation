@@ -124,3 +124,14 @@ Executable acceptance at the accepted frozen revision:
   `go test -exec=true -run '^$' -tags=ts_omit_logtail ./...`.
 - `go test -count=1 -tags=integration -run '^$' ./tests/codex_peer_e2e` passed.
 - The reviewed range passed `git diff --check`; the detached worktree remained clean.
+
+Post-integration acceptance after the exact fast-forward and evidence commit:
+
+- Core root MCP, local bridge, protocol, broker, and store package tests passed.
+- The focused projection, pagination, generation-churn, output-bound, compatibility, and exact
+  wait-activity tests passed 50 consecutive runs under the race detector.
+- `go test -count=1 -tags=ts_omit_logtail -timeout=30m ./...` and
+  `go vet -tags=ts_omit_logtail ./...` passed.
+- Linux amd64, macOS arm64, and Windows amd64 compile validation passed with `CGO_ENABLED=0`.
+- Integration-tagged Codex peer E2E compilation and `git diff --check` passed.
+- Validation used `go1.26.5 linux/amd64`; the integration worktree remained clean.
