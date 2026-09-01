@@ -152,6 +152,19 @@ func TestManagerCancelsPeerAfterPrepareResponseLoss(t *testing.T) {
 	}
 }
 
+func TestManagerCancelsMissingPeerTransactionAfterPriorTerminalUpgrade(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	fixture.broker.failPrepareBeforeCreate = true
+	journal, err := fixture.manager.Start(context.Background(), testTargetVersion, 30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if journal.State != StateCanceled || journal.Participants[0].State != ParticipantCanceled ||
+		fixture.broker.draining {
+		t.Fatalf("missing peer transaction journal = %#v, draining=%v", journal, fixture.broker.draining)
+	}
+}
+
 func TestManagerCancelsBrokerAfterPrepareResponseLoss(t *testing.T) {
 	fixture := newCoordinatorFixture(t)
 	fixture.local.losePrepareResponse = true
@@ -346,6 +359,7 @@ type fakeBrokerControl struct {
 	pinnedReplacementAccepted bool
 	loseActivationResponse    bool
 	losePrepareResponse       bool
+	failPrepareBeforeCreate   bool
 	activationFailures        int
 	qualifyAfterActivate      bool
 	draining                  bool
@@ -401,6 +415,10 @@ func (f *fakeBrokerControl) upgrade(method string, params any) (protocol.Upgrade
 	switch method {
 	case protocol.MethodPrepareUpgrade:
 		prepare := params.(protocol.PrepareUpgradeParams)
+		if f.failPrepareBeforeCreate {
+			f.failPrepareBeforeCreate = false
+			return protocol.UpgradeSnapshot{}, errors.New("prepare request lost before create")
+		}
 		f.prepared = protocol.UpgradeSnapshot{
 			ControllerTransactionID: prepare.ControllerTransactionID, TransactionID: prepare.TransactionID,
 			State: string(localupgrade.StatePrepared), SourceVersion: testSourceVersion, TargetVersion: prepare.TargetVersion,
