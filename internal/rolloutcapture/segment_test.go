@@ -158,13 +158,32 @@ func TestCaptureSegmentRawLimitExcludesPreStartRecords(t *testing.T) {
 }
 
 func TestCaptureSegmentBoundsPreStartScan(t *testing.T) {
+	const preStartLimit = int64(1024)
 	prefix := "{\"type\":\"response_item\",\"payload\":{\"padding\":\"" +
-		strings.Repeat("x", int(maximumPreStartBytes)) + "\"}}\n"
+		strings.Repeat("x", int(preStartLimit)) + "\"}}\n"
 	input := prefix + rolloutLine("event_msg", "task_started", testThreadID)
-	if _, err := CaptureSegment(
+	if _, err := captureSegment(
 		context.Background(), strings.NewReader(input), 0, testThreadID, io.Discard,
+		segmentLimits{rawBytes: MaximumRawBytes, preStartBytes: preStartLimit},
 	); !errors.Is(err, errStartScan) {
 		t.Fatalf("error = %v, want %v", err, errStartScan)
+	}
+}
+
+func TestCaptureSegmentAcceptsLargeSessionMetadataBeforeStart(t *testing.T) {
+	prefix := "{\"type\":\"session_meta\",\"payload\":{\"instructions\":\"" +
+		strings.Repeat("x", 2*1024*1024) + "\"}}\n"
+	segment := rolloutLine("event_msg", "task_started", testThreadID) +
+		rolloutLine("event_msg", "task_complete", testThreadID)
+	var output bytes.Buffer
+	got, err := CaptureSegment(
+		context.Background(), strings.NewReader(prefix+segment), 0, testThreadID, &output,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RawBytes != int64(len(segment)) || output.String() != segment {
+		t.Fatalf("segment metadata = %#v, output bytes = %d", got, output.Len())
 	}
 }
 

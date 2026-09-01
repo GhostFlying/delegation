@@ -15,8 +15,10 @@ import (
 )
 
 const (
-	MaximumRawBytes      = int64(64 * 1024 * 1024)
-	maximumPreStartBytes = int64(1024 * 1024)
+	MaximumRawBytes = int64(64 * 1024 * 1024)
+	// Current TraeX session metadata can exceed 1 MiB before task_started. Keep
+	// the scan bounded by the same limit as the returned turn segment.
+	maximumPreStartBytes = MaximumRawBytes
 )
 
 var (
