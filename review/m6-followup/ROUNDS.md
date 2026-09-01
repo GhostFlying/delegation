@@ -207,3 +207,77 @@ Post-integration acceptance after the exact fast-forward and evidence commit:
   `git diff --check` passed.
 - Validation used `go1.26.5 linux/amd64`; the integration worktree remained clean before this
   evidence-only update.
+
+## Checkpoint 5: Broker-Coordinated Upgrade
+
+- Base commit: `be9375ffc4210b89788c381ad0e9e857eedfd552`
+- Base tree: `c0ed91e1868e11ecfcd958bef0518ec6669fe5e0`
+- Accepted review range:
+  `be9375ffc4210b89788c381ad0e9e857eedfd552..f1d77501f06a1fe1c5da9bd8ee45e341074ef3f8`
+
+### Review Round 1
+
+- Frozen commit: `f0ae6d47657df36c50f22f8215d8db101796393e`
+- Frozen tree: `276b81fefef0ccc4121321b1773a4f2e86fbed26`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `FINDINGS`
+- Finding: a peer or broker could durably complete PREPARE and bind its local journal, lose the
+  response before the controller persisted the returned local transaction ID, and then be skipped
+  by pre-COMMIT cancellation. The stranded transaction blocked later upgrades and dispatch could
+  resume before all prepared work was canceled.
+- Disposition: actionable response-loss and operability defect. The controller now reserves and
+  persists every peer and broker local transaction ID before PREPARE, carries that exact identity
+  in the protocol request, and requires local preparation to create or resume the reserved ID with
+  its controller binding.
+
+Round-1 reviewer verification passed the focused protocol, connector, broker, coordinated-upgrade,
+local-bridge, and CLI tests and `git diff --check`; the detached worktree remained clean. An initial
+reviewer attempt produced no verdict and was replaced on the same unchanged frozen revision, so it
+did not consume a separate review round.
+
+### Review Round 2
+
+- Frozen commit: `021fcf90918e571f6352b77d92deda92111fffce`
+- Frozen tree: `dd7d8103f058fc0ae50c11d7608d7606c8e1f649`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `FINDINGS`
+- Confirmed disposition: the Round-1 durable-PREPARE response-loss path was fixed.
+- Finding: on a later upgrade, a previous terminal local journal could mask that a newly reserved
+  transaction had never been created. Cancellation returned an identity conflict instead of
+  authenticated NotFound, leaving the controller in `canceling` and the broker-wide mutation drain
+  active indefinitely.
+- Disposition: actionable ordinary retry-path operability defect. A mismatched terminal journal now
+  classifies the newly reserved transaction as absent, while a mismatched active journal remains a
+  fail-closed conflict. Regression tests cover both cases.
+
+Round-2 reviewer verification passed the six focused packages, response-loss tests under the race
+detector, and `git diff --check`; the detached worktree remained clean.
+
+### Review Round 3
+
+- Frozen commit: `f1d77501f06a1fe1c5da9bd8ee45e341074ef3f8`
+- Frozen tree: `9ee4e8fac8b62e82a8a463b9fab3b6f2c63e7b3a`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `CLEAN`
+- Findings: none
+- Confirmed dispositions: local transaction identities are durable before PREPARE; exact-ID
+  create/resume and controller binding survive response loss; a prior terminal journal does not
+  mask an absent reserved transaction; and conflicting active state still fails closed.
+- Disposition: accepted for serial fast-forward into the integration branch. This was the third and
+  final permitted automated review round.
+
+Executable acceptance at the accepted frozen revision:
+
+- The protocol, local-upgrade, CLI, connector, broker, and coordinated-upgrade focused tests passed.
+- PREPARE response-loss and cancellation regression tests passed 20 consecutive runs under the
+  race detector.
+- `go test -count=1 -tags=ts_omit_logtail -timeout=30m ./...` and
+  `go vet -tags=ts_omit_logtail ./...` passed.
+- The coordinated-upgrade, local-bridge, broker, connector, CLI, local-upgrade, and protocol race
+  suites passed.
+- Linux amd64, macOS arm64, and Windows amd64 ordinary and `integration,live` compile-only
+  validation passed with `CGO_ENABLED=0`.
+- `GO=go ./tests/posix_plugin_test.sh`, `./tests/m6_support_contract_test.sh`,
+  `git diff --check`, and the full-tree gofmt check passed.
+- Validation used `go1.26.5 linux/amd64`; the accepted writer and detached review worktrees remained
+  clean.
