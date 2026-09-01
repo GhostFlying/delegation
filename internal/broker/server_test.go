@@ -1036,6 +1036,7 @@ func TestWorkerReadinessPendingUpdateRevokesDispatchability(t *testing.T) {
 	if result := sendHello(t, connection); !result.WorkerReadiness.IsReady() {
 		t.Fatalf("hello readiness = %#v", result.WorkerReadiness)
 	}
+	waitForBrokerDispatchability(t, harness.server, brokerTestDeviceID, true)
 	harness.server.mu.Lock()
 	current := harness.server.connections[brokerTestDeviceID]
 	dispatchableBefore := current != nil && current.workerSyncReady.Load() && current.workerReady.Load()
@@ -1184,6 +1185,21 @@ func waitForDevice(t *testing.T, registry *store.Store, online bool, revision ui
 	}
 	record, err := registry.DescribeDevice(context.Background(), brokerTestControllerID, brokerTestDeviceID)
 	t.Fatalf("device did not reach online=%v revision=%d: %#v, %v", online, revision, record, err)
+}
+
+func waitForBrokerDispatchability(t *testing.T, server *Server, deviceID string, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		server.mu.Lock()
+		dispatchable := server.dispatchableConnectionLocked(deviceID) != nil
+		server.mu.Unlock()
+		if dispatchable == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("broker connection %s dispatchability did not become %t", deviceID, want)
 }
 
 func ptr[T any](value T) *T {
