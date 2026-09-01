@@ -396,3 +396,39 @@ Executable acceptance at the accepted frozen revision:
   result marker. No token value entered tracked files or test output.
 - The round-2 reviewer reran the focused packages, full Linux suite, vet, live-tag compilation, and
   Darwin arm64 and Windows amd64 cross-compilation; the detached worktree remained clean.
+
+## Follow-up Checkpoint: Native macOS Test Portability
+
+- Base commit: `c4544d0443803423dca7bf29a63282498331867a`
+- Accepted review range:
+  `c4544d0443803423dca7bf29a63282498331867a..510ccd62d908b88b0115dda073821c851e466580`
+- Review round: 1
+- Frozen commit: `510ccd62d908b88b0115dda073821c851e466580`
+- Frozen tree: `17876fa1f3bebd49ee9d5f287a7f7d165742c78d`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `CLEAN`
+- Findings: none
+- Disposition: accepted at the exact frozen commit and tree
+
+Native macOS execution exposed two test-fixture assumptions rather than product defects. The
+qualification assertion compared the lexical temporary path under `/tmp` with the production
+canonical path under `/private/tmp`, and the CLI MCP fixture wrote a relative `os.Args[0]` into a
+configuration that correctly requires absolute executable paths. The tests now compare the
+canonical managed home and reuse the existing absolute test-binary helper. Production behavior and
+security validation are unchanged.
+
+Executable acceptance at the accepted frozen revision:
+
+- `go test -count=1 ./internal/cli ./internal/workerhost` passed on Linux.
+- The affected CLI, worker-host, and qualification tests passed 20 consecutive runs under the race
+  detector on Linux.
+- The independent reviewer reran the full Linux suite, full CLI and worker-host race suites,
+  Darwin arm64 and Windows amd64 cross-compilation, and `git diff --check`; all passed.
+- Kross workload `m6-traex-auth-iosdev-20260901-1922` used macOS 26.3 arm64, Xcode 26.3, and
+  Apple Git 2.50.1. Locally cross-compiled test binaries were verified by SHA-256 after transfer.
+  The complete `internal/config`, `internal/traexauth`, `internal/pathguard`,
+  `internal/codexconfig`, `internal/workerhost`, `internal/workerreadiness`,
+  `internal/localupgrade`, and `internal/cli` packages passed natively after the fixture fixes.
+- The Kross workload and local transferred test artifacts were deleted after validation. No real
+  TraeX credential was uploaded because the available workspace had no secret mount. Native macOS
+  real-account TraeX execution therefore remains a release gate rather than an inferred pass.
