@@ -234,6 +234,17 @@ func TestHostIsolatesRuntimeHomeForHostKind(t *testing.T) {
 					t.Fatalf("managed worker shell does not exclude %s: %#v", name, excluded)
 				}
 			}
+			if test.hostKind == hostkind.TraeX && runtime.GOOS != "windows" {
+				filesystem := managedFilesystemPermissions(t, config)
+				for _, protected := range []string{
+					paths.credentialSourceFile,
+					paths.managedCredentialFile,
+				} {
+					if filesystem[protected] != "deny" {
+						t.Fatalf("managed TraeX profile does not deny credential file %q: %#v", protected, filesystem)
+					}
+				}
+			}
 		})
 	}
 }
@@ -2859,7 +2870,7 @@ func TestHostRejectsTraeXRuntimeConfigurationBeforeLaunch(t *testing.T) {
 		want     string
 	}{
 		{name: "instructions", relative: "AGENTS.md", want: "AGENTS.md"},
-		{name: "CLI authentication", relative: filepath.Join("cli", "auth.json"), want: "auth.json"},
+		{name: "invalid CLI authentication", relative: filepath.Join("cli", "auth.json"), want: "valid JSON"},
 		{name: "CLI hooks", relative: filepath.Join("cli", "hooks.json"), want: "hooks.json"},
 		{name: "CLI plugins", relative: filepath.Join("cli", "plugins"), want: "plugins"},
 		{name: "CLI rules", relative: filepath.Join("cli", "rules"), want: "rules"},
@@ -2960,6 +2971,8 @@ type testHostPaths struct {
 	gitBinary               string
 	codexHome               string
 	providerEnvironmentFile string
+	credentialSourceFile    string
+	managedCredentialFile   string
 	launchOptions           *appserver.Options
 	allowCloseError         *atomic.Bool
 }
@@ -3072,6 +3085,22 @@ func newTestHostWithStateSetupAndResultPublisherForKind(
 			t.Fatal(err)
 		}
 	}
+	managedCredentialFile := ""
+	if hostKind == hostkind.TraeX {
+		paths.credentialSourceFile = filepath.Join(root, "trae-auth-source.json")
+		if err := os.WriteFile(paths.credentialSourceFile, []byte(`{"auth_mode":"trae","trae":{"access_token":"test","credential_kind":"cloud_cli_jwt","login_method":"test","region":"CN","version":2}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cliHome := filepath.Join(paths.codexHome, "cli")
+		if err := config.PreparePrivateDirectory(cliHome); err != nil {
+			t.Fatal(err)
+		}
+		managedCredentialFile = filepath.Join(cliHome, "auth.json")
+		if err := os.WriteFile(managedCredentialFile, []byte(`{"auth_mode":"trae","trae":{"access_token":"test","credential_kind":"cloud_cli_jwt","login_method":"test","region":"CN","version":2}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths.managedCredentialFile = managedCredentialFile
+	}
 	workspaceRoot, err = filepath.EvalSymlinks(workspaceRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -3115,6 +3144,8 @@ func newTestHostWithStateSetupAndResultPublisherForKind(
 		},
 		CodexUnsetEnvironment:   []string{"CODEX_MANAGED_BY_NPM"},
 		ProviderEnvironmentFile: paths.providerEnvironmentFile,
+		TraeAuthSourceFile:      paths.credentialSourceFile,
+		ManagedTraeAuthFile:     managedCredentialFile,
 		WorkspaceRoot:           workspaceRoot, MaxWorkerSlots: maxSlots,
 		CodexConfig: map[string]any{
 			"model":          "test-model",

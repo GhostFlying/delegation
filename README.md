@@ -191,7 +191,8 @@ plugins/delegation/scripts/delegation-mcp setup peer \
   --cli-command <traex-executable> \
   --cli-argument=<traex-cli-argument> \
   --cli-launcher <traex-launcher-executable> \
-  --cli-launcher-prefix-argument=<traex-launcher-prefix-argument>
+  --cli-launcher-prefix-argument=<traex-launcher-prefix-argument> \
+  --trae-auth-file <protected-host-traecli-auth.json>
 ```
 
 Managed TraeX workers use this exact shell-free launch. The connector adapts TraeX's app-server
@@ -208,9 +209,19 @@ begins with `-`.
 The `--codex-home` flag and `peer.codexHome` JSON field retain their established names. They
 identify the managed CLI home, not the product identity. Codex maps the path to `CODEX_HOME`; TraeX
 maps it to `TRAE_HOME` and uses `<peer.codexHome>/cli` as `TRAECLI_HOME`. These directories must not
-reuse the user's normal CLI homes; setup, doctor, and worker launch reject user authentication,
-instructions, profiles, plugins, hooks, model providers, execution rules, and non-system skills in
-a managed TraeX home.
+reuse the user's normal CLI homes. A TraeX peer instead requires `--trae-auth-file` with the
+absolute path of the host's existing current-user-only `TRAECLI_HOME/auth.json`. The source remains
+outside the managed home and workspace; the peer atomically maintains a private copy at
+`<peer.codexHome>/cli/auth.json` for the app-server, while the managed worker tool profile denies
+both the host source and the managed copy. Setup and every service start reject a missing,
+malformed, broadly readable, aliased, or conflicting source without printing its contents. A
+source-byte change takes effect on service restart and starts a new execution-readiness epoch.
+
+All other normal CLI state remains isolated. Setup, doctor, and worker launch reject ambient
+instructions, profiles, plugins, hooks, model providers, execution rules, non-system skills, and
+authentication outside the one managed TraeX copy. TraeX-owned model, marketplace, configuration,
+and commit-attribution caches are shape-checked and removed before each app-server start so they
+cannot become persistent worker authority.
 
 The `default` instance keeps the existing `~/.delegation/broker.json`,
 `~/.delegation/peer.json`, local bridge, and native service identities. A named instance uses

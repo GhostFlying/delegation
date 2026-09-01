@@ -160,7 +160,7 @@ func TestDoctorRejectsPrepopulatedManagedTraeXHome(t *testing.T) {
 		want     string
 	}{
 		{name: "instructions", relative: "AGENTS.md", want: "AGENTS.md"},
-		{name: "CLI authentication", relative: filepath.Join("cli", "auth.json"), want: "auth.json"},
+		{name: "top-level authentication", relative: "auth.json", want: "auth.json"},
 		{name: "CLI hooks", relative: filepath.Join("cli", "hooks.json"), want: "hooks.json"},
 		{name: "CLI plugins", relative: filepath.Join("cli", "plugins"), want: "plugins"},
 		{name: "CLI rules", relative: filepath.Join("cli", "rules"), want: "rules"},
@@ -170,6 +170,7 @@ func TestDoctorRejectsPrepopulatedManagedTraeXHome(t *testing.T) {
 			configPath := filepath.Join(root, "peer.json")
 			managedHome := filepath.Join(root, "managed-trae")
 			executable := testCodexBinary(t)
+			traeAuthFile := testTraeAuthFile(t)
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 			if code := Run([]string{
@@ -183,6 +184,7 @@ func TestDoctorRejectsPrepopulatedManagedTraeXHome(t *testing.T) {
 				"--auth-mode", "none",
 				"--cli-command", executable,
 				"--cli-launcher", executable,
+				"--trae-auth-file", traeAuthFile,
 				"--codex-home", managedHome,
 			}, &stdout, &stderr); code != 0 {
 				t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())
@@ -209,6 +211,7 @@ func TestDoctorRejectsSymlinkedTraeCLIHome(t *testing.T) {
 	configPath := filepath.Join(root, "peer.json")
 	managedHome := filepath.Join(root, "managed-trae")
 	executable := testCodexBinary(t)
+	traeAuthFile := testTraeAuthFile(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if code := Run([]string{
@@ -222,6 +225,7 @@ func TestDoctorRejectsSymlinkedTraeCLIHome(t *testing.T) {
 		"--auth-mode", "none",
 		"--cli-command", executable,
 		"--cli-launcher", executable,
+		"--trae-auth-file", traeAuthFile,
 		"--codex-home", managedHome,
 	}, &stdout, &stderr); code != 0 {
 		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())

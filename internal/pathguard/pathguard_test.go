@@ -1,6 +1,7 @@
 package pathguard
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -815,6 +816,69 @@ func TestValidatePeerRuntimeAuthorityRejectsAuthorityInsideManagedDirectories(t 
 				t.Fatal("ValidatePeerRuntimeAuthority accepted managed authority")
 			}
 		})
+	}
+}
+
+func TestValidatePeerRuntimeAuthorityProtectsTraeXAuthenticationSource(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "peer.json")
+	statePath := filepath.Join(root, "state", "peer.sqlite3")
+	tokenPath := filepath.Join(root, "secrets", "peer.token")
+	codexHome := filepath.Join(root, "managed")
+	workspaceRoot := filepath.Join(root, "workspaces")
+	authPath := filepath.Join(root, "secrets", "trae-auth.json")
+	if err := os.MkdirAll(filepath.Dir(authPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(authPath, []byte("auth"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePeerRuntimeAuthority(
+		configPath, statePath, tokenPath, codexHome, workspaceRoot, authPath,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, candidate := range map[string]string{
+		"config alias":        configPath,
+		"inside managed home": filepath.Join(codexHome, "auth.json"),
+		"inside workspace":    filepath.Join(workspaceRoot, "auth.json"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidatePeerRuntimeAuthority(
+				configPath, statePath, tokenPath, codexHome, workspaceRoot, candidate,
+			)
+			if !errors.Is(err, ErrTraeXAuthenticationAuthority) {
+				t.Fatalf("TraeX authentication authority error = %v", err)
+			}
+		})
+	}
+
+	hardLink := filepath.Join(root, "trae-auth-hardlink.json")
+	if err := os.Link(authPath, hardLink); err != nil {
+		t.Skipf("creating a hard link is unavailable: %v", err)
+	}
+	err := ValidatePeerRuntimeAuthority(
+		configPath, statePath, tokenPath, codexHome, workspaceRoot, authPath,
+	)
+	if !errors.Is(err, ErrTraeXAuthenticationAuthority) ||
+		!strings.Contains(err.Error(), "hard-link count 2") {
+		t.Fatalf("TraeX authentication hard-link error = %v", err)
+	}
+}
+
+func TestValidatePeerServiceEnvironmentRejectsTraeXAuthenticationAlias(t *testing.T) {
+	root := t.TempDir()
+	authPath := filepath.Join(root, "trae-auth.json")
+	err := ValidatePeerServiceEnvironment(
+		authPath, filepath.Join(root, "peer.json"),
+		filepath.Join(root, "peer.sqlite3"), "",
+		filepath.Join(root, "managed"), filepath.Join(root, "workspaces"),
+		authPath,
+	)
+	if err == nil || !strings.Contains(err.Error(),
+		"peer service environment path conflicts with TraeX authentication source") {
+		t.Fatalf("TraeX authentication environment alias error = %v", err)
 	}
 }
 

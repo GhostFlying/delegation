@@ -55,6 +55,10 @@ require explicit broker and status listeners. Before setup or issuing/revoking a
 [role configuration](references/role-configuration.md) and follow its enrollment and transport
 rules. Token authentication is the default. Never pass token material as a command-line value;
 configuration stores only an absolute token file path and refuses to overwrite an existing config.
+TraeX peer setup additionally requires `--trae-auth-file` pointing to the host's protected
+`TRAECLI_HOME/auth.json`; keep that source outside the isolated managed home, workspace, service
+environment, Delegation authority, and Tailscale authority. The runtime copies it into the managed
+home for the app-server while denying managed worker tools access to both the source and the copy.
 Set `DELEGATION_INSTANCE` in the CLI host environment before plugin startup to select a named
 peer's root MCP; an explicit `DELEGATION_CONFIG` remains authoritative and must identify the same
 instance.

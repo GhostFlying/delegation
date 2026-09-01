@@ -26,6 +26,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/runtimeconfig"
 	"github.com/GhostFlying/delegation/internal/serviceenv"
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/traexauth"
 	"github.com/GhostFlying/delegation/internal/traexrepair"
 	"github.com/GhostFlying/delegation/internal/userservice"
 	"github.com/GhostFlying/delegation/internal/workerreadiness"
@@ -50,7 +51,7 @@ type serviceRepairResult struct {
 
 type serviceRepairDependencies struct {
 	run     func(context.Context, traexrepair.Options) (traexrepair.Result, error)
-	qualify func(context.Context, string, string, delegationconfig.Config, string) error
+	qualify func(context.Context, string, string, delegationconfig.Config, string, string) error
 }
 
 func runService(args []string, stdout, stderr io.Writer) int {
@@ -516,6 +517,7 @@ func runServiceRepairWithDependencies(
 		return writeError(stderr, err)
 	}
 	defer lease.Close()
+	var qualificationAuth []byte
 	result, err := dependencies.run(context.Background(), traexrepair.Options{
 		ConfigPath: resolvedConfig, ManagedHome: cfg.Peer.CodexHome,
 		OriginalConfig: originalConfig, ReplacementConfig: replacementConfig,
@@ -534,9 +536,28 @@ func runServiceRepairWithDependencies(
 			return err
 		},
 		Smoke: func(ctx context.Context, transaction traexrepair.Result) error {
-			return dependencies.qualify(
-				ctx, resolvedConfig, resolvedEnvironment, cfg, transaction.QuarantinePath,
-			)
+			auth, err := traexauth.ReadSource(cfg.Peer.TraeAuthFile)
+			if err != nil {
+				return err
+			}
+			managedAuthPath, err := traexauth.Sync(auth, cfg.Peer.CodexHome)
+			if err != nil {
+				return fmt.Errorf("synchronize repaired TraeX authentication: %w", err)
+			}
+			if err := dependencies.qualify(
+				ctx, resolvedConfig, resolvedEnvironment, cfg,
+				transaction.QuarantinePath, managedAuthPath,
+			); err != nil {
+				return err
+			}
+			current, err := traexauth.ReadSource(cfg.Peer.TraeAuthFile)
+			if err != nil || !bytes.Equal(current, auth) {
+				return errors.Join(err, errors.New(
+					"TraeX authentication source changed during repair qualification",
+				))
+			}
+			qualificationAuth = auth
+			return nil
 		},
 	})
 	if err != nil {
@@ -551,6 +572,7 @@ func runServiceRepairWithDependencies(
 	}
 	if err := createRepairReadinessEpoch(
 		cfg.Peer.StateFile, resolvedConfig, resolvedEnvironment,
+		cfg.Peer.TraeAuthFile, qualificationAuth,
 	); err != nil {
 		return writeError(stderr, fmt.Errorf(
 			"repair committed but create readiness epoch failed; rerun worker recheck: %w", err,
@@ -575,13 +597,17 @@ func runServiceRepairWithDependencies(
 	return 0
 }
 
-func createRepairReadinessEpoch(statePath, configPath, environmentPath string) error {
+func createRepairReadinessEpoch(
+	statePath, configPath, environmentPath, traeAuthPath string, traeAuth []byte,
+) error {
 	state, err := store.OpenPeer(context.Background(), statePath)
 	if err != nil {
 		return err
 	}
 	defer state.Close()
-	runtimeDigest, configDigest, err := repairReadinessDigests(configPath, environmentPath)
+	runtimeDigest, configDigest, err := repairReadinessDigestsWithAuthentication(
+		configPath, environmentPath, traeAuthPath, traeAuth,
+	)
 	if err != nil {
 		return err
 	}
@@ -591,6 +617,35 @@ func createRepairReadinessEpoch(statePath, configPath, environmentPath string) e
 	return err
 }
 
+func repairReadinessDigestsWithAuthentication(
+	configPath, environmentPath, traeAuthPath string, traeAuth []byte,
+) (string, string, error) {
+	if traeAuthPath == "" || len(traeAuth) == 0 {
+		return "", "", errors.New("TraeX repair qualification authentication is missing")
+	}
+	runtimePath, err := os.Executable()
+	if err != nil {
+		return "", "", err
+	}
+	runtimePath, err = filepath.EvalSymlinks(runtimePath)
+	if err != nil {
+		return "", "", err
+	}
+	runtimeDigest, err := workerreadiness.RuntimeDigest(runtimePath)
+	if err != nil {
+		return "", "", err
+	}
+	materials, err := workerreadiness.ReadConfigMaterials(configPath, environmentPath)
+	if err != nil {
+		return "", "", err
+	}
+	materials = append(materials, workerreadiness.ConfigMaterial{
+		Path: traeAuthPath, Data: traeAuth,
+	})
+	configDigest, err := workerreadiness.ConfigDigestMaterials(materials...)
+	return runtimeDigest, configDigest, err
+}
+
 func persistRepairRollbackFailure(statePath, configPath, environmentPath string) error {
 	state, err := store.OpenPeer(context.Background(), statePath)
 	if err != nil {
@@ -598,7 +653,9 @@ func persistRepairRollbackFailure(statePath, configPath, environmentPath string)
 	}
 	defer state.Close()
 	if _, err := state.WorkerReadiness(context.Background()); errors.Is(err, store.ErrNotFound) {
-		runtimeDigest, configDigest, digestErr := repairReadinessDigests(configPath, environmentPath)
+		runtimeDigest, configDigest, digestErr := repairReadinessDigests(
+			configPath, environmentPath, "",
+		)
 		if digestErr != nil {
 			return digestErr
 		}
@@ -616,7 +673,9 @@ func persistRepairRollbackFailure(statePath, configPath, environmentPath string)
 	return err
 }
 
-func repairReadinessDigests(configPath, environmentPath string) (string, string, error) {
+func repairReadinessDigests(
+	configPath, environmentPath, traeAuthPath string,
+) (string, string, error) {
 	runtimePath, err := os.Executable()
 	if err != nil {
 		return "", "", err
@@ -629,7 +688,7 @@ func repairReadinessDigests(configPath, environmentPath string) (string, string,
 	if err != nil {
 		return "", "", err
 	}
-	configDigest, err := workerreadiness.ConfigDigest(configPath, environmentPath)
+	configDigest, err := workerreadiness.ConfigDigest(configPath, environmentPath, traeAuthPath)
 	if err != nil {
 		return "", "", err
 	}
@@ -854,6 +913,7 @@ func readServiceRuntimeConfig(
 		}
 		persistErr := persistStoppedPeerReadinessFailure(
 			repairable.Peer.StateFile, configPath, environmentPath,
+			repairable.Peer.TraeAuthFile,
 			protocol.WorkerProfileUnsupported,
 		)
 		return delegationconfig.Config{}, errors.Join(validationErr, persistErr)
@@ -862,7 +922,8 @@ func readServiceRuntimeConfig(
 		operatingSystem == "windows" {
 		unsupportedErr := errors.New("TraeX worker host is unsupported on Windows")
 		persistErr := persistStoppedPeerReadinessFailure(
-			cfg.Peer.StateFile, configPath, environmentPath, protocol.WorkerHostUnsupported,
+			cfg.Peer.StateFile, configPath, environmentPath, cfg.Peer.TraeAuthFile,
+			protocol.WorkerHostUnsupported,
 		)
 		return delegationconfig.Config{}, errors.Join(unsupportedErr, persistErr)
 	}
@@ -870,7 +931,7 @@ func readServiceRuntimeConfig(
 }
 
 func persistStoppedPeerReadinessFailure(
-	statePath, configPath, environmentPath, failureCode string,
+	statePath, configPath, environmentPath, traeAuthPath, failureCode string,
 ) error {
 	lease, err := store.AcquirePeerLease(statePath)
 	if err != nil {
@@ -878,7 +939,7 @@ func persistStoppedPeerReadinessFailure(
 	}
 	defer lease.Close()
 	readiness, err := persistWorkerReadinessFailure(
-		context.Background(), statePath, configPath, environmentPath, failureCode,
+		context.Background(), statePath, configPath, environmentPath, traeAuthPath, failureCode,
 	)
 	if err != nil {
 		return err
@@ -887,14 +948,16 @@ func persistStoppedPeerReadinessFailure(
 }
 
 func persistWorkerReadinessFailure(
-	ctx context.Context, statePath, configPath, environmentPath, failureCode string,
+	ctx context.Context, statePath, configPath, environmentPath, traeAuthPath, failureCode string,
 ) (protocol.WorkerReadiness, error) {
 	state, err := store.OpenPeer(ctx, statePath)
 	if err != nil {
 		return protocol.WorkerReadiness{}, err
 	}
 	defer state.Close()
-	runtimeDigest, configDigest, err := repairReadinessDigests(configPath, environmentPath)
+	runtimeDigest, configDigest, err := repairReadinessDigests(
+		configPath, environmentPath, traeAuthPath,
+	)
 	if err != nil {
 		return protocol.WorkerReadiness{}, err
 	}
@@ -928,6 +991,7 @@ func validatePeerServiceEnvironmentPath(
 			cfg.Peer.WorkspaceRoot,
 			tailscaleConfig.StateDir,
 			tailscaleConfig.AuthKeyFile,
+			cfg.Peer.TraeAuthFile,
 		)
 	}
 	return pathguard.ValidatePeerServiceEnvironment(
@@ -937,5 +1001,6 @@ func validatePeerServiceEnvironmentPath(
 		cfg.Broker.Auth.TokenFile,
 		cfg.Peer.CodexHome,
 		cfg.Peer.WorkspaceRoot,
+		cfg.Peer.TraeAuthFile,
 	)
 }

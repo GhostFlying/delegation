@@ -28,7 +28,11 @@ func TestRunQuarantinesEntriesAndCommitsValidatedReplacement(t *testing.T) {
 	writeFile(t, filepath.Join(managedHome, "AGENTS.md"), []byte("instructions"), 0o600)
 	writeFile(t, filepath.Join(managedHome, "skills", "custom", "SKILL.md"), []byte("skill"), 0o600)
 	writeFile(t, filepath.Join(managedHome, "skills", ".system", "kept"), []byte("system"), 0o600)
+	writeFile(t, filepath.Join(managedHome, "model-provider", "trae", "models_cache.json"), []byte(`{}`), 0o600)
+	writeFile(t, filepath.Join(managedHome, "plugins", "cache", "traex-bd-plugins", "kept"), []byte("cache"), 0o600)
 	writeFile(t, filepath.Join(managedHome, "cli", "rules", "rule.md"), []byte("rule"), 0o600)
+	managedAuth := filepath.Join(managedHome, "cli", "auth.json")
+	writeFile(t, managedAuth, []byte(`{"auth_mode":"trae"}`), 0o600)
 	var doctorCalls, smokeCalls int
 	result, err := Run(context.Background(), Options{
 		ConfigPath: configPath, ManagedHome: managedHome,
@@ -60,6 +64,17 @@ func TestRunQuarantinesEntriesAndCommitsValidatedReplacement(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(managedHome, "skills", ".system", "kept")); err != nil {
 		t.Fatalf("system skill was not preserved: %v", err)
+	}
+	for _, generated := range []string{
+		filepath.Join("model-provider", "trae", "models_cache.json"),
+		filepath.Join("plugins", "cache", "traex-bd-plugins", "kept"),
+	} {
+		if _, err := os.Stat(filepath.Join(managedHome, generated)); err != nil {
+			t.Fatalf("TraeX-generated cache %s was not preserved: %v", generated, err)
+		}
+	}
+	if got, err := os.ReadFile(managedAuth); err != nil || string(got) != `{"auth_mode":"trae"}` {
+		t.Fatalf("managed TraeX authentication was not preserved: %q, %v", got, err)
 	}
 	wantPaths := []string{"AGENTS.md", "cli/rules", "skills/custom"}
 	gotPaths := make([]string, len(result.Entries))

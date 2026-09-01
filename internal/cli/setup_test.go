@@ -227,6 +227,7 @@ func TestSetupTailscaleTraeXPeerUsesNamedInstanceState(t *testing.T) {
 	instanceRoot := filepath.Join(delegationHome, "instances", "traex-main")
 	tailscaleStateDir := filepath.Join(instanceRoot, "state", "tailscale", "peer")
 	executable := testCodexBinary(t)
+	traeAuthFile := testTraeAuthFile(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -242,6 +243,7 @@ func TestSetupTailscaleTraeXPeerUsesNamedInstanceState(t *testing.T) {
 		"--token-file", tokenPath,
 		"--cli-command", executable,
 		"--cli-launcher", executable,
+		"--trae-auth-file", traeAuthFile,
 		"--transport", "tailscale",
 		"--tailscale-hostname", "traex-peer",
 		"--tailscale-auth-key-file", authKeyPath,
@@ -1035,6 +1037,7 @@ func TestSetupTraeXPeerPersistsExactStructuredLaunchAndPassesDoctor(t *testing.T
 	statePath := filepath.Join(root, "state", "peer.sqlite3")
 	command := testCodexBinary(t)
 	launcher := testCodexBinary(t)
+	traeAuthFile := testTraeAuthFile(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run([]string{
@@ -1054,6 +1057,7 @@ func TestSetupTraeXPeerPersistsExactStructuredLaunchAndPassesDoctor(t *testing.T
 		"--cli-launcher", launcher,
 		"--cli-launcher-prefix-argument=run",
 		"--cli-launcher-prefix-argument=--",
+		"--trae-auth-file", traeAuthFile,
 		"--codex-home", managedHome,
 		"--workspace-root", workspaceRoot,
 		"--state", statePath,
@@ -1077,7 +1081,7 @@ func TestSetupTraeXPeerPersistsExactStructuredLaunchAndPassesDoctor(t *testing.T
 		},
 	}
 	if cfg.HostKind != hostkind.TraeX || !reflect.DeepEqual(cfg.Peer.CLI, wantCLI) ||
-		cfg.Peer.CodexBinary != "" {
+		cfg.Peer.CodexBinary != "" || cfg.Peer.TraeAuthFile != traeAuthFile {
 		t.Fatalf("TraeX peer config = %#v", cfg)
 	}
 	stdout.Reset()
@@ -1129,6 +1133,7 @@ func TestSetupNamedTraeXPeerUsesIsolatedTraeHomeDefault(t *testing.T) {
 	t.Setenv("DELEGATION_HOME", home)
 	t.Setenv("DELEGATION_CONFIG", "")
 	executable := testCodexBinary(t)
+	traeAuthFile := testTraeAuthFile(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run([]string{
@@ -1142,6 +1147,7 @@ func TestSetupNamedTraeXPeerUsesIsolatedTraeHomeDefault(t *testing.T) {
 		"--auth-mode", "none",
 		"--cli-command", executable,
 		"--cli-launcher", executable,
+		"--trae-auth-file", traeAuthFile,
 		"--json",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -1539,7 +1545,7 @@ func TestSetupPeerRejectsPrepopulatedManagedTraeXHomeWithoutSideEffects(t *testi
 		want     string
 	}{
 		{name: "instructions", relative: "AGENTS.md", want: "AGENTS.md"},
-		{name: "CLI authentication", relative: filepath.Join("cli", "auth.json"), want: "auth.json"},
+		{name: "top-level authentication", relative: "auth.json", want: "auth.json"},
 		{name: "CLI hooks", relative: filepath.Join("cli", "hooks.json"), want: "hooks.json"},
 		{name: "CLI plugins", relative: filepath.Join("cli", "plugins"), want: "plugins"},
 		{name: "CLI rules", relative: filepath.Join("cli", "rules"), want: "rules"},
@@ -1558,6 +1564,7 @@ func TestSetupPeerRejectsPrepopulatedManagedTraeXHomeWithoutSideEffects(t *testi
 				t.Fatal(err)
 			}
 			executable := testCodexBinary(t)
+			traeAuthFile := testTraeAuthFile(t)
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 			code := Run([]string{
@@ -1571,6 +1578,7 @@ func TestSetupPeerRejectsPrepopulatedManagedTraeXHomeWithoutSideEffects(t *testi
 				"--auth-mode", "none",
 				"--cli-command", executable,
 				"--cli-launcher", executable,
+				"--trae-auth-file", traeAuthFile,
 				"--codex-home", managedHome,
 				"--workspace-root", workspaceRoot,
 				"--state", statePath,
@@ -1608,6 +1616,7 @@ func TestSetupPeerRejectsSymlinkedTraeCLIHomeWithoutSideEffects(t *testing.T) {
 		t.Skipf("symbolic links are unavailable: %v", err)
 	}
 	executable := testCodexBinary(t)
+	traeAuthFile := testTraeAuthFile(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run([]string{
@@ -1621,6 +1630,7 @@ func TestSetupPeerRejectsSymlinkedTraeCLIHomeWithoutSideEffects(t *testing.T) {
 		"--auth-mode", "none",
 		"--cli-command", executable,
 		"--cli-launcher", executable,
+		"--trae-auth-file", traeAuthFile,
 		"--codex-home", managedHome,
 		"--workspace-root", workspaceRoot,
 		"--state", statePath,
@@ -1653,6 +1663,7 @@ func TestSetupPeerRejectsSymlinkedTraeHomeWithoutSideEffects(t *testing.T) {
 		t.Skipf("symbolic links are unavailable: %v", err)
 	}
 	executable := testCodexBinary(t)
+	traeAuthFile := testTraeAuthFile(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Run([]string{
@@ -1666,6 +1677,7 @@ func TestSetupPeerRejectsSymlinkedTraeHomeWithoutSideEffects(t *testing.T) {
 		"--auth-mode", "none",
 		"--cli-command", executable,
 		"--cli-launcher", executable,
+		"--trae-auth-file", traeAuthFile,
 		"--codex-home", managedHome,
 		"--workspace-root", workspaceRoot,
 		"--state", statePath,

@@ -161,6 +161,18 @@ func openProtectedConfig(path string) (*os.File, error) {
 	return file, nil
 }
 
+func openedProtectedFileLinkCount(file *os.File) (uint64, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, errors.New("file link-count metadata is unavailable")
+	}
+	return uint64(stat.Nlink), nil
+}
+
 func readProtectedConfigAt(
 	directory *securefs.Root, name string, maximumBytes int,
 ) ([]byte, os.FileInfo, error) {

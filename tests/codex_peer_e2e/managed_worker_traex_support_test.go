@@ -4,13 +4,12 @@ package codex_peer_e2e
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +17,9 @@ import (
 	"github.com/GhostFlying/delegation/internal/identity"
 )
 
-const traeXLiveFinalText = "delegation-traex-live-ok"
+func isTraeXLiveProcessCommand(command string) bool {
+	return command == "traex" || command == "traecli"
+}
 
 func runTraeXLive(
 	t *testing.T, environment []string, binary string, args ...string,
@@ -57,56 +58,150 @@ func newTraeXLiveIdentity(t *testing.T) string {
 	return value
 }
 
-func decodeTraeXLiveRequest(request *http.Request) (map[string]any, error) {
-	var reader io.Reader = io.LimitReader(request.Body, 16<<20)
-	if request.Header.Get("Content-Encoding") == "gzip" {
-		compressed, err := gzip.NewReader(reader)
-		if err != nil {
-			return nil, fmt.Errorf("open compressed model request: %w", err)
+func optionalLiveProtectedFile(t *testing.T, variable string) string {
+	t.Helper()
+	path := os.Getenv(variable)
+	if path == "" {
+		t.Skipf("%s is not set", variable)
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("resolve %s: %v", variable, err)
+	}
+	return absolute
+}
+
+func liveTraeXAccessToken(t *testing.T, auth []byte) string {
+	t.Helper()
+	var document struct {
+		Trae struct {
+			AccessToken string `json:"access_token"`
+		} `json:"trae"`
+	}
+	if err := json.Unmarshal(auth, &document); err != nil {
+		t.Fatalf("decode validated TraeX authentication source: %v", err)
+	}
+	if document.Trae.AccessToken == "" {
+		t.Fatal("validated TraeX authentication source omitted an access token")
+	}
+	return document.Trae.AccessToken
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func assertTraeXAccountBoundary(
+	t *testing.T, rolloutPath, sourceAuthPath, managedAuthPath, accessToken string,
+) {
+	t.Helper()
+	rollout, err := os.ReadFile(rolloutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(rollout, []byte(accessToken)) {
+		t.Fatal("TraeX rollout contains the protected account access token")
+	}
+
+	authCalls := make(map[string]struct{})
+	toolNames := make(map[string]struct{})
+	var authReferences []string
+	sourceDenied := false
+	managedDenied := false
+	sourceAliasSetup := false
+	managedAliasSetup := false
+	sourceAliasDenied := false
+	managedAliasDenied := false
+	for _, line := range bytes.Split(rollout, []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
 		}
-		defer compressed.Close()
-		reader = compressed
+		var record any
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("decode TraeX rollout record: %v", err)
+		}
+		walkTraeXRollout(record, func(item map[string]any) {
+			typeName, _ := item["type"].(string)
+			name, _ := item["name"].(string)
+			if name != "" {
+				toolNames[name] = struct{}{}
+			}
+			encoded, _ := json.Marshal(item)
+			if bytes.Contains(encoded, []byte(sourceAuthPath)) ||
+				bytes.Contains(encoded, []byte(managedAuthPath)) {
+				keys := make([]string, 0, len(item))
+				for key := range item {
+					keys = append(keys, key)
+				}
+				authReferences = append(authReferences, fmt.Sprintf(
+					"type=%q name=%q keys=%v", typeName, name, keys,
+				))
+			}
+			switch typeName {
+			case "function_call":
+				arguments, _ := item["arguments"].(string)
+				callID, _ := item["call_id"].(string)
+				if isTraeXShellTool(name) && callID != "" &&
+					strings.Contains(arguments, sourceAuthPath) &&
+					strings.Contains(arguments, managedAuthPath) {
+					authCalls[callID] = struct{}{}
+				}
+			case "function_call_output", "exec_command_end":
+				callID, _ := item["call_id"].(string)
+				if _, found := authCalls[callID]; !found {
+					return
+				}
+				output := traeXToolOutput(item)
+				sourceDenied = sourceDenied || strings.Contains(output, "SOURCE_AUTH_RESULT=blocked")
+				managedDenied = managedDenied || strings.Contains(output, "MANAGED_AUTH_RESULT=blocked")
+				sourceAliasSetup = sourceAliasSetup || strings.Contains(output, "SOURCE_ALIAS_SETUP=ok")
+				managedAliasSetup = managedAliasSetup || strings.Contains(output, "MANAGED_ALIAS_SETUP=ok")
+				sourceAliasDenied = sourceAliasDenied || strings.Contains(output, "SOURCE_ALIAS_RESULT=blocked")
+				managedAliasDenied = managedAliasDenied || strings.Contains(output, "MANAGED_ALIAS_RESULT=blocked")
+			}
+		})
 	}
-	var body map[string]any
-	if err := json.NewDecoder(reader).Decode(&body); err != nil {
-		return nil, fmt.Errorf("decode model request: %w", err)
+	if len(authCalls) == 0 {
+		t.Fatalf(
+			"real TraeX account turn did not expose a recognizable credential boundary probe; tool names=%v auth references=%v",
+			toolNames, authReferences,
+		)
 	}
-	return body, nil
+	if !sourceDenied || !managedDenied || !sourceAliasSetup || !managedAliasSetup ||
+		!sourceAliasDenied || !managedAliasDenied {
+		t.Fatalf(
+			"TraeX worker credential deny result: source=%t managed=%t sourceAliasSetup=%t managedAliasSetup=%t sourceAlias=%t managedAlias=%t",
+			sourceDenied, managedDenied, sourceAliasSetup, managedAliasSetup,
+			sourceAliasDenied, managedAliasDenied,
+		)
+	}
 }
 
-func writeTraeXLiveFinalResponse(writer http.ResponseWriter, key string) {
-	writeTraeXLiveSSE(writer,
-		map[string]any{
-			"type":     "response.created",
-			"response": map[string]any{"id": "resp-" + key + "-2"},
-		},
-		map[string]any{
-			"type": "response.output_item.done",
-			"item": map[string]any{
-				"type": "message", "role": "assistant", "id": "msg-" + key,
-				"content": []map[string]any{{
-					"type": "output_text", "text": traeXLiveFinalText,
-				}},
-			},
-		},
-		map[string]any{
-			"type": "response.completed",
-			"response": map[string]any{
-				"id": "resp-" + key + "-2",
-				"usage": map[string]any{
-					"input_tokens": 0, "input_tokens_details": nil,
-					"output_tokens": 0, "output_tokens_details": nil,
-					"total_tokens": 0,
-				},
-			},
-		},
-	)
+func isTraeXShellTool(name string) bool {
+	return name == "exec_command" || name == "exec" || name == "Bash" ||
+		name == "shell_command"
 }
 
-func writeTraeXLiveSSE(writer http.ResponseWriter, events ...map[string]any) {
-	writer.Header().Set("Content-Type", "text/event-stream")
-	for _, event := range events {
-		data, _ := json.Marshal(event)
-		fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", event["type"], data)
+func traeXToolOutput(item map[string]any) string {
+	var output strings.Builder
+	for _, key := range []string{"output", "aggregated_output", "stdout", "stderr", "formatted_output"} {
+		value, _ := item[key].(string)
+		output.WriteString(value)
+		output.WriteByte('\n')
+	}
+	return output.String()
+}
+
+func walkTraeXRollout(value any, visit func(map[string]any)) {
+	switch value := value.(type) {
+	case map[string]any:
+		visit(value)
+		for _, child := range value {
+			walkTraeXRollout(child, visit)
+		}
+	case []any:
+		for _, child := range value {
+			walkTraeXRollout(child, visit)
+		}
 	}
 }

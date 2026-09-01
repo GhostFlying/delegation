@@ -24,7 +24,7 @@ func traeXLiveAppServerPIDs(cliHome string, excluded int) ([]int, error) {
 			continue
 		}
 		command := cString(process.Proc.P_comm[:])
-		if command != "traex" && command != "traecli" {
+		if !isTraeXLiveProcessCommand(command) {
 			continue
 		}
 		if !containsTraeXLiveProcessValue(metadata, "TRAECLI_HOME", cliHome) ||

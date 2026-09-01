@@ -32,6 +32,8 @@ import (
 	"github.com/GhostFlying/delegation/internal/serviceenv"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
+	"github.com/GhostFlying/delegation/internal/traexauth"
+	"github.com/GhostFlying/delegation/internal/workerreadiness"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -793,6 +795,7 @@ func TestConnectorAuthorityAppliesManagedHomePolicyByHostKind(t *testing.T) {
 		t.Fatalf("Codex connector authority error = %v", err)
 	}
 	cfg.HostKind = hostkind.TraeX
+	cfg.Peer.TraeAuthFile = testTraeAuthFile(t)
 	if _, err := loadConnectorAuthority(configPath, cfg); err == nil ||
 		!strings.Contains(err.Error(), "config.toml") {
 		t.Fatalf("TraeX connector authority error = %v", err)
@@ -832,6 +835,109 @@ func TestConnectorPersistsManagedHomeFailureInCurrentEpoch(t *testing.T) {
 	if readiness.Epoch != 1 || readiness.State != protocol.WorkerReadinessInterventionRequired ||
 		readiness.FailureCode != protocol.WorkerManagedHomeInvalid {
 		t.Fatalf("managed-home readiness = %#v", readiness)
+	}
+}
+
+func TestInitializeWorkerReadinessBindsAndSynchronizesExactTraeXAuthentication(t *testing.T) {
+	configPath, cfg := setupConnectorRuntimeTest(
+		t, runtimeDeviceID, "traex-auth-epoch", "wss://broker.example.test",
+	)
+	cfg.HostKind = hostkind.TraeX
+	cfg.Peer.TraeAuthFile = testTraeAuthFile(t)
+	state, err := store.OpenPeer(context.Background(), cfg.Peer.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	runtimeDigest := strings.Repeat("a", 64)
+	configMaterials, err := workerreadiness.ReadConfigMaterials(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstAuth, err := traexauth.ReadSource(cfg.Peer.TraeAuthFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedPath, firstDigest, err := initializeWorkerReadiness(
+		context.Background(), state, runtimeDigest, configMaterials, cfg, firstAuth,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := state.WorkerReadiness(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Epoch != 1 || first.ConfigDigest != firstDigest ||
+		managedPath != traexauth.ManagedPath(cfg.Peer.CodexHome) {
+		t.Fatalf("first TraeX readiness = %#v, managed path %q", first, managedPath)
+	}
+	if got, err := os.ReadFile(managedPath); err != nil || !bytes.Equal(got, firstAuth) {
+		t.Fatalf("first managed authentication = %q, %v", got, err)
+	}
+
+	rotated := []byte(strings.Replace(
+		testTraeAuth, "test-access-token", "rotated-access-token", 1,
+	))
+	if err := os.WriteFile(cfg.Peer.TraeAuthFile, rotated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rotatedSource, err := traexauth.ReadSource(cfg.Peer.TraeAuthFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secondDigest, err := initializeWorkerReadiness(
+		context.Background(), state, runtimeDigest, configMaterials, cfg, rotatedSource,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := state.WorkerReadiness(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Epoch != first.Epoch+1 || secondDigest == firstDigest ||
+		second.ConfigDigest != secondDigest {
+		t.Fatalf("rotated TraeX readiness = %#v, first %#v", second, first)
+	}
+	if got, err := os.ReadFile(managedPath); err != nil || !bytes.Equal(got, rotatedSource) {
+		t.Fatalf("rotated managed authentication = %q, %v", got, err)
+	}
+}
+
+func TestConnectorPersistsInvalidTraeXAuthenticationInCurrentEpoch(t *testing.T) {
+	configPath, cfg := setupConnectorRuntimeTest(
+		t, runtimeDeviceID, "traex-auth-invalid", "wss://broker.example.test",
+	)
+	cfg.HostKind = hostkind.TraeX
+	cfg.Peer.TraeAuthFile = testTraeAuthFile(t)
+	if err := os.WriteFile(cfg.Peer.TraeAuthFile, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		err := runConnectorServiceWithProviderEnvironment(
+			context.Background(), configPath, cfg, "",
+			func() (serviceenv.Resolved, error) { return serviceenv.Resolved{}, nil },
+			io.Discard, connectorRuntimeOptions{},
+		)
+		if !errors.Is(err, traexauth.ErrInvalidSource) ||
+			!strings.Contains(err.Error(), "state=intervention_required") ||
+			!strings.Contains(err.Error(), "failureCode=authentication_invalid") {
+			t.Fatalf("invalid TraeX authentication startup %d error = %v", attempt+1, err)
+		}
+	}
+	state, err := store.OpenPeer(context.Background(), cfg.Peer.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	readiness, err := state.WorkerReadiness(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readiness.Epoch != 1 || readiness.State != protocol.WorkerReadinessInterventionRequired ||
+		readiness.FailureCode != protocol.WorkerAuthenticationInvalid {
+		t.Fatalf("invalid TraeX authentication readiness = %#v", readiness)
 	}
 }
 

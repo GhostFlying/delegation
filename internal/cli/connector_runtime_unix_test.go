@@ -38,6 +38,7 @@ func TestDoctorRejectsTraeCLIHomePermissionDrift(t *testing.T) {
 	configPath := filepath.Join(root, "peer.json")
 	managedHome := filepath.Join(root, "managed-trae")
 	executable := testCodexBinary(t)
+	traeAuthFile := testTraeAuthFile(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if code := Run([]string{
@@ -51,6 +52,7 @@ func TestDoctorRejectsTraeCLIHomePermissionDrift(t *testing.T) {
 		"--auth-mode", "none",
 		"--cli-command", executable,
 		"--cli-launcher", executable,
+		"--trae-auth-file", traeAuthFile,
 		"--codex-home", managedHome,
 	}, &stdout, &stderr); code != 0 {
 		t.Fatalf("setup code = %d, stderr = %q", code, stderr.String())

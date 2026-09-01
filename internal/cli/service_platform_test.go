@@ -20,6 +20,7 @@ func TestServiceRuntimePersistsUnsupportedWindowsTraeXHost(t *testing.T) {
 		"wss://broker.example.test/v1/connect",
 	)
 	cfg.HostKind = hostkind.TraeX
+	cfg.Peer.TraeAuthFile = testTraeAuthFile(t)
 	cfg.Peer.CLI = &delegationconfig.CLIConfig{
 		Command:  testCodexBinary(t),
 		Launcher: &clilaunch.Spec{Executable: testCodexBinary(t)},

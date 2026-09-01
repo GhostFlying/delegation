@@ -853,6 +853,7 @@ func TestTraeXPeerConfigRequiresStructuredLauncher(t *testing.T) {
 			mutate: func(peer *PeerConfig) {
 				command := peer.CodexBinary
 				peer.CodexBinary = ""
+				peer.TraeAuthFile = filepath.Join(t.TempDir(), "auth.json")
 				peer.CLI = &CLIConfig{
 					Command:   command,
 					Arguments: []string{"--model", "test"},

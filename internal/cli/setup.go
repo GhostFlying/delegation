@@ -23,6 +23,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tailscaleauth"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
+	"github.com/GhostFlying/delegation/internal/traexauth"
 )
 
 type setupResult struct {
@@ -253,6 +254,11 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		"",
 		"managed CLI home; compatibility flag persisted as peer.codexHome",
 	)
+	traeAuthFile := flags.String(
+		"trae-auth-file",
+		"",
+		"protected TraeX auth.json source (required for TraeX peers)",
+	)
 	workspaceRoot := flags.String("workspace-root", "", "managed worker workspace root; defaults beside the peer config")
 	statePath := flags.String("state", "", "peer reservation database path; defaults beside the peer config")
 	transport := flags.String("transport", "tcp", "network transport: tcp or tailscale")
@@ -331,6 +337,11 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		if !flagWasSet(flags, "cli-launcher") || strings.TrimSpace(*cliLauncher) == "" {
 			return writeError(stderr, errors.New("TraeX peer setup requires --cli-launcher"))
 		}
+		if strings.TrimSpace(*traeAuthFile) == "" {
+			return writeError(stderr, errors.New("TraeX peer setup requires --trae-auth-file"))
+		}
+	} else if flagWasSet(flags, "trae-auth-file") {
+		return writeError(stderr, errors.New("--trae-auth-file is supported only for TraeX peers"))
 	}
 	resolvedConfig, err := absolutePath(*configPath)
 	if err != nil {
@@ -405,6 +416,13 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	} else if !errors.Is(evalErr, os.ErrNotExist) {
 		return writeError(stderr, fmt.Errorf("resolve managed CLI home: %w", evalErr))
 	}
+	resolvedTraeAuthFile := ""
+	if *traeAuthFile != "" {
+		resolvedTraeAuthFile, err = absolutePath(*traeAuthFile)
+		if err != nil {
+			return writeError(stderr, err)
+		}
+	}
 	if *workspaceRoot == "" {
 		*workspaceRoot = filepath.Join(resourceRoot, "workspaces")
 	}
@@ -457,6 +475,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 			CLI:            &configuredCLI,
 			GitBinary:      resolvedGitBinary,
 			CodexHome:      resolvedCodexHome,
+			TraeAuthFile:   resolvedTraeAuthFile,
 			WorkspaceRoot:  resolvedWorkspaceRoot,
 			StateFile:      resolvedState,
 			MaxWorkerSlots: *maxWorkerSlots,
@@ -475,6 +494,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		resolvedCodexHome,
 		resolvedWorkspaceRoot,
 		transportConfig,
+		resolvedTraeAuthFile,
 	); err != nil {
 		return writeError(stderr, err)
 	}
@@ -503,6 +523,11 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 	}
 	if auth.Mode == delegationconfig.AuthModeToken {
 		if err := tokenfile.Validate(auth.TokenFile); err != nil {
+			return writeError(stderr, err)
+		}
+	}
+	if networkHostKind == hostkind.TraeX {
+		if _, err := traexauth.ReadSource(resolvedTraeAuthFile); err != nil {
 			return writeError(stderr, err)
 		}
 	}
@@ -546,6 +571,7 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		resolvedCodexHome,
 		resolvedWorkspaceRoot,
 		transportConfig,
+		resolvedTraeAuthFile,
 	); err != nil {
 		return writeError(stderr, err)
 	}
@@ -653,7 +679,7 @@ func validateBrokerSetupAuthority(
 
 func validatePeerSetupAuthority(
 	configPath, statePath, tokenPath, codexHome, workspaceRoot string,
-	transport delegationconfig.TransportConfig,
+	transport delegationconfig.TransportConfig, traeAuthFile string,
 ) error {
 	if transport.Mode != delegationconfig.TransportModeTailscale {
 		return pathguard.ValidatePeerRuntimeAuthority(
@@ -662,6 +688,7 @@ func validatePeerSetupAuthority(
 			tokenPath,
 			codexHome,
 			workspaceRoot,
+			traeAuthFile,
 		)
 	}
 	return pathguard.ValidatePeerTailscaleAuthority(
@@ -672,6 +699,7 @@ func validatePeerSetupAuthority(
 		workspaceRoot,
 		transport.Tailscale.StateDir,
 		transport.Tailscale.AuthKeyFile,
+		traeAuthFile,
 	)
 }
 

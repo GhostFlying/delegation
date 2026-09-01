@@ -3,12 +3,10 @@
 package codex_peer_e2e
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +20,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/traexauth"
 	"github.com/GhostFlying/delegation/internal/workerhost"
 )
 
@@ -29,6 +28,12 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 	delegationBinary := optionalLiveExecutable(t, "DELEGATION_E2E_BINARY")
 	traeXBinary := optionalLiveExecutable(t, "TRAE_X_BINARY")
 	warmpoolBinary := optionalLiveExecutable(t, "WARMPOOL_BINARY")
+	traeAuthFile := optionalLiveProtectedFile(t, "TRAE_AUTH_FILE")
+	traeAuth, err := traexauth.ReadSource(traeAuthFile)
+	if err != nil {
+		t.Fatalf("read live TraeX authentication source: %v", err)
+	}
+	accessToken := liveTraeXAccessToken(t, traeAuth)
 
 	userHome, err := os.UserHomeDir()
 	if err != nil {
@@ -55,20 +60,6 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 	t.Setenv("NO_PROXY", "127.0.0.1,localhost")
 	t.Setenv("no_proxy", "127.0.0.1,localhost")
 
-	provider := &traeXLiveResponses{}
-	modelServer := httptest.NewServer(provider)
-	t.Cleanup(modelServer.Close)
-	providerConfig := map[string]any{
-		"model":          "delegation-traex-live",
-		"model_provider": "delegation_live",
-		"model_providers.delegation_live": map[string]any{
-			"name":                 "Delegation TraeX live smoke",
-			"base_url":             modelServer.URL + "/v1",
-			"wire_api":             "responses",
-			"requires_openai_auth": false,
-		},
-	}
-
 	controllerID := newTraeXLiveIdentity(t)
 	deviceID := newTraeXLiveIdentity(t)
 	treeID := newTraeXLiveIdentity(t)
@@ -80,6 +71,10 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 	managedTraeCLIHome := filepath.Join(managedTraeHome, "cli")
 	workspaceRoot := filepath.Join(root, "workspaces")
 	statePath := filepath.Join(delegationHome, "state", "peer.sqlite3")
+	managedAuthPath, err := traexauth.Sync(traeAuth, managedTraeHome)
+	if err != nil {
+		t.Fatalf("synchronize live TraeX authentication: %v", err)
+	}
 	runTraeXLive(t, os.Environ(), delegationBinary,
 		"setup", "peer", "--config", configPath,
 		"--host-kind", "traex",
@@ -90,6 +85,7 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 		"--cli-launcher", warmpoolBinary,
 		"--cli-launcher-prefix-argument=run",
 		"--cli-launcher-prefix-argument=--",
+		"--trae-auth-file", traeAuthFile,
 		"--codex-home", managedTraeHome, "--workspace-root", workspaceRoot,
 		"--state", statePath, "--max-worker-slots", "1", "--json",
 	)
@@ -155,15 +151,20 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 		CLIRuntimeExecutable: traeXBinary,
 		GitBinary:            resolveLiveExecutable(t, "git"),
 		CodexHome:            managedTraeHome,
+		TraeAuthSourceFile:   traeAuthFile,
+		ManagedTraeAuthFile:  managedAuthPath,
 		WorkspaceRoot:        workspaceRoot,
 		MaxWorkerSlots:       1,
-		CodexConfig:          providerConfig,
 		Store:                state,
 		ResultPackages:       resultPackages,
 		ReportError:          reportError,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	managedTraeCLIHome, err = filepath.EvalSymlinks(managedTraeCLIHome)
+	if err != nil {
+		t.Fatalf("resolve managed TraeX CLI home: %v", err)
 	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -176,7 +177,13 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 	started, err := host.Spawn(context.Background(), workerhost.SpawnRequest{
 		TreeID: treeID, AgentID: agentID, ParentAgentID: parentAgentID,
 		TaskName: "TraeX warmpool live smoke",
-		Prompt:   "Complete this smoke turn without calling tools.",
+		Prompt: fmt.Sprintf(
+			"Use the shell tool exactly once to run: if cat %s >/dev/null 2>&1; then printf SOURCE_AUTH_RESULT=readable; else printf SOURCE_AUTH_RESULT=blocked; fi; printf '\\n'; if cat %s >/dev/null 2>&1; then printf MANAGED_AUTH_RESULT=readable; else printf MANAGED_AUTH_RESULT=blocked; fi; printf '\\n'; rm -f .delegation-source-auth-probe .delegation-managed-auth-probe; if ln -s %s .delegation-source-auth-probe; then printf SOURCE_ALIAS_SETUP=ok; else printf SOURCE_ALIAS_SETUP=failed; fi; printf '\\n'; if ln -s %s .delegation-managed-auth-probe; then printf MANAGED_ALIAS_SETUP=ok; else printf MANAGED_ALIAS_SETUP=failed; fi; printf '\\n'; if cat .delegation-source-auth-probe >/dev/null 2>&1; then printf SOURCE_ALIAS_RESULT=readable; else printf SOURCE_ALIAS_RESULT=blocked; fi; printf '\\n'; if cat .delegation-managed-auth-probe >/dev/null 2>&1; then printf MANAGED_ALIAS_RESULT=readable; else printf MANAGED_ALIAS_RESULT=blocked; fi; rm -f .delegation-source-auth-probe .delegation-managed-auth-probe. Then reply with exactly the command output. Never read or print either file's contents.",
+			shellSingleQuote(traeAuthFile),
+			shellSingleQuote(managedAuthPath),
+			shellSingleQuote(traeAuthFile),
+			shellSingleQuote(managedAuthPath),
+		),
 	})
 	if err != nil {
 		t.Fatal(errors.Join(err, loadReportedErrors()))
@@ -192,18 +199,8 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 	if !published || !acknowledged {
 		t.Fatalf("result package published = %t, acknowledged = %t", published, acknowledged)
 	}
-	calls, workerCalls, initialAuxiliaryCalls, providerErr := provider.result()
-	if calls != workerCalls+initialAuxiliaryCalls ||
-		workerCalls != 1 || initialAuxiliaryCalls > 1 || providerErr != nil {
-		t.Fatalf(
-			"initial loopback provider calls = %d (worker %d, auxiliary %d), want 1 worker and at most 1 auxiliary; error = %v",
-			calls,
-			workerCalls,
-			initialAuxiliaryCalls,
-			providerErr,
-		)
-	}
 	rolloutPath := assertTraeXLiveRollout(t, managedTraeCLIHome, worker.CodexThreadID)
+	assertTraeXAccountBoundary(t, rolloutPath, traeAuthFile, managedAuthPath, accessToken)
 	rolloutBefore, err := os.Stat(rolloutPath)
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +219,7 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 	followup, err := host.Followup(context.Background(), workerhost.FollowupRequest{
 		OperationID: newTraeXLiveIdentity(t),
 		Key:         started.Worker.WorkerKey,
-		Message:     "Complete this cold-resume follow-up turn without calling tools.",
+		Message:     "Reply with exactly DELEGATION_TRAEX_ACCOUNT_REUSE_OK and do not call tools.",
 	})
 	if err != nil {
 		t.Fatal(errors.Join(err, loadReportedErrors()))
@@ -269,18 +266,6 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 			worker.CodexThreadID,
 		)
 	}
-	calls, workerCalls, auxiliaryCalls, providerErr := provider.result()
-	if calls != workerCalls+auxiliaryCalls || workerCalls != 2 ||
-		auxiliaryCalls < initialAuxiliaryCalls ||
-		auxiliaryCalls > initialAuxiliaryCalls+1 || providerErr != nil {
-		t.Fatalf(
-			"cold-resume loopback provider calls = %d (worker %d, auxiliary %d), want 2 workers and at most 1 new auxiliary; error = %v",
-			calls,
-			workerCalls,
-			auxiliaryCalls,
-			providerErr,
-		)
-	}
 	if replacementAppServerPID == firstAppServerPID {
 		t.Fatalf("TraeX app-server PID was not replaced: %d", firstAppServerPID)
 	}
@@ -302,6 +287,14 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 			rolloutBefore.Size(),
 		)
 	}
+	assertTraeXAccountBoundary(t, rolloutPath, traeAuthFile, managedAuthPath, accessToken)
+	rollout, err := os.ReadFile(rolloutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(rollout, []byte("DELEGATION_TRAEX_ACCOUNT_REUSE_OK")) {
+		t.Fatal("cold-resumed real TraeX account turn omitted the expected result")
+	}
 	for name, path := range map[string]string{
 		"ambient CODEX_HOME":   ambientCodexHome,
 		"ambient TRAE_HOME":    ambientTraeHome,
@@ -313,181 +306,6 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 			t.Fatalf("%s received managed runtime state", name)
 		}
 	}
-}
-
-type traeXLiveResponses struct {
-	mu             sync.Mutex
-	calls          int
-	workerCalls    int
-	auxiliaryCalls int
-	err            error
-}
-
-func (m *traeXLiveResponses) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	body, decodeErr := decodeTraeXLiveRequest(request)
-	m.mu.Lock()
-	call := m.calls
-	m.calls++
-	if request.Method != http.MethodPost || request.URL.Path != "/v1/responses" {
-		m.err = errors.Join(
-			m.err,
-			fmt.Errorf("unexpected provider request %s %s", request.Method, request.URL.Path),
-		)
-	}
-	if decodeErr != nil {
-		m.err = errors.Join(m.err, decodeErr)
-	}
-	workerCall := -1
-	auxiliaryCall := -1
-	if decodeErr == nil && containsManagedWorkerMCPNamespace(body["tools"]) {
-		workerCall = m.workerCalls
-		m.workerCalls++
-	} else if decodeErr == nil {
-		auxiliaryCall = m.auxiliaryCalls
-		m.auxiliaryCalls++
-	}
-	m.mu.Unlock()
-	if decodeErr != nil {
-		writeTraeXLiveFinalResponse(writer, "traex-live-decode-error")
-		return
-	}
-	if workerCall > 1 {
-		m.mu.Lock()
-		m.err = errors.Join(
-			m.err,
-			fmt.Errorf("unexpected TraeX worker provider call %d", workerCall+1),
-		)
-		m.mu.Unlock()
-	}
-	if workerCall >= 0 {
-		if err := validateTraeXLiveWorkerTools(body["tools"]); err != nil {
-			m.mu.Lock()
-			m.err = errors.Join(m.err, err)
-			m.mu.Unlock()
-		}
-		expectedPrompt := "Complete this smoke turn without calling tools."
-		if workerCall == 1 {
-			expectedPrompt = "Complete this cold-resume follow-up turn without calling tools."
-		}
-		encoded, _ := json.Marshal(body)
-		if !strings.Contains(string(encoded), expectedPrompt) {
-			m.mu.Lock()
-			m.err = errors.Join(
-				m.err,
-				fmt.Errorf(
-					"TraeX worker provider call %d omitted prompt %q",
-					workerCall+1,
-					expectedPrompt,
-				),
-			)
-			m.mu.Unlock()
-		}
-	}
-	if auxiliaryCall > 1 {
-		m.mu.Lock()
-		m.err = errors.Join(
-			m.err,
-			fmt.Errorf("unexpected TraeX auxiliary provider call %d", auxiliaryCall+1),
-		)
-		m.mu.Unlock()
-	}
-	writeTraeXLiveFinalResponse(writer, fmt.Sprintf("traex-live-%d", call+1))
-}
-
-func (m *traeXLiveResponses) result() (int, int, int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.calls, m.workerCalls, m.auxiliaryCalls, m.err
-}
-
-func validateTraeXLiveWorkerTools(raw any) error {
-	declarations, ok := raw.([]any)
-	if !ok {
-		return errors.New("TraeX model request tools are not an array")
-	}
-	namespaces := make(map[string][]string)
-	for _, declaration := range declarations {
-		tool, ok := declaration.(map[string]any)
-		if !ok {
-			return fmt.Errorf("TraeX model request contains an invalid tool declaration: %#v", declaration)
-		}
-		name, _ := tool["name"].(string)
-		if !strings.HasPrefix(name, "mcp__") {
-			continue
-		}
-		if tool["type"] != "namespace" {
-			return fmt.Errorf("TraeX model request exposes MCP tool outside a namespace: %#v", tool)
-		}
-		children, ok := tool["tools"].([]any)
-		if !ok {
-			return fmt.Errorf("TraeX MCP namespace %q tools are not an array", name)
-		}
-		names := make([]string, 0, len(children))
-		for _, child := range children {
-			function, ok := child.(map[string]any)
-			if !ok || function["type"] != "function" {
-				return fmt.Errorf("TraeX MCP namespace %q contains an invalid tool: %#v", name, child)
-			}
-			childName, _ := function["name"].(string)
-			if childName == "" {
-				return fmt.Errorf("TraeX MCP namespace %q contains an unnamed tool", name)
-			}
-			names = append(names, childName)
-		}
-		if _, duplicate := namespaces[name]; duplicate {
-			return fmt.Errorf("TraeX model request repeats MCP namespace %q", name)
-		}
-		namespaces[name] = names
-	}
-	tools, found := namespaces["mcp__delegation_worker__"]
-	if len(namespaces) != 1 || !found {
-		return fmt.Errorf(
-			"TraeX model request MCP namespaces = %v, want only mcp__delegation_worker__",
-			namespaces,
-		)
-	}
-	want := map[string]bool{
-		"send_upstream_message":     false,
-		"wait_for_upstream_message": false,
-	}
-	for _, tool := range tools {
-		if _, allowed := want[tool]; !allowed {
-			return fmt.Errorf("TraeX model request exposed unexpected worker MCP tool %q", tool)
-		}
-		want[tool] = true
-	}
-	for tool, found := range want {
-		if !found {
-			return fmt.Errorf("TraeX model request omitted worker MCP tool %q: %v", tool, tools)
-		}
-	}
-	if len(tools) != len(want) {
-		return fmt.Errorf(
-			"TraeX model request exposed %d worker MCP tools, want %d: %v",
-			len(tools),
-			len(want),
-			tools,
-		)
-	}
-	return nil
-}
-
-func containsManagedWorkerMCPNamespace(raw any) bool {
-	declarations, ok := raw.([]any)
-	if !ok {
-		return false
-	}
-	for _, declaration := range declarations {
-		tool, ok := declaration.(map[string]any)
-		if !ok {
-			continue
-		}
-		name, _ := tool["name"].(string)
-		if name == "mcp__delegation_worker__" {
-			return true
-		}
-	}
-	return false
 }
 
 func waitForTraeXLiveResult(

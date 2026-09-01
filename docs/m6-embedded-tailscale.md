@@ -203,6 +203,7 @@ TraeX requires a structured CLI command and an attached shell-free launcher:
   --cli-launcher <traex-launcher-executable>
   --cli-launcher-prefix-argument=<traex-launcher-prefix-argument>
   --git-binary <traex-peer-git-executable>
+  --trae-auth-file <protected-host-traecli-auth.json>
   --codex-home <traex-managed-cli-home>
   --workspace-root <traex-workspace-root>
   --state <traex-peer-database>
@@ -212,6 +213,13 @@ TraeX requires a structured CLI command and an attached shell-free launcher:
   --tailscale-state-dir <traex-peer-tailscale-state-dir>
   --max-worker-slots <traex-max-worker-slots>
 ```
+
+`--trae-auth-file` is the absolute path of the host's existing protected
+`TRAECLI_HOME/auth.json`; it is not the Delegation peer token. Keep it outside the managed home,
+workspace, service environment, Delegation authority files, and Tailscale authority. The peer
+atomically copies validated bytes into the isolated managed `TRAECLI_HOME` for the app-server and
+denies worker tools access to both the host source and managed copy. Restart the peer after the
+Trae account token changes so qualification uses a new readiness epoch.
 
 Repeat `--cli-argument` and `--cli-launcher-prefix-argument` once per exact argv element. Setup does
 not perform shell parsing. The TraeX peer URL is exactly
