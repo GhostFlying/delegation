@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,26 @@ func (p *testPublisher) UpdateWorkerReadiness(
 	_ context.Context, readiness protocol.WorkerReadiness,
 ) error {
 	p.updates = append(p.updates, readiness)
+	return nil
+}
+
+type transientTestPublisher struct {
+	mu      sync.Mutex
+	calls   int
+	updates chan protocol.WorkerReadiness
+}
+
+func (p *transientTestPublisher) UpdateWorkerReadiness(
+	_ context.Context, readiness protocol.WorkerReadiness,
+) error {
+	p.mu.Lock()
+	p.calls++
+	call := p.calls
+	p.mu.Unlock()
+	if call == 1 {
+		return errors.New("temporarily unavailable")
+	}
+	p.updates <- readiness
 	return nil
 }
 
@@ -189,6 +210,40 @@ func TestControllerPublishesOneCompletedSnapshotPerProbe(t *testing.T) {
 	}
 	if len(publisher.updates) != 2 || publisher.updates[1] != readiness {
 		t.Fatalf("terminal publications = %#v, want %#v", publisher.updates, readiness)
+	}
+}
+
+func TestControllerRetriesFailedPublicationWithoutAnotherReadinessTransition(t *testing.T) {
+	state, now, runtimeDigest, configDigest := readinessTestState(t)
+	publisher := &transientTestPublisher{updates: make(chan protocol.WorkerReadiness, 1)}
+	controller, err := New(Options{
+		Store: state, Probe: &testProbe{}, Publisher: publisher,
+		RuntimeDigest: runtimeDigest, ConfigDigest: configDigest,
+		Now: func() time.Time { return *now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runContext, cancelRun := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- controller.Run(runContext) }()
+	select {
+	case readiness := <-publisher.updates:
+		if readiness.State != protocol.WorkerReadinessReady || readiness.AttemptCount != 1 {
+			t.Fatalf("retried readiness = %#v", readiness)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed readiness publication was not retried")
+	}
+	cancelRun()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	publisher.mu.Lock()
+	calls := publisher.calls
+	publisher.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("publication calls = %d, want 2", calls)
 	}
 }
 

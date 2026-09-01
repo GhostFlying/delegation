@@ -117,6 +117,19 @@ current agent state without rewriting immutable spawn receipts. The milestone st
   must prove the same deny boundary before release acceptance; otherwise stop for an explicit
   security-model decision.
 
+### Final-review follow-up: reliable terminal readiness publication
+
+- Owner: milestone integration worktree.
+- Dependencies: checkpoint 2 and final milestone review round 1.
+- Write set: connector readiness publication, focused concurrency tests, and review evidence only.
+- Behavior: terminal readiness is deduplicated only after a validated broker acknowledgement; when
+  the connector's supported in-flight RPC capacity is temporarily full, publication waits for a
+  slot and retries within the caller's bounded context instead of suppressing the durable terminal
+  snapshot. Lost acknowledgements continue to recover through the reconnect hello snapshot.
+- Acceptance: a 128-call capacity test releases one slot without reconnecting and observes the
+  terminal update and acknowledgement; invalid acknowledgements remain retryable; existing
+  once-per-connection and lost-acknowledgement tests pass under the race detector.
+
 ## Freeze, Review, and Integration
 
 For every checkpoint, record the base, frozen commit and tree, focused acceptance command and raw
