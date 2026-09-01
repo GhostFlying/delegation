@@ -63,6 +63,17 @@ current agent state without rewriting immutable spawn receipts. The milestone st
 - Acceptance: prepare/arm/activate response loss, post-switch disconnect, broker-switch failure,
   reconnect/qualification timeout, cancellation boundary, and bootstrap tests.
 
+### Final-validation follow-up: broker hello activation synchronization
+
+- Owner: milestone integration worktree.
+- Dependencies: checkpoint 2 and the combined milestone tree.
+- Write set: broker readiness test synchronization and review evidence only.
+- Behavior: the readiness transition test waits for the broker handler to publish the accepted
+  connection after the hello response instead of racing that handler continuation. Product runtime
+  behavior and protocol ordering remain unchanged.
+- Acceptance: the focused test passes 100 consecutive runs, the surrounding readiness and
+  dispatchability tests pass under the race detector, and the full Linux suite passes.
+
 ## Freeze, Review, and Integration
 
 For every checkpoint, record the base, frozen commit and tree, focused acceptance command and raw
