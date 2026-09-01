@@ -19,20 +19,21 @@ type Provider func(context.Context) (Snapshot, error)
 // It intentionally contains no credentials, local paths, or per-device data.
 type Snapshot struct {
 	config.TransportStatus
-	Version        string         `json:"version,omitempty"`
-	ServiceRunning bool           `json:"serviceRunning"`
-	UptimeSeconds  uint64         `json:"uptimeSeconds"`
-	ControllerID   string         `json:"controllerId,omitempty"`
-	InstanceID     string         `json:"instanceId,omitempty"`
-	Devices        DeviceCounts   `json:"devices"`
-	Dispatch       DispatchCounts `json:"dispatch"`
-	RunningTurns   uint64         `json:"runningTurns"`
-	OccupiedSlots  uint64         `json:"occupiedSlots"`
-	LifetimeTurns  uint64         `json:"lifetimeTurns"`
-	Trees          uint64         `json:"trees"`
-	Artifacts      ArtifactCounts `json:"artifacts"`
-	Results        ResultCounts   `json:"results"`
-	Upgrade        *Upgrade       `json:"upgrade,omitempty"`
+	Version           string             `json:"version,omitempty"`
+	ServiceRunning    bool               `json:"serviceRunning"`
+	UptimeSeconds     uint64             `json:"uptimeSeconds"`
+	ControllerID      string             `json:"controllerId,omitempty"`
+	InstanceID        string             `json:"instanceId,omitempty"`
+	Devices           DeviceCounts       `json:"devices"`
+	Dispatch          DispatchCounts     `json:"dispatch"`
+	RunningTurns      uint64             `json:"runningTurns"`
+	OccupiedSlots     uint64             `json:"occupiedSlots"`
+	LifetimeTurns     uint64             `json:"lifetimeTurns"`
+	Trees             uint64             `json:"trees"`
+	Artifacts         ArtifactCounts     `json:"artifacts"`
+	Results           ResultCounts       `json:"results"`
+	Upgrade           *Upgrade           `json:"upgrade,omitempty"`
+	ControllerUpgrade *ControllerUpgrade `json:"controllerUpgrade,omitempty"`
 }
 
 type Upgrade struct {
@@ -43,6 +44,32 @@ type Upgrade struct {
 	CommitAuthorized bool   `json:"commitAuthorized"`
 	FailureCode      string `json:"failureCode,omitempty"`
 	UpdatedAt        int64  `json:"updatedAt"`
+}
+
+type ControllerUpgradeCounts struct {
+	Total                int `json:"total"`
+	Pending              int `json:"pending"`
+	Prepared             int `json:"prepared"`
+	Armed                int `json:"armed"`
+	ActivationRequested  int `json:"activationRequested"`
+	Qualified            int `json:"qualified"`
+	Canceled             int `json:"canceled"`
+	InterventionRequired int `json:"interventionRequired"`
+}
+
+type ControllerUpgrade struct {
+	TransactionID      string                  `json:"transactionId"`
+	State              string                  `json:"state"`
+	SourceVersion      string                  `json:"sourceVersion"`
+	TargetVersion      string                  `json:"targetVersion"`
+	GlobalCommit       bool                    `json:"globalCommit"`
+	Deadline           int64                   `json:"deadline"`
+	CompletionDeadline int64                   `json:"completionDeadline,omitempty"`
+	Participants       ControllerUpgradeCounts `json:"participants"`
+	BrokerState        string                  `json:"brokerState,omitempty"`
+	BrokerFailureCode  string                  `json:"brokerFailureCode,omitempty"`
+	FailureCode        string                  `json:"failureCode,omitempty"`
+	UpdatedAt          int64                   `json:"updatedAt"`
 }
 
 // DeviceCounts summarizes registered and usable devices without identifying
@@ -118,7 +145,31 @@ func (s Snapshot) Validate() error {
 		!validOptionalText(s.Upgrade.FailureCode) || s.Upgrade.UpdatedAt <= 0) {
 		return errors.New("upgrade status is invalid")
 	}
+	if s.ControllerUpgrade != nil {
+		u := s.ControllerUpgrade
+		if !validOptionalText(u.TransactionID) || !validOptionalText(u.State) ||
+			!validOptionalText(u.SourceVersion) || !validOptionalText(u.TargetVersion) ||
+			!validOptionalText(u.BrokerState) || !validOptionalText(u.BrokerFailureCode) ||
+			!validOptionalText(u.FailureCode) || u.Deadline <= 0 || u.CompletionDeadline < 0 ||
+			u.UpdatedAt <= 0 || !validControllerUpgradeCounts(u.Participants) {
+			return errors.New("controller upgrade status is invalid")
+		}
+	}
 	return nil
+}
+
+func validControllerUpgradeCounts(counts ControllerUpgradeCounts) bool {
+	values := []int{
+		counts.Total, counts.Pending, counts.Prepared, counts.Armed, counts.ActivationRequested,
+		counts.Qualified, counts.Canceled, counts.InterventionRequired,
+	}
+	for _, value := range values {
+		if value < 0 || value > counts.Total {
+			return false
+		}
+	}
+	return counts.Pending+counts.Prepared+counts.Armed+counts.ActivationRequested+
+		counts.Qualified+counts.Canceled+counts.InterventionRequired == counts.Total
 }
 
 func validOptionalText(value string) bool {

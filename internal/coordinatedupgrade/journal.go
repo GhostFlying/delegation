@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/GhostFlying/delegation/internal/identity"
+	"github.com/GhostFlying/delegation/internal/instanceid"
 	"golang.org/x/mod/semver"
 )
 
@@ -72,6 +73,8 @@ type LocalParticipant struct {
 type Journal struct {
 	SchemaVersion      int              `json:"schemaVersion"`
 	TransactionID      string           `json:"transactionId"`
+	ControllerID       string           `json:"controllerId"`
+	InstanceID         string           `json:"instanceId"`
 	State              State            `json:"state"`
 	SourceVersion      string           `json:"sourceVersion"`
 	TargetVersion      string           `json:"targetVersion"`
@@ -97,6 +100,12 @@ func (j Journal) Validate() error {
 	}
 	if err := identity.ValidateID(j.TransactionID); err != nil {
 		return fmt.Errorf("transactionId %w", err)
+	}
+	if err := identity.ValidateID(j.ControllerID); err != nil {
+		return fmt.Errorf("controllerId %w", err)
+	}
+	if err := instanceid.Validate(j.InstanceID); err != nil {
+		return fmt.Errorf("instanceId %w", err)
 	}
 	if !semver.IsValid("v"+j.SourceVersion) || !semver.IsValid("v"+j.TargetVersion) ||
 		semver.Compare("v"+j.TargetVersion, "v"+j.SourceVersion) <= 0 {
@@ -217,8 +226,8 @@ func RootForBroker(home, instanceID string) (string, error) {
 	if home == "" || !filepath.IsAbs(home) || filepath.Clean(home) != home {
 		return "", errors.New("delegation home must be an absolute clean path")
 	}
-	if instanceID == "" || filepath.Base(instanceID) != instanceID {
-		return "", errors.New("broker instance ID is invalid")
+	if err := instanceid.Validate(instanceID); err != nil {
+		return "", fmt.Errorf("broker instance ID: %w", err)
 	}
 	return filepath.Join(home, "upgrades", instanceID, "broker", "controller"), nil
 }

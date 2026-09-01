@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/coordinatedupgrade"
 	"github.com/GhostFlying/delegation/internal/localupgrade"
 	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
@@ -265,6 +267,150 @@ func TestStatusCommandDoesNotClaimStoppedBrokerWhileLeaseIsHeld(t *testing.T) {
 	)
 	if code != exitUnavailable || stdout.Len() != 0 || stderr.String() != brokerStatusUnavailableError {
 		t.Fatalf("status = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestStatusCommandReadsControllerOnlyStoppedBrokerUpgrade(t *testing.T) {
+	home := privateTestDirectory(t)
+	t.Setenv("DELEGATION_HOME", home)
+	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RoleBroker)
+	persistBrokerControllerStatusUpgrade(t, home, cfg)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runStatusWithReaders(
+		[]string{"--config", configPath, "--json"}, &stdout, &stderr, nil,
+		func(context.Context, string) (statuspage.Snapshot, error) {
+			return statuspage.Snapshot{}, errors.New("broker stopped")
+		},
+	)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("controller-only stopped status = %d, stderr %q", code, stderr.String())
+	}
+	var got statuspage.Snapshot
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ServiceRunning || got.ControllerUpgrade == nil ||
+		got.ControllerUpgrade.State != string(coordinatedupgrade.StateQualifying) ||
+		!got.ControllerUpgrade.GlobalCommit {
+		t.Fatalf("controller-only stopped status = %#v", got)
+	}
+}
+
+func TestStatusCommandRejectsWrongIdentityStoppedBrokerControllerUpgrade(t *testing.T) {
+	home := privateTestDirectory(t)
+	t.Setenv("DELEGATION_HOME", home)
+	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RoleBroker)
+	persistBrokerControllerStatusUpgrade(t, home, cfg)
+
+	root, err := coordinatedupgrade.RootForBroker(home, cfg.EffectiveInstanceID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transactionStore, err := coordinatedupgrade.OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transactionStore.Update(upgradeTestTransactionID, func(current *coordinatedupgrade.Journal) error {
+		current.ControllerID = "123e4567-e89b-42d3-a456-426614174399"
+		return nil
+	}); err == nil {
+		t.Fatal("store accepted a controller identity mutation")
+	}
+
+	// A protected but stale directory can belong to an earlier broker identity.
+	// Status must fail closed instead of projecting it as the configured broker.
+	cfg.ControllerID = "123e4567-e89b-42d3-a456-426614174399"
+	rewriteStatusTestConfig(t, configPath, cfg)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runStatusWithReaders(
+		[]string{"--config", configPath, "--json"}, &stdout, &stderr, nil,
+		func(context.Context, string) (statuspage.Snapshot, error) {
+			return statuspage.Snapshot{}, errors.New("broker stopped")
+		},
+	)
+	if code != exitUnavailable || stdout.Len() != 0 || stderr.String() != brokerStatusUnavailableError {
+		t.Fatalf("wrong-identity stopped status = %d, stdout %q, stderr %q",
+			code, stdout.String(), stderr.String())
+	}
+}
+
+func TestStatusCommandRejectsCorruptStoppedBrokerControllerUpgrade(t *testing.T) {
+	home := privateTestDirectory(t)
+	t.Setenv("DELEGATION_HOME", home)
+	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RoleBroker)
+	persistBrokerControllerStatusUpgrade(t, home, cfg)
+	root, err := coordinatedupgrade.RootForBroker(home, cfg.EffectiveInstanceID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(root, "journal.json")
+	if err := os.WriteFile(journalPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runStatusWithReaders(
+		[]string{"--config", configPath, "--json"}, &stdout, &stderr, nil,
+		func(context.Context, string) (statuspage.Snapshot, error) {
+			return statuspage.Snapshot{}, errors.New("broker stopped")
+		},
+	)
+	if code != exitUnavailable || stdout.Len() != 0 || stderr.String() != brokerStatusUnavailableError {
+		t.Fatalf("corrupt stopped status = %d, stdout %q, stderr %q",
+			code, stdout.String(), stderr.String())
+	}
+}
+
+func persistBrokerControllerStatusUpgrade(
+	t *testing.T, home string, cfg delegationconfig.Config,
+) {
+	t.Helper()
+	root, err := coordinatedupgrade.RootForBroker(home, cfg.EffectiveInstanceID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transactionStore, err := coordinatedupgrade.OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	journal := coordinatedupgrade.Journal{
+		SchemaVersion: coordinatedupgrade.JournalSchemaVersion, TransactionID: upgradeTestTransactionID,
+		ControllerID: cfg.ControllerID, InstanceID: cfg.EffectiveInstanceID(),
+		State: coordinatedupgrade.StatePreparing, SourceVersion: "0.1.0-alpha.7",
+		TargetVersion: "0.1.0-alpha.8", Deadline: now + 1000, CreatedAt: now, UpdatedAt: now,
+		Participants: []coordinatedupgrade.Participant{},
+	}
+	if _, _, err := transactionStore.CreateOrResume(journal); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*coordinatedupgrade.Journal){
+		func(current *coordinatedupgrade.Journal) {
+			current.Broker = coordinatedupgrade.LocalParticipant{
+				TransactionID: "123e4567-e89b-42d3-a456-426614174389", State: "armed",
+				TargetRuntimeDigest: strings.Repeat("a", 64), ConfigDigest: strings.Repeat("b", 64),
+				UpdatedAt: now,
+			}
+			current.State = coordinatedupgrade.StateArming
+		},
+		func(current *coordinatedupgrade.Journal) { current.State = coordinatedupgrade.StateArmed },
+		func(current *coordinatedupgrade.Journal) {
+			current.State = coordinatedupgrade.StateCommitted
+			current.GlobalCommit = true
+		},
+		func(current *coordinatedupgrade.Journal) { current.State = coordinatedupgrade.StateActivatingPeers },
+		func(current *coordinatedupgrade.Journal) { current.State = coordinatedupgrade.StateActivatingBroker },
+		func(current *coordinatedupgrade.Journal) { current.State = coordinatedupgrade.StateQualifying },
+	} {
+		if _, err := transactionStore.Update(journal.TransactionID, func(current *coordinatedupgrade.Journal) error {
+			mutate(current)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/coordinatedupgrade"
 	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/localupgrade"
@@ -81,9 +82,13 @@ func runServiceUpgrade(args []string, stdout, stderr io.Writer) int {
 }
 
 type serviceUpgradeCommandDependencies struct {
-	bootstrap func(context.Context, delegationconfig.Config, string, string, string) (localbridge.UpgradeSnapshot, error)
-	cancel    func(context.Context, delegationconfig.Config, string, string) (localbridge.UpgradeSnapshot, error)
+	bootstrap         func(context.Context, delegationconfig.Config, string, string, string) (localbridge.UpgradeSnapshot, error)
+	cancel            func(context.Context, delegationconfig.Config, string, string) (localbridge.UpgradeSnapshot, error)
+	coordinate        func(context.Context, delegationconfig.Config, string, time.Duration) (localbridge.ControllerUpgradeSnapshot, error)
+	cancelCoordinated func(context.Context, delegationconfig.Config, string) (localbridge.ControllerUpgradeSnapshot, error)
 }
+
+const maximumServiceUpgradeTimeout = 30 * time.Minute
 
 func runServiceUpgradeWithDependencies(
 	args []string, stdout, stderr io.Writer, dependencies serviceUpgradeCommandDependencies,
@@ -93,6 +98,12 @@ func runServiceUpgradeWithDependencies(
 	}
 	if dependencies.cancel == nil {
 		dependencies.cancel = cancelServiceUpgrade
+	}
+	if dependencies.coordinate == nil {
+		dependencies.coordinate = coordinateServiceUpgrade
+	}
+	if dependencies.cancelCoordinated == nil {
+		dependencies.cancelCoordinated = cancelCoordinatedServiceUpgrade
 	}
 	flags := flag.NewFlagSet("delegation service upgrade", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -107,8 +118,8 @@ func runServiceUpgradeWithDependencies(
 	if code := parseFlags(flags, args); code >= 0 {
 		return code
 	}
-	if *configPath == "" || *timeout <= 0 {
-		return writeError(stderr, errors.New("--config and a positive --timeout are required"))
+	if *configPath == "" || *timeout <= 0 || *timeout > maximumServiceUpgradeTimeout {
+		return writeError(stderr, errors.New("--config and a --timeout between 1ns and 30m are required"))
 	}
 	if *cancelUpgrade {
 		if *transactionID == "" || *targetVersion != "" || *environmentFile != "" || *bootstrap {
@@ -142,11 +153,20 @@ func runServiceUpgradeWithDependencies(
 	} else if cfg.Role == delegationconfig.RoleBroker && resolvedEnvironment != "" {
 		return writeError(stderr, errors.New("broker service upgrade must not use --environment-file"))
 	}
-	if !*cancelUpgrade && !*bootstrap {
-		return writeError(stderr, errors.New("coordinated broker upgrade is not available without --bootstrap"))
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	if cfg.Role == delegationconfig.RoleBroker && !*bootstrap {
+		var result localbridge.ControllerUpgradeSnapshot
+		if *cancelUpgrade {
+			result, err = dependencies.cancelCoordinated(ctx, cfg, *transactionID)
+		} else {
+			result, err = dependencies.coordinate(ctx, cfg, *targetVersion, *timeout)
+		}
+		if err != nil {
+			return writeError(stderr, err)
+		}
+		return writeControllerUpgradeResult(stdout, stderr, result, *jsonOutput)
+	}
 	var result localbridge.UpgradeSnapshot
 	if *cancelUpgrade {
 		result, err = dependencies.cancel(ctx, cfg, resolvedConfig, *transactionID)
@@ -159,6 +179,96 @@ func runServiceUpgradeWithDependencies(
 		return writeError(stderr, err)
 	}
 	return writeServiceUpgradeResult(stdout, stderr, result, *jsonOutput)
+}
+
+func coordinateServiceUpgrade(
+	ctx context.Context, cfg delegationconfig.Config, targetVersion string, timeout time.Duration,
+) (localbridge.ControllerUpgradeSnapshot, error) {
+	endpoint, identity, err := localUpgradeEndpoint(cfg)
+	if err != nil {
+		return localbridge.ControllerUpgradeSnapshot{}, err
+	}
+	if err := localbridge.Probe(ctx, endpoint, identity); err != nil {
+		return localbridge.ControllerUpgradeSnapshot{}, err
+	}
+	return coordinateServiceUpgradeWithClient(
+		ctx, targetVersion, timeout.Milliseconds(),
+		func(ctx context.Context, target string, timeoutMillis int64) (localbridge.ControllerUpgradeSnapshot, error) {
+			return localbridge.StartControllerUpgrade(ctx, endpoint, target, timeoutMillis)
+		},
+		func(ctx context.Context) (*localbridge.ControllerUpgradeSnapshot, error) {
+			return localbridge.ReadControllerUpgrade(ctx, endpoint)
+		},
+	)
+}
+
+func coordinateServiceUpgradeWithClient(
+	ctx context.Context, targetVersion string, timeoutMillis int64,
+	start func(context.Context, string, int64) (localbridge.ControllerUpgradeSnapshot, error),
+	read func(context.Context) (*localbridge.ControllerUpgradeSnapshot, error),
+) (localbridge.ControllerUpgradeSnapshot, error) {
+	result, startErr := start(ctx, targetVersion, timeoutMillis)
+	if startErr == nil && controllerUpgradeTerminal(result.State) {
+		return result, nil
+	}
+	// The broker activator may terminate the old process after the durable
+	// global COMMIT but before its local bridge writes the response. Poll the
+	// protected endpoint and recover only the same target transaction.
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		status, statusErr := read(ctx)
+		if statusErr == nil && status != nil {
+			if status.TargetVersion != targetVersion {
+				return *status, errors.New("controller upgrade status changed target version")
+			}
+			result = *status
+			if controllerUpgradeTerminal(status.State) {
+				return *status, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return result, errors.Join(startErr, ctx.Err())
+		case <-ticker.C:
+		}
+		// Start is the idempotent resume operation for this target. Retrying it
+		// covers both a request lost before the old broker received it and a
+		// response lost while the broker activator replaced that process.
+		next, retryErr := start(ctx, targetVersion, timeoutMillis)
+		if retryErr == nil {
+			result = next
+			startErr = nil
+			if controllerUpgradeTerminal(next.State) {
+				return next, nil
+			}
+		} else {
+			startErr = retryErr
+		}
+	}
+}
+
+func controllerUpgradeTerminal(state string) bool {
+	switch coordinatedupgrade.State(state) {
+	case coordinatedupgrade.StateCanceled, coordinatedupgrade.StateCompleted,
+		coordinatedupgrade.StateCompletedErrors:
+		return true
+	default:
+		return false
+	}
+}
+
+func cancelCoordinatedServiceUpgrade(
+	ctx context.Context, cfg delegationconfig.Config, transactionID string,
+) (localbridge.ControllerUpgradeSnapshot, error) {
+	endpoint, identity, err := localUpgradeEndpoint(cfg)
+	if err != nil {
+		return localbridge.ControllerUpgradeSnapshot{}, err
+	}
+	if err := localbridge.Probe(ctx, endpoint, identity); err != nil {
+		return localbridge.ControllerUpgradeSnapshot{}, err
+	}
+	return localbridge.CancelControllerUpgrade(ctx, endpoint, transactionID)
 }
 
 func activateAndWaitForLocalUpgrade(
@@ -232,6 +342,27 @@ func writeServiceUpgradeResult(
 	fmt.Fprintf(stdout, "state: %s\n", result.State)
 	fmt.Fprintf(stdout, "version: %s -> %s\n", result.SourceVersion, result.TargetVersion)
 	fmt.Fprintf(stdout, "commit authorized: %t\n", result.CommitAuthorized)
+	if result.FailureCode != "" {
+		fmt.Fprintf(stdout, "failure: %s\n", result.FailureCode)
+	}
+	return 0
+}
+
+func writeControllerUpgradeResult(
+	stdout, stderr io.Writer, result localbridge.ControllerUpgradeSnapshot, jsonOutput bool,
+) int {
+	if jsonOutput {
+		if err := json.NewEncoder(stdout).Encode(result); err != nil {
+			return writeError(stderr, err)
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "upgrade transaction: %s\n", result.TransactionID)
+	fmt.Fprintf(stdout, "state: %s\n", result.State)
+	fmt.Fprintf(stdout, "version: %s -> %s\n", result.SourceVersion, result.TargetVersion)
+	fmt.Fprintf(stdout, "global commit: %t\n", result.GlobalCommit)
+	fmt.Fprintf(stdout, "participants: %d total, %d qualified, %d intervention required\n",
+		result.Participants.Total, result.Participants.Qualified, result.Participants.InterventionRequired)
 	if result.FailureCode != "" {
 		fmt.Fprintf(stdout, "failure: %s\n", result.FailureCode)
 	}

@@ -129,6 +129,7 @@ func testControllerJournal() Journal {
 	now := time.Unix(1_800_000_000, 0).UnixMilli()
 	return Journal{
 		SchemaVersion: JournalSchemaVersion, TransactionID: testControllerTransactionID,
+		ControllerID: testPeerDeviceID, InstanceID: "default",
 		State: StatePreparing, SourceVersion: testSourceVersion, TargetVersion: testTargetVersion,
 		Deadline: now + int64(time.Hour/time.Millisecond), CreatedAt: now, UpdatedAt: now,
 		Participants: []Participant{{

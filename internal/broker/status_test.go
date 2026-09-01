@@ -95,6 +95,32 @@ func TestStatusCombinesDurableStateWithLiveSynchronizedConnections(t *testing.T)
 	}
 }
 
+func TestStatusIncludesProtectedControllerUpgradeSnapshot(t *testing.T) {
+	reader := &observedStatusReader{}
+	want := &statuspage.ControllerUpgrade{
+		TransactionID: "123e4567-e89b-42d3-a456-426614174199", State: "qualifying",
+		SourceVersion: "0.1.0", TargetVersion: "0.2.0", GlobalCommit: true,
+		Deadline: 1, CompletionDeadline: 2, UpdatedAt: 1,
+		Participants: statuspage.ControllerUpgradeCounts{Total: 1, Qualified: 1},
+	}
+	server := &Server{
+		controllerID: brokerTestControllerID, transport: config.TransportStatus{Transport: "tcp"},
+		statusReader: reader, connections: map[string]*session{}, latestRevisions: map[string]uint64{},
+		startedAt: time.Unix(1, 0), now: func() time.Time { return time.Unix(2, 0) },
+	}
+	server.SetControllerUpgradeStatusReader(func() (*statuspage.ControllerUpgrade, error) {
+		result := *want
+		return &result, nil
+	})
+	got, err := server.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.ControllerUpgrade, want) {
+		t.Fatalf("controller upgrade = %#v, want %#v", got.ControllerUpgrade, want)
+	}
+}
+
 func TestStatusAllowsConnectedSessionAfterDurableCredentialRevocation(t *testing.T) {
 	const deviceID = "123e4567-e89b-42d3-a456-426614174101"
 	reader := &observedStatusReader{snapshot: store.StatusSnapshot{

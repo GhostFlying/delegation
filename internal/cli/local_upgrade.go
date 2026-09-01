@@ -71,16 +71,18 @@ func (m *serviceUpgradeManager) PrepareLocalUpgrade(
 		return localbridge.UpgradeSnapshot{}, errors.New("upgrade request does not match the running service invocation")
 	}
 	if existing, err := m.store.Load(); err == nil {
-		if existing.TargetVersion != targetVersion {
+		if existing.TargetVersion != targetVersion && !existing.Terminal() {
 			return localbridge.UpgradeSnapshot{}, localupgrade.ErrTargetConflict
 		}
-		if existing.Role != m.config.Role || existing.InstanceID != m.config.EffectiveInstanceID() ||
-			existing.ControllerID != m.config.ControllerID || existing.DeviceID != m.config.DeviceID ||
-			existing.Invocation.ConfigPath != m.configPath ||
-			existing.Invocation.EnvironmentFile != m.environmentFile {
-			return localbridge.UpgradeSnapshot{}, errors.New("same-target upgrade does not match the configured service identity")
+		if existing.TargetVersion == targetVersion {
+			if existing.Role != m.config.Role || existing.InstanceID != m.config.EffectiveInstanceID() ||
+				existing.ControllerID != m.config.ControllerID || existing.DeviceID != m.config.DeviceID ||
+				existing.Invocation.ConfigPath != m.configPath ||
+				existing.Invocation.EnvironmentFile != m.environmentFile {
+				return localbridge.UpgradeSnapshot{}, errors.New("same-target upgrade does not match the configured service identity")
+			}
+			return bridgeUpgradeSnapshot(existing), nil
 		}
-		return bridgeUpgradeSnapshot(existing), nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return localbridge.UpgradeSnapshot{}, err
 	}
