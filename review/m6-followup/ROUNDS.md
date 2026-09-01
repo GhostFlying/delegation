@@ -494,3 +494,43 @@ Round-1 validation otherwise passed the full Linux suite, race suites, vet, supp
 plugin smoke, format and credential checks, and Linux, macOS, and Windows compile validation. The
 reviewer reproduced the finding using the public 128-call capacity without modifying the frozen
 worktree.
+
+### Review Round 2
+
+- Frozen commit: `86d619c5d82185576b10305d3fd649865b61ce3e`
+- Frozen tree: `a5d6ba55da597b7eaf8f3e5922ccda7f0e4d559b`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `CLEAN`
+- Findings: none
+- Confirmed disposition: terminal readiness is acknowledged only after a matching broker response;
+  capacity exhaustion waits and retries, concurrent same-epoch publication is single-flight, failed
+  or mismatched acknowledgements remain retryable, the controller retries the latest durable
+  snapshot without another readiness transition, reconnect hello carries durable readiness, and
+  shutdown wakes blocked publishers.
+- Disposition: the combined milestone implementation is accepted at the exact frozen commit and
+  tree.
+
+Executable acceptance at the accepted frozen revision:
+
+- The five focused readiness publication tests passed 50 consecutive iterations under the race
+  detector.
+- Focused connector, broker, store, and worker-readiness race suites passed.
+- `go test -count=1 -buildvcs=false -tags=ts_omit_logtail -timeout=30m ./...` and
+  `go vet -tags=ts_omit_logtail ./...` passed.
+- Linux amd64, macOS arm64, and Windows amd64 compile-only matrices passed, including the
+  `integration,live` E2E package.
+- `GO=go ./tests/posix_plugin_test.sh`, `./tests/m6_support_contract_test.sh`, `git diff --check`,
+  and the full-tree gofmt check passed.
+- The real Linux TraeX 0.201.6 account smoke passed in 47.64 seconds on the frozen tree, covering a
+  real turn, result return, protected host-auth reuse and worker-tool denial, app-server replacement,
+  and cold resume. No credential value entered tracked files or test output.
+- The independent reviewer found no tracked credential or machine-specific private data and did not
+  access the real TraeX token. The detached review worktree remained clean.
+
+Release acceptance still requires native macOS execution of the real-account TraeX authorization
+and denial path. The available remote macOS workspace had no authorized secret mount, so no
+credential was transferred. A real coordinated higher-version upgrade also requires a newer
+canonical attested release; alpha.4 bootstrap, protocol behavior, journals, response-loss handling,
+and platform service integration are covered without claiming that unavailable cross-version live
+run. These are external release gates, not unresolved code-review findings or reasons to relax the
+credential boundary.
