@@ -23,6 +23,7 @@ type BrokerControl interface {
 	BeginUpgradeDrain()
 	EndUpgradeDrain()
 	UpgradeDraining() bool
+	RequireRuntimeVersion(string)
 	FreezeUpgradePeers() []broker.UpgradePeer
 	CallPinnedUpgrade(context.Context, broker.UpgradePeer, string, any) (protocol.UpgradeSnapshot, error)
 	CallCurrentUpgrade(context.Context, string, string, any) (protocol.UpgradeSnapshot, error)
@@ -43,6 +44,8 @@ type Options struct {
 	Broker            BrokerControl
 	Local             LocalManager
 	SourceVersion     string
+	ControllerID      string
+	InstanceID        string
 	NewID             func() (string, error)
 	Now               func() time.Time
 	CompletionTimeout time.Duration
@@ -54,6 +57,8 @@ type Manager struct {
 	broker            BrokerControl
 	local             LocalManager
 	sourceVersion     string
+	controllerID      string
+	instanceID        string
 	newID             func() (string, error)
 	now               func() time.Time
 	completionTimeout time.Duration
@@ -64,6 +69,12 @@ type Manager struct {
 func NewManager(options Options) (*Manager, error) {
 	if options.Store == nil || options.Broker == nil || options.Local == nil {
 		return nil, errors.New("coordinated upgrade dependencies are required")
+	}
+	if err := identity.ValidateID(options.ControllerID); err != nil {
+		return nil, fmt.Errorf("coordinated upgrade controller ID: %w", err)
+	}
+	if options.InstanceID == "" {
+		return nil, errors.New("coordinated upgrade instance ID is required")
 	}
 	if options.NewID == nil {
 		options.NewID = identity.NewID
@@ -82,7 +93,8 @@ func NewManager(options Options) (*Manager, error) {
 	}
 	return &Manager{
 		store: options.Store, broker: options.Broker, local: options.Local,
-		sourceVersion: options.SourceVersion, newID: options.NewID, now: options.Now,
+		sourceVersion: options.SourceVersion, controllerID: options.ControllerID,
+		instanceID: options.InstanceID, newID: options.NewID, now: options.Now,
 		completionTimeout: options.CompletionTimeout, reportError: options.ReportError,
 	}, nil
 }
@@ -96,6 +108,9 @@ func (m *Manager) Start(ctx context.Context, targetVersion string, timeout time.
 	m.broker.BeginUpgradeDrain()
 	existing, err := m.store.Load()
 	if err == nil {
+		if err := m.validateIdentity(existing); err != nil {
+			return existing, err
+		}
 		if existing.TargetVersion != targetVersion && !existing.Terminal() {
 			return existing, ErrTargetConflict
 		}
@@ -125,6 +140,7 @@ func (m *Manager) Start(ctx context.Context, targetVersion string, timeout time.
 	}
 	journal, _, err := m.store.CreateOrResume(Journal{
 		SchemaVersion: JournalSchemaVersion, TransactionID: transactionID, State: StatePreparing,
+		ControllerID: m.controllerID, InstanceID: m.instanceID,
 		SourceVersion: m.sourceVersion, TargetVersion: targetVersion, Deadline: now + timeout.Milliseconds(),
 		Participants: participants, CreatedAt: now, UpdatedAt: now,
 	})
@@ -142,6 +158,9 @@ func (m *Manager) Resume(ctx context.Context) (Journal, error) {
 	if err != nil {
 		return Journal{}, err
 	}
+	if err := m.validateIdentity(journal); err != nil {
+		return journal, err
+	}
 	if journal.Terminal() {
 		m.reconcileTerminalDrain(journal)
 		return journal, nil
@@ -157,8 +176,15 @@ func (m *Manager) Cancel(ctx context.Context, transactionID string) (Journal, er
 	if err != nil {
 		return Journal{}, err
 	}
+	if err := m.validateIdentity(journal); err != nil {
+		return journal, err
+	}
 	if journal.TransactionID != transactionID {
 		return journal, errors.New("coordinated upgrade transaction ID does not match")
+	}
+	if journal.State == StateCanceled {
+		m.reconcileTerminalDrain(journal)
+		return journal, nil
 	}
 	if journal.GlobalCommit {
 		return journal, errors.New("coordinated upgrade cannot be canceled after global COMMIT")
@@ -177,6 +203,50 @@ func (m *Manager) Status() (*Journal, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if err := m.validateIdentity(journal); err != nil {
+		return nil, err
+	}
+	return &journal, nil
+}
+
+func (m *Manager) validateIdentity(journal Journal) error {
+	if journal.ControllerID != m.controllerID || journal.InstanceID != m.instanceID {
+		return errors.New("coordinated upgrade journal does not match this broker identity")
+	}
+	return nil
+}
+
+// RestoreFence reapplies the persisted dispatch fence without advancing the
+// transaction. The broker calls it before accepting peer or management
+// traffic, then RunRecovery advances the transaction once listeners are live.
+func (m *Manager) RestoreFence() (*Journal, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	journal, err := m.store.Load()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := m.validateIdentity(journal); err != nil {
+		return nil, err
+	}
+	for _, participant := range journal.Participants {
+		if participant.State == ParticipantIntervention {
+			m.broker.SetUpgradeIntervention(participant.DeviceID, true)
+		}
+	}
+	if journal.Terminal() {
+		m.reconcileTerminalDrain(journal)
+	} else {
+		m.broker.BeginUpgradeDrain()
+	}
+	if journal.GlobalCommit {
+		m.broker.RequireRuntimeVersion(journal.TargetVersion)
+	} else {
+		m.broker.RequireRuntimeVersion(journal.SourceVersion)
 	}
 	return &journal, nil
 }
@@ -342,11 +412,15 @@ func (m *Manager) arm(ctx context.Context, journal Journal) (Journal, error) {
 }
 
 func (m *Manager) commit(journal Journal) (Journal, error) {
-	return m.store.Update(journal.TransactionID, func(current *Journal) error {
+	committed, err := m.store.Update(journal.TransactionID, func(current *Journal) error {
 		current.GlobalCommit = true
 		current.State = StateCommitted
 		return nil
 	})
+	if err == nil {
+		m.broker.RequireRuntimeVersion(committed.TargetVersion)
+	}
+	return committed, err
 }
 
 func (m *Manager) beginPeerActivation(journal Journal) (Journal, error) {
@@ -376,9 +450,22 @@ func (m *Manager) activatePeers(ctx context.Context, journal Journal) (Journal, 
 			RuntimeVersion: participant.SourceVersion,
 		}, protocol.MethodActivateUpgrade, transactionParams(journal, participant))
 		if err != nil {
-			m.reportError(fmt.Errorf("activate upgrade peer %s: %w", participant.DeviceID, err))
-		} else if err := validatePeerSnapshot(journal, participant, snapshot, true); err != nil {
-			m.reportError(fmt.Errorf("validate activated upgrade peer %s: %w", participant.DeviceID, err))
+			pinnedErr := err
+			snapshot, err = m.broker.CallCurrentUpgrade(
+				ctx, participant.DeviceID, protocol.MethodActivateUpgrade, transactionParams(journal, participant),
+			)
+			if err != nil {
+				m.reportError(fmt.Errorf(
+					"activate upgrade peer %s: %w", participant.DeviceID, errors.Join(pinnedErr, err),
+				))
+			}
+		}
+		if err == nil {
+			if validationErr := validatePeerSnapshot(journal, participant, snapshot, true); validationErr != nil {
+				m.reportError(fmt.Errorf(
+					"validate activated upgrade peer %s: %w", participant.DeviceID, validationErr,
+				))
+			}
 		}
 	}
 	return m.store.Update(journal.TransactionID, func(current *Journal) error {
@@ -399,9 +486,6 @@ func (m *Manager) activateOrQualifyBroker(ctx context.Context, journal Journal) 
 		return m.store.Update(journal.TransactionID, func(current *Journal) error {
 			current.Broker = localParticipant(snapshot)
 			current.State = StateQualifying
-			if current.CompletionDeadline == 0 {
-				current.CompletionDeadline = m.now().Add(m.completionTimeout).UnixMilli()
-			}
 			return nil
 		})
 	}
@@ -415,15 +499,25 @@ func (m *Manager) activateOrQualifyBroker(ctx context.Context, journal Journal) 
 	journal, err = m.store.Update(journal.TransactionID, func(current *Journal) error {
 		current.Broker = localParticipant(snapshot)
 		current.State = StateQualifying
-		if current.CompletionDeadline == 0 {
-			current.CompletionDeadline = m.now().Add(m.completionTimeout).UnixMilli()
-		}
 		return nil
 	})
 	return journal, err
 }
 
 func (m *Manager) qualify(ctx context.Context, journal Journal) (Journal, error) {
+	if journal.CompletionDeadline == 0 {
+		if m.sourceVersion != journal.TargetVersion {
+			return journal, nil
+		}
+		var err error
+		journal, err = m.store.Update(journal.TransactionID, func(current *Journal) error {
+			current.CompletionDeadline = m.now().Add(m.completionTimeout).UnixMilli()
+			return nil
+		})
+		if err != nil {
+			return journal, err
+		}
+	}
 	now := m.now().UnixMilli()
 	brokerQualified := journal.Broker.State == string(localupgrade.StateCommitted)
 	brokerFailed := journal.Broker.FailureCode != ""
@@ -468,6 +562,18 @@ func (m *Manager) qualify(ctx context.Context, journal Journal) (Journal, error)
 			continue
 		}
 		state := m.broker.UpgradePeerState(participant.DeviceID)
+		if state.Connected && state.RuntimeVersion == participant.SourceVersion {
+			_, activateErr := m.broker.CallCurrentUpgrade(
+				ctx, participant.DeviceID, protocol.MethodActivateUpgrade, transactionParams(journal, participant),
+			)
+			if activateErr != nil {
+				m.reportError(fmt.Errorf("resume upgrade peer %s activation: %w", participant.DeviceID, activateErr))
+			}
+			// A successful activate can replace the source connection before the
+			// response is observed. Re-read the broker view so the same recovery
+			// pass can qualify a target-version replacement.
+			state = m.broker.UpgradePeerState(participant.DeviceID)
+		}
 		qualified := state.Connected && state.RuntimeVersion == journal.TargetVersion && state.WorkerSyncReady &&
 			state.WorkerReadiness.Epoch > participant.SourceReadinessEpoch &&
 			state.WorkerReadiness.State == protocol.WorkerReadinessReady &&
@@ -602,6 +708,7 @@ func (m *Manager) cancelPrepared(ctx context.Context, journal Journal) (Journal,
 		return nil
 	})
 	if err == nil {
+		m.broker.RequireRuntimeVersion(journal.SourceVersion)
 		m.broker.EndUpgradeDrain()
 	}
 	return journal, err

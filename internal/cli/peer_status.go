@@ -15,6 +15,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/buildinfo"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/connector"
+	"github.com/GhostFlying/delegation/internal/coordinatedupgrade"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/localupgrade"
 	"github.com/GhostFlying/delegation/internal/protocol"
@@ -209,10 +210,12 @@ type statusReader func(
 ) (localbridge.StatusSnapshot, error)
 type brokerStatusReader func(context.Context, string) (statuspage.Snapshot, error)
 type upgradeStatusReader func(context.Context, string) (*localbridge.UpgradeSnapshot, error)
+type controllerUpgradeStatusReader func(context.Context, string) (*localbridge.ControllerUpgradeSnapshot, error)
 
 func runStatus(args []string, stdout, stderr io.Writer) int {
 	return runStatusWithAllReaders(
 		args, stdout, stderr, localbridge.ReadStatusForIdentity, readBrokerStatus, localbridge.ReadUpgrade,
+		localbridge.ReadControllerUpgrade,
 	)
 }
 
@@ -222,7 +225,7 @@ func runStatusWithReader(
 	stderr io.Writer,
 	read statusReader,
 ) int {
-	return runStatusWithAllReaders(args, stdout, stderr, read, nil, nil)
+	return runStatusWithAllReaders(args, stdout, stderr, read, nil, nil, nil)
 }
 
 func runStatusWithReaders(
@@ -232,7 +235,7 @@ func runStatusWithReaders(
 	readPeer statusReader,
 	readBroker brokerStatusReader,
 ) int {
-	return runStatusWithAllReaders(args, stdout, stderr, readPeer, readBroker, nil)
+	return runStatusWithAllReaders(args, stdout, stderr, readPeer, readBroker, nil, nil)
 }
 
 func runStatusWithAllReaders(
@@ -242,6 +245,7 @@ func runStatusWithAllReaders(
 	readPeer statusReader,
 	readBroker brokerStatusReader,
 	readUpgrade upgradeStatusReader,
+	readControllerUpgrade controllerUpgradeStatusReader,
 ) int {
 	flags := flag.NewFlagSet("delegation status", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -323,6 +327,19 @@ func runStatusWithAllReaders(
 			}
 			status.Upgrade = toStatusPageUpgrade(upgrade)
 		}
+		if readControllerUpgrade != nil {
+			endpoint, _, endpointErr := localUpgradeEndpoint(cfg)
+			if endpointErr != nil {
+				return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
+			}
+			upgrade, upgradeErr := readControllerUpgrade(ctx, endpoint)
+			if upgradeErr != nil {
+				return writeFixedStatusError(stderr, brokerStatusUnavailableError, exitUnavailable)
+			}
+			if upgrade != nil {
+				status.ControllerUpgrade = toStatusPageControllerUpgrade(*upgrade)
+			}
+		}
 		return writeBrokerStatus(stdout, stderr, status, *jsonOutput)
 	}
 	if cfg.Role != delegationconfig.RolePeer {
@@ -373,22 +390,41 @@ func readStoppedBrokerStatus(
 ) (status statuspage.Snapshot, err error) {
 	// Establish that a protected matching transaction exists before touching
 	// the broker lease path, then hold the lease and read it again.
-	if _, err := readStoppedUpgrade(cfg, configPath); err != nil {
-		return statuspage.Snapshot{}, err
+	localUpgrade, localErr := readStoppedUpgrade(cfg, configPath)
+	controllerUpgrade, controllerErr := readStoppedControllerUpgrade(cfg)
+	if localErr != nil && !errors.Is(localErr, os.ErrNotExist) {
+		return statuspage.Snapshot{}, localErr
+	}
+	if controllerErr != nil && !errors.Is(controllerErr, os.ErrNotExist) {
+		return statuspage.Snapshot{}, controllerErr
+	}
+	if localErr != nil && controllerErr != nil {
+		return statuspage.Snapshot{}, errors.Join(localErr, controllerErr)
 	}
 	lease, err := store.AcquireBrokerLease(cfg.Broker.StateFile)
 	if err != nil {
 		return statuspage.Snapshot{}, err
 	}
 	defer func() { err = errors.Join(err, lease.Close()) }()
-	upgrade, err := readStoppedUpgrade(cfg, configPath)
-	if err != nil {
-		return statuspage.Snapshot{}, err
+	if localErr == nil {
+		localUpgrade, localErr = readStoppedUpgrade(cfg, configPath)
+		if localErr != nil {
+			return statuspage.Snapshot{}, localErr
+		}
+	}
+	if controllerErr == nil {
+		controllerUpgrade, controllerErr = readStoppedControllerUpgrade(cfg)
+		if controllerErr != nil {
+			return statuspage.Snapshot{}, controllerErr
+		}
 	}
 	status = statuspage.Snapshot{
 		TransportStatus: cfg.Transport.Status(), Version: buildinfo.Version,
 		ControllerID: cfg.ControllerID, ServiceRunning: false,
-		Upgrade: toStatusPageUpgrade(upgrade),
+		Upgrade: toStatusPageUpgrade(localUpgrade),
+	}
+	if controllerErr == nil {
+		status.ControllerUpgrade = toStatusPageControllerUpgrade(controllerUpgrade)
 	}
 	if cfg.EffectiveInstanceID() != delegationconfig.DefaultInstanceID {
 		status.InstanceID = cfg.EffectiveInstanceID()
@@ -429,6 +465,38 @@ func readStoppedUpgrade(
 	}
 	snapshot := bridgeUpgradeSnapshot(j)
 	return &snapshot, nil
+}
+
+func readStoppedControllerUpgrade(
+	cfg delegationconfig.Config,
+) (localbridge.ControllerUpgradeSnapshot, error) {
+	home, err := delegationconfig.DefaultHome()
+	if err != nil {
+		return localbridge.ControllerUpgradeSnapshot{}, err
+	}
+	home, err = filepath.Abs(home)
+	if err != nil {
+		return localbridge.ControllerUpgradeSnapshot{}, err
+	}
+	root, err := coordinatedupgrade.RootForBroker(home, cfg.EffectiveInstanceID())
+	if err != nil {
+		return localbridge.ControllerUpgradeSnapshot{}, err
+	}
+	transactionStore, err := coordinatedupgrade.OpenExistingStore(root)
+	if err != nil {
+		return localbridge.ControllerUpgradeSnapshot{}, err
+	}
+	journal, err := transactionStore.Load()
+	if err != nil {
+		return localbridge.ControllerUpgradeSnapshot{}, err
+	}
+	if journal.ControllerID != cfg.ControllerID ||
+		journal.InstanceID != cfg.EffectiveInstanceID() {
+		return localbridge.ControllerUpgradeSnapshot{}, errors.New(
+			"controller upgrade journal does not match the requested broker identity",
+		)
+	}
+	return controllerUpgradeSnapshot(journal), nil
 }
 
 func writePeerStatus(

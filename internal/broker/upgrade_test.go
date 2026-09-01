@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	upgradeTestDeviceA     = "123e4567-e89b-42d3-a456-426614174181"
-	upgradeTestDeviceB     = "123e4567-e89b-42d3-a456-426614174182"
-	upgradeTestConnectionA = "123e4567-e89b-42d3-a456-426614174183"
-	upgradeTestConnectionB = "123e4567-e89b-42d3-a456-426614174184"
+	upgradeTestDeviceA               = "123e4567-e89b-42d3-a456-426614174181"
+	upgradeTestDeviceB               = "123e4567-e89b-42d3-a456-426614174182"
+	upgradeTestConnectionA           = "123e4567-e89b-42d3-a456-426614174183"
+	upgradeTestConnectionB           = "123e4567-e89b-42d3-a456-426614174184"
+	testUpgradeReplacementConnection = "123e4567-e89b-42d3-a456-426614174185"
 )
 
 func TestUpgradeDrainWaitsForAdmittedMutationAndRejectsNewOnes(t *testing.T) {
@@ -61,6 +62,11 @@ func TestUpgradeParticipantFreezeIsSortedCapableAndGenerationPinned(t *testing.T
 	server.connections[upgradeTestDeviceA] = upgradeSession(
 		upgradeTestDeviceA, upgradeTestConnectionA, false,
 	)
+	incompatible := upgradeSession(
+		"123e4567-e89b-42d3-a456-426614174186", testUpgradeReplacementConnection, true,
+	)
+	incompatible.versionCompatible.Store(false)
+	server.connections[incompatible.deviceID] = incompatible
 	peers := server.FreezeUpgradePeers()
 	if len(peers) != 1 || peers[0].DeviceID != upgradeTestDeviceB ||
 		peers[0].ConnectionID != upgradeTestConnectionB {
@@ -122,6 +128,29 @@ func TestUpgradePeerStateCarriesReadinessSnapshot(t *testing.T) {
 	}
 }
 
+func TestRequiredRuntimeVersionKeepsLateOldPeerNonDispatchable(t *testing.T) {
+	server := upgradeTestServer()
+	oldPeer := upgradeSession(upgradeTestDeviceA, upgradeTestConnectionA, true)
+	newPeer := upgradeSession(upgradeTestDeviceB, upgradeTestConnectionB, true)
+	newPeer.runtimeVersion = "0.2.0"
+	oldPeer.versionCompatible.Store(true)
+	newPeer.versionCompatible.Store(true)
+	server.connections[upgradeTestDeviceA] = oldPeer
+	server.connections[upgradeTestDeviceB] = newPeer
+	server.RequireRuntimeVersion("0.2.0")
+	if oldPeer.versionCompatible.Load() || !newPeer.versionCompatible.Load() {
+		t.Fatalf("version compatibility old=%v new=%v",
+			oldPeer.versionCompatible.Load(), newPeer.versionCompatible.Load())
+	}
+	replacement := upgradeSession(upgradeTestDeviceA, testUpgradeReplacementConnection, true)
+	if _, active := server.activate(replacement); !active {
+		t.Fatal("replacement connection was not activated")
+	}
+	if replacement.versionCompatible.Load() {
+		t.Fatal("late old-version peer bypassed committed version fence")
+	}
+}
+
 func upgradeTestServer() *Server {
 	return &Server{
 		connections: map[string]*session{}, latestRevisions: map[string]uint64{},
@@ -140,5 +169,6 @@ func upgradeSession(deviceID, connectionID string, capable bool) *session {
 		features: features,
 	}
 	current.revision.Store(1)
+	current.versionCompatible.Store(true)
 	return current
 }

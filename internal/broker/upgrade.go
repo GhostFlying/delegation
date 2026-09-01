@@ -63,6 +63,22 @@ func (s *Server) UpgradeDraining() bool {
 	return s.upgradeDraining.Load()
 }
 
+// RequireRuntimeVersion gates dispatch independently of controller drain. A
+// committed controller transaction uses the target version so peers that were
+// offline at participant freeze must bootstrap locally before becoming usable.
+func (s *Server) RequireRuntimeVersion(version string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.requiredRuntimeVersion == version {
+		return
+	}
+	s.requiredRuntimeVersion = version
+	for _, current := range s.connections {
+		current.versionCompatible.Store(version == "" || current.runtimeVersion == version)
+	}
+	s.statusGeneration++
+}
+
 func (s *Server) SetUpgradeIntervention(deviceID string, required bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -83,7 +99,8 @@ func (s *Server) FreezeUpgradePeers() []UpgradePeer {
 	peers := make([]UpgradePeer, 0, len(s.connections))
 	for deviceID := range s.connections {
 		current := s.currentConnectionLocked(deviceID)
-		if current == nil || !slices.Contains(current.features, protocol.FeatureCoordinatedUpgrade) {
+		if current == nil || !current.versionCompatible.Load() ||
+			!slices.Contains(current.features, protocol.FeatureCoordinatedUpgrade) {
 			continue
 		}
 		peers = append(peers, UpgradePeer{

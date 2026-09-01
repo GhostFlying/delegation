@@ -58,9 +58,14 @@ func newCoordinatorFixture(t *testing.T) *coordinatorFixture {
 }
 
 func (f *coordinatorFixture) newManager() *Manager {
+	return f.newManagerAtVersion(testSourceVersion)
+}
+
+func (f *coordinatorFixture) newManagerAtVersion(version string) *Manager {
 	f.t.Helper()
 	manager, err := NewManager(Options{
-		Store: f.store, Broker: f.broker, Local: f.local, SourceVersion: testSourceVersion,
+		Store: f.store, Broker: f.broker, Local: f.local, SourceVersion: version,
+		ControllerID: testPeerDeviceID, InstanceID: "default",
 		NewID: func() (string, error) { return testControllerTransactionID, nil },
 		Now:   func() time.Time { return f.now }, CompletionTimeout: time.Minute,
 		ReportError: func(err error) { f.errors = append(f.errors, err) },
@@ -74,6 +79,13 @@ func (f *coordinatorFixture) newManager() *Manager {
 func TestManagerCompletesPeerFirstBrokerLastUpgrade(t *testing.T) {
 	fixture := newCoordinatorFixture(t)
 	journal, err := fixture.manager.Start(context.Background(), testTargetVersion, 30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if journal.State != StateQualifying || !journal.GlobalCommit || !fixture.broker.draining {
+		t.Fatalf("source broker journal = %#v, draining=%v", journal, fixture.broker.draining)
+	}
+	journal, err = fixture.newManagerAtVersion(testTargetVersion).Resume(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,6 +122,11 @@ func TestManagerCancelsAllPreparedWorkWhenArmFails(t *testing.T) {
 	if slices.Contains(*fixture.sharedCall, "peer:activate") || slices.Contains(*fixture.sharedCall, "broker:activate") {
 		t.Fatalf("pre-COMMIT failure activated service: %q", *fixture.sharedCall)
 	}
+	calls := len(*fixture.sharedCall)
+	resumed, err := fixture.manager.Cancel(context.Background(), journal.TransactionID)
+	if err != nil || resumed.State != StateCanceled || len(*fixture.sharedCall) != calls {
+		t.Fatalf("idempotent cancel = %#v, %v, calls=%q", resumed, err, *fixture.sharedCall)
+	}
 }
 
 func TestManagerRejectsReplacementConnectionBeforeCommit(t *testing.T) {
@@ -134,6 +151,10 @@ func TestManagerTreatsLostPeerActivationResponseAsAmbiguousAfterCommit(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	journal, err = fixture.newManagerAtVersion(testTargetVersion).Resume(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if journal.State != StateCompleted || !journal.GlobalCommit || len(fixture.errors) != 1 {
 		t.Fatalf("lost response journal = %#v, reports=%v", journal, fixture.errors)
 	}
@@ -145,6 +166,67 @@ func TestManagerTreatsLostPeerActivationResponseAsAmbiguousAfterCommit(t *testin
 	}
 }
 
+func TestManagerActivatesPeerThroughReplacementConnectionAfterCommit(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	fixture.broker.replaceBeforeMethod = protocol.MethodActivateUpgrade
+	journal, err := fixture.manager.Start(context.Background(), testTargetVersion, 30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err = fixture.newManagerAtVersion(testTargetVersion).Resume(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if journal.State != StateCompleted || journal.Participants[0].State != ParticipantQualified {
+		t.Fatalf("replacement activation journal = %#v", journal)
+	}
+	wantActivationCalls := 0
+	for _, call := range *fixture.sharedCall {
+		if call == "peer:activate" {
+			wantActivationCalls++
+		}
+	}
+	if wantActivationCalls != 2 {
+		t.Fatalf("replacement activation calls = %d, calls=%q", wantActivationCalls, *fixture.sharedCall)
+	}
+}
+
+func TestManagerRetriesLostPeerActivationAfterTargetBrokerRestart(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	fixture.broker.activationFailures = 2
+	fixture.broker.state = broker.UpgradePeerState{
+		UpgradePeer: broker.UpgradePeer{
+			DeviceID: testPeerDeviceID, ConnectionID: testReplacementConnectionID,
+			RuntimeVersion: testSourceVersion,
+		},
+		Connected: true, WorkerSyncReady: true, WorkerReadiness: readyWorkerReadiness(),
+	}
+	first, err := fixture.manager.Start(context.Background(), testTargetVersion, 30*time.Minute)
+	if err != nil || first.State != StateQualifying || first.Participants[0].State != ParticipantActivationRequested {
+		t.Fatalf("initial lost activation = %#v, %v", first, err)
+	}
+	if len(fixture.errors) != 1 {
+		t.Fatalf("initial activation reports = %v", fixture.errors)
+	}
+
+	resumed, err := fixture.newManagerAtVersion(testTargetVersion).Resume(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.State != StateCompleted || resumed.Participants[0].State != ParticipantQualified {
+		t.Fatalf("resumed peer activation = %#v", resumed)
+	}
+	activationCalls := 0
+	for _, call := range *fixture.sharedCall {
+		if call == "peer:activate" {
+			activationCalls++
+		}
+	}
+	if activationCalls != 3 {
+		t.Fatalf("peer activation calls = %d, calls=%q", activationCalls, *fixture.sharedCall)
+	}
+}
+
 func TestManagerResumesBrokerActivationAfterRestart(t *testing.T) {
 	fixture := newCoordinatorFixture(t)
 	fixture.local.failActivate = errors.New("injected broker activation response loss")
@@ -153,7 +235,7 @@ func TestManagerResumesBrokerActivationAfterRestart(t *testing.T) {
 		t.Fatalf("first activation = %#v, %v", first, err)
 	}
 	fixture.local.failActivate = nil
-	resumed, err := fixture.newManager().Resume(context.Background())
+	resumed, err := fixture.newManagerAtVersion(testTargetVersion).Resume(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,8 +251,13 @@ func TestManagerTimesOutUnavailablePeerAndRequiresIntervention(t *testing.T) {
 	if err != nil || journal.State != StateQualifying || !fixture.broker.draining {
 		t.Fatalf("initial qualification = %#v, %v, draining=%v", journal, err, fixture.broker.draining)
 	}
+	targetManager := fixture.newManagerAtVersion(testTargetVersion)
+	journal, err = targetManager.Resume(context.Background())
+	if err != nil || journal.State != StateQualifying {
+		t.Fatalf("target broker qualification = %#v, %v", journal, err)
+	}
 	fixture.now = fixture.now.Add(2 * time.Minute)
-	journal, err = fixture.manager.Resume(context.Background())
+	journal, err = targetManager.Resume(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +266,33 @@ func TestManagerTimesOutUnavailablePeerAndRequiresIntervention(t *testing.T) {
 		!fixture.broker.intervention[testPeerDeviceID] || fixture.broker.draining {
 		t.Fatalf("timed out qualification = %#v, intervention=%v, draining=%v",
 			journal, fixture.broker.intervention, fixture.broker.draining)
+	}
+}
+
+func TestManagerStartsCompletionDeadlineOnlyOnTargetBroker(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	fixture.broker.qualifyAfterActivate = false
+	journal, err := fixture.manager.Start(context.Background(), testTargetVersion, 30*time.Minute)
+	if err != nil || journal.State != StateQualifying || journal.CompletionDeadline != 0 {
+		t.Fatalf("source broker qualification = %#v, %v", journal, err)
+	}
+	fixture.now = fixture.now.Add(9 * time.Minute)
+	target := fixture.newManagerAtVersion(testTargetVersion)
+	journal, err = target.Resume(context.Background())
+	if err != nil || journal.CompletionDeadline != fixture.now.Add(time.Minute).UnixMilli() {
+		t.Fatalf("target broker completion deadline = %#v, %v", journal, err)
+	}
+}
+
+func TestManagerRejectsJournalForAnotherBrokerIdentity(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	journal := testControllerJournal()
+	journal.ControllerID = testControllerTransactionID
+	if _, _, err := fixture.store.CreateOrResume(journal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.manager.RestoreFence(); err == nil {
+		t.Fatal("RestoreFence accepted another broker's controller journal")
 	}
 }
 
@@ -194,9 +308,11 @@ type fakeBrokerControl struct {
 	replaced                  bool
 	pinnedReplacementAccepted bool
 	loseActivationResponse    bool
+	activationFailures        int
 	qualifyAfterActivate      bool
 	draining                  bool
 	intervention              map[string]bool
+	requiredRuntimeVersion    string
 }
 
 func newFakeBrokerControl(calls *[]string, now time.Time) *fakeBrokerControl {
@@ -212,6 +328,9 @@ func newFakeBrokerControl(calls *[]string, now time.Time) *fakeBrokerControl {
 func (f *fakeBrokerControl) BeginUpgradeDrain()    { f.draining = true }
 func (f *fakeBrokerControl) EndUpgradeDrain()      { f.draining = false }
 func (f *fakeBrokerControl) UpgradeDraining() bool { return f.draining }
+func (f *fakeBrokerControl) RequireRuntimeVersion(version string) {
+	f.requiredRuntimeVersion = version
+}
 func (f *fakeBrokerControl) FreezeUpgradePeers() []broker.UpgradePeer {
 	return slices.Clone(f.peers)
 }
@@ -253,6 +372,10 @@ func (f *fakeBrokerControl) upgrade(method string, params any) (protocol.Upgrade
 	case protocol.MethodArmUpgrade:
 		f.prepared.State = string(localupgrade.StateArmed)
 	case protocol.MethodActivateUpgrade:
+		if f.activationFailures > 0 {
+			f.activationFailures--
+			return protocol.UpgradeSnapshot{}, errors.New("injected activation failure")
+		}
 		f.prepared.State = string(localupgrade.StateCommitted)
 		f.prepared.CommitAuthorized = true
 		if f.qualifyAfterActivate {

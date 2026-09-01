@@ -297,8 +297,8 @@ attempts; a clean exit is not restarted. Upgrade changes only the runtime binary
 changes the config or environment-file path. Provider credentials may be rotated in the existing
 protected environment file, followed by a peer-service restart.
 
-Until controller-wide coordination is available, upgrade one idle managed service at a time with
-explicit local authorization. Upgrade every peer first and the broker last:
+The first move from alpha.4 requires explicit local bootstrap because alpha.4 has no upgrade RPC.
+Upgrade every peer first and the broker last:
 
 ```bash
 plugins/delegation/scripts/delegation-mcp service upgrade \
@@ -316,6 +316,26 @@ plugins/delegation/scripts/delegation-mcp service upgrade \
   --json
 ```
 
+After every online peer and the broker run a coordination-capable version, start one broker-owned
+transaction from the broker host:
+
+```bash
+plugins/delegation/scripts/delegation-mcp service upgrade \
+  --config <broker.json> \
+  --target-version <newer-version> \
+  --timeout 30m \
+  --json
+```
+
+The broker freezes the online, compatible, upgrade-capable peers, drains new mutations, prepares
+and arms every participant, persists an irreversible global COMMIT, activates peers first, and
+activates itself last. A pre-COMMIT failure cancels every prepared transaction. A lost activation
+reply is treated as ambiguous and recovered forward. Offline peers do not block the transaction;
+they remain non-dispatchable after reconnecting on the old version and require local `--bootstrap`.
+After the target broker starts, it waits at most ten minutes for each participant to reconnect,
+synchronize lifecycle state, and publish a newer target-bound readiness epoch. The transaction then
+finishes as `completed` or `completed_with_errors`; intervention peers remain non-dispatchable.
+
 Preparation accepts only a newer canonical GitHub release whose manifest, Sigstore provenance, tag
 commit, workflow identity, platform, architecture, and binary digest match. It also verifies exact
 native-service ownership, schema compatibility, and the absence of active work. The alpha.4
@@ -326,8 +346,10 @@ target resumes the protected journal. `--bootstrap` can start from the alpha.4 l
 new CLI reads and verifies its exact native definition, running process identity, and executable
 version locally, so it does not require the old service to implement the current local-bridge
 protocol or upgrade RPC. `prepared` and `armed` transactions may be cancelled with
-`service upgrade --cancel --config <path> --transaction-id <uuid>`; after durable commit
-authorization, recovery is forward-only. Never substitute an arbitrary URL, binary, repository, or
+`service upgrade --cancel --config <path> --transaction-id <uuid>`; a broker config cancels its
+controller transaction and a bootstrap config cancels its local transaction. Cancellation is
+refused after global or local durable commit authorization, when recovery is forward-only. Never
+substitute an arbitrary URL, binary, repository, or
 development override for a release upgrade.
 Peer completion additionally requires a newer target-bound execution-readiness epoch after the
 target reconnects and completes lifecycle synchronization; an old ready snapshot cannot qualify an
@@ -357,7 +379,9 @@ the current synchronized connection set. It includes registered/online/connected
 counts, current and lifetime dispatch/turn counts, occupied worker slots, and bounded artifact
 counts. Broker result status separates current delivery/detail retention from lifetime delivered,
 source-acknowledged, source-released, and compacted-detail totals. Both status surfaces include
-`serviceRunning` and a bounded `upgrade` snapshot when a local transaction exists. If a broker is
+`serviceRunning` and a bounded `upgrade` snapshot when a local transaction exists. Broker status
+also includes a bounded `controllerUpgrade` transaction, participant-state counts, completion
+deadline, global-COMMIT decision, and intervention state. If a broker is
 stopped during activation, the CLI reads the protected journal only after acquiring the broker state
 lease and omits unavailable operational counters from human output. Neither surface includes
 prompts, messages, Git URLs, workspaces, rollout contents, credentials, provider configuration,

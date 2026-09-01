@@ -21,6 +21,11 @@ The original M6 platform qualification used only fresh independent deployments. 
 adds one narrow in-place path: an exact alpha.4 schema-3 TCP service with broker schema 19 or peer
 schema 15 may move forward through the protected local bootstrap upgrade. Arbitrary config/state
 reuse, transport migration, downgrade, and operator-selected binaries remain unsupported.
+After that bootstrap boundary, coordination-capable releases support a broker-owned, peer-first and
+broker-last transaction over the existing authenticated connector sessions and protected local
+management endpoint. The coordinator freezes only online compatible peers, persists COMMIT before
+activation, resumes forward after response loss or restart, and leaves old-version offline peers
+non-dispatchable until they are bootstrapped locally.
 
 ## Acceptance Disposition
 

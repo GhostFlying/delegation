@@ -46,6 +46,31 @@ func TestJSONStatusReturnsOneAggregateSnapshot(t *testing.T) {
 	}
 }
 
+func TestJSONStatusIncludesBoundedControllerUpgrade(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.ControllerUpgrade = &ControllerUpgrade{
+		TransactionID: "123e4567-e89b-42d3-a456-426614174199", State: "completed_with_errors",
+		SourceVersion: "0.1.0", TargetVersion: "0.2.0", GlobalCommit: true,
+		Deadline: 1, CompletionDeadline: 2, UpdatedAt: 3,
+		Participants: ControllerUpgradeCounts{Total: 2, Qualified: 1, InterventionRequired: 1},
+		FailureCode:  "upgrade_intervention_required",
+	}
+	response := requestStatus(t, NewHandler(func(context.Context) (Snapshot, error) {
+		return snapshot, nil
+	}), http.MethodGet, JSONPath)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+	}
+	var got Snapshot
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ControllerUpgrade == nil || got.ControllerUpgrade.Participants.InterventionRequired != 1 ||
+		got.ControllerUpgrade.State != "completed_with_errors" {
+		t.Fatalf("controller upgrade status = %#v", got.ControllerUpgrade)
+	}
+}
+
 func TestTailscaleStatusExposesOnlyHostnameAndTransport(t *testing.T) {
 	snapshot := testSnapshot()
 	snapshot.TransportStatus = config.TransportStatus{
@@ -360,6 +385,18 @@ func TestStatusProviderFailuresReturnBoundedError(t *testing.T) {
 			provider: func(context.Context) (Snapshot, error) {
 				snapshot := testSnapshot()
 				snapshot.Results.DeliveryPending = snapshot.Results.DetailsRetained + 1
+				return snapshot, nil
+			},
+		},
+		{
+			name: "inconsistent controller upgrade counts",
+			provider: func(context.Context) (Snapshot, error) {
+				snapshot := testSnapshot()
+				snapshot.ControllerUpgrade = &ControllerUpgrade{
+					TransactionID: "123e4567-e89b-42d3-a456-426614174199", State: "qualifying",
+					SourceVersion: "0.1.0", TargetVersion: "0.2.0", GlobalCommit: true,
+					Deadline: 1, UpdatedAt: 1, Participants: ControllerUpgradeCounts{Total: 1},
+				}
 				return snapshot, nil
 			},
 		},

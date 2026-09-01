@@ -37,6 +37,19 @@ func OpenStore(path string) (*Store, error) {
 	return &Store{path: path, now: time.Now}, nil
 }
 
+// OpenExistingStore opens protected controller state without creating it.
+// Read-only status uses this path so a configured identity cannot cause
+// filesystem mutations merely by being inspected.
+func OpenExistingStore(path string) (*Store, error) {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, errors.New("coordinated upgrade root must be absolute and clean")
+	}
+	if err := delegationconfig.ValidatePrivateDirectory(path); err != nil {
+		return nil, fmt.Errorf("validate coordinated upgrade root: %w", err)
+	}
+	return &Store{path: path, now: time.Now}, nil
+}
+
 func (s *Store) Load() (Journal, error) {
 	data, err := delegationconfig.ReadProtectedFile(filepath.Join(s.path, journalName), maximumJournalBytes)
 	if err != nil {

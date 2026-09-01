@@ -65,26 +65,27 @@ type ResultPackageAvailabilityProvider interface {
 }
 
 type Server struct {
-	listener      net.Listener
-	identity      ServiceIdentity
-	backend       Backend
-	authorizer    Authorizer
-	status        StatusProvider
-	readiness     WorkerReadinessManager
-	upgrade       UpgradeManager
-	results       ResultPackageAvailabilityProvider
-	apply         ResultApplyProvider
-	connectionSem chan struct{}
-	waitSem       chan struct{}
-	controlSem    chan struct{}
-	started       atomic.Bool
-	closeOnce     sync.Once
-	wait          sync.WaitGroup
-	serveDone     chan struct{}
-	mu            sync.Mutex
-	connections   map[net.Conn]struct{}
-	closed        bool
-	closeErr      error
+	listener          net.Listener
+	identity          ServiceIdentity
+	backend           Backend
+	authorizer        Authorizer
+	status            StatusProvider
+	readiness         WorkerReadinessManager
+	upgrade           UpgradeManager
+	controllerUpgrade ControllerUpgradeManager
+	results           ResultPackageAvailabilityProvider
+	apply             ResultApplyProvider
+	connectionSem     chan struct{}
+	waitSem           chan struct{}
+	controlSem        chan struct{}
+	started           atomic.Bool
+	closeOnce         sync.Once
+	wait              sync.WaitGroup
+	serveDone         chan struct{}
+	mu                sync.Mutex
+	connections       map[net.Conn]struct{}
+	closed            bool
+	closeErr          error
 }
 
 func Listen(endpoint string, identity ServiceIdentity, backend Backend) (*Server, error) {
@@ -161,10 +162,27 @@ func ListenWithUpgradeManagement(
 	readiness WorkerReadinessManager,
 	upgrade UpgradeManager,
 ) (*Server, error) {
+	return ListenWithControllerUpgradeManagement(
+		endpoint, identity, backend, authorizer, status, results, apply, readiness, upgrade, nil,
+	)
+}
+
+func ListenWithControllerUpgradeManagement(
+	endpoint string,
+	identity ServiceIdentity,
+	backend Backend,
+	authorizer Authorizer,
+	status StatusProvider,
+	results ResultPackageAvailabilityProvider,
+	apply ResultApplyProvider,
+	readiness WorkerReadinessManager,
+	upgrade UpgradeManager,
+	controllerUpgrade ControllerUpgradeManager,
+) (*Server, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
-	if backend == nil && upgrade == nil {
+	if backend == nil && upgrade == nil && controllerUpgrade == nil {
 		return nil, errors.New("local bridge backend is required")
 	}
 	listener, err := listen(endpoint)
@@ -173,14 +191,15 @@ func ListenWithUpgradeManagement(
 	}
 	return &Server{
 		listener: listener, identity: identity, backend: backend, authorizer: authorizer, status: status,
-		results:       results,
-		apply:         apply,
-		readiness:     readiness,
-		upgrade:       upgrade,
-		connectionSem: make(chan struct{}, maximumConcurrentCalls),
-		waitSem:       make(chan struct{}, maximumConcurrentWaitCalls),
-		controlSem:    make(chan struct{}, maximumConcurrentControlCalls),
-		serveDone:     make(chan struct{}), connections: make(map[net.Conn]struct{}),
+		results:           results,
+		apply:             apply,
+		readiness:         readiness,
+		upgrade:           upgrade,
+		controllerUpgrade: controllerUpgrade,
+		connectionSem:     make(chan struct{}, maximumConcurrentCalls),
+		waitSem:           make(chan struct{}, maximumConcurrentWaitCalls),
+		controlSem:        make(chan struct{}, maximumConcurrentControlCalls),
+		serveDone:         make(chan struct{}), connections: make(map[net.Conn]struct{}),
 	}, nil
 }
 
@@ -292,7 +311,7 @@ func (s *Server) handle(serverContext context.Context, connection net.Conn) {
 	if request.Method == protocol.MethodSyncWorkspace || request.Method == MethodApplyAgentChanges {
 		callTimeout = localWorkspaceCallTimeout
 	}
-	if isUpgradeMethod(request.Method) {
+	if isUpgradeMethod(request.Method) || isControllerUpgradeMethod(request.Method) {
 		callTimeout = localUpgradeCallTimeout
 	}
 	ctx, cancel := context.WithTimeout(serverContext, callTimeout)
@@ -455,6 +474,9 @@ func (s *Server) call(ctx context.Context, request request) (json.RawMessage, *p
 	if isUpgradeMethod(request.Method) {
 		return s.callUpgrade(ctx, request)
 	}
+	if isControllerUpgradeMethod(request.Method) {
+		return s.callControllerUpgrade(ctx, request)
+	}
 	if request.Method == MethodApplyAgentChanges {
 		return s.applyAgentChanges(ctx, request)
 	}
@@ -553,6 +575,76 @@ func isUpgradeMethod(method string) bool {
 	default:
 		return false
 	}
+}
+
+func isControllerUpgradeMethod(method string) bool {
+	switch method {
+	case methodControllerUpgradeStart, methodControllerUpgradeCancel, methodControllerUpgradeStatus:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) callControllerUpgrade(
+	ctx context.Context, request request,
+) (json.RawMessage, *protocol.Error) {
+	if request.TreeID != "" || request.Source != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorInvalidRequest, Message: "invalid controller upgrade request"}
+	}
+	if s.identity.EffectiveRole() != config.RoleBroker || s.controllerUpgrade == nil {
+		return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "controller upgrade management unavailable"}
+	}
+	var (
+		snapshot ControllerUpgradeSnapshot
+		err      error
+	)
+	switch request.Method {
+	case methodControllerUpgradeStart:
+		var params controllerUpgradeStartParams
+		if decodeResult(request.Payload, &params) != nil ||
+			!semver.IsValid("v"+params.TargetVersion) || params.TimeoutMillis <= 0 ||
+			params.TimeoutMillis > maximumControllerUpgradeTimeoutMillis {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidParams, Message: "invalid controller upgrade target"}
+		}
+		snapshot, err = s.controllerUpgrade.StartControllerUpgrade(
+			ctx, params.TargetVersion, params.TimeoutMillis,
+		)
+	case methodControllerUpgradeCancel:
+		var params controllerUpgradeTransactionParams
+		if decodeResult(request.Payload, &params) != nil ||
+			identity.ValidateID(params.TransactionID) != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidParams, Message: "invalid controller upgrade transaction"}
+		}
+		snapshot, err = s.controllerUpgrade.CancelControllerUpgrade(ctx, params.TransactionID)
+	case methodControllerUpgradeStatus:
+		var params struct{}
+		if decodeResult(request.Payload, &params) != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInvalidParams, Message: "invalid controller upgrade status request"}
+		}
+		current, statusErr := s.controllerUpgrade.ControllerUpgradeStatus(ctx)
+		if statusErr != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorUnavailable, Message: "controller upgrade status unavailable"}
+		}
+		result, encodeErr := json.Marshal(struct {
+			Upgrade *ControllerUpgradeSnapshot `json:"upgrade"`
+		}{Upgrade: current})
+		if encodeErr != nil {
+			return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode controller upgrade status"}
+		}
+		return result, nil
+	}
+	if err != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorConflict, Message: "controller upgrade request rejected"}
+	}
+	if err := snapshot.Validate(); err != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "controller upgrade result invalid"}
+	}
+	result, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil, &protocol.Error{Code: protocol.ErrorInternal, Message: "encode controller upgrade result"}
+	}
+	return result, nil
 }
 
 func (s *Server) callUpgrade(

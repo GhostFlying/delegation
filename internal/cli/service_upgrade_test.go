@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
@@ -24,25 +25,28 @@ import (
 
 const upgradeTestTransactionID = "123e4567-e89b-42d3-a456-426614174388"
 
-func TestServiceUpgradeRequiresBootstrapUntilCoordinationIsAvailable(t *testing.T) {
-	for _, role := range []delegationconfig.Role{
-		delegationconfig.RoleBroker, delegationconfig.RolePeer,
-	} {
-		t.Run(string(role), func(t *testing.T) {
-			configPath, _ := writeStatusTestConfig(t, role)
-			args := []string{
-				"--config", configPath, "--target-version", "0.1.0-alpha.8",
-			}
-			if role == delegationconfig.RolePeer {
-				args = append(args, "--environment-file", privateTestPath(t, "peer.env"))
-			}
-			var stdout bytes.Buffer
-			var stderr bytes.Buffer
-			code := runServiceUpgrade(args, &stdout, &stderr)
-			if code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "--bootstrap") {
-				t.Fatalf("upgrade = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
-			}
-		})
+func TestPeerServiceUpgradeRequiresBootstrap(t *testing.T) {
+	configPath, _ := writeStatusTestConfig(t, delegationconfig.RolePeer)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runServiceUpgrade([]string{
+		"--config", configPath, "--target-version", "0.1.0-alpha.8",
+		"--environment-file", privateTestPath(t, "peer.env"),
+	}, &stdout, &stderr)
+	if code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "--bootstrap") {
+		t.Fatalf("upgrade = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestServiceUpgradeRejectsTimeoutOverThirtyMinutes(t *testing.T) {
+	configPath, _ := writeStatusTestConfig(t, delegationconfig.RoleBroker)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runServiceUpgrade([]string{
+		"--config", configPath, "--target-version", "0.1.0-alpha.8", "--timeout", "30m1ns",
+	}, &stdout, &stderr)
+	if code == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "between 1ns and 30m") {
+		t.Fatalf("oversized timeout = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -393,7 +397,7 @@ func TestServiceUpgradePrefersCurrentProtectedLocalBridge(t *testing.T) {
 	}
 }
 
-func TestServiceUpgradeCancelUsesProtectedLocalJournal(t *testing.T) {
+func TestServiceUpgradeCancelUsesProtectedControllerJournal(t *testing.T) {
 	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RoleBroker)
 	called := 0
 	var stdout bytes.Buffer
@@ -402,28 +406,102 @@ func TestServiceUpgradeCancelUsesProtectedLocalJournal(t *testing.T) {
 		"--cancel", "--config", configPath, "--transaction-id",
 		upgradeTestTransactionID, "--json", "--timeout", "5s",
 	}, &stdout, &stderr, serviceUpgradeCommandDependencies{
-		cancel: func(
-			_ context.Context, gotConfig delegationconfig.Config, gotConfigPath, gotTransactionID string,
-		) (localbridge.UpgradeSnapshot, error) {
+		cancelCoordinated: func(
+			_ context.Context, gotConfig delegationconfig.Config, gotTransactionID string,
+		) (localbridge.ControllerUpgradeSnapshot, error) {
 			called++
-			if gotConfig.Role != cfg.Role || gotConfigPath != configPath || gotTransactionID != upgradeTestTransactionID {
-				t.Fatalf("cancel inputs = %#v, %q, %q", gotConfig, gotConfigPath, gotTransactionID)
+			if gotConfig.Role != cfg.Role || gotTransactionID != upgradeTestTransactionID {
+				t.Fatalf("cancel inputs = %#v, %q", gotConfig, gotTransactionID)
 			}
-			return upgradeTestSnapshot(localupgrade.StateRolledBack), nil
+			return controllerUpgradeTestSnapshot("canceled"), nil
 		},
 	})
 	if code != 0 || stderr.Len() != 0 {
 		t.Fatalf("cancel = %d, stderr %q", code, stderr.String())
 	}
-	var result localbridge.UpgradeSnapshot
+	var result localbridge.ControllerUpgradeSnapshot
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.State != string(localupgrade.StateRolledBack) || result.CommitAuthorized {
+	if result.State != "canceled" || result.GlobalCommit {
 		t.Fatalf("cancel result = %#v", result)
 	}
 	if called != 1 {
 		t.Fatalf("cancel calls = %d, want 1", called)
+	}
+}
+
+func TestBrokerServiceUpgradeUsesProtectedControllerManagement(t *testing.T) {
+	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RoleBroker)
+	called := 0
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runServiceUpgradeWithDependencies([]string{
+		"--config", configPath, "--target-version", "0.1.0-alpha.8",
+		"--timeout", "5s", "--json",
+	}, &stdout, &stderr, serviceUpgradeCommandDependencies{
+		coordinate: func(
+			_ context.Context, gotConfig delegationconfig.Config, target string, timeout time.Duration,
+		) (localbridge.ControllerUpgradeSnapshot, error) {
+			called++
+			if gotConfig.Role != cfg.Role || target != "0.1.0-alpha.8" || timeout != 5*time.Second {
+				t.Fatalf("coordinate inputs = %#v, %q, %v", gotConfig, target, timeout)
+			}
+			return controllerUpgradeTestSnapshot("completed"), nil
+		},
+	})
+	if code != 0 || stderr.Len() != 0 || called != 1 {
+		t.Fatalf("upgrade = %d, stderr %q, calls %d", code, stderr.String(), called)
+	}
+	var result localbridge.ControllerUpgradeSnapshot
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.State != "completed" || !result.GlobalCommit {
+		t.Fatalf("controller result = %#v", result)
+	}
+}
+
+func TestCoordinatedServiceUpgradeRetriesLostStartRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	startCalls := 0
+	readCalls := 0
+	result, err := coordinateServiceUpgradeWithClient(
+		ctx, "0.1.0-alpha.8", 5_000,
+		func(context.Context, string, int64) (localbridge.ControllerUpgradeSnapshot, error) {
+			startCalls++
+			if startCalls == 1 {
+				return localbridge.ControllerUpgradeSnapshot{}, errors.New("request lost")
+			}
+			return controllerUpgradeTestSnapshot("completed"), nil
+		},
+		func(context.Context) (*localbridge.ControllerUpgradeSnapshot, error) {
+			readCalls++
+			return nil, nil
+		},
+	)
+	if err != nil || result.State != "completed" || startCalls != 2 || readCalls == 0 {
+		t.Fatalf("lost start recovery = %#v, %v, starts=%d reads=%d",
+			result, err, startCalls, readCalls)
+	}
+}
+
+func TestCoordinatedServiceUpgradeRecoversLostActivationResponseFromStatus(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	want := controllerUpgradeTestSnapshot("completed_with_errors")
+	startCalls := 0
+	result, err := coordinateServiceUpgradeWithClient(
+		ctx, want.TargetVersion, 5_000,
+		func(context.Context, string, int64) (localbridge.ControllerUpgradeSnapshot, error) {
+			startCalls++
+			return localbridge.ControllerUpgradeSnapshot{}, errors.New("activation response lost")
+		},
+		func(context.Context) (*localbridge.ControllerUpgradeSnapshot, error) { return &want, nil },
+	)
+	if err != nil || !reflect.DeepEqual(result, want) || startCalls != 1 {
+		t.Fatalf("lost response recovery = %#v, %v, starts=%d", result, err, startCalls)
 	}
 }
 
@@ -731,6 +809,15 @@ func upgradeTestSnapshot(state localupgrade.State) localbridge.UpgradeSnapshot {
 	return localbridge.UpgradeSnapshot{
 		TransactionID: upgradeTestTransactionID, State: string(state),
 		SourceVersion: "0.1.0-alpha.7", TargetVersion: "0.1.0-alpha.8", UpdatedAt: 1,
+	}
+}
+
+func controllerUpgradeTestSnapshot(state string) localbridge.ControllerUpgradeSnapshot {
+	return localbridge.ControllerUpgradeSnapshot{
+		TransactionID: upgradeTestTransactionID, State: state,
+		SourceVersion: "0.1.0-alpha.7", TargetVersion: "0.1.0-alpha.8",
+		GlobalCommit: state != "canceled", Deadline: 2, UpdatedAt: 1,
+		Participants: localbridge.ControllerUpgradeCounts{},
 	}
 }
 

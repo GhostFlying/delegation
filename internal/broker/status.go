@@ -31,14 +31,30 @@ func (s *Server) Status(ctx context.Context) (statuspage.Snapshot, error) {
 		if err != nil {
 			return statuspage.Snapshot{}, err
 		}
+		controllerUpgrade, err := s.readControllerUpgradeStatus()
+		if err != nil {
+			return statuspage.Snapshot{}, err
+		}
 		if s.connectionStatusGenerationMatches(connections.generation) {
-			return s.buildStatusSnapshot(durable, connections), nil
+			snapshot := s.buildStatusSnapshot(durable, connections)
+			snapshot.ControllerUpgrade = controllerUpgrade
+			return snapshot, nil
 		}
 		if err := ctx.Err(); err != nil {
 			return statuspage.Snapshot{}, err
 		}
 	}
 	return statuspage.Snapshot{}, errors.New("broker connections changed during status snapshot")
+}
+
+func (s *Server) readControllerUpgradeStatus() (*statuspage.ControllerUpgrade, error) {
+	s.mu.Lock()
+	read := s.controllerUpgradeStatus
+	s.mu.Unlock()
+	if read == nil {
+		return nil, nil
+	}
+	return read()
 }
 
 type connectionStatusSnapshot struct {

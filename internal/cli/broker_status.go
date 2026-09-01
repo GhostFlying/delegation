@@ -100,6 +100,7 @@ func writeBrokerStatus(
 		}
 		fmt.Fprintf(&rendered, "service running: %t\n", status.ServiceRunning)
 		writeUpgradeStatus(&rendered, fromStatusPageUpgrade(status.Upgrade))
+		writeControllerUpgradeStatus(&rendered, status.ControllerUpgrade)
 		if status.ServiceRunning {
 			fmt.Fprintf(&rendered, "uptime seconds: %d\n", status.UptimeSeconds)
 			fmt.Fprintln(&rendered, "devices:")
@@ -139,6 +140,28 @@ func writeBrokerStatus(
 		return writeFixedStatusError(stderr, statusOutputError, 1)
 	}
 	return 0
+}
+
+func writeControllerUpgradeStatus(rendered *bytes.Buffer, upgrade *statuspage.ControllerUpgrade) {
+	if upgrade == nil {
+		return
+	}
+	fmt.Fprintln(rendered, "controller upgrade:")
+	fmt.Fprintf(rendered, "  transaction: %s\n", upgrade.TransactionID)
+	fmt.Fprintf(rendered, "  state: %s\n", upgrade.State)
+	fmt.Fprintf(rendered, "  version: %s -> %s\n", upgrade.SourceVersion, upgrade.TargetVersion)
+	fmt.Fprintf(rendered, "  global commit: %t\n", upgrade.GlobalCommit)
+	fmt.Fprintf(rendered, "  completion deadline: %d\n", upgrade.CompletionDeadline)
+	fmt.Fprintf(rendered, "  participants total: %d\n", upgrade.Participants.Total)
+	fmt.Fprintf(rendered, "  participants qualified: %d\n", upgrade.Participants.Qualified)
+	fmt.Fprintf(rendered, "  participants intervention required: %d\n",
+		upgrade.Participants.InterventionRequired)
+	if upgrade.BrokerFailureCode != "" {
+		fmt.Fprintf(rendered, "  broker failure: %s\n", upgrade.BrokerFailureCode)
+	}
+	if upgrade.FailureCode != "" {
+		fmt.Fprintf(rendered, "  failure: %s\n", upgrade.FailureCode)
+	}
 }
 
 func toStatusPageUpgrade(upgrade *localbridge.UpgradeSnapshot) *statuspage.Upgrade {

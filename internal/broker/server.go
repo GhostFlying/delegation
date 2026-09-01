@@ -21,6 +21,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/protocol"
+	"github.com/GhostFlying/delegation/internal/statuspage"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
 	"github.com/coder/websocket"
@@ -108,25 +109,27 @@ type Options struct {
 }
 
 type Server struct {
-	controllerID      string
-	instanceID        string
-	hostKind          hostkind.Kind
-	transport         config.TransportStatus
-	authMode          config.AuthMode
-	masterToken       tokenfile.Token
-	registry          Registry
-	statusReader      StatusReader
-	heartbeatInterval time.Duration
-	newID             func() (string, error)
-	now               func() time.Time
-	reportError       func(error)
-	context           context.Context
-	cancel            context.CancelFunc
+	controllerID            string
+	instanceID              string
+	hostKind                hostkind.Kind
+	transport               config.TransportStatus
+	authMode                config.AuthMode
+	masterToken             tokenfile.Token
+	registry                Registry
+	statusReader            StatusReader
+	controllerUpgradeStatus func() (*statuspage.ControllerUpgrade, error)
+	heartbeatInterval       time.Duration
+	newID                   func() (string, error)
+	now                     func() time.Time
+	reportError             func(error)
+	context                 context.Context
+	cancel                  context.CancelFunc
 
 	mu                      sync.Mutex
 	connections             map[string]*session
 	latestRevisions         map[string]uint64
 	statusGeneration        uint64
+	requiredRuntimeVersion  string
 	upgradeIntervention     map[string]bool
 	peers                   map[*websocket.Conn]struct{}
 	pendingHellos           int
@@ -160,6 +163,17 @@ type Server struct {
 	shutdownDone chan struct{}
 	shutdownErr  error
 	startedAt    time.Time
+}
+
+// SetControllerUpgradeStatusReader installs the protected controller-journal
+// projection after the coordinator is constructed around this server.
+func (s *Server) SetControllerUpgradeStatusReader(
+	read func() (*statuspage.ControllerUpgrade, error),
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.controllerUpgradeStatus = read
+	s.statusGeneration++
 }
 
 type peerAuthority struct {
@@ -694,7 +708,12 @@ func (s *Server) acceptHello(
 	}
 	current.workerApplied.Store(appliedRevision)
 	current.workerSyncReady.Store(appliedRevision == hello.WorkerRevision)
-	current.versionCompatible.Store(true)
+	s.mu.Lock()
+	requiredRuntimeVersion := s.requiredRuntimeVersion
+	s.mu.Unlock()
+	current.versionCompatible.Store(
+		requiredRuntimeVersion == "" || hello.RuntimeVersion == requiredRuntimeVersion,
+	)
 	persistedReadiness, err := s.registry.PutWorkerReadiness(
 		ctx, s.controllerID, current.deviceID, hello.WorkerReadiness,
 	)
@@ -782,6 +801,9 @@ func (s *Server) activate(current *session) (*session, bool) {
 	if previous != nil && previous.revision.Load() > current.revision.Load() {
 		return previous, false
 	}
+	current.versionCompatible.Store(
+		s.requiredRuntimeVersion == "" || current.runtimeVersion == s.requiredRuntimeVersion,
+	)
 	current.draining.Store(s.upgradeDraining.Load() || s.upgradeIntervention[current.deviceID])
 	s.connections[current.deviceID] = current
 	s.statusGeneration++

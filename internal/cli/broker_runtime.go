@@ -14,6 +14,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/broker"
 	"github.com/GhostFlying/delegation/internal/buildinfo"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/coordinatedupgrade"
 	"github.com/GhostFlying/delegation/internal/localbridge"
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/statuspage"
@@ -181,19 +182,6 @@ func runBrokerService(
 	if err != nil {
 		return err
 	}
-	resources.localBridge, err = localbridge.ListenWithUpgradeManagement(
-		bridgeEndpoint, bridgeIdentity, nil, nil, nil, nil, nil, nil, upgradeManager,
-	)
-	if err != nil {
-		probeContext, cancelProbe := context.WithTimeout(ctx, 2*time.Second)
-		identityErr := localbridge.Probe(probeContext, bridgeEndpoint, bridgeIdentity)
-		cancelProbe()
-		return errors.Join(err, identityErr)
-	}
-	localBridgeDone := make(chan error, 1)
-	resources.localBridgeDone = localBridgeDone
-	go func() { localBridgeDone <- resources.localBridge.Serve(ctx) }()
-	go runCommittedUpgradeCleanup(ctx, upgradeManager)
 	brokerServer, err := broker.New(broker.Options{
 		ControllerID: cfg.ControllerID,
 		InstanceID:   cfg.EffectiveInstanceID(),
@@ -212,6 +200,51 @@ func runBrokerService(
 		return nil
 	}
 	resources.broker = brokerServer
+	home, err := delegationconfig.DefaultHome()
+	if err != nil {
+		return err
+	}
+	home, err = filepath.Abs(home)
+	if err != nil {
+		return err
+	}
+	controllerRoot, err := coordinatedupgrade.RootForBroker(home, cfg.EffectiveInstanceID())
+	if err != nil {
+		return err
+	}
+	controllerStore, err := coordinatedupgrade.OpenStore(controllerRoot)
+	if err != nil {
+		return fmt.Errorf("initialize broker controller upgrade store: %w", err)
+	}
+	controllerManager, err := coordinatedupgrade.NewManager(coordinatedupgrade.Options{
+		Store: controllerStore, Broker: resources.broker, Local: upgradeManager,
+		SourceVersion: buildinfo.Version, ControllerID: cfg.ControllerID,
+		InstanceID: cfg.EffectiveInstanceID(), ReportError: options.reportError,
+	})
+	if err != nil {
+		return fmt.Errorf("initialize broker controller upgrade management: %w", err)
+	}
+	resources.broker.SetControllerUpgradeStatusReader(func() (*statuspage.ControllerUpgrade, error) {
+		return statusPageControllerUpgrade(controllerManager)
+	})
+	controllerJournal, err := controllerManager.RestoreFence()
+	if err != nil {
+		return fmt.Errorf("restore broker controller upgrade fence: %w", err)
+	}
+	resources.localBridge, err = localbridge.ListenWithControllerUpgradeManagement(
+		bridgeEndpoint, bridgeIdentity, nil, nil, nil, nil, nil, nil, upgradeManager,
+		controllerUpgradeManagement{manager: controllerManager},
+	)
+	if err != nil {
+		probeContext, cancelProbe := context.WithTimeout(ctx, 2*time.Second)
+		identityErr := localbridge.Probe(probeContext, bridgeEndpoint, bridgeIdentity)
+		cancelProbe()
+		return errors.Join(err, identityErr)
+	}
+	localBridgeDone := make(chan error, 1)
+	resources.localBridgeDone = localBridgeDone
+	go func() { localBridgeDone <- resources.localBridge.Serve(ctx) }()
+	go runCommittedUpgradeCleanup(ctx, upgradeManager)
 	prepare := options.prepare
 	if prepare == nil {
 		prepare = func(ctx context.Context, server *broker.Server) (store.PresenceTransition, error) {
@@ -265,6 +298,9 @@ func runBrokerService(
 	go func() {
 		serveDone <- resources.httpServer.Serve(resources.listener)
 	}()
+	if controllerJournal != nil && !controllerJournal.Terminal() {
+		go controllerManager.RunRecovery(ctx)
+	}
 	var statusServeDone chan error
 	if resources.statusHTTPServer != nil {
 		statusServeDone = make(chan error, 1)
