@@ -306,6 +306,7 @@ func TestConnectorPublishesTerminalReadinessOncePerActiveConnection(t *testing.T
 	)
 	readiness := &mutableReadinessSource{readiness: pending}
 	updateSeen := make(chan protocol.WorkerReadiness, 2)
+	releaseAcknowledgement := make(chan struct{})
 	hold := make(chan struct{})
 	server := newLifecycleBrokerDynamic(t, func(
 		connection *websocket.Conn, helloRequest protocol.Envelope, hello protocol.Hello,
@@ -322,6 +323,7 @@ func TestConnectorPublishesTerminalReadinessOncePerActiveConnection(t *testing.T
 			return
 		}
 		updateSeen <- params.Readiness
+		<-releaseAcknowledgement
 		writeTestResult(t, connection, request, protocol.UpdateWorkerReadinessResult{
 			Readiness: params.Readiness,
 		})
@@ -342,12 +344,8 @@ func TestConnectorPublishesTerminalReadinessOncePerActiveConnection(t *testing.T
 	terminal.LastAttemptAt = 2
 	terminal.UpdatedAt = 2
 	readiness.set(terminal)
-	if err := client.UpdateWorkerReadiness(context.Background(), terminal); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.UpdateWorkerReadiness(context.Background(), terminal); err != nil {
-		t.Fatal(err)
-	}
+	updateErrors := make(chan error, 2)
+	go func() { updateErrors <- client.UpdateWorkerReadiness(context.Background(), terminal) }()
 	select {
 	case got := <-updateSeen:
 		if got != terminal {
@@ -356,10 +354,190 @@ func TestConnectorPublishesTerminalReadinessOncePerActiveConnection(t *testing.T
 	case <-time.After(2 * time.Second):
 		t.Fatal("terminal readiness update was not sent")
 	}
+	go func() { updateErrors <- client.UpdateWorkerReadiness(context.Background(), terminal) }()
+	select {
+	case err := <-updateErrors:
+		t.Fatalf("concurrent terminal update finished before the in-flight acknowledgement: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseAcknowledgement)
+	for range 2 {
+		if err := <-updateErrors; err != nil {
+			t.Fatal(err)
+		}
+	}
 	select {
 	case duplicate := <-updateSeen:
 		t.Fatalf("duplicate terminal readiness update = %#v", duplicate)
 	case <-time.After(50 * time.Millisecond):
+	}
+	cancelRun()
+	if err := waitClient(done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConnectorPublishesTerminalReadinessAfterPendingCapacityFrees(t *testing.T) {
+	lifecycle := newLifecycleTestSource(0, nil)
+	pending := protocol.NewPendingWorkerReadiness(
+		strings.Repeat("a", 64), strings.Repeat("b", 64), 1,
+	)
+	readiness := &mutableReadinessSource{readiness: pending}
+	pendingFull := make(chan struct{})
+	releaseCapacity := make(chan struct{})
+	terminalSeen := make(chan protocol.WorkerReadiness, 1)
+	hold := make(chan struct{})
+	server := newLifecycleBrokerDynamic(t, func(
+		connection *websocket.Conn, helloRequest protocol.Envelope, hello protocol.Hello,
+	) {
+		writeLifecycleHelloWithReadiness(t, connection, helloRequest, 0, hello.WorkerReadiness)
+		requests := make([]protocol.Envelope, 0, maximumPendingCalls)
+		for range maximumPendingCalls {
+			requests = append(requests, readTestEnvelope(t, connection))
+		}
+		close(pendingFull)
+		<-releaseCapacity
+		writeTestResult(t, connection, requests[0], struct{}{})
+		request := readTestEnvelope(t, connection)
+		if request.Method != protocol.MethodUpdateWorkerReadiness {
+			t.Errorf("terminal update method = %q", request.Method)
+			return
+		}
+		params, err := protocol.DecodePayload[protocol.UpdateWorkerReadinessParams](request.Payload)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		terminalSeen <- params.Readiness
+		writeTestResult(t, connection, request, protocol.UpdateWorkerReadinessResult{
+			Readiness: params.Readiness,
+		})
+		<-hold
+	})
+	defer server.Close()
+	defer close(hold)
+	client := newLifecycleClientWithReadiness(
+		t, websocketURL(server.URL), lifecycle, readiness,
+	)
+	runContext, cancelRun := context.WithCancel(context.Background())
+	done := runClient(client, runContext)
+	waitReady(t, client)
+
+	callErrors := make(chan error, maximumPendingCalls)
+	for range maximumPendingCalls {
+		go func() {
+			callErrors <- client.Call(context.Background(), "test.pending", "", nil, struct{}{}, nil)
+		}()
+	}
+	select {
+	case <-pendingFull:
+	case <-time.After(2 * time.Second):
+		t.Fatal("broker did not receive all pending calls")
+	}
+	terminal := pending
+	terminal.State = protocol.WorkerReadinessReady
+	terminal.AttemptCount = 1
+	terminal.NextAttemptAt = 0
+	terminal.LastAttemptAt = 2
+	terminal.UpdatedAt = 2
+	readiness.set(terminal)
+	updateErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		updateErr <- client.UpdateWorkerReadiness(ctx, terminal)
+	}()
+	select {
+	case err := <-updateErr:
+		t.Fatalf("terminal update finished while capacity was full: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(releaseCapacity)
+	select {
+	case got := <-terminalSeen:
+		if got != terminal {
+			t.Fatalf("terminal update = %#v, want %#v", got, terminal)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal readiness update was not retried after capacity freed")
+	}
+	if err := <-updateErr; err != nil {
+		t.Fatal(err)
+	}
+	cancelRun()
+	for range maximumPendingCalls {
+		select {
+		case <-callErrors:
+		case <-time.After(2 * time.Second):
+			t.Fatal("pending calls did not drain after shutdown")
+		}
+	}
+	if err := waitClient(done); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConnectorRetriesTerminalReadinessAfterMismatchedAcknowledgement(t *testing.T) {
+	lifecycle := newLifecycleTestSource(0, nil)
+	pending := protocol.NewPendingWorkerReadiness(
+		strings.Repeat("a", 64), strings.Repeat("b", 64), 1,
+	)
+	readiness := &mutableReadinessSource{readiness: pending}
+	secondUpdate := make(chan protocol.WorkerReadiness, 1)
+	hold := make(chan struct{})
+	server := newLifecycleBrokerDynamic(t, func(
+		connection *websocket.Conn, helloRequest protocol.Envelope, hello protocol.Hello,
+	) {
+		writeLifecycleHelloWithReadiness(t, connection, helloRequest, 0, hello.WorkerReadiness)
+		first := readTestEnvelope(t, connection)
+		params, err := protocol.DecodePayload[protocol.UpdateWorkerReadinessParams](first.Payload)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		mismatched := params.Readiness
+		mismatched.UpdatedAt++
+		writeTestResult(t, connection, first, protocol.UpdateWorkerReadinessResult{Readiness: mismatched})
+		second := readTestEnvelope(t, connection)
+		params, err = protocol.DecodePayload[protocol.UpdateWorkerReadinessParams](second.Payload)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		secondUpdate <- params.Readiness
+		writeTestResult(t, connection, second, protocol.UpdateWorkerReadinessResult{
+			Readiness: params.Readiness,
+		})
+		<-hold
+	})
+	defer server.Close()
+	defer close(hold)
+	client := newLifecycleClientWithReadiness(
+		t, websocketURL(server.URL), lifecycle, readiness,
+	)
+	runContext, cancelRun := context.WithCancel(context.Background())
+	done := runClient(client, runContext)
+	waitReady(t, client)
+	terminal := pending
+	terminal.State = protocol.WorkerReadinessReady
+	terminal.AttemptCount = 1
+	terminal.NextAttemptAt = 0
+	terminal.LastAttemptAt = 2
+	terminal.UpdatedAt = 2
+	readiness.set(terminal)
+	if err := client.UpdateWorkerReadiness(context.Background(), terminal); err == nil {
+		t.Fatal("mismatched readiness acknowledgement unexpectedly succeeded")
+	}
+	if err := client.UpdateWorkerReadiness(context.Background(), terminal); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-secondUpdate:
+		if got != terminal {
+			t.Fatalf("retried terminal update = %#v, want %#v", got, terminal)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal readiness was suppressed after a mismatched acknowledgement")
 	}
 	cancelRun()
 	if err := waitClient(done); err != nil {

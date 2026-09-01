@@ -622,16 +622,38 @@ func (c *Client) UpdateWorkerReadiness(
 	if current == nil {
 		return ErrUnavailable
 	}
-	if readiness.State != protocol.WorkerReadinessPending &&
-		!current.claimTerminalReadinessUpdate(readiness.Epoch) {
-		return nil
+	terminal := readiness.State != protocol.WorkerReadinessPending
+	if terminal {
+		publish, err := current.beginTerminalReadinessUpdate(ctx, readiness.Epoch)
+		if err != nil {
+			return err
+		}
+		if !publish {
+			return nil
+		}
 	}
-	payload, err := current.call(
-		ctx, protocol.MethodUpdateWorkerReadiness, "", nil,
-		protocol.UpdateWorkerReadinessParams{Readiness: readiness},
-	)
-	if err != nil {
-		return err
+	acknowledged := false
+	if terminal {
+		defer func() {
+			current.finishTerminalReadinessUpdate(readiness.Epoch, acknowledged)
+		}()
+	}
+	var payload json.RawMessage
+	for {
+		var err error
+		payload, err = current.call(
+			ctx, protocol.MethodUpdateWorkerReadiness, "", nil,
+			protocol.UpdateWorkerReadinessParams{Readiness: readiness},
+		)
+		if !errors.Is(err, ErrBusy) || !terminal {
+			if err != nil {
+				return err
+			}
+			break
+		}
+		if err := current.waitForPendingCapacity(ctx); err != nil {
+			return err
+		}
 	}
 	var result protocol.UpdateWorkerReadinessResult
 	if err := decodeResult(payload, &result); err != nil {
@@ -640,6 +662,7 @@ func (c *Client) UpdateWorkerReadiness(
 	if err := result.Validate(); err != nil || result.Readiness != readiness {
 		return errors.New("broker returned mismatched worker readiness")
 	}
+	acknowledged = true
 	c.mu.Lock()
 	if c.session == current {
 		c.status.WorkerReadiness = result.Readiness

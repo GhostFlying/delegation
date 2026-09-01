@@ -11,7 +11,11 @@ import (
 	"github.com/GhostFlying/delegation/internal/store"
 )
 
-const transientProbeFailureCode = "worker_probe_failed"
+const (
+	transientProbeFailureCode = "worker_probe_failed"
+	publicationTimeout        = 10 * time.Second
+	publicationRetryInterval  = 250 * time.Millisecond
+)
 
 type StateStore interface {
 	WorkerReadiness(context.Context) (protocol.WorkerReadiness, error)
@@ -54,6 +58,9 @@ type Controller struct {
 	interventionMu   sync.Mutex
 	interventionCh   chan struct{}
 	lastIntervention protocol.WorkerReadiness
+	publicationMu    sync.Mutex
+	pendingPublish   *protocol.WorkerReadiness
+	publicationWake  chan struct{}
 }
 
 type PermanentFailure struct {
@@ -104,7 +111,7 @@ func New(options Options) (*Controller, error) {
 		store: options.Store, probe: options.Probe, publisher: options.Publisher,
 		runtimeDigest: options.RuntimeDigest, configDigest: options.ConfigDigest,
 		now: now, reportError: reportError, wake: make(chan struct{}, 1),
-		interventionCh: make(chan struct{}),
+		interventionCh: make(chan struct{}), publicationWake: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -147,6 +154,16 @@ func (c *Controller) WaitWorkerIntervention(
 }
 
 func (c *Controller) Run(ctx context.Context) error {
+	publicationContext, cancelPublication := context.WithCancel(ctx)
+	publicationDone := make(chan struct{})
+	go func() {
+		defer close(publicationDone)
+		c.runPublicationRetries(publicationContext)
+	}()
+	defer func() {
+		cancelPublication()
+		<-publicationDone
+	}()
 	for {
 		readiness, attempted, err := c.advance(ctx)
 		if err != nil {
@@ -304,11 +321,89 @@ func (c *Controller) reportIntervention(readiness protocol.WorkerReadiness) {
 }
 
 func (c *Controller) publish(readiness protocol.WorkerReadiness) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	err := c.publisher.UpdateWorkerReadiness(ctx, readiness)
-	cancel()
+	err := c.publishOnce(context.Background(), readiness)
 	if err != nil {
 		c.reportError(fmt.Errorf("publish worker readiness: %w", err))
+		c.queuePublication(readiness)
+		return
+	}
+	c.discardPublicationThrough(readiness)
+}
+
+func (c *Controller) publishOnce(
+	parent context.Context, readiness protocol.WorkerReadiness,
+) error {
+	ctx, cancel := context.WithTimeout(parent, publicationTimeout)
+	defer cancel()
+	return c.publisher.UpdateWorkerReadiness(ctx, readiness)
+}
+
+func (c *Controller) queuePublication(readiness protocol.WorkerReadiness) {
+	c.publicationMu.Lock()
+	if c.pendingPublish == nil || c.pendingPublish.Cursor().Before(readiness) {
+		copy := readiness
+		c.pendingPublish = &copy
+	}
+	c.publicationMu.Unlock()
+	c.signalPublication()
+}
+
+func (c *Controller) pendingPublication() (protocol.WorkerReadiness, bool) {
+	c.publicationMu.Lock()
+	defer c.publicationMu.Unlock()
+	if c.pendingPublish == nil {
+		return protocol.WorkerReadiness{}, false
+	}
+	return *c.pendingPublish, true
+}
+
+func (c *Controller) discardPublicationThrough(readiness protocol.WorkerReadiness) {
+	c.publicationMu.Lock()
+	if c.pendingPublish != nil && !readiness.Cursor().Before(*c.pendingPublish) {
+		c.pendingPublish = nil
+	}
+	pending := c.pendingPublish != nil
+	c.publicationMu.Unlock()
+	if pending {
+		c.signalPublication()
+	}
+}
+
+func (c *Controller) runPublicationRetries(ctx context.Context) {
+	for {
+		readiness, pending := c.pendingPublication()
+		if !pending {
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.publicationWake:
+			}
+			continue
+		}
+		err := c.publishOnce(ctx, readiness)
+		if err == nil {
+			c.discardPublicationThrough(readiness)
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		timer := time.NewTimer(publicationRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-c.publicationWake:
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+}
+
+func (c *Controller) signalPublication() {
+	select {
+	case c.publicationWake <- struct{}{}:
+	default:
 	}
 }
 

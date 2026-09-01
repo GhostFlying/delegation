@@ -40,43 +40,79 @@ type pendingCall struct {
 }
 
 type session struct {
-	client             *Client
-	connection         *websocket.Conn
-	writeMu            sync.Mutex
-	pendingMu          sync.Mutex
-	pending            map[string]pendingCall
-	closeOnce          sync.Once
-	done               chan struct{}
-	errMu              sync.Mutex
-	closeErr           error
-	heartbeatSucceeded atomic.Bool
-	readinessMu        sync.Mutex
-	readinessEpoch     uint64
-	inboundSem         chan struct{}
-	inboundMu          sync.Mutex
-	inbound            map[string]context.CancelFunc
-	workspaceInbound   sync.WaitGroup
-	workspaceStopping  bool
-	context            context.Context
-	cancel             context.CancelFunc
+	client              *Client
+	connection          *websocket.Conn
+	writeMu             sync.Mutex
+	pendingMu           sync.Mutex
+	pending             map[string]pendingCall
+	pendingChanged      chan struct{}
+	closeOnce           sync.Once
+	done                chan struct{}
+	errMu               sync.Mutex
+	closeErr            error
+	heartbeatSucceeded  atomic.Bool
+	readinessMu         sync.Mutex
+	readinessEpoch      uint64
+	readinessPublishing bool
+	readinessChanged    chan struct{}
+	inboundSem          chan struct{}
+	inboundMu           sync.Mutex
+	inbound             map[string]context.CancelFunc
+	workspaceInbound    sync.WaitGroup
+	workspaceStopping   bool
+	context             context.Context
+	cancel              context.CancelFunc
 }
 
-func (s *session) claimTerminalReadinessUpdate(epoch uint64) bool {
-	s.readinessMu.Lock()
-	defer s.readinessMu.Unlock()
-	if s.readinessEpoch == epoch {
-		return false
+func (s *session) beginTerminalReadinessUpdate(
+	ctx context.Context, epoch uint64,
+) (bool, error) {
+	for {
+		s.readinessMu.Lock()
+		if s.readinessEpoch >= epoch {
+			s.readinessMu.Unlock()
+			return false, nil
+		}
+		if !s.readinessPublishing {
+			s.readinessPublishing = true
+			s.readinessMu.Unlock()
+			return true, nil
+		}
+		if s.readinessChanged == nil {
+			s.readinessChanged = make(chan struct{})
+		}
+		changed := s.readinessChanged
+		s.readinessMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-s.done:
+			return false, s.err()
+		case <-changed:
+		}
 	}
-	s.readinessEpoch = epoch
-	return true
+}
+
+func (s *session) finishTerminalReadinessUpdate(epoch uint64, acknowledged bool) {
+	s.readinessMu.Lock()
+	if acknowledged && epoch > s.readinessEpoch {
+		s.readinessEpoch = epoch
+	}
+	s.readinessPublishing = false
+	if s.readinessChanged != nil {
+		close(s.readinessChanged)
+	}
+	s.readinessChanged = make(chan struct{})
+	s.readinessMu.Unlock()
 }
 
 func newSession(client *Client, connection *websocket.Conn) *session {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &session{
 		client: client, connection: connection, pending: map[string]pendingCall{}, done: make(chan struct{}),
-		inboundSem: make(chan struct{}, maximumPendingCalls), inbound: make(map[string]context.CancelFunc),
-		context: ctx, cancel: cancel,
+		pendingChanged: make(chan struct{}),
+		inboundSem:     make(chan struct{}, maximumPendingCalls), inbound: make(map[string]context.CancelFunc),
+		readinessChanged: make(chan struct{}), context: ctx, cancel: cancel,
 	}
 }
 
@@ -324,6 +360,7 @@ func (s *session) complete(response protocol.Envelope) error {
 		return errors.New("broker response treeId does not match its request")
 	}
 	delete(s.pending, response.ReplyTo)
+	s.signalPendingChangedLocked()
 	s.pendingMu.Unlock()
 	result := callResult{payload: response.Payload}
 	if response.Error != nil {
@@ -362,7 +399,40 @@ func (s *session) removePending(requestID string) bool {
 		return false
 	}
 	delete(s.pending, requestID)
+	s.signalPendingChangedLocked()
 	return true
+}
+
+func (s *session) waitForPendingCapacity(ctx context.Context) error {
+	for {
+		s.pendingMu.Lock()
+		select {
+		case <-s.done:
+			s.pendingMu.Unlock()
+			return s.err()
+		default:
+		}
+		if len(s.pending) < maximumPendingCalls {
+			s.pendingMu.Unlock()
+			return nil
+		}
+		changed := s.pendingChanged
+		s.pendingMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.done:
+			return s.err()
+		case <-changed:
+		}
+	}
+}
+
+func (s *session) signalPendingChangedLocked() {
+	if s.pendingChanged != nil {
+		close(s.pendingChanged)
+	}
+	s.pendingChanged = make(chan struct{})
 }
 
 func (s *session) markPendingWritten(requestID string) {
@@ -440,13 +510,14 @@ func (s *session) close(err error) {
 		s.closeErr = err
 		s.errMu.Unlock()
 		s.cancel()
+		close(s.done)
 		s.pendingMu.Lock()
 		for requestID, pending := range s.pending {
 			delete(s.pending, requestID)
 			pending.result <- callResult{err: err}
 		}
+		s.signalPendingChangedLocked()
 		s.pendingMu.Unlock()
-		close(s.done)
 		_ = s.connection.CloseNow()
 	})
 }
