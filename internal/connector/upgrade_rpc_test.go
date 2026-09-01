@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -75,7 +76,8 @@ func TestConnectorDispatchesCoordinatedUpgradeRPCs(t *testing.T) {
 		params any
 	}{
 		{protocol.MethodPrepareUpgrade, protocol.PrepareUpgradeParams{
-			ControllerTransactionID: connectorUpgradeControllerTransactionID, TargetVersion: "0.2.0",
+			ControllerTransactionID: connectorUpgradeControllerTransactionID,
+			TransactionID:           connectorUpgradeTransactionID, TargetVersion: "0.2.0",
 		}},
 		{protocol.MethodArmUpgrade, connectorUpgradeTransactionParams()},
 		{protocol.MethodActivateUpgrade, connectorUpgradeTransactionParams()},
@@ -103,7 +105,8 @@ func TestConnectorDispatchesCoordinatedUpgradeRPCs(t *testing.T) {
 func TestConnectorRejectsUpgradeWorkerAuthorityAndMismatchedResult(t *testing.T) {
 	manager := &connectorUpgradeManager{snapshot: connectorUpgradeSnapshot()}
 	request := upgradeEnvelope(t, protocol.MethodPrepareUpgrade, protocol.PrepareUpgradeParams{
-		ControllerTransactionID: connectorUpgradeControllerTransactionID, TargetVersion: "0.2.0",
+		ControllerTransactionID: connectorUpgradeControllerTransactionID,
+		TransactionID:           connectorUpgradeTransactionID, TargetVersion: "0.2.0",
 	})
 	request.TreeID = connectorTestThreadID
 	source := workerOperationRoot()
@@ -130,6 +133,16 @@ func TestConnectorUpgradeFailureIsBoundedAndDoesNotExposeManagerError(t *testing
 	if response.Error == nil || response.Error.Code != protocol.ErrorUnavailable ||
 		strings.Contains(response.Error.Message, "private") {
 		t.Fatalf("upgrade failure response = %#v", response)
+	}
+}
+
+func TestConnectorReportsMissingReservedUpgradeTransaction(t *testing.T) {
+	manager := &connectorUpgradeManager{snapshot: connectorUpgradeSnapshot(), err: os.ErrNotExist}
+	response := runConnectorUpgradeRPC(
+		t, manager, upgradeEnvelope(t, protocol.MethodCancelUpgrade, connectorUpgradeTransactionParams()),
+	)
+	if response.Error == nil || response.Error.Code != protocol.ErrorNotFound {
+		t.Fatalf("missing transaction response = %#v", response)
 	}
 }
 

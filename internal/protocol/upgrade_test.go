@@ -10,6 +10,7 @@ const (
 func TestUpgradePayloadValidation(t *testing.T) {
 	prepare := PrepareUpgradeParams{
 		ControllerTransactionID: testUpgradeControllerTransactionID,
+		TransactionID:           testUpgradeTransactionID,
 		TargetVersion:           "0.2.0",
 	}
 	if err := prepare.Validate(); err != nil {
@@ -26,6 +27,11 @@ func TestUpgradePayloadValidation(t *testing.T) {
 	invalidPrepare.TargetVersion = "latest"
 	if err := invalidPrepare.Validate(); err == nil {
 		t.Fatal("upgrade prepare accepted a non-canonical target version")
+	}
+	invalidPrepare = prepare
+	invalidPrepare.TransactionID = ""
+	if err := invalidPrepare.Validate(); err == nil {
+		t.Fatal("upgrade prepare accepted a missing reserved transaction ID")
 	}
 	invalidTransaction := transaction
 	invalidTransaction.ControllerTransactionID = "invalid"

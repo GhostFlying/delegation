@@ -55,12 +55,16 @@ func (s UpgradeSnapshot) Validate() error {
 
 type PrepareUpgradeParams struct {
 	ControllerTransactionID string `json:"controllerTransactionId"`
+	TransactionID           string `json:"transactionId"`
 	TargetVersion           string `json:"targetVersion"`
 }
 
 func (p PrepareUpgradeParams) Validate() error {
 	if err := identity.ValidateID(p.ControllerTransactionID); err != nil {
 		return fmt.Errorf("controllerTransactionId %w", err)
+	}
+	if err := identity.ValidateID(p.TransactionID); err != nil {
+		return fmt.Errorf("transactionId %w", err)
 	}
 	if !semver.IsValid("v" + p.TargetVersion) {
 		return errors.New("targetVersion is invalid")

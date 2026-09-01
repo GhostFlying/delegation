@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/GhostFlying/delegation/internal/buildinfo"
@@ -22,6 +23,7 @@ import (
 )
 
 type serviceUpgradeManager struct {
+	mu              sync.Mutex
 	store           *localupgrade.Store
 	manager         *localupgrade.Manager
 	home            string
@@ -65,31 +67,24 @@ func newServiceUpgradeManager(
 func (m *serviceUpgradeManager) PrepareLocalUpgrade(
 	ctx context.Context, targetVersion, configPath, environmentFile string,
 ) (localbridge.UpgradeSnapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.prepareLocalUpgrade(ctx, targetVersion, configPath, environmentFile, "", "")
+}
+
+func (m *serviceUpgradeManager) prepareLocalUpgrade(
+	ctx context.Context, targetVersion, configPath, environmentFile, transactionID, controllerTransactionID string,
+) (localbridge.UpgradeSnapshot, error) {
 	if filepath.Clean(configPath) != m.configPath ||
 		(environmentFile != "" && filepath.Clean(environmentFile) != m.environmentFile) ||
 		(environmentFile == "" && m.environmentFile != "") {
 		return localbridge.UpgradeSnapshot{}, errors.New("upgrade request does not match the running service invocation")
 	}
-	if existing, err := m.store.Load(); err == nil {
-		if existing.TargetVersion != targetVersion && !existing.Terminal() {
-			return localbridge.UpgradeSnapshot{}, localupgrade.ErrTargetConflict
-		}
-		if existing.TargetVersion == targetVersion {
-			if existing.Role != m.config.Role || existing.InstanceID != m.config.EffectiveInstanceID() ||
-				existing.ControllerID != m.config.ControllerID || existing.DeviceID != m.config.DeviceID ||
-				existing.Invocation.ConfigPath != m.configPath ||
-				existing.Invocation.EnvironmentFile != m.environmentFile {
-				return localbridge.UpgradeSnapshot{}, errors.New("same-target upgrade does not match the configured service identity")
-			}
-			return bridgeUpgradeSnapshot(existing), nil
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return localbridge.UpgradeSnapshot{}, err
-	}
 	result, err := localupgrade.Prepare(ctx, localupgrade.PrepareOptions{
 		Store: m.store, Home: m.home, Config: m.config, ConfigPath: m.configPath,
 		EnvironmentFile: m.environmentFile, SourceBinary: m.sourceBinary,
 		CurrentVersion: m.currentVersion, TargetVersion: targetVersion,
+		TransactionID: transactionID, ControllerTransactionID: controllerTransactionID,
 	})
 	if err != nil {
 		return localbridge.UpgradeSnapshot{}, err
@@ -100,18 +95,19 @@ func (m *serviceUpgradeManager) PrepareLocalUpgrade(
 func (m *serviceUpgradeManager) PrepareCoordinatedUpgrade(
 	ctx context.Context, params protocol.PrepareUpgradeParams,
 ) (protocol.UpgradeSnapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if err := params.Validate(); err != nil {
 		return protocol.UpgradeSnapshot{}, err
 	}
-	prepared, err := m.PrepareLocalUpgrade(
+	_, err := m.prepareLocalUpgrade(
 		ctx, params.TargetVersion, m.configPath, m.environmentFile,
+		params.TransactionID, params.ControllerTransactionID,
 	)
 	if err != nil {
 		return protocol.UpgradeSnapshot{}, err
 	}
-	journal, err := m.store.BindControllerTransaction(
-		prepared.TransactionID, params.ControllerTransactionID,
-	)
+	journal, err := m.store.Load()
 	if err != nil {
 		return protocol.UpgradeSnapshot{}, err
 	}
@@ -121,24 +117,48 @@ func (m *serviceUpgradeManager) PrepareCoordinatedUpgrade(
 func (m *serviceUpgradeManager) ArmCoordinatedUpgrade(
 	ctx context.Context, params protocol.UpgradeTransactionParams,
 ) (protocol.UpgradeSnapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.runCoordinatedUpgrade(ctx, params, m.manager.Arm)
 }
 
 func (m *serviceUpgradeManager) ActivateCoordinatedUpgrade(
 	ctx context.Context, params protocol.UpgradeTransactionParams,
 ) (protocol.UpgradeSnapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.runCoordinatedUpgrade(ctx, params, m.manager.AuthorizeAndLaunch)
 }
 
 func (m *serviceUpgradeManager) CancelCoordinatedUpgrade(
 	ctx context.Context, params protocol.UpgradeTransactionParams,
 ) (protocol.UpgradeSnapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := params.Validate(); err != nil {
+		return protocol.UpgradeSnapshot{}, err
+	}
+	journal, err := m.store.Load()
+	if err != nil {
+		return protocol.UpgradeSnapshot{}, err
+	}
+	if journal.TransactionID != params.TransactionID {
+		return protocol.UpgradeSnapshot{}, errors.New("coordinated upgrade transaction identity does not match")
+	}
+	if journal.ControllerTransactionID == "" {
+		journal, err = m.store.BindControllerTransaction(params.TransactionID, params.ControllerTransactionID)
+		if err != nil {
+			return protocol.UpgradeSnapshot{}, err
+		}
+	}
 	return m.runCoordinatedUpgrade(ctx, params, m.manager.Cancel)
 }
 
 func (m *serviceUpgradeManager) CoordinatedUpgradeStatus(
 	_ context.Context, params protocol.UpgradeTransactionParams,
 ) (protocol.UpgradeSnapshot, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if err := params.Validate(); err != nil {
 		return protocol.UpgradeSnapshot{}, err
 	}

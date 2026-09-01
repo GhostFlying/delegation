@@ -133,16 +133,28 @@ func (m *Manager) Start(ctx context.Context, targetVersion string, timeout time.
 	peers := m.broker.FreezeUpgradePeers()
 	participants := make([]Participant, len(peers))
 	for index, peer := range peers {
+		localTransactionID, idErr := m.newID()
+		if idErr != nil {
+			m.broker.EndUpgradeDrain()
+			return Journal{}, fmt.Errorf("create peer local upgrade transaction ID: %w", idErr)
+		}
 		participants[index] = Participant{
 			DeviceID: peer.DeviceID, ConnectionID: peer.ConnectionID,
-			SourceVersion: peer.RuntimeVersion, State: ParticipantPending, UpdatedAt: now,
+			SourceVersion: peer.RuntimeVersion, LocalTransactionID: localTransactionID,
+			State: ParticipantPending, UpdatedAt: now,
 		}
+	}
+	brokerTransactionID, err := m.newID()
+	if err != nil {
+		m.broker.EndUpgradeDrain()
+		return Journal{}, fmt.Errorf("create broker local upgrade transaction ID: %w", err)
 	}
 	journal, _, err := m.store.CreateOrResume(Journal{
 		SchemaVersion: JournalSchemaVersion, TransactionID: transactionID, State: StatePreparing,
 		ControllerID: m.controllerID, InstanceID: m.instanceID,
 		SourceVersion: m.sourceVersion, TargetVersion: targetVersion, Deadline: now + timeout.Milliseconds(),
-		Participants: participants, CreatedAt: now, UpdatedAt: now,
+		Participants: participants, Broker: LocalParticipant{TransactionID: brokerTransactionID, UpdatedAt: now},
+		CreatedAt: now, UpdatedAt: now,
 	})
 	if err != nil {
 		m.broker.EndUpgradeDrain()
@@ -308,7 +320,8 @@ func (m *Manager) prepare(ctx context.Context, journal Journal) (Journal, error)
 			DeviceID: participant.DeviceID, ConnectionID: participant.ConnectionID,
 			RuntimeVersion: participant.SourceVersion,
 		}, protocol.MethodPrepareUpgrade, protocol.PrepareUpgradeParams{
-			ControllerTransactionID: journal.TransactionID, TargetVersion: journal.TargetVersion,
+			ControllerTransactionID: journal.TransactionID, TransactionID: participant.LocalTransactionID,
+			TargetVersion: journal.TargetVersion,
 		})
 		if err != nil {
 			return journal, err
@@ -333,8 +346,12 @@ func (m *Manager) prepare(ctx context.Context, journal Journal) (Journal, error)
 		}
 	}
 	if journal.Broker.TransactionID == "" {
+		return journal, errors.New("broker local upgrade transaction ID was not reserved")
+	}
+	if journal.Broker.State == "" {
 		snapshot, err := m.local.PrepareCoordinatedUpgrade(ctx, protocol.PrepareUpgradeParams{
-			ControllerTransactionID: journal.TransactionID, TargetVersion: journal.TargetVersion,
+			ControllerTransactionID: journal.TransactionID, TransactionID: journal.Broker.TransactionID,
+			TargetVersion: journal.TargetVersion,
 		})
 		if err != nil {
 			return journal, err
@@ -657,12 +674,24 @@ func (m *Manager) cancelPrepared(ctx context.Context, journal Journal) (Journal,
 	var failures []error
 	for index := range journal.Participants {
 		participant := journal.Participants[index]
-		if participant.LocalTransactionID == "" || participant.State == ParticipantCanceled {
+		if participant.State == ParticipantCanceled {
 			continue
 		}
 		snapshot, err := m.broker.CallCurrentUpgrade(
 			ctx, participant.DeviceID, protocol.MethodCancelUpgrade, transactionParams(journal, participant),
 		)
+		if errors.Is(err, broker.ErrUpgradeTransactionNotFound) {
+			var updateErr error
+			journal, updateErr = m.store.Update(journal.TransactionID, func(current *Journal) error {
+				current.Participants[index].State = ParticipantCanceled
+				current.Participants[index].UpdatedAt = max(participant.UpdatedAt+1, m.now().UnixMilli())
+				return nil
+			})
+			if updateErr != nil {
+				failures = append(failures, updateErr)
+			}
+			continue
+		}
 		validationErr := validatePeerSnapshot(journal, participant, snapshot, false)
 		if err != nil || validationErr != nil || snapshot.State != string(localupgrade.StateRolledBack) {
 			failures = append(failures, errors.Join(
@@ -680,23 +709,27 @@ func (m *Manager) cancelPrepared(ctx context.Context, journal Journal) (Journal,
 			failures = append(failures, updateErr)
 		}
 	}
-	if journal.Broker.TransactionID != "" && journal.Broker.State != string(localupgrade.StateRolledBack) {
+	if journal.Broker.State != string(localupgrade.StateRolledBack) {
 		params := protocol.UpgradeTransactionParams{
 			ControllerTransactionID: journal.TransactionID, TransactionID: journal.Broker.TransactionID,
 		}
 		snapshot, err := m.local.CancelCoordinatedUpgrade(ctx, params)
-		validationErr := validateLocalSnapshot(journal, snapshot, false)
-		if err != nil || validationErr != nil || snapshot.State != string(localupgrade.StateRolledBack) {
-			failures = append(failures, errors.Join(
-				err, validationErr, errors.New("broker local upgrade did not cancel"),
-			))
+		if errors.Is(err, os.ErrNotExist) {
+			err = nil
 		} else {
-			journal, err = m.store.Update(journal.TransactionID, func(current *Journal) error {
-				current.Broker = localParticipant(snapshot)
-				return nil
-			})
-			if err != nil {
-				failures = append(failures, err)
+			validationErr := validateLocalSnapshot(journal, snapshot, false)
+			if err != nil || validationErr != nil || snapshot.State != string(localupgrade.StateRolledBack) {
+				failures = append(failures, errors.Join(
+					err, validationErr, errors.New("broker local upgrade did not cancel"),
+				))
+			} else {
+				journal, err = m.store.Update(journal.TransactionID, func(current *Journal) error {
+					current.Broker = localParticipant(snapshot)
+					return nil
+				})
+				if err != nil {
+					failures = append(failures, err)
+				}
 			}
 		}
 	}

@@ -45,6 +45,34 @@ func TestPrepareCreatesProtectedJournalAndResumesBeforeAcquisition(t *testing.T)
 	}
 }
 
+func TestPrepareUsesReservedCoordinatedTransactionIdentity(t *testing.T) {
+	options := prepareFixture(t)
+	options.TransactionID = "123e4567-e89b-42d3-a456-426614174897"
+	options.ControllerTransactionID = "123e4567-e89b-42d3-a456-426614174898"
+	options.Dependencies.NewID = func() (string, error) {
+		t.Fatal("Prepare generated an ID despite a reserved transaction identity")
+		return "", nil
+	}
+	first, err := Prepare(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Journal.TransactionID != options.TransactionID ||
+		first.Journal.ControllerTransactionID != options.ControllerTransactionID {
+		t.Fatalf("coordinated identity = %#v", first.Journal)
+	}
+	second, err := Prepare(context.Background(), options)
+	if err != nil || !second.Resumed || second.Journal.TransactionID != options.TransactionID {
+		t.Fatalf("reserved identity resume = %#v, %v", second, err)
+	}
+	different := options
+	different.TransactionID = "123e4567-e89b-42d3-a456-426614174896"
+	if _, err := Prepare(context.Background(), different); err == nil ||
+		!strings.Contains(err.Error(), "reserved transaction identity") {
+		t.Fatalf("different reserved identity error = %v", err)
+	}
+}
+
 func TestPrepareRejectsBusyStateBeforeServiceInspection(t *testing.T) {
 	options := prepareFixture(t)
 	serviceCalls := 0

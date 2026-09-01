@@ -146,13 +146,18 @@ func (p Participant) validate(j Journal, index int) error {
 		return fmt.Errorf("participant %d identity or state is invalid", index)
 	}
 	if p.LocalTransactionID == "" {
-		if p.State != ParticipantPending || p.TargetRuntimeDigest != "" || p.ConfigDigest != "" {
-			return fmt.Errorf("participant %d lacks prepared transaction identity", index)
+		return fmt.Errorf("participant %d lacks reserved transaction identity", index)
+	}
+	if identity.ValidateID(p.LocalTransactionID) != nil {
+		return fmt.Errorf("participant %d prepared identity is invalid", index)
+	}
+	if p.State == ParticipantPending || (p.State == ParticipantCanceled && p.TargetRuntimeDigest == "") {
+		if p.TargetRuntimeDigest != "" || p.ConfigDigest != "" || p.SourceReadinessEpoch != 0 || p.FailureCode != "" {
+			return fmt.Errorf("participant %d has prepared state before PREPARE completed", index)
 		}
 		return nil
 	}
-	if identity.ValidateID(p.LocalTransactionID) != nil || !digestPattern.MatchString(p.TargetRuntimeDigest) ||
-		!digestPattern.MatchString(p.ConfigDigest) {
+	if !digestPattern.MatchString(p.TargetRuntimeDigest) || !digestPattern.MatchString(p.ConfigDigest) {
 		return fmt.Errorf("participant %d prepared identity is invalid", index)
 	}
 	if p.FailureCode != "" && !validCode(p.FailureCode) {
@@ -166,15 +171,19 @@ func (p Participant) validate(j Journal, index int) error {
 
 func (p LocalParticipant) validate(j Journal) error {
 	if p.TransactionID == "" {
-		if p.State != "" || p.TargetRuntimeDigest != "" || p.ConfigDigest != "" ||
-			p.CommitAuthorized || p.UpdatedAt != 0 {
-			return errors.New("broker participant lacks prepared transaction identity")
+		return errors.New("broker participant lacks reserved transaction identity")
+	}
+	if identity.ValidateID(p.TransactionID) != nil || p.UpdatedAt <= 0 {
+		return errors.New("broker participant identity is invalid")
+	}
+	if p.State == "" {
+		if p.TargetRuntimeDigest != "" || p.ConfigDigest != "" || p.CommitAuthorized || p.FailureCode != "" {
+			return errors.New("broker participant has prepared state before PREPARE completed")
 		}
 		return nil
 	}
-	if identity.ValidateID(p.TransactionID) != nil || !digestPattern.MatchString(p.TargetRuntimeDigest) ||
-		!digestPattern.MatchString(p.ConfigDigest) || p.State == "" || p.UpdatedAt <= 0 {
-		return errors.New("broker participant identity is invalid")
+	if !digestPattern.MatchString(p.TargetRuntimeDigest) || !digestPattern.MatchString(p.ConfigDigest) {
+		return errors.New("broker participant prepared identity is invalid")
 	}
 	if p.CommitAuthorized && !j.GlobalCommit {
 		return errors.New("broker local transaction was authorized before global COMMIT")

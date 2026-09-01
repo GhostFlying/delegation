@@ -3,6 +3,7 @@ package coordinatedupgrade
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -63,11 +64,17 @@ func (f *coordinatorFixture) newManager() *Manager {
 
 func (f *coordinatorFixture) newManagerAtVersion(version string) *Manager {
 	f.t.Helper()
+	identifiers := []string{testControllerTransactionID, testPeerTransactionID, testBrokerTransactionID}
+	nextIdentifier := 0
 	manager, err := NewManager(Options{
 		Store: f.store, Broker: f.broker, Local: f.local, SourceVersion: version,
 		ControllerID: testPeerDeviceID, InstanceID: "default",
-		NewID: func() (string, error) { return testControllerTransactionID, nil },
-		Now:   func() time.Time { return f.now }, CompletionTimeout: time.Minute,
+		NewID: func() (string, error) {
+			identifier := identifiers[nextIdentifier]
+			nextIdentifier++
+			return identifier, nil
+		},
+		Now: func() time.Time { return f.now }, CompletionTimeout: time.Minute,
 		ReportError: func(err error) { f.errors = append(f.errors, err) },
 	})
 	if err != nil {
@@ -126,6 +133,35 @@ func TestManagerCancelsAllPreparedWorkWhenArmFails(t *testing.T) {
 	resumed, err := fixture.manager.Cancel(context.Background(), journal.TransactionID)
 	if err != nil || resumed.State != StateCanceled || len(*fixture.sharedCall) != calls {
 		t.Fatalf("idempotent cancel = %#v, %v, calls=%q", resumed, err, *fixture.sharedCall)
+	}
+}
+
+func TestManagerCancelsPeerAfterPrepareResponseLoss(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	fixture.broker.losePrepareResponse = true
+	journal, err := fixture.manager.Start(context.Background(), testTargetVersion, 30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if journal.State != StateCanceled || journal.Participants[0].State != ParticipantCanceled ||
+		journal.Participants[0].LocalTransactionID != testPeerTransactionID || fixture.broker.draining {
+		t.Fatalf("lost peer PREPARE response journal = %#v, draining=%v", journal, fixture.broker.draining)
+	}
+	if fixture.broker.prepared.State != string(localupgrade.StateRolledBack) {
+		t.Fatalf("stranded peer local transaction = %#v", fixture.broker.prepared)
+	}
+}
+
+func TestManagerCancelsBrokerAfterPrepareResponseLoss(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	fixture.local.losePrepareResponse = true
+	journal, err := fixture.manager.Start(context.Background(), testTargetVersion, 30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if journal.State != StateCanceled || journal.Broker.State != string(localupgrade.StateRolledBack) ||
+		journal.Broker.TransactionID != testBrokerTransactionID || fixture.broker.draining {
+		t.Fatalf("lost broker PREPARE response journal = %#v, draining=%v", journal, fixture.broker.draining)
 	}
 }
 
@@ -302,12 +338,14 @@ type fakeBrokerControl struct {
 	peers                     []broker.UpgradePeer
 	currentConnection         string
 	prepared                  protocol.UpgradeSnapshot
+	preparedExists            bool
 	state                     broker.UpgradePeerState
 	failMethod                map[string]error
 	replaceBeforeMethod       string
 	replaced                  bool
 	pinnedReplacementAccepted bool
 	loseActivationResponse    bool
+	losePrepareResponse       bool
 	activationFailures        int
 	qualifyAfterActivate      bool
 	draining                  bool
@@ -364,10 +402,15 @@ func (f *fakeBrokerControl) upgrade(method string, params any) (protocol.Upgrade
 	case protocol.MethodPrepareUpgrade:
 		prepare := params.(protocol.PrepareUpgradeParams)
 		f.prepared = protocol.UpgradeSnapshot{
-			ControllerTransactionID: prepare.ControllerTransactionID, TransactionID: testPeerTransactionID,
+			ControllerTransactionID: prepare.ControllerTransactionID, TransactionID: prepare.TransactionID,
 			State: string(localupgrade.StatePrepared), SourceVersion: testSourceVersion, TargetVersion: prepare.TargetVersion,
 			TargetRuntimeDigest: testPeerRuntimeDigest, ConfigDigest: testPeerConfigDigest,
 			SourceReadinessEpoch: 4, UpdatedAt: f.now.UnixMilli(),
+		}
+		f.preparedExists = true
+		if f.losePrepareResponse {
+			f.losePrepareResponse = false
+			return protocol.UpgradeSnapshot{}, errors.New("prepare response lost")
 		}
 	case protocol.MethodArmUpgrade:
 		f.prepared.State = string(localupgrade.StateArmed)
@@ -390,6 +433,9 @@ func (f *fakeBrokerControl) upgrade(method string, params any) (protocol.Upgrade
 			return protocol.UpgradeSnapshot{}, errors.New("activation response lost")
 		}
 	case protocol.MethodCancelUpgrade:
+		if !f.preparedExists {
+			return protocol.UpgradeSnapshot{}, broker.ErrUpgradeTransactionNotFound
+		}
 		f.prepared.State = string(localupgrade.StateRolledBack)
 	case protocol.MethodStatusUpgrade:
 	}
@@ -402,10 +448,12 @@ func (f *fakeBrokerControl) SetUpgradeIntervention(deviceID string, required boo
 }
 
 type fakeLocalManager struct {
-	now          time.Time
-	calls        *[]string
-	prepared     protocol.UpgradeSnapshot
-	failActivate error
+	now                 time.Time
+	calls               *[]string
+	prepared            protocol.UpgradeSnapshot
+	failActivate        error
+	losePrepareResponse bool
+	preparedExists      bool
 }
 
 func newFakeLocalManager(calls *[]string, now time.Time) *fakeLocalManager {
@@ -416,10 +464,15 @@ func (f *fakeLocalManager) PrepareCoordinatedUpgrade(
 ) (protocol.UpgradeSnapshot, error) {
 	*f.calls = append(*f.calls, "broker:prepare")
 	f.prepared = protocol.UpgradeSnapshot{
-		ControllerTransactionID: params.ControllerTransactionID, TransactionID: testBrokerTransactionID,
+		ControllerTransactionID: params.ControllerTransactionID, TransactionID: params.TransactionID,
 		State: string(localupgrade.StatePrepared), SourceVersion: testSourceVersion, TargetVersion: params.TargetVersion,
 		TargetRuntimeDigest: testBrokerRuntimeDigest, ConfigDigest: testBrokerConfigDigest,
 		SourceReadinessEpoch: 7, UpdatedAt: f.now.UnixMilli(),
+	}
+	f.preparedExists = true
+	if f.losePrepareResponse {
+		f.losePrepareResponse = false
+		return protocol.UpgradeSnapshot{}, errors.New("prepare response lost")
 	}
 	return f.prepared, nil
 }
@@ -441,9 +494,15 @@ func (f *fakeLocalManager) ActivateCoordinatedUpgrade(
 	return f.prepared, f.failActivate
 }
 func (f *fakeLocalManager) CancelCoordinatedUpgrade(
-	context.Context, protocol.UpgradeTransactionParams,
+	_ context.Context, params protocol.UpgradeTransactionParams,
 ) (protocol.UpgradeSnapshot, error) {
 	*f.calls = append(*f.calls, "broker:cancel")
+	if !f.preparedExists {
+		return protocol.UpgradeSnapshot{}, os.ErrNotExist
+	}
+	if f.prepared.TransactionID != params.TransactionID {
+		return protocol.UpgradeSnapshot{}, errors.New("broker transaction mismatch")
+	}
 	f.prepared.State = string(localupgrade.StateRolledBack)
 	f.prepared.UpdatedAt++
 	return f.prepared, nil

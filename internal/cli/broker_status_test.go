@@ -383,17 +383,18 @@ func persistBrokerControllerStatusUpgrade(
 		State: coordinatedupgrade.StatePreparing, SourceVersion: "0.1.0-alpha.7",
 		TargetVersion: "0.1.0-alpha.8", Deadline: now + 1000, CreatedAt: now, UpdatedAt: now,
 		Participants: []coordinatedupgrade.Participant{},
+		Broker: coordinatedupgrade.LocalParticipant{
+			TransactionID: "123e4567-e89b-42d3-a456-426614174389", UpdatedAt: now,
+		},
 	}
 	if _, _, err := transactionStore.CreateOrResume(journal); err != nil {
 		t.Fatal(err)
 	}
 	for _, mutate := range []func(*coordinatedupgrade.Journal){
 		func(current *coordinatedupgrade.Journal) {
-			current.Broker = coordinatedupgrade.LocalParticipant{
-				TransactionID: "123e4567-e89b-42d3-a456-426614174389", State: "armed",
-				TargetRuntimeDigest: strings.Repeat("a", 64), ConfigDigest: strings.Repeat("b", 64),
-				UpdatedAt: now,
-			}
+			current.Broker.State = "armed"
+			current.Broker.TargetRuntimeDigest = strings.Repeat("a", 64)
+			current.Broker.ConfigDigest = strings.Repeat("b", 64)
 			current.State = coordinatedupgrade.StateArming
 		},
 		func(current *coordinatedupgrade.Journal) { current.State = coordinatedupgrade.StateArmed },
