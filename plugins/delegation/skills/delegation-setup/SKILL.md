@@ -73,12 +73,14 @@ provenance, exact service ownership, immutable config/environment identity, data
 embedded-Tailscale compatibility before it can stop the service. It never accepts a caller-selected
 repository, URL, or binary. `DELEGATION_BINARY` and development builds are outside this path.
 
-Until broker coordination is available, use `service upgrade ... --bootstrap` locally on each host,
-peers first and broker last. A peer upgrade also requires its existing protected
-`--environment-file`; a broker upgrade forbids that flag. Retrying the same target resumes the
-journal. Bootstrap discovers and verifies the old runtime through the exact current-user native
-service definition and process identity; it does not require the old service's local bridge to
-support upgrade RPCs, including when starting from alpha.4.
+The first move from alpha.4 requires `service upgrade ... --bootstrap` locally on each host, peers
+first and broker last, because alpha.4 has no upgrade RPC. A peer bootstrap also requires its
+existing protected `--environment-file`; a broker bootstrap forbids that flag. After the network
+runs a coordination-capable version, invoke `service upgrade` without `--bootstrap` against the
+broker config. The broker drains mutations, freezes the online compatible peers, upgrades them
+first, and upgrades itself last. Offline old-version peers later require local bootstrap. Retrying
+the same target resumes the protected controller journal. Bootstrap discovers and verifies the old
+runtime through the exact current-user native service definition and process identity.
 `service upgrade --cancel --config <path> --transaction-id <uuid>` is valid only before
 durable commit authorization. After authorization, do not downgrade or restore the old definition;
 inspect `status --config <path> --json`, repair the target release, and retry forward. Windows TraeX

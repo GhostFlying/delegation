@@ -79,10 +79,10 @@ canonical runtime through the local atomic upgrade below. The config and environ
 remain immutable; use a fresh named deployment when either path or another service identity must
 change.
 
-## Local Atomic Upgrade
+## Managed Service Upgrade
 
-The current public path requires explicit local bootstrap authorization. Upgrade every idle peer
-first, then the broker last:
+The first move from alpha.4 requires explicit local bootstrap authorization because alpha.4 has no
+upgrade RPC. Upgrade every idle peer first, then the broker last:
 
 ```text
 service upgrade --config <peer.json> --environment-file <peer.env> \
@@ -90,6 +90,21 @@ service upgrade --config <peer.json> --environment-file <peer.env> \
 service upgrade --config <broker.json> \
   --target-version <newer-version> --bootstrap --timeout 30m --json
 ```
+
+Once every online peer and the broker run a coordination-capable version, start a controller-wide
+transaction from the broker host without `--bootstrap`:
+
+```text
+service upgrade --config <broker.json> \
+  --target-version <newer-version> --timeout 30m --json
+```
+
+The broker drains new mutations, freezes the online compatible upgrade-capable peers, prepares and
+arms every participant, persists irreversible global COMMIT, activates peers first, and activates
+itself last. Pre-COMMIT failure cancels every prepared transaction. Offline peers do not block; an
+old-version peer remains non-dispatchable after reconnecting and requires local bootstrap. The new
+broker bounds reconnect and readiness qualification and reports `completed_with_errors` when a
+participant requires intervention.
 
 Preparation accepts only the canonical Delegation GitHub release and verifies its manifest,
 Sigstore provenance, tag commit, workflow identity, platform, architecture, and artifact digest. It
