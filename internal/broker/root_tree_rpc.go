@@ -16,6 +16,10 @@ func (s *session) handleEnsureRootTree(ctx context.Context, request protocol.Env
 	if err != nil || params.Validate() != nil {
 		return s.writeError(ctx, request, protocol.ErrorInvalidParams, "invalid root tree payload")
 	}
+	releaseAdmission, err := s.rejectDrainedMutation(ctx, request)
+	if releaseAdmission == nil {
+		return err
+	}
 	tree, principal, err := s.server.registry.EnsureRootTree(
 		ctx,
 		s.server.controllerID,
@@ -23,6 +27,7 @@ func (s *session) handleEnsureRootTree(ctx context.Context, request protocol.Env
 		s.deviceID,
 		s.server.now(),
 	)
+	releaseAdmission()
 	if err == nil {
 		return s.writeResult(ctx, request, protocol.EnsureRootTreeResult{
 			Tree: tree, Principal: principal,

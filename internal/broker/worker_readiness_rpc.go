@@ -35,6 +35,7 @@ func (s *session) handleUpdateWorkerReadiness(
 	s.server.mu.Lock()
 	if s.server.currentConnectionLocked(s.deviceID) == s {
 		ready := persisted.IsReady()
+		s.workerReadiness = persisted
 		if s.workerReady.Load() != ready {
 			s.workerReady.Store(ready)
 			s.server.statusGeneration++
