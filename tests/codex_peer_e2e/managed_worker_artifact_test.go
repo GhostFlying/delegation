@@ -35,6 +35,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/rootmcp"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/workerhost"
+	"github.com/GhostFlying/delegation/internal/workerreadiness"
 	"github.com/klauspost/compress/zstd"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -94,6 +95,32 @@ func openArtifactE2EPeer(
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtimeDigest, err := workerreadiness.RuntimeDigest(managedBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configDigest, err := workerreadiness.ConfigDigest(configPath, providerEnvironmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Result-package coverage starts after execution qualification. Persist the
+	// same digest-bound ready snapshot that a successful production probe publishes.
+	readiness, err := state.EnsureWorkerReadinessEpoch(
+		context.Background(), runtimeDigest, configDigest, time.Now().UnixMilli(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readiness.State = protocol.WorkerReadinessReady
+	readiness.AttemptCount = 1
+	readiness.NextAttemptAt = 0
+	readiness.LastAttemptAt = readiness.UpdatedAt + 1
+	readiness.UpdatedAt = readiness.LastAttemptAt
+	if _, err := state.UpdateWorkerReadiness(
+		context.Background(), readiness.Epoch, readiness,
+	); err != nil {
+		t.Fatal(err)
+	}
 	host := openManagedTestHost(
 		t, configPath, managedBinary, codexBinary, providerEnvironmentPath, state,
 	)
@@ -134,6 +161,7 @@ func startArtifactE2EConnector(
 		WorkerSpawner:         noopPeer,
 		WorkerController:      noopPeer,
 		WorkerLifecycleSource: peer.host,
+		WorkerReadinessSource: peer.state,
 		ChangesArtifactSource: artifactSource,
 		ResultPackageSource:   peer.host,
 		WorkspaceManager:      noopPeer,
