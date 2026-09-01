@@ -281,3 +281,56 @@ Executable acceptance at the accepted frozen revision:
   `git diff --check`, and the full-tree gofmt check passed.
 - Validation used `go1.26.5 linux/amd64`; the accepted writer and detached review worktrees remained
   clean.
+
+## Follow-up Checkpoint: Bounded TraeX Rollout Compatibility
+
+- Base commit: `b0e16fed3f899c2a45996c944bdc2f8d8ce31f05`
+- Accepted review range:
+  `b0e16fed3f899c2a45996c944bdc2f8d8ce31f05..66df723e81d36a0f37f4145598ad01ac349abc6e`
+- Review round: 1
+- Frozen commit: `66df723e81d36a0f37f4145598ad01ac349abc6e`
+- Frozen tree: `0775c121a18c59853e38795d2021d31e37e05b4e`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `CLEAN`
+- Findings: none
+- Disposition: accepted and committed directly on the integration branch
+
+This checkpoint raises only the bounded pre-start scan budget to the existing 64 MiB raw-rollout
+limit. It keeps pre-start content excluded from the captured result and digest while accepting the
+approximately 1.41 MiB `session_meta` emitted by the supported TraeX 0.201.6 runtime.
+
+Executable acceptance at the accepted frozen revision:
+
+- The focused rollout-capture package tests passed, including the retained small-limit rejection
+  case and a 2 MiB session-metadata regression case that returns only the exact requested turn.
+- `go test -count=1 -tags=ts_omit_logtail -timeout=30m ./...` passed.
+- `go vet -tags=ts_omit_logtail ./...` passed.
+- The reviewed range passed `git diff --check` and the full-tree gofmt check; the detached review
+  worktree remained clean.
+
+## Follow-up Checkpoint: Readiness-aware Live E2E Fixtures
+
+- Base commit: `66df723e81d36a0f37f4145598ad01ac349abc6e`
+- Accepted review range:
+  `66df723e81d36a0f37f4145598ad01ac349abc6e..79513871a3e0c5c37c427dcdd06d0608d13b5f99`
+- Review round: 1
+- Frozen commit: `79513871a3e0c5c37c427dcdd06d0608d13b5f99`
+- Frozen tree: `0f18584b7fe92ed003a6f64453661d9cb113a778`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `CLEAN`
+- Findings: none
+- Disposition: accepted and committed directly on the integration branch
+
+This checkpoint makes the result-package fixture enter through a production-equivalent,
+digest-bound persisted readiness epoch and removes prohibited TraeX profile-loading arguments from
+the live smoke path.
+
+Executable acceptance at the accepted frozen revision:
+
+- The independently reviewed artifact live E2E passed both dirty-workspace-and-commit and
+  clean-commit-only result-package scenarios with Codex 0.144.1.
+- The independently reviewed TraeX 0.201.6 plus warmpool live smoke passed a real worker turn,
+  result packaging, app-server process replacement, and cold resume.
+- Fresh result-package E2E passed on Linux amd64 in 2.02 seconds, macOS arm64 in 7.04 seconds, and
+  Windows amd64 in 45.67 seconds using binaries built from the frozen tree.
+- The reviewed range passed `git diff --check`; the detached review worktree remained clean.
