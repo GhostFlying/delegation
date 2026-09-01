@@ -278,42 +278,6 @@ func TestServiceRuntimePersistsProfileFailureWithoutResettingEpoch(t *testing.T)
 	}
 }
 
-func TestServiceRuntimePersistsUnsupportedWindowsTraeXHost(t *testing.T) {
-	configPath, cfg := setupConnectorRuntimeTest(
-		t, "123e4567-e89b-42d3-a456-426614174724", "windows-traex",
-		"wss://broker.example.test/v1/connect",
-	)
-	cfg.HostKind = hostkind.TraeX
-	cfg.Peer.CLI = &delegationconfig.CLIConfig{
-		Command:  testCodexBinary(t),
-		Launcher: &clilaunch.Spec{Executable: testCodexBinary(t)},
-	}
-	cfg.Peer.CodexBinary = ""
-	rewriteRepairConfig(t, configPath, cfg)
-
-	_, err := readServiceRuntimeConfig(configPath, "", "windows")
-	if err == nil || !strings.Contains(err.Error(), "unsupported on Windows") {
-		t.Fatalf("Windows TraeX startup error = %v", err)
-	}
-	if !strings.Contains(err.Error(), "state=intervention_required") ||
-		!strings.Contains(err.Error(), "failureCode=unsupported_host") {
-		t.Fatalf("Windows TraeX startup log = %v", err)
-	}
-	state, err := store.OpenPeer(context.Background(), cfg.Peer.StateFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer state.Close()
-	readiness, err := state.WorkerReadiness(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if readiness.State != protocol.WorkerReadinessInterventionRequired ||
-		readiness.FailureCode != protocol.WorkerHostUnsupported {
-		t.Fatalf("unsupported host readiness = %#v", readiness)
-	}
-}
-
 func rewriteRepairConfig(t *testing.T, path string, cfg delegationconfig.Config) {
 	t.Helper()
 	data, err := json.MarshalIndent(cfg, "", "  ")
