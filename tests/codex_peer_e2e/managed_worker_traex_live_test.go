@@ -84,7 +84,6 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 		"--device-name", "managed-worker-traex-live", "--broker-url", "ws://127.0.0.1:1",
 		"--auth-mode", "none",
 		"--cli-command", traeXBinary,
-		"--cli-argument=-p", "--cli-argument=ultra",
 		"--cli-launcher", warmpoolBinary,
 		"--cli-launcher-prefix-argument=run",
 		"--cli-launcher-prefix-argument=--",
@@ -147,7 +146,7 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 		CLILaunch: clilaunch.Spec{
 			Executable: warmpoolBinary,
 			PrefixArguments: []string{
-				"run", "--", traeXBinary, "-p", "ultra",
+				"run", "--", traeXBinary,
 			},
 		},
 		CLIRuntimeExecutable: traeXBinary,
