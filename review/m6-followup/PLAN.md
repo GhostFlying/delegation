@@ -74,6 +74,17 @@ current agent state without rewriting immutable spawn receipts. The milestone st
 - Acceptance: the focused test passes 100 consecutive runs, the surrounding readiness and
   dispatchability tests pass under the race detector, and the full Linux suite passes.
 
+### Final-validation follow-up: native Windows TraeX rejection coverage
+
+- Owner: milestone integration worktree.
+- Dependencies: checkpoint 2 and the combined milestone tree.
+- Write set: CLI platform test placement, Windows acceptance runner, and review evidence only.
+- Behavior: the existing startup-classification regression for unsupported Windows TraeX peers is
+  compiled and executed on Windows instead of remaining hidden in a Linux-only test file. Product
+  runtime behavior and the explicit Windows rejection contract remain unchanged.
+- Acceptance: the focused test passes on Linux and native Windows, the Windows platform contract
+  suite reports that the test executed, and the full Linux suite passes.
+
 ## Freeze, Review, and Integration
 
 For every checkpoint, record the base, frozen commit and tree, focused acceptance command and raw
