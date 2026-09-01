@@ -307,10 +307,14 @@ func TestHostQualifyUsesOneFreshThreadAndPersistentManagedRoots(t *testing.T) {
 		t.Fatalf("qualification workspace = cwd %q, roots %#v, want %q",
 			start.CWD, start.RuntimeWorkspaceRoots, workspace)
 	}
-	if paths.launchOptions.CodexHome != paths.codexHome ||
-		paths.launchOptions.RuntimeHomeEnvironment["CODEX_HOME"] != paths.codexHome {
+	managedHome, err := filepath.EvalSymlinks(paths.codexHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paths.launchOptions.CodexHome != managedHome ||
+		paths.launchOptions.RuntimeHomeEnvironment["CODEX_HOME"] != managedHome {
 		t.Fatalf("qualification managed home = %#v, want %q",
-			paths.launchOptions, paths.codexHome)
+			paths.launchOptions, managedHome)
 	}
 	mcpConfig, ok := start.Config["mcp_servers."+workerServerName].(map[string]any)
 	if !ok || mcpConfig["command"] != paths.delegationBinary ||
