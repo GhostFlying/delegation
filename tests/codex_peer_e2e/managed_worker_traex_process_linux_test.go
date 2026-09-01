@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -25,6 +26,10 @@ func traeXLiveAppServerPIDs(cliHome string, excluded int) ([]int, error) {
 			continue
 		}
 		processRoot := filepath.Join("/proc", entry.Name())
+		command, err := os.ReadFile(filepath.Join(processRoot, "comm"))
+		if err != nil || !isTraeXLiveProcessCommand(strings.TrimSpace(string(command))) {
+			continue
+		}
 		environment, err := os.ReadFile(filepath.Join(processRoot, "environ"))
 		if err != nil ||
 			!containsTraeXLiveProcessValue(environment, "TRAECLI_HOME", cliHome) {

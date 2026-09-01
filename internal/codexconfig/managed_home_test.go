@@ -1,6 +1,7 @@
 package codexconfig
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,16 +44,16 @@ func TestValidateManagedRuntimeHomeAppliesHostContentPolicy(t *testing.T) {
 			want:     "managed TRAE_HOME must not contain AGENTS.md",
 		},
 		{
-			name:     "TraeX top-level plugins",
+			name:     "TraeX CLI plugins",
 			hostKind: hostkind.TraeX,
-			relative: "plugins",
-			want:     "managed TRAE_HOME must not contain plugins",
+			relative: filepath.Join("cli", "plugins"),
+			want:     "managed TRAECLI_HOME must not contain plugins",
 		},
 		{
-			name:     "TraeX CLI authentication",
+			name:     "TraeX top-level authentication",
 			hostKind: hostkind.TraeX,
-			relative: filepath.Join("cli", "auth.json"),
-			want:     "managed TRAECLI_HOME must not contain auth.json",
+			relative: "auth.json",
+			want:     "managed TRAE_HOME must not contain auth.json",
 		},
 		{
 			name:     "TraeX CLI hooks",
@@ -124,6 +125,9 @@ func TestValidateManagedRuntimeHomeAllowsTraeXGeneratedArtifacts(t *testing.T) {
 	home := t.TempDir()
 	for _, directory := range []string{
 		".tmp",
+		filepath.Join("model-provider", "trae"),
+		filepath.Join("plugins", "cache", "traex-bd-plugins"),
+		filepath.Join("cli", "hooks", "commit-attribution"),
 		filepath.Join("cli", "memories"),
 		filepath.Join("cli", "skills", ".system"),
 		filepath.Join("skills", ".system"),
@@ -135,6 +139,9 @@ func TestValidateManagedRuntimeHomeAllowsTraeXGeneratedArtifacts(t *testing.T) {
 	for _, file := range []string{
 		"installation_id",
 		"minimum_supported_version.json",
+		filepath.Join("model-provider", "trae", "models_cache.json"),
+		filepath.Join("cli", "hooks", "commit-attribution", "generated.json"),
+		filepath.Join("cli", "auth.json"),
 		filepath.Join("cli", "state_5.sqlite"),
 		filepath.Join("cli", "state_5.sqlite-wal"),
 		filepath.Join("cli", "state_5.sqlite-shm"),
@@ -146,6 +153,13 @@ func TestValidateManagedRuntimeHomeAllowsTraeXGeneratedArtifacts(t *testing.T) {
 		if err := os.WriteFile(path, []byte("managed"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.WriteFile(
+		filepath.Join(home, "traecli.toml"),
+		[]byte("[marketplaces.traex-bd-plugins]\nauto_update = true\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
 	}
 	if err := ValidateManagedRuntimeHome(hostkind.TraeX, home); err != nil {
 		t.Fatalf("TraeX generated managed runtime home error = %v", err)
@@ -169,7 +183,7 @@ func TestValidateManagedRuntimeHomeRejectsAllTraeXForbiddenEntries(t *testing.T)
 			}
 		})
 	}
-	for _, entry := range forbiddenManagedTraeHomeEntries {
+	for _, entry := range forbiddenManagedTraeCLIHomeEntries {
 		t.Run("TRAECLI_HOME "+entry, func(t *testing.T) {
 			home := t.TempDir()
 			path := filepath.Join(home, "cli", entry)
@@ -184,5 +198,120 @@ func TestValidateManagedRuntimeHomeRejectsAllTraeXForbiddenEntries(t *testing.T)
 				t.Fatalf("ValidateManagedRuntimeHome() error = %v, want %q", err, entry)
 			}
 		})
+	}
+}
+
+func TestResetGeneratedTraeRuntimeArtifactsRejectsUnexpectedShape(t *testing.T) {
+	for _, test := range []struct {
+		relative string
+		contents string
+	}{
+		{relative: filepath.Join("model-provider", "custom")},
+		{relative: filepath.Join("plugins", "custom")},
+		{relative: filepath.Join("plugins", "cache", "custom")},
+		{relative: filepath.Join("cli", "hooks", "custom")},
+		{relative: "traecli.toml", contents: "model = \"user-selected\"\n"},
+	} {
+		t.Run(test.relative, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, test.relative)
+			if test.contents == "" {
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.WriteFile(path, []byte(test.contents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := ResetGeneratedTraeRuntimeArtifacts(home); err == nil ||
+				(!strings.Contains(err.Error(), "unsupported entry") &&
+					!strings.Contains(err.Error(), "marketplace")) {
+				t.Fatalf("ResetGeneratedTraeRuntimeArtifacts() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestResetGeneratedTraeRuntimeArtifactsRemovesOnlyReservedCaches(t *testing.T) {
+	home := t.TempDir()
+	for _, path := range []string{
+		filepath.Join(home, "model-provider", "trae", "models_cache.json"),
+		filepath.Join(home, "plugins", "cache", "traex-bd-plugins", "guide", "SKILL.md"),
+		filepath.Join(home, "cli", "hooks", "commit-attribution", "generated.json"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("generated"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(
+		filepath.Join(home, "traecli.toml"),
+		[]byte("[marketplaces.traex-bd-plugins]\nlast_revision = \"generated\"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	kept := filepath.Join(home, "minimum_supported_version.json")
+	if err := os.WriteFile(kept, []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetGeneratedTraeRuntimeArtifacts(home); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"model-provider",
+		"plugins",
+		"traecli.toml",
+		filepath.Join("cli", "hooks"),
+	} {
+		if _, err := os.Lstat(filepath.Join(home, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("generated cache %s remains: %v", name, err)
+		}
+	}
+	if data, err := os.ReadFile(kept); err != nil || string(data) != "kept" {
+		t.Fatalf("unrelated managed state = %q, %v", data, err)
+	}
+}
+
+func TestResetGeneratedTraeRuntimeArtifactsValidatesBeforeRemoving(t *testing.T) {
+	home := t.TempDir()
+	cache := filepath.Join(home, "model-provider", "trae", "models_cache.json")
+	if err := os.MkdirAll(filepath.Dir(cache), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cache, []byte("generated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "cli", "hooks", "custom"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetGeneratedTraeRuntimeArtifacts(home); err == nil ||
+		!strings.Contains(err.Error(), "unsupported entry custom") {
+		t.Fatalf("ResetGeneratedTraeRuntimeArtifacts() error = %v", err)
+	}
+	if data, err := os.ReadFile(cache); err != nil || string(data) != "generated" {
+		t.Fatalf("cache changed before complete validation: %q, %v", data, err)
+	}
+}
+
+func TestResetGeneratedTraeRuntimeArtifactsRejectsGeneratedSymlink(t *testing.T) {
+	home := t.TempDir()
+	directory := filepath.Join(home, "cli", "hooks", "commit-attribution")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(home, "target")
+	if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(directory, "generated")); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+	if err := ResetGeneratedTraeRuntimeArtifacts(home); err == nil ||
+		!strings.Contains(err.Error(), "must not contain symbolic links") {
+		t.Fatalf("ResetGeneratedTraeRuntimeArtifacts() error = %v", err)
 	}
 }

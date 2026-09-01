@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	JournalSchemaVersion = 2
+	JournalSchemaVersion = 3
 	maximumJournalBytes  = 64 << 10
 	maximumFailureBytes  = 64
 )
@@ -50,6 +50,7 @@ type Invocation struct {
 	TargetBinaryPath string `json:"targetBinaryPath"`
 	ConfigPath       string `json:"configPath"`
 	EnvironmentFile  string `json:"environmentFile,omitempty"`
+	TraeAuthFile     string `json:"traeAuthFile,omitempty"`
 	NativeName       string `json:"nativeName"`
 	DefinitionPath   string `json:"definitionPath"`
 	UserIdentity     string `json:"userIdentity"`
@@ -177,12 +178,16 @@ func (j Journal) Validate() error {
 	}
 	switch j.Role {
 	case delegationconfig.RoleBroker:
-		if j.DeviceID != "" || j.Invocation.EnvironmentFile != "" || j.SourceReadinessEpoch != 0 {
+		if j.DeviceID != "" || j.Invocation.EnvironmentFile != "" ||
+			j.Invocation.TraeAuthFile != "" || j.SourceReadinessEpoch != 0 {
 			return errors.New("broker journal contains peer-only identity")
 		}
 	case delegationconfig.RolePeer:
 		if identity.ValidateID(j.DeviceID) != nil || j.Invocation.EnvironmentFile == "" {
 			return errors.New("peer journal identity is incomplete")
+		}
+		if j.Invocation.TraeAuthFile != "" && !filepath.IsAbs(j.Invocation.TraeAuthFile) {
+			return errors.New("peer journal TraeX authentication path is invalid")
 		}
 	default:
 		return fmt.Errorf("unsupported upgrade role %q", j.Role)
@@ -221,6 +226,9 @@ func (j Journal) Validate() error {
 	}
 	if j.Invocation.EnvironmentFile != "" {
 		paths = append(paths, j.Invocation.EnvironmentFile)
+	}
+	if j.Invocation.TraeAuthFile != "" {
+		paths = append(paths, j.Invocation.TraeAuthFile)
 	}
 	for _, path := range paths {
 		if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {

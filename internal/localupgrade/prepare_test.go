@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GhostFlying/delegation/internal/clilaunch"
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/releaseverify"
@@ -113,6 +114,48 @@ func TestPrepareRejectsCompatibilityAndConfigurationDrift(t *testing.T) {
 	}
 	if _, err := Prepare(context.Background(), options); err == nil || !strings.Contains(err.Error(), "configuration changed") {
 		t.Fatalf("configuration drift error = %v", err)
+	}
+}
+
+func TestPrepareFreezesTraeXAuthenticationSource(t *testing.T) {
+	options := prepareTraeXFixture(t)
+	result, err := Prepare(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Journal.Invocation.TraeAuthFile != options.Config.Peer.TraeAuthFile {
+		t.Fatalf(
+			"journal TraeX authentication source = %q, want %q",
+			result.Journal.Invocation.TraeAuthFile,
+			options.Config.Peer.TraeAuthFile,
+		)
+	}
+	if result.Journal.SourceConfigDigest == "" || result.Journal.ConfigDigest == "" {
+		t.Fatalf("journal configuration digests = %#v", result.Journal)
+	}
+}
+
+func TestPrepareRejectsTraeXAuthenticationSourceDrift(t *testing.T) {
+	options := prepareTraeXFixture(t)
+	originalPrepare := options.Dependencies.PrepareService
+	options.Dependencies.PrepareService = func(
+		ctx context.Context,
+		role userservice.ServiceRole,
+		source, target userservice.Invocation,
+	) (userservice.UpgradePlan, error) {
+		plan, err := originalPrepare(ctx, role, source, target)
+		if err == nil {
+			err = os.WriteFile(
+				options.Config.Peer.TraeAuthFile,
+				traeXUpgradeAuth("rotated-access-token"),
+				0o600,
+			)
+		}
+		return plan, err
+	}
+	if _, err := Prepare(context.Background(), options); err == nil ||
+		!strings.Contains(err.Error(), "upgrade configuration changed during preflight") {
+		t.Fatalf("TraeX authentication drift error = %v", err)
 	}
 }
 
@@ -277,6 +320,47 @@ func prepareFixture(t *testing.T) PrepareOptions {
 			Now:                func() time.Time { return time.Unix(100, 0) },
 		},
 	}
+}
+
+func prepareTraeXFixture(t *testing.T) PrepareOptions {
+	t.Helper()
+	options := prepareFixture(t)
+	authPath := filepath.Join(options.Home, "trae-auth.json")
+	if err := os.WriteFile(authPath, traeXUpgradeAuth("test-access-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options.Config.HostKind = hostkind.TraeX
+	options.Config.Peer.CLI = &delegationconfig.CLIConfig{
+		Command: options.Config.Peer.CodexBinary,
+		Launcher: &clilaunch.Spec{
+			Executable:      options.SourceBinary,
+			PrefixArguments: []string{"run", "--"},
+		},
+	}
+	options.Config.Peer.CodexBinary = ""
+	options.Config.Peer.TraeAuthFile = authPath
+	configData, err := delegationconfig.EncodeForRuntime(
+		options.Config, delegationconfig.RuntimeCapabilities{EmbeddedTailscale: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(options.ConfigPath, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return options
+}
+
+func traeXUpgradeAuth(accessToken string) []byte {
+	document := map[string]any{
+		"auth_mode": "trae",
+		"trae": map[string]any{
+			"access_token": accessToken, "credential_kind": "cloud_cli_jwt",
+			"login_method": "test", "region": "CN", "version": 2,
+		},
+	}
+	data, _ := json.Marshal(document)
+	return data
 }
 
 func testCompatibility(t *testing.T, role delegationconfig.Role, version string) Compatibility {

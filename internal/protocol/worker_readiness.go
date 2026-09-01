@@ -38,6 +38,7 @@ const (
 const (
 	WorkerRequalificationExhausted = "worker_requalification_exhausted"
 	WorkerManagedHomeInvalid       = "managed_home_invalid"
+	WorkerAuthenticationInvalid    = "authentication_invalid"
 	WorkerProfileUnsupported       = "profile_arguments_unsupported"
 	WorkerHostUnsupported          = "unsupported_host"
 	WorkerServiceIdentityInvalid   = "service_identity_invalid"

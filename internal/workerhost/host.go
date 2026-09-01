@@ -26,6 +26,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/pathguard"
 	"github.com/GhostFlying/delegation/internal/resultpackagefiles"
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/traexauth"
 )
 
 const (
@@ -109,6 +110,8 @@ type Options struct {
 	CodexEnvironment        map[string]string
 	CodexUnsetEnvironment   []string
 	ProviderEnvironmentFile string
+	TraeAuthSourceFile      string
+	ManagedTraeAuthFile     string
 	CodexHome               string
 	WorkspaceRoot           string
 	MaxWorkerSlots          int
@@ -187,6 +190,8 @@ type Host struct {
 	runtimeHomeEnvironment   map[string]string
 	shellExcludedEnvironment []string
 	providerEnvironmentFile  string
+	traeAuthSourceFiles      []string
+	managedTraeAuthFiles     []string
 	codexHome                string
 	rolloutHome              string
 	workspaceRoot            *os.Root
@@ -274,6 +279,24 @@ func New(ctx context.Context, options Options) (*Host, error) {
 	if options.ProviderEnvironmentFile != "" && !filepath.IsAbs(options.ProviderEnvironmentFile) {
 		return nil, errors.New("provider environment file must be an absolute path")
 	}
+	switch options.HostKind {
+	case hostkind.Codex:
+		if options.TraeAuthSourceFile != "" || options.ManagedTraeAuthFile != "" {
+			return nil, errors.New("credential files are supported only for TraeX")
+		}
+	case hostkind.TraeX:
+		want := traexauth.ManagedPath(options.CodexHome)
+		if !filepath.IsAbs(options.TraeAuthSourceFile) {
+			return nil, errors.New("TraeX credential source file must be an absolute path")
+		}
+		if !filepath.IsAbs(options.ManagedTraeAuthFile) ||
+			!sameCanonicalPath(options.ManagedTraeAuthFile, want) {
+			return nil, errors.New("managed TraeX credential file must be the isolated TRAECLI_HOME auth.json")
+		}
+		if sameCanonicalPath(options.TraeAuthSourceFile, options.ManagedTraeAuthFile) {
+			return nil, errors.New("TraeX credential source and managed copy must be different files")
+		}
+	}
 	for name, path := range map[string]string{
 		"peer config":       options.PeerConfigPath,
 		"delegation binary": options.DelegationBinary,
@@ -326,11 +349,42 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		}
 		providerEnvironmentFile = resolvedEnvironmentFile
 	}
+	var traeAuthSourceFiles []string
+	var managedTraeAuthFiles []string
+	if options.TraeAuthSourceFile != "" {
+		if err := requireRegularFile(options.TraeAuthSourceFile, "TraeX credential source file"); err != nil {
+			return nil, err
+		}
+		resolvedCredentialSourceFile, err := filepath.EvalSymlinks(options.TraeAuthSourceFile)
+		if err != nil {
+			return nil, fmt.Errorf("resolve TraeX credential source file: %w", err)
+		}
+		resolvedManagedCredentialFile, err := filepath.EvalSymlinks(options.ManagedTraeAuthFile)
+		if err != nil {
+			return nil, fmt.Errorf("resolve managed TraeX credential file: %w", err)
+		}
+		if sameCanonicalPath(resolvedCredentialSourceFile, resolvedManagedCredentialFile) {
+			return nil, errors.New("TraeX credential source and managed copy must be different files")
+		}
+		traeAuthSourceFiles = append(traeAuthSourceFiles, filepath.Clean(options.TraeAuthSourceFile))
+		if !sameCanonicalPath(options.TraeAuthSourceFile, resolvedCredentialSourceFile) {
+			traeAuthSourceFiles = append(traeAuthSourceFiles, resolvedCredentialSourceFile)
+		}
+		managedTraeAuthFiles = append(managedTraeAuthFiles, filepath.Clean(options.ManagedTraeAuthFile))
+		if !sameCanonicalPath(options.ManagedTraeAuthFile, resolvedManagedCredentialFile) {
+			managedTraeAuthFiles = append(managedTraeAuthFiles, resolvedManagedCredentialFile)
+		}
+	}
 	if options.MaxWorkerSlots < 1 || options.MaxWorkerSlots > config.MaximumWorkerSlots {
 		return nil, fmt.Errorf("max worker slots must be from 1 through %d", config.MaximumWorkerSlots)
 	}
 	if err := validateManagedRuntimeHome(options.HostKind, options.CodexHome); err != nil {
 		return nil, err
+	}
+	if options.HostKind == hostkind.TraeX {
+		if err := traexauth.ValidateManagedCopy(options.CodexHome, true); err != nil {
+			return nil, err
+		}
 	}
 	codexHome, err := filepath.EvalSymlinks(options.CodexHome)
 	if err != nil {
@@ -417,6 +471,8 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		runtimeHomeEnvironment:   runtimeHomeEnvironment,
 		shellExcludedEnvironment: uniqueEnvironmentNames(shellExcludedEnvironment),
 		providerEnvironmentFile:  providerEnvironmentFile,
+		traeAuthSourceFiles:      traeAuthSourceFiles,
+		managedTraeAuthFiles:     managedTraeAuthFiles,
 		rolloutHome:              rolloutHome,
 		workspaceRoot:            root, artifactRoot: artifactRoot,
 		maxWorkerSlots:          options.MaxWorkerSlots,
@@ -525,6 +581,11 @@ func validateManagedRuntimeHome(kind hostkind.Kind, path string) error {
 	}
 	if err := config.ValidatePrivateDirectory(path); err != nil {
 		return fmt.Errorf("validate managed %s: %w", name, err)
+	}
+	if kind == hostkind.TraeX {
+		if err := codexconfig.ResetGeneratedTraeRuntimeArtifacts(path); err != nil {
+			return fmt.Errorf("reset managed TraeX runtime caches: %w", err)
+		}
 	}
 	return codexconfig.ValidateManagedRuntimeHome(kind, path)
 }

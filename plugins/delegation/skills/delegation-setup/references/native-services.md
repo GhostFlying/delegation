@@ -42,7 +42,11 @@ file uses literal `NAME=value` lines with no shell expansion or quote processing
 `DELEGATION_CODEX_CONFIG_JSON` and the credential variables referenced by that JSON. It may also
 contain `CODEX_ACCESS_TOKEN`, `CODEX_API_KEY`, or `OPENAI_API_KEY` from the target host so the
 managed app-server can use the host's existing authentication; worker shells exclude these values.
-Do not put broker or peer tokens in this file.
+Do not put broker or peer tokens in this file. A TraeX account token also does not belong in this
+file: `peer.traeAuthFile`, configured by `setup peer --trae-auth-file`, names the separately
+protected host `TRAECLI_HOME/auth.json`. The peer service validates that source and atomically
+copies it into the isolated managed home for the app-server while denying worker tools access to
+both the source and the copy. Retain the source and restart the peer after account rotation.
 For embedded Tailscale, also keep the environment file outside the Tailscale enrollment-key file,
 state directory, and derived `<state-dir>.tailscale.lock` path. Never put the Tailscale enrollment
 key or a Delegation token in the environment file.

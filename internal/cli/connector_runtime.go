@@ -31,6 +31,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/tailscaleauth"
 	"github.com/GhostFlying/delegation/internal/tailscaleruntime"
 	"github.com/GhostFlying/delegation/internal/tokenfile"
+	"github.com/GhostFlying/delegation/internal/traexauth"
 	"github.com/GhostFlying/delegation/internal/workerhost"
 	"github.com/GhostFlying/delegation/internal/workerreadiness"
 )
@@ -89,14 +90,31 @@ func runConnectorServiceWithProviderEnvironment(
 		return err
 	}
 	authority, authorityErr := loadConnectorAuthority(configPath, cfg)
-	var managedHomeErr error
 	if authorityErr != nil {
-		managedHomeErr = codexconfig.ValidateManagedRuntimeHome(
+		managedHomeErr := codexconfig.ValidateManagedRuntimeHome(
 			cfg.EffectiveHostKind(), cfg.Peer.CodexHome,
 		)
-		if managedHomeErr == nil {
-			return authorityErr
+		if managedHomeErr != nil {
+			return errors.Join(
+				authorityErr,
+				persistConnectorStartupFailure(
+					ctx, cfg, configPath, environmentFile,
+					protocol.WorkerManagedHomeInvalid,
+				),
+			)
 		}
+		if cfg.EffectiveHostKind() == hostkind.TraeX &&
+			(errors.Is(authorityErr, traexauth.ErrInvalidSource) ||
+				errors.Is(authorityErr, pathguard.ErrTraeXAuthenticationAuthority)) {
+			return errors.Join(
+				authorityErr,
+				persistConnectorStartupFailure(
+					ctx, cfg, configPath, environmentFile,
+					protocol.WorkerAuthenticationInvalid,
+				),
+			)
+		}
+		return authorityErr
 	}
 	if ctx.Err() != nil {
 		return nil
@@ -144,26 +162,21 @@ func runConnectorServiceWithProviderEnvironment(
 	if err != nil {
 		return err
 	}
-	configDigest, err := workerreadiness.ConfigDigest(configPath, environmentFile)
+	configMaterials, err := workerreadiness.ReadConfigMaterials(configPath, environmentFile)
 	if err != nil {
 		return err
 	}
-	if _, err := peerState.EnsureWorkerReadinessEpoch(
-		ctx, runtimeDigest, configDigest, time.Now().UnixMilli(),
-	); err != nil {
-		return fmt.Errorf("initialize worker readiness: %w", err)
+	managedAuthPath, configDigest, err := initializeWorkerReadiness(
+		ctx, peerState, runtimeDigest, configMaterials, cfg, authority.traeAuth,
+	)
+	if err != nil {
+		return err
 	}
 	if runtime.GOOS == "windows" && cfg.EffectiveHostKind() == hostkind.TraeX {
 		unsupportedErr := errors.New("TraeX worker host is unsupported on Windows")
 		return errors.Join(
 			unsupportedErr,
 			failOpenPeerReadiness(ctx, peerState, protocol.WorkerHostUnsupported),
-		)
-	}
-	if managedHomeErr != nil {
-		return errors.Join(
-			authorityErr,
-			failOpenPeerReadiness(ctx, peerState, protocol.WorkerManagedHomeInvalid),
 		)
 	}
 	var tailscale embeddedTailscaleRuntime
@@ -230,6 +243,8 @@ func runConnectorServiceWithProviderEnvironment(
 		CodexEnvironment:        codexEnvironment,
 		CodexUnsetEnvironment:   cliLaunch.UnsetEnvironment,
 		ProviderEnvironmentFile: environmentFile,
+		TraeAuthSourceFile:      cfg.Peer.TraeAuthFile,
+		ManagedTraeAuthFile:     managedAuthPath,
 		WorkspaceRoot:           cfg.Peer.WorkspaceRoot, MaxWorkerSlots: cfg.Peer.MaxWorkerSlots,
 		CodexConfig: providerEnvironment.Config, Store: peerState,
 		ResultPackages: resultPackages,
@@ -238,6 +253,13 @@ func runConnectorServiceWithProviderEnvironment(
 		},
 	})
 	if err != nil {
+		if errors.Is(err, traexauth.ErrInvalidManagedCopy) {
+			return errors.Join(
+				err, failOpenPeerReadiness(
+					ctx, peerState, protocol.WorkerAuthenticationInvalid,
+				),
+			)
+		}
 		return err
 	}
 	defer func() {
@@ -442,6 +464,92 @@ func runConnectorServiceWithProviderEnvironment(
 	return errors.Join(fmt.Errorf("%s stopped: %w", firstName, firstErr), closeErr, connectorErr, bridgeErr, readinessErr)
 }
 
+func initializeWorkerReadiness(
+	ctx context.Context,
+	state *store.PeerStore,
+	runtimeDigest string,
+	configMaterials []workerreadiness.ConfigMaterial,
+	cfg delegationconfig.Config,
+	traeAuth []byte,
+) (string, string, error) {
+	if cfg.EffectiveHostKind() == hostkind.TraeX {
+		configMaterials = append(configMaterials, workerreadiness.ConfigMaterial{
+			Path: cfg.Peer.TraeAuthFile, Data: traeAuth,
+		})
+	}
+	configDigest, err := workerreadiness.ConfigDigestMaterials(configMaterials...)
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := state.EnsureWorkerReadinessEpoch(
+		ctx, runtimeDigest, configDigest, time.Now().UnixMilli(),
+	); err != nil {
+		return "", "", fmt.Errorf("initialize worker readiness: %w", err)
+	}
+	if cfg.EffectiveHostKind() != hostkind.TraeX {
+		return "", configDigest, nil
+	}
+	managedAuthPath, err := traexauth.Sync(traeAuth, cfg.Peer.CodexHome)
+	if err != nil {
+		return "", "", errors.Join(
+			fmt.Errorf("synchronize managed TraeX authentication: %w", err),
+			failOpenPeerReadiness(ctx, state, protocol.WorkerAuthenticationInvalid),
+		)
+	}
+	return managedAuthPath, configDigest, nil
+}
+
+func persistConnectorStartupFailure(
+	ctx context.Context,
+	cfg delegationconfig.Config,
+	configPath, environmentFile, failureCode string,
+) (resultErr error) {
+	lease, err := store.AcquirePeerLease(cfg.Peer.StateFile)
+	if err != nil {
+		return fmt.Errorf("acquire peer lease to persist %s readiness: %w", failureCode, err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, lease.Close()) }()
+	state, err := store.OpenPeer(ctx, cfg.Peer.StateFile)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, state.Close()) }()
+	runtimeBinary, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	runtimeBinary, err = filepath.EvalSymlinks(runtimeBinary)
+	if err != nil {
+		return err
+	}
+	runtimeDigest, err := workerreadiness.RuntimeDigest(runtimeBinary)
+	if err != nil {
+		return err
+	}
+	materials, err := workerreadiness.ReadConfigMaterials(configPath, environmentFile)
+	if err != nil {
+		return err
+	}
+	if cfg.EffectiveHostKind() == hostkind.TraeX {
+		// An invalid source has no trusted bytes to hash. Binding its protected
+		// path to an impossible valid-document marker keeps ordinary restarts in
+		// one intervention epoch; a repaired source necessarily changes it.
+		materials = append(materials, workerreadiness.ConfigMaterial{
+			Path: cfg.Peer.TraeAuthFile, Data: []byte("invalid-traex-auth-source"),
+		})
+	}
+	configDigest, err := workerreadiness.ConfigDigestMaterials(materials...)
+	if err != nil {
+		return err
+	}
+	if _, err := state.EnsureWorkerReadinessEpoch(
+		ctx, runtimeDigest, configDigest, time.Now().UnixMilli(),
+	); err != nil {
+		return err
+	}
+	return failOpenPeerReadiness(ctx, state, failureCode)
+}
+
 func failOpenPeerReadiness(
 	ctx context.Context, state *store.PeerStore, failureCode string,
 ) error {
@@ -471,9 +579,16 @@ func qualifyTraeXRepair(
 	environmentFile string,
 	cfg delegationconfig.Config,
 	quarantinePath string,
+	managedAuthPath string,
 ) (resultErr error) {
 	authority, err := loadConnectorAuthority(configPath, cfg)
 	if err != nil {
+		return err
+	}
+	if managedAuthPath != traexauth.ManagedPath(cfg.Peer.CodexHome) {
+		return errors.New("repair qualification received an unexpected TraeX authentication path")
+	}
+	if err := traexauth.ValidateManagedCopy(cfg.Peer.CodexHome, true); err != nil {
 		return err
 	}
 	providerEnvironment, err := serviceenv.LoadProtectedFile(environmentFile)
@@ -528,7 +643,9 @@ func qualifyTraeXRepair(
 		GitBinary: cfg.Peer.GitBinary, CodexHome: cfg.Peer.CodexHome,
 		CodexEnvironment: codexEnvironment, CodexUnsetEnvironment: authority.cliLaunch.UnsetEnvironment,
 		ProviderEnvironmentFile: environmentFile, WorkspaceRoot: cfg.Peer.WorkspaceRoot,
-		MaxWorkerSlots: cfg.Peer.MaxWorkerSlots, CodexConfig: providerEnvironment.Config,
+		TraeAuthSourceFile:  cfg.Peer.TraeAuthFile,
+		ManagedTraeAuthFile: managedAuthPath,
+		MaxWorkerSlots:      cfg.Peer.MaxWorkerSlots, CodexConfig: providerEnvironment.Config,
 		Store: temporaryState, ResultPackages: resultPackages,
 	})
 	if err != nil {
@@ -636,6 +753,7 @@ func (a peerAuthorizer) AuthorizeWorker(
 
 type connectorAuthority struct {
 	token           *tokenfile.Token
+	traeAuth        []byte
 	cliLaunch       clicommand.Launch
 	appServerLaunch clilaunch.Spec
 }
@@ -647,6 +765,7 @@ func loadConnectorAuthority(
 	if cfg.Role != delegationconfig.RolePeer {
 		return connectorAuthority{}, errors.New("connector runtime requires a peer configuration")
 	}
+	var traeAuth []byte
 	if cfg.Transport.Mode == delegationconfig.TransportModeTailscale {
 		tailscaleConfig := cfg.Transport.Tailscale
 		if tailscaleConfig == nil {
@@ -660,6 +779,7 @@ func loadConnectorAuthority(
 			cfg.Peer.WorkspaceRoot,
 			tailscaleConfig.StateDir,
 			tailscaleConfig.AuthKeyFile,
+			cfg.Peer.TraeAuthFile,
 		); err != nil {
 			return connectorAuthority{}, err
 		}
@@ -676,6 +796,7 @@ func loadConnectorAuthority(
 			cfg.Broker.Auth.TokenFile,
 			cfg.Peer.CodexHome,
 			cfg.Peer.WorkspaceRoot,
+			cfg.Peer.TraeAuthFile,
 		); err != nil {
 			return connectorAuthority{}, err
 		}
@@ -730,6 +851,11 @@ func loadConnectorAuthority(
 		return connectorAuthority{}, err
 	}
 	if cfg.EffectiveHostKind() == hostkind.TraeX {
+		auth, err := traexauth.ReadSource(cfg.Peer.TraeAuthFile)
+		if err != nil {
+			return connectorAuthority{}, err
+		}
+		traeAuth = auth
 		cliHome := filepath.Join(cfg.Peer.CodexHome, "cli")
 		if _, err := os.Lstat(cliHome); err == nil {
 			if err := delegationconfig.ValidatePrivateDirectory(cliHome); err != nil {
@@ -743,6 +869,7 @@ func loadConnectorAuthority(
 		return connectorAuthority{}, fmt.Errorf("validate managed workspace root: %w", err)
 	}
 	authority := connectorAuthority{
+		traeAuth:        traeAuth,
 		cliLaunch:       cliLaunch,
 		appServerLaunch: appServerLaunch,
 	}

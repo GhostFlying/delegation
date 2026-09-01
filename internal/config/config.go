@@ -109,6 +109,7 @@ type PeerConfig struct {
 	CodexBinary    string     `json:"codexBinary,omitempty"`
 	GitBinary      string     `json:"gitBinary,omitempty"`
 	CodexHome      string     `json:"codexHome,omitempty"`
+	TraeAuthFile   string     `json:"traeAuthFile,omitempty"`
 	WorkspaceRoot  string     `json:"workspaceRoot,omitempty"`
 	StateFile      string     `json:"stateFile,omitempty"`
 	MaxWorkerSlots int        `json:"maxWorkerSlots,omitempty"`
@@ -446,6 +447,11 @@ func (c Config) ValidateForRuntime(capabilities RuntimeCapabilities) error {
 			if c.Peer.CLI.Launcher == nil {
 				return errors.New("TraeX peer requires a CLI launcher")
 			}
+			if !filepath.IsAbs(c.Peer.TraeAuthFile) {
+				return errors.New("TraeX peer traeAuthFile must be a non-empty absolute path")
+			}
+		} else if c.Peer.TraeAuthFile != "" {
+			return errors.New("peer traeAuthFile is supported only for TraeX")
 		}
 		if !filepath.IsAbs(c.Peer.GitBinary) {
 			return errors.New("peer gitBinary must be an absolute path")

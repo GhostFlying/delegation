@@ -21,6 +21,10 @@ var platformCanonicalExistingPath = func(path string) (string, error) {
 	return filepath.Clean(path), nil
 }
 
+var ErrTraeXAuthenticationAuthority = errors.New(
+	"TraeX authentication authority is invalid",
+)
+
 // ValidatePeerAuthority rejects aliases between the configuration, token, and
 // reservation database files that make up a peer authority.
 func ValidatePeerAuthority(configPath, statePath, tokenPath string) error {
@@ -49,11 +53,15 @@ func ValidatePeerAuthority(configPath, statePath, tokenPath string) error {
 // merge independent runtime namespaces.
 func ValidatePeerRuntimeAuthority(
 	configPath, statePath, tokenPath, codexHome, workspaceRoot string,
+	traeAuthPaths ...string,
 ) error {
 	if err := ValidatePeerAuthority(configPath, statePath, tokenPath); err != nil {
 		return err
 	}
 	files := peerAuthorityFiles(configPath, statePath, tokenPath)
+	if len(traeAuthPaths) > 1 {
+		return errors.New("at most one TraeX authentication source may be configured")
+	}
 	directories := []namedPath{
 		{name: "worker CODEX_HOME", path: codexHome},
 		{name: "worker workspace root", path: workspaceRoot},
@@ -80,6 +88,44 @@ func ValidatePeerRuntimeAuthority(
 	if workspaceInsideHome || homeInsideWorkspace {
 		return errors.New("worker workspace root and worker CODEX_HOME must not contain one another")
 	}
+	if len(traeAuthPaths) == 1 && traeAuthPaths[0] != "" {
+		if err := validateTraeXAuthenticationAuthority(
+			files, directories, traeAuthPaths[0],
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTraeXAuthenticationAuthority(
+	files, directories []namedPath, path string,
+) error {
+	traeAuth := namedPath{name: "TraeX authentication source", path: path}
+	wrap := func(err error) error {
+		return fmt.Errorf("%w: %v", ErrTraeXAuthenticationAuthority, err)
+	}
+	for _, file := range files {
+		conflicts, err := equivalent(traeAuth.path, file.path)
+		if err != nil {
+			return wrap(err)
+		}
+		if conflicts {
+			return wrap(fmt.Errorf("%s path conflicts with %s", traeAuth.name, file.name))
+		}
+	}
+	if err := requireSingleLink(traeAuth); err != nil {
+		return wrap(err)
+	}
+	for _, directory := range directories {
+		contained, err := pathWithin(traeAuth.path, directory.path)
+		if err != nil {
+			return wrap(err)
+		}
+		if contained {
+			return wrap(fmt.Errorf("%s must not be inside %s", traeAuth.name, directory.name))
+		}
+	}
 	return nil
 }
 
@@ -87,7 +133,7 @@ func ValidatePeerRuntimeAuthority(
 // the embedded Tailscale state directory and enrollment key.
 func ValidatePeerTailscaleAuthority(
 	configPath, statePath, tokenPath, codexHome, workspaceRoot,
-	tailscaleStateDir, tailscaleAuthKeyPath string,
+	tailscaleStateDir, tailscaleAuthKeyPath string, traeAuthPaths ...string,
 ) error {
 	if err := ValidatePeerRuntimeAuthority(
 		configPath,
@@ -95,11 +141,16 @@ func ValidatePeerTailscaleAuthority(
 		tokenPath,
 		codexHome,
 		workspaceRoot,
+		traeAuthPaths...,
 	); err != nil {
 		return err
 	}
+	files := peerAuthorityFiles(configPath, statePath, tokenPath)
+	if len(traeAuthPaths) == 1 && traeAuthPaths[0] != "" {
+		files = append(files, namedPath{name: "TraeX authentication source", path: traeAuthPaths[0]})
+	}
 	if err := validateTailscaleAuthority(
-		peerAuthorityFiles(configPath, statePath, tokenPath),
+		files,
 		tailscaleStateDir,
 		tailscaleAuthKeyPath,
 	); err != nil {
@@ -154,6 +205,7 @@ func ValidateManagedExecutable(name, executablePath, codexHome, workspaceRoot st
 // peer authority files or living inside a directory exposed to managed Codex.
 func ValidatePeerServiceEnvironment(
 	environmentPath, configPath, statePath, tokenPath, codexHome, workspaceRoot string,
+	traeAuthPaths ...string,
 ) error {
 	if !filepath.IsAbs(environmentPath) {
 		return errors.New("peer service environment path must be absolute")
@@ -164,12 +216,17 @@ func ValidatePeerServiceEnvironment(
 		tokenPath,
 		codexHome,
 		workspaceRoot,
+		traeAuthPaths...,
 	); err != nil {
 		return err
 	}
+	authorities := peerAuthorityFiles(configPath, statePath, tokenPath)
+	if len(traeAuthPaths) == 1 && traeAuthPaths[0] != "" {
+		authorities = append(authorities, namedPath{name: "TraeX authentication source", path: traeAuthPaths[0]})
+	}
 	return validatePeerServiceEnvironment(
 		environmentPath,
-		peerAuthorityFiles(configPath, statePath, tokenPath),
+		authorities,
 		codexHome,
 		workspaceRoot,
 		nil,
@@ -181,7 +238,7 @@ func ValidatePeerServiceEnvironment(
 // paths.
 func ValidatePeerTailscaleServiceEnvironment(
 	environmentPath, configPath, statePath, tokenPath, codexHome, workspaceRoot,
-	tailscaleStateDir, tailscaleAuthKeyPath string,
+	tailscaleStateDir, tailscaleAuthKeyPath string, traeAuthPaths ...string,
 ) error {
 	if !filepath.IsAbs(environmentPath) {
 		return errors.New("peer service environment path must be absolute")
@@ -194,6 +251,7 @@ func ValidatePeerTailscaleServiceEnvironment(
 		workspaceRoot,
 		tailscaleStateDir,
 		tailscaleAuthKeyPath,
+		traeAuthPaths...,
 	); err != nil {
 		return err
 	}
@@ -202,6 +260,9 @@ func ValidatePeerTailscaleServiceEnvironment(
 		tailscaleStateLease(tailscaleStateDir),
 		namedPath{name: "Tailscale enrollment key", path: tailscaleAuthKeyPath},
 	)
+	if len(traeAuthPaths) == 1 && traeAuthPaths[0] != "" {
+		authorities = append(authorities, namedPath{name: "TraeX authentication source", path: traeAuthPaths[0]})
+	}
 	tailscaleState := namedPath{name: "Tailscale state directory", path: tailscaleStateDir}
 	return validatePeerServiceEnvironment(
 		environmentPath,

@@ -579,9 +579,7 @@ func qualifyLocalUpgrade(ctx context.Context, journal localupgrade.Journal) erro
 		runtimeIdentity.Digest != journal.TargetRuntimeDigest {
 		return errors.New("running service does not match the target runtime identity")
 	}
-	configDigest, err := workerreadiness.ConfigDigest(
-		journal.Invocation.ConfigPath, journal.Invocation.EnvironmentFile,
-	)
+	configDigest, err := localupgrade.JournalConfigurationDigest(journal)
 	if err != nil || configDigest != journal.ConfigDigest {
 		return errors.Join(err, errors.New("running service configuration does not match the upgrade target"))
 	}

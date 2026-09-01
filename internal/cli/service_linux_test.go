@@ -25,6 +25,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/runtimeconfig"
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/traexauth"
 	"github.com/GhostFlying/delegation/internal/userservice"
 )
 
@@ -38,6 +39,7 @@ func TestServiceRepairRequiresStoppedPeerLease(t *testing.T) {
 		"wss://broker.example.test/v1/connect",
 	)
 	cfg.HostKind = hostkind.TraeX
+	cfg.Peer.TraeAuthFile = testTraeAuthFile(t)
 	cfg.Peer.CLI = &delegationconfig.CLIConfig{
 		Command: testCodexBinary(t), Arguments: []string{"--profile", "legacy"},
 		Launcher: &clilaunch.Spec{Executable: testCodexBinary(t)},
@@ -89,13 +91,24 @@ func TestServiceRepairCLICommitsInjectedFreshThreadQualification(t *testing.T) {
 	}, &stdout, &stderr, serviceRepairDependencies{
 		qualify: func(
 			_ context.Context, gotConfig, gotEnvironment string, got delegationconfig.Config,
-			quarantinePath string,
+			quarantinePath, managedAuthPath string,
 		) error {
 			smokeCalls++
 			if gotConfig != configPath || gotEnvironment != environmentPath ||
 				got.Peer.StateFile != cfg.Peer.StateFile || quarantinePath == "" {
 				t.Fatalf("qualification inputs = %q, %q, %#v, %q",
 					gotConfig, gotEnvironment, got, quarantinePath)
+			}
+			if managedAuthPath != traexauth.ManagedPath(cfg.Peer.CodexHome) {
+				t.Fatalf("managed authentication path = %q", managedAuthPath)
+			}
+			managedAuth, err := os.ReadFile(managedAuthPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourceAuth, err := os.ReadFile(cfg.Peer.TraeAuthFile)
+			if err != nil || !bytes.Equal(managedAuth, sourceAuth) {
+				t.Fatalf("managed authentication copy differs from source: %v", err)
 			}
 			return nil
 		},
@@ -147,7 +160,7 @@ func TestServiceRepairCLIRollsBackInjectedQualificationFailure(t *testing.T) {
 	code := runServiceRepairWithDependencies([]string{
 		"--config", configPath, "--environment-file", environmentPath,
 	}, &stdout, &stderr, serviceRepairDependencies{
-		qualify: func(context.Context, string, string, delegationconfig.Config, string) error {
+		qualify: func(context.Context, string, string, delegationconfig.Config, string, string) error {
 			return smokeErr
 		},
 	})
@@ -175,6 +188,7 @@ func serviceRepairCLIFixture(
 		"wss://broker.example.test/v1/connect",
 	)
 	cfg.HostKind = hostkind.TraeX
+	cfg.Peer.TraeAuthFile = testTraeAuthFile(t)
 	cfg.Peer.CLI = &delegationconfig.CLIConfig{
 		Command: testCodexBinary(t), Arguments: []string{"--profile", "legacy", "serve"},
 		Launcher: &clilaunch.Spec{Executable: testCodexBinary(t)},
@@ -189,6 +203,10 @@ func serviceRepairCLIFixture(
 	}, "\n"))
 	pollutedPath := filepath.Join(cfg.Peer.CodexHome, "AGENTS.md")
 	writeFileForServiceRepair(t, pollutedPath, []byte("legacy"))
+	writeFileForServiceRepair(
+		t, traexauth.ManagedPath(cfg.Peer.CodexHome),
+		[]byte(testTraeAuth),
+	)
 	return configPath, cfg, environmentPath, pollutedPath
 }
 
@@ -244,6 +262,7 @@ func TestServiceRuntimePersistsProfileFailureWithoutResettingEpoch(t *testing.T)
 		"wss://broker.example.test/v1/connect",
 	)
 	cfg.HostKind = hostkind.TraeX
+	cfg.Peer.TraeAuthFile = testTraeAuthFile(t)
 	cfg.Peer.CLI = &delegationconfig.CLIConfig{
 		Command: testCodexBinary(t), Arguments: []string{"--profile=legacy"},
 		Launcher: &clilaunch.Spec{Executable: testCodexBinary(t)},

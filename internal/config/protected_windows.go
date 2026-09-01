@@ -228,6 +228,14 @@ func openProtectedConfig(path string) (*os.File, error) {
 	return file, nil
 }
 
+func openedProtectedFileLinkCount(file *os.File) (uint64, error) {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err != nil {
+		return 0, err
+	}
+	return uint64(info.NumberOfLinks), nil
+}
+
 func readProtectedConfigAt(
 	directory *securefs.Root, name string, maximumBytes int,
 ) ([]byte, os.FileInfo, error) {

@@ -245,12 +245,34 @@ func ValidatePrivateDirectory(path string) error {
 // ReadProtectedFile reads a bounded current-user-only regular file through the
 // same no-alias authority checks used for Delegation configuration.
 func ReadProtectedFile(path string, maximumBytes int) ([]byte, error) {
+	return readProtectedFile(path, maximumBytes, false)
+}
+
+// ReadProtectedSingleLinkFile applies ReadProtectedFile's protections and
+// additionally requires the opened file to have exactly one hard link. Use it
+// for an authority whose contents must not be reachable through another path.
+func ReadProtectedSingleLinkFile(path string, maximumBytes int) ([]byte, error) {
+	return readProtectedFile(path, maximumBytes, true)
+}
+
+func readProtectedFile(path string, maximumBytes int, requireSingleLink bool) ([]byte, error) {
 	if maximumBytes < 1 || maximumBytes > maximumProtectedReadSize {
 		return nil, fmt.Errorf("protected file limit must be from 1 through %d bytes", maximumProtectedReadSize)
 	}
 	file, err := openProtectedConfig(path)
 	if err != nil {
 		return nil, err
+	}
+	if requireSingleLink {
+		count, linkErr := openedProtectedFileLinkCount(file)
+		if linkErr != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("inspect protected file hard-link count: %w", linkErr)
+		}
+		if count != 1 {
+			_ = file.Close()
+			return nil, fmt.Errorf("protected file has unexpected hard-link count %d; expected 1", count)
+		}
 	}
 	data, readErr := io.ReadAll(io.LimitReader(file, int64(maximumBytes)+1))
 	closeErr := file.Close()

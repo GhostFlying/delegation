@@ -85,6 +85,7 @@ setup peer
   --cli-argument=<traex-cli-argument>
   --cli-launcher <traex-launcher-executable>
   --cli-launcher-prefix-argument=<traex-launcher-prefix-argument>
+  --trae-auth-file <protected-host-traecli-auth.json>
 ```
 
 Managed TraeX workers use this exact shell-free launch. The connector adapts TraeX's app-server
@@ -104,10 +105,19 @@ without invoking a shell.
 `--codex-home` and `peer.codexHome` are the current flag and field names for the managed CLI home;
 they do not imply support for an older config schema. Codex receives the path as `CODEX_HOME`;
 TraeX receives it as `TRAE_HOME` and uses its `cli` child as `TRAECLI_HOME`. Never point this field
-at the user's normal CLI home: setup, doctor, and worker launch reject user authentication,
-instructions, profiles, plugins, hooks, model providers, execution rules, and non-system skills.
-Setup and doctor validate the command, launcher, paths, and protected configuration without
-starting the CLI.
+at the user's normal CLI home. For TraeX, pass the absolute path of the existing host
+`TRAECLI_HOME/auth.json` through `--trae-auth-file`. It must be a current-user-only protected
+regular file with one hard link, outside the managed home, workspace, service environment,
+Delegation authority files, and Tailscale authority. The peer copies its exact validated bytes
+atomically to `<peer.codexHome>/cli/auth.json`; only the app-server may use that copy, and the
+managed worker tool profile denies both the source and the copy. Keep the source for every service
+start. Restart the service after account rotation; changed bytes create a new readiness epoch.
+
+All other normal CLI state remains isolated. Setup, doctor, and worker launch reject instructions,
+profiles, plugins, hooks, model providers, execution rules, non-system skills, and authentication
+outside the single managed copy. TraeX-generated model, marketplace, configuration, and
+commit-attribution caches are validated and cleared before app-server start. Setup and doctor
+validate the command, launcher, paths, and protected configuration without starting the CLI.
 
 For token authentication, enroll every peer from the configured broker:
 

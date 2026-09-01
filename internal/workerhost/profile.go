@@ -68,6 +68,12 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 	if h.providerEnvironmentFile != "" {
 		filesystem[h.providerEnvironmentFile] = "deny"
 	}
+	for _, traeAuthSourceFile := range h.traeAuthSourceFiles {
+		filesystem[traeAuthSourceFile] = "deny"
+	}
+	for _, managedTraeAuthFile := range h.managedTraeAuthFiles {
+		filesystem[managedTraeAuthFile] = "deny"
+	}
 	if runtime.GOOS == "windows" {
 		// Codex requires the elevated Windows sandbox to enforce restricted reads.
 		// M2 isolates worker capabilities, not same-user filesystem access, so keep

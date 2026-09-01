@@ -99,6 +99,24 @@ current agent state without rewriting immutable spawn receipts. The milestone st
 - Acceptance: the complete smoke passes with pinned TraeX on fresh isolated Linux and macOS homes,
   compile-only validation passes on all supported build targets, and the full Linux suite passes.
 
+### Final-validation follow-up: protected TraeX account reuse
+
+- Owner: milestone integration worktree.
+- Dependencies: checkpoint 2 and the portable TraeX managed-worker live smoke.
+- Write set: peer configuration/setup, protected credential synchronization, managed-home policy,
+  worker profile, readiness digest inputs, live acceptance, and review evidence.
+- Behavior: a TraeX peer reuses one explicitly configured current-user-only host `auth.json` by
+  atomically copying it into the isolated `TRAECLI_HOME`; the app-server can authenticate with the
+  copy while model-generated worker tools are explicitly denied access to both source and copy.
+  The normal TraeX home, configuration, plugins, rules, skills, and session history remain
+  isolated.
+- Acceptance: setup and runtime reject missing, aliased, broad-permission, malformed, and
+  conflicting credential sources; a source-byte change starts a new readiness epoch after service
+  restart; the real Linux TraeX shell cannot read either the host source or managed copy; and the
+  live worker smoke uses the existing Trae account rather than a no-auth loopback provider. macOS
+  must prove the same deny boundary before release acceptance; otherwise stop for an explicit
+  security-model decision.
+
 ## Freeze, Review, and Integration
 
 For every checkpoint, record the base, frozen commit and tree, focused acceptance command and raw

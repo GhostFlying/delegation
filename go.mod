@@ -4,6 +4,7 @@ go 1.26.5
 
 require (
 	github.com/Microsoft/go-winio v0.6.2
+	github.com/BurntSushi/toml v1.5.0
 	github.com/coder/websocket v1.8.15
 	github.com/google/jsonschema-go v0.4.3
 	github.com/klauspost/compress v1.19.1

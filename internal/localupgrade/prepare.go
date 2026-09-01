@@ -3,8 +3,6 @@ package localupgrade
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +21,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/releaseverify"
 	"github.com/GhostFlying/delegation/internal/securefs"
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/traexauth"
 	"github.com/GhostFlying/delegation/internal/userservice"
 	"github.com/GhostFlying/delegation/internal/workerreadiness"
 )
@@ -251,14 +250,18 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 	if !reflect.DeepEqual(configured, options.Config) {
 		return PrepareResult{}, errors.New("upgrade configuration identity changed before preparation")
 	}
+	credential, err := credentialSourceMaterial(configured)
+	if err != nil {
+		return PrepareResult{}, err
+	}
 	sourceConfigDigest, err := configurationDigest(
-		options.ConfigPath, sourceConfig, options.EnvironmentFile,
+		options.ConfigPath, sourceConfig, options.EnvironmentFile, credential,
 	)
 	if err != nil {
 		return PrepareResult{}, err
 	}
 	targetConfigDigest, err := configurationDigest(
-		options.ConfigPath, targetConfig, options.EnvironmentFile,
+		options.ConfigPath, targetConfig, options.EnvironmentFile, credential,
 	)
 	if err != nil {
 		return PrepareResult{}, err
@@ -349,7 +352,9 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 	} else if !currentBlockers.Empty() {
 		return PrepareResult{}, fmt.Errorf("upgrade preflight changed while preparing: %+v", currentBlockers)
 	}
-	configDigestAfter, err := protectedConfigurationDigest(options.ConfigPath, options.EnvironmentFile)
+	configDigestAfter, err := CurrentConfigurationDigest(
+		options.ConfigPath, options.EnvironmentFile, options.Config.Peer.TraeAuthFile,
+	)
 	if err != nil || configDigestAfter != sourceConfigDigest {
 		return PrepareResult{}, errors.Join(err, errors.New("upgrade configuration changed during preflight"))
 	}
@@ -379,7 +384,8 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 		Invocation: Invocation{
 			BinaryPath: options.SourceBinary, TargetBinaryPath: runtimeMaterial.BinaryPath,
 			ConfigPath: options.ConfigPath, EnvironmentFile: options.EnvironmentFile,
-			NativeName: plan.NativeName, DefinitionPath: plan.Artifact,
+			TraeAuthFile: options.Config.Peer.TraeAuthFile,
+			NativeName:   plan.NativeName, DefinitionPath: plan.Artifact,
 			UserIdentity: plan.UserIdentity, ProcessIDs: append([]int(nil), plan.ProcessIDs...),
 			ProcessGroup: plan.ProcessGroup,
 		},
@@ -444,7 +450,9 @@ func validatePrepareOptions(options PrepareOptions) error {
 func validateResumeRequest(journal Journal, options PrepareOptions) error {
 	if journal.Role != options.Config.Role || journal.InstanceID != options.Config.EffectiveInstanceID() ||
 		journal.ControllerID != options.Config.ControllerID || journal.DeviceID != options.Config.DeviceID ||
-		journal.Invocation.ConfigPath != options.ConfigPath || journal.Invocation.EnvironmentFile != options.EnvironmentFile {
+		journal.Invocation.ConfigPath != options.ConfigPath ||
+		journal.Invocation.EnvironmentFile != options.EnvironmentFile ||
+		journal.Invocation.TraeAuthFile != options.Config.Peer.TraeAuthFile {
 		return errors.New("same-target upgrade does not match the configured service identity")
 	}
 	if options.TransactionID != "" && journal.TransactionID != options.TransactionID {
@@ -457,55 +465,67 @@ func validateResumeRequest(journal Journal, options PrepareOptions) error {
 }
 
 func protectedConfigurationDigest(paths ...string) (string, error) {
-	digest := sha256.New()
-	for _, path := range paths {
-		if path == "" {
-			continue
-		}
-		data, err := delegationconfig.ReadProtectedFile(path, maximumConfigDigestFile)
-		if err != nil {
-			return "", fmt.Errorf("read protected upgrade configuration %s: %w", path, err)
-		}
-		if _, err := fmt.Fprintf(digest, "%d:%s\x00%d:", len(path), path, len(data)); err != nil {
-			return "", err
-		}
-		if _, err := digest.Write(data); err != nil {
-			return "", err
-		}
-	}
-	return hex.EncodeToString(digest.Sum(nil)), nil
+	return workerreadiness.ConfigDigest(paths...)
 }
 
-func configurationDigest(configPath string, configData []byte, environmentPath string) (string, error) {
-	digest := sha256.New()
-	if _, err := fmt.Fprintf(digest, "%d:%s\x00", len(configPath), configPath); err != nil {
-		return "", err
-	}
-	if _, err := fmt.Fprintf(digest, "%d:", len(configData)); err != nil {
-		return "", err
-	}
-	if _, err := digest.Write(configData); err != nil {
-		return "", err
-	}
+func configurationDigest(
+	configPath string, configData []byte, environmentPath string,
+	credential workerreadiness.ConfigMaterial,
+) (string, error) {
+	materials := []workerreadiness.ConfigMaterial{{Path: configPath, Data: configData}}
 	if environmentPath != "" {
 		data, err := delegationconfig.ReadProtectedFile(environmentPath, maximumConfigDigestFile)
 		if err != nil {
 			return "", err
 		}
-		if _, err := fmt.Fprintf(digest, "%d:%s\x00%d:", len(environmentPath), environmentPath, len(data)); err != nil {
-			return "", err
-		}
-		if _, err := digest.Write(data); err != nil {
-			return "", err
-		}
+		materials = append(materials, workerreadiness.ConfigMaterial{
+			Path: environmentPath, Data: data,
+		})
 	}
-	return hex.EncodeToString(digest.Sum(nil)), nil
+	if credential.Path != "" {
+		materials = append(materials, credential)
+	}
+	return workerreadiness.ConfigDigestMaterials(materials...)
+}
+
+// CurrentConfigurationDigest returns the readiness identity of the protected
+// service inputs currently on disk, including the configured TraeX account
+// source. The journal freezes the credential path so activation can verify the
+// exact PREPARE input without depending on the config migration phase.
+func CurrentConfigurationDigest(
+	configPath, environmentPath, traeAuthPath string,
+) (string, error) {
+	return protectedConfigurationDigest(configPath, environmentPath, traeAuthPath)
+}
+
+// JournalConfigurationDigest validates the exact protected inputs frozen in
+// an upgrade journal. It intentionally does not decode the configuration: the
+// activator may run while the canonical config is at either side of an atomic
+// schema migration, and the journal already binds both accepted digests.
+func JournalConfigurationDigest(journal Journal) (string, error) {
+	return CurrentConfigurationDigest(
+		journal.Invocation.ConfigPath, journal.Invocation.EnvironmentFile,
+		journal.Invocation.TraeAuthFile,
+	)
+}
+
+func credentialSourceMaterial(
+	cfg delegationconfig.Config,
+) (workerreadiness.ConfigMaterial, error) {
+	if cfg.Role != delegationconfig.RolePeer || cfg.EffectiveHostKind() != hostkind.TraeX {
+		return workerreadiness.ConfigMaterial{}, nil
+	}
+	data, err := traexauth.ReadSource(cfg.Peer.TraeAuthFile)
+	if err != nil {
+		return workerreadiness.ConfigMaterial{}, err
+	}
+	return workerreadiness.ConfigMaterial{Path: cfg.Peer.TraeAuthFile, Data: data}, nil
 }
 
 func regularFileDigest(path string) (string, error) { return workerreadiness.RuntimeDigest(path) }
 
 func validateActivationMaterial(journal Journal) error {
-	configDigest, err := protectedConfigurationDigest(journal.Invocation.ConfigPath, journal.Invocation.EnvironmentFile)
+	configDigest, err := JournalConfigurationDigest(journal)
 	if err != nil || configDigest != journal.SourceConfigDigest && configDigest != journal.ConfigDigest {
 		return errors.Join(err, errors.New("upgrade configuration changed after preparation"))
 	}

@@ -12,8 +12,10 @@ import (
 
 	"github.com/GhostFlying/delegation/internal/appserver"
 	"github.com/GhostFlying/delegation/internal/config"
+	"github.com/GhostFlying/delegation/internal/hostkind"
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/traexauth"
 )
 
 func (h *Host) startNewThread(
@@ -449,6 +451,11 @@ func (h *Host) shouldRetire(client application, err error) bool {
 func (h *Host) validateRuntimeDirectories() error {
 	if err := validateManagedRuntimeHome(h.hostKind, h.codexHome); err != nil {
 		return err
+	}
+	if h.hostKind == hostkind.TraeX {
+		if err := traexauth.ValidateManagedCopy(h.codexHome, true); err != nil {
+			return err
+		}
 	}
 	for name, path := range h.runtimeHomeEnvironment {
 		if path == h.codexHome {
