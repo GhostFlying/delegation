@@ -432,3 +432,65 @@ Executable acceptance at the accepted frozen revision:
 - The Kross workload and local transferred test artifacts were deleted after validation. No real
   TraeX credential was uploaded because the available workspace had no secret mount. Native macOS
   real-account TraeX execution therefore remains a release gate rather than an inferred pass.
+
+## Follow-up Checkpoint: Reliable Terminal Readiness Publication
+
+- Base commit: `8025bebda747acb5b0847a9c97587d67127ae0b9`
+- Accepted review range:
+  `8025bebda747acb5b0847a9c97587d67127ae0b9..fa178470a97aa6691ea3eee51319825dbf5506e5`
+- Review round: 1
+- Frozen commit: `fa178470a97aa6691ea3eee51319825dbf5506e5`
+- Frozen tree: `6c28c60b8d3e8576e0fb6eb3245c350d8fdc3d28`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `CLEAN`
+- Findings: none
+- Disposition: accepted at the exact frozen commit and tree
+
+This checkpoint resolves the combined milestone round-1 finding that terminal readiness could be
+suppressed permanently after the connector's 128 supported in-flight RPC slots were occupied. A
+terminal epoch is now deduplicated only after a validated matching broker acknowledgement. The
+connector waits eventfully for capacity within the bounded publication context, concurrent
+same-epoch callers share the in-flight result, and the readiness controller retries the latest
+durable snapshot without requiring another readiness transition. Lost acknowledgements continue to
+recover through the durable readiness snapshot in the reconnect hello.
+
+Executable acceptance at the accepted frozen revision:
+
+- The capacity-release, concurrent same-epoch, mismatched-acknowledgement, lost-acknowledgement, and
+  controller publication-retry tests passed 50 consecutive runs under the race detector.
+- The original pending-call capacity and reconnect recovery test passed together with the new
+  capacity-release path for 20 consecutive race-detector runs.
+- Full connector and worker-readiness race suites passed.
+- `go test -count=1 -buildvcs=false -tags=ts_omit_logtail -timeout=30m ./...` and
+  `go vet -tags=ts_omit_logtail ./...` passed.
+- Linux amd64, macOS amd64, macOS arm64, and Windows amd64 compile validation passed, including the
+  `integration,live` E2E package.
+- `GO=go ./tests/posix_plugin_test.sh`, `./tests/m6_support_contract_test.sh`, the full-tree gofmt
+  check, and `git diff --check` passed.
+- The independent reviewer reran focused packages, full Linux tests, full affected race suites, 20
+  focused race iterations, and macOS arm64 and Windows amd64 compile checks. The detached worktree
+  remained clean.
+
+## Combined Milestone Review
+
+- Review base commit: `b406974120dcc95372a91c8d9297649fa665a431`
+
+### Review Round 1
+
+- Frozen commit: `8025bebda747acb5b0847a9c97587d67127ae0b9`
+- Frozen tree: `41cf23f9a6c2669e7e2ede014b7345863dd1d6ce`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `FINDINGS`
+- Finding: if all 128 supported connector RPC slots were occupied when readiness became terminal,
+  the first publication returned `ErrBusy` after marking the epoch as published. Later same-epoch
+  calls returned false success without sending, and the controller did not retry. The broker could
+  therefore remain pending and non-dispatchable indefinitely while local durable state was ready.
+- Disposition: actionable ordinary-concurrency operability defect. The reliable terminal readiness
+  publication follow-up above adds acknowledgement-based deduplication, event-driven capacity
+  retry, controller-owned durable snapshot retry, and focused regression coverage. The corrected
+  combined tree will be frozen for milestone review round 2.
+
+Round-1 validation otherwise passed the full Linux suite, race suites, vet, support contract, POSIX
+plugin smoke, format and credential checks, and Linux, macOS, and Windows compile validation. The
+reviewer reproduced the finding using the public 128-call capacity without modifying the frozen
+worktree.
