@@ -85,6 +85,20 @@ current agent state without rewriting immutable spawn receipts. The milestone st
 - Acceptance: the focused test passes on Linux and native Windows, the Windows platform contract
   suite reports that the test executed, and the full Linux suite passes.
 
+### Final-validation follow-up: portable TraeX managed-worker live smoke
+
+- Owner: milestone integration worktree.
+- Dependencies: checkpoint 2, the readiness-aware live fixture follow-up, and the combined
+  milestone tree.
+- Write set: TraeX live-test helper isolation, Linux/macOS process observation, and review evidence
+  only.
+- Behavior: the existing managed TraeX app-server/thread/turn/result/cold-resume smoke compiles and
+  runs on both supported TraeX platforms. Linux keeps procfs observation; macOS uses native process
+  metadata to match the managed runtime home and exact app-server arguments. Product runtime
+  behavior remains unchanged.
+- Acceptance: the complete smoke passes with pinned TraeX on fresh isolated Linux and macOS homes,
+  compile-only validation passes on all supported build targets, and the full Linux suite passes.
+
 ## Freeze, Review, and Integration
 
 For every checkpoint, record the base, frozen commit and tree, focused acceptance command and raw

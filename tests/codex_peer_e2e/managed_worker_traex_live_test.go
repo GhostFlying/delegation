@@ -1,4 +1,4 @@
-//go:build integration && live && linux
+//go:build integration && live && (linux || darwin)
 
 package codex_peer_e2e
 
@@ -12,10 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -32,7 +30,12 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 	traeXBinary := optionalLiveExecutable(t, "TRAE_X_BINARY")
 	warmpoolBinary := optionalLiveExecutable(t, "WARMPOOL_BINARY")
 
-	root, err := os.MkdirTemp("", "delegation-traex-live-")
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep HOME short enough for the portable Unix socket path limit.
+	root, err := os.MkdirTemp(userHome, ".dmtl-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,18 +69,18 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 		},
 	}
 
-	controllerID := newIdentity(t)
-	deviceID := newIdentity(t)
-	treeID := newIdentity(t)
-	parentAgentID := newIdentity(t)
-	agentID := newIdentity(t)
+	controllerID := newTraeXLiveIdentity(t)
+	deviceID := newTraeXLiveIdentity(t)
+	treeID := newTraeXLiveIdentity(t)
+	parentAgentID := newTraeXLiveIdentity(t)
+	agentID := newTraeXLiveIdentity(t)
 	delegationHome := filepath.Join(root, "delegation")
 	configPath := filepath.Join(delegationHome, "peer.json")
 	managedTraeHome := filepath.Join(root, "managed-trae")
 	managedTraeCLIHome := filepath.Join(managedTraeHome, "cli")
 	workspaceRoot := filepath.Join(root, "workspaces")
 	statePath := filepath.Join(delegationHome, "state", "peer.sqlite3")
-	run(t, os.Environ(), delegationBinary,
+	runTraeXLive(t, os.Environ(), delegationBinary,
 		"setup", "peer", "--config", configPath,
 		"--host-kind", "traex",
 		"--controller-id", controllerID, "--device-id", deviceID,
@@ -217,7 +220,7 @@ func TestManagedWorkerTraeXWarmpoolLiveSmoke(t *testing.T) {
 	)
 
 	followup, err := host.Followup(context.Background(), workerhost.FollowupRequest{
-		OperationID: newIdentity(t),
+		OperationID: newTraeXLiveIdentity(t),
 		Key:         started.Worker.WorkerKey,
 		Message:     "Complete this cold-resume follow-up turn without calling tools.",
 	})
@@ -321,7 +324,7 @@ type traeXLiveResponses struct {
 }
 
 func (m *traeXLiveResponses) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	body, decodeErr := decodeRequest(request)
+	body, decodeErr := decodeTraeXLiveRequest(request)
 	m.mu.Lock()
 	call := m.calls
 	m.calls++
@@ -345,7 +348,7 @@ func (m *traeXLiveResponses) ServeHTTP(writer http.ResponseWriter, request *http
 	}
 	m.mu.Unlock()
 	if decodeErr != nil {
-		writeFinalResponse(writer, "traex-live-decode-error")
+		writeTraeXLiveFinalResponse(writer, "traex-live-decode-error")
 		return
 	}
 	if workerCall > 1 {
@@ -388,7 +391,7 @@ func (m *traeXLiveResponses) ServeHTTP(writer http.ResponseWriter, request *http
 		)
 		m.mu.Unlock()
 	}
-	writeFinalResponse(writer, fmt.Sprintf("traex-live-%d", call+1))
+	writeTraeXLiveFinalResponse(writer, fmt.Sprintf("traex-live-%d", call+1))
 }
 
 func (m *traeXLiveResponses) result() (int, int, int, error) {
@@ -613,43 +616,7 @@ func waitForTraeXLiveAppServerPID(t *testing.T, cliHome string, previous int) in
 	return 0
 }
 
-func traeXLiveAppServerPIDs(cliHome string, excluded int) ([]int, error) {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return nil, err
-	}
-	var pids []int
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 0 || pid == excluded {
-			continue
-		}
-		processRoot := filepath.Join("/proc", entry.Name())
-		environment, err := os.ReadFile(filepath.Join(processRoot, "environ"))
-		if err != nil || !containsProcValue(environment, "TRAECLI_HOME", cliHome) {
-			continue
-		}
-		cmdline, err := os.ReadFile(filepath.Join(processRoot, "cmdline"))
-		if err != nil || !containsProcArguments(
-			cmdline,
-			"app-server",
-			"--listen",
-			"stdio://",
-		) {
-			continue
-		}
-		signalErr := syscall.Kill(pid, 0)
-		if signalErr == nil || errors.Is(signalErr, syscall.EPERM) {
-			pids = append(pids, pid)
-		}
-	}
-	return pids, nil
-}
-
-func containsProcValue(environment []byte, name, value string) bool {
+func containsTraeXLiveProcessValue(environment []byte, name, value string) bool {
 	want := name + "=" + value
 	for _, entry := range strings.Split(string(environment), "\x00") {
 		if entry == want {
@@ -659,7 +626,7 @@ func containsProcValue(environment []byte, name, value string) bool {
 	return false
 }
 
-func containsProcArguments(cmdline []byte, want ...string) bool {
+func containsTraeXLiveProcessArguments(cmdline []byte, want ...string) bool {
 	arguments := strings.Split(strings.TrimSuffix(string(cmdline), "\x00"), "\x00")
 	for index := 0; index+len(want) <= len(arguments); index++ {
 		matches := true
@@ -691,8 +658,8 @@ func waitForTraeXLiveAppServerExit(t *testing.T, pid int) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		err := syscall.Kill(pid, 0)
-		if errors.Is(err, syscall.ESRCH) {
+		running, err := traeXLiveProcessRunning(pid)
+		if err == nil && !running {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
