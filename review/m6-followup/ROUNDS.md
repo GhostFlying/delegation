@@ -334,3 +334,65 @@ Executable acceptance at the accepted frozen revision:
 - Fresh result-package E2E passed on Linux amd64 in 2.02 seconds, macOS arm64 in 7.04 seconds, and
   Windows amd64 in 45.67 seconds using binaries built from the frozen tree.
 - The reviewed range passed `git diff --check`; the detached review worktree remained clean.
+
+## Follow-up Checkpoint: Protected TraeX Account Reuse
+
+- Base commit: `9aee2bad99a89bcd924fe3b916627d1875c7303a`
+- Accepted review range:
+  `9aee2bad99a89bcd924fe3b916627d1875c7303a..5e040f61178c4e1aff98d1f35448a8b821faf520`
+
+This checkpoint keeps the managed TraeX home isolated while copying only an explicitly configured,
+validated host `auth.json` into the managed CLI home. Both the host source and managed copy remain
+outside the worker tool filesystem profile, including access through workspace symlink aliases.
+The auth path and exact bytes participate in readiness and upgrade digests; authentication failures
+are persisted as `authentication_invalid`.
+
+### Review Round 1
+
+- Frozen commit: `2bd7e12aff43964b1027e1a3a0cbdc135ff6621b`
+- Frozen tree: `c8c03d0aba0c96f3a1ef6db2d089c520dad76862`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `FINDINGS`
+- Finding 1: the live process matcher compared a lexical home path with the canonical managed home,
+  causing ordinary symlinked user homes to report that no TraeX app-server existed.
+- Finding 2: the first TraeX app-server run created bounded runtime-owned state that managed-home
+  validation rejected during process replacement and cold resume.
+- Disposition: both findings were actionable supported-path operability defects. Process discovery
+  now uses platform-specific exact argument inspection against the canonical managed CLI home.
+  Managed-home validation accepts only the known TraeX-generated paths and clears that bounded
+  state before each app-server start or reuse.
+
+The reviewer reproduced both findings with TraeX 0.201.6 and warmpool 0.1.0. The reviewed range
+passed `git diff --check` and Linux, macOS amd64, macOS arm64 compile checks; the detached worktree
+remained clean.
+
+### Review Round 2
+
+- Frozen commit: `5e040f61178c4e1aff98d1f35448a8b821faf520`
+- Frozen tree: `2cb13f6493a46437733b24c970d2349370881aa6`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `CLEAN`
+- Findings: none
+- Confirmed dispositions: canonical platform process discovery resolves symlinked-home matching,
+  and bounded TraeX-generated state no longer prevents app-server replacement or cold resume.
+- Residual risk: native macOS execution of the auth reuse and filesystem-denial path remains a
+  release gate; cross-compilation and static inspection are not treated as native acceptance.
+- Disposition: accepted at the exact frozen commit and tree. No security-model relaxation was
+  required.
+
+Executable acceptance at the accepted frozen revision:
+
+- `go test -count=1 -buildvcs=false -tags=ts_omit_logtail -timeout=30m ./...` passed.
+- `go vet -tags=ts_omit_logtail ./...` passed.
+- Focused config, TraeX auth, path guard, managed-home, worker-host, readiness, local-upgrade, CLI,
+  and repair suites passed under the race detector.
+- Linux amd64, macOS amd64, macOS arm64, and Windows amd64 core plus `integration,live` compile-only
+  validation passed.
+- `GO=go ./tests/posix_plugin_test.sh`, `./tests/m6_support_contract_test.sh`, the full-tree gofmt
+  check, and `git diff --check` passed.
+- The real Linux TraeX 0.201.6 account smoke passed in 39.04 seconds. It covered a real worker turn,
+  result publication and acknowledgement, direct and symlink-alias denial of the source and copy,
+  token non-leakage, app-server process replacement, same-thread cold resume, and the follow-up
+  result marker. No token value entered tracked files or test output.
+- The round-2 reviewer reran the focused packages, full Linux suite, vet, live-tag compilation, and
+  Darwin arm64 and Windows amd64 cross-compilation; the detached worktree remained clean.
