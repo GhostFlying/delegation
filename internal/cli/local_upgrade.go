@@ -142,8 +142,8 @@ func (m *serviceUpgradeManager) CancelCoordinatedUpgrade(
 	if err != nil {
 		return protocol.UpgradeSnapshot{}, err
 	}
-	if journal.TransactionID != params.TransactionID {
-		return protocol.UpgradeSnapshot{}, errors.New("coordinated upgrade transaction identity does not match")
+	if err := validateCoordinatedCancellation(journal, params); err != nil {
+		return protocol.UpgradeSnapshot{}, err
 	}
 	if journal.ControllerTransactionID == "" {
 		journal, err = m.store.BindControllerTransaction(params.TransactionID, params.ControllerTransactionID)
@@ -152,6 +152,22 @@ func (m *serviceUpgradeManager) CancelCoordinatedUpgrade(
 		}
 	}
 	return m.runCoordinatedUpgrade(ctx, params, m.manager.Cancel)
+}
+
+func validateCoordinatedCancellation(
+	journal localupgrade.Journal, params protocol.UpgradeTransactionParams,
+) error {
+	if journal.TransactionID != params.TransactionID {
+		if journal.Terminal() {
+			return os.ErrNotExist
+		}
+		return errors.New("coordinated upgrade transaction identity does not match")
+	}
+	if journal.ControllerTransactionID != "" &&
+		journal.ControllerTransactionID != params.ControllerTransactionID {
+		return errors.New("coordinated upgrade controller transaction identity does not match")
+	}
+	return nil
 }
 
 func (m *serviceUpgradeManager) CoordinatedUpgradeStatus(
