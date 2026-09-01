@@ -43,6 +43,14 @@ func (s *session) startAgentOperation(
 			"invalid agent operation payload",
 		)
 	}
+	releaseAdmission := func() {}
+	if operation.action != protocol.AgentOperationInterrupt {
+		var admissionErr error
+		releaseAdmission, admissionErr = s.rejectDrainedMutation(responseContext, request)
+		if releaseAdmission == nil {
+			return admissionErr
+		}
+	}
 	receipt, err := s.server.registry.BeginAgentOperation(
 		responseContext,
 		store.AgentOperationIntent{
@@ -54,6 +62,7 @@ func (s *session) startAgentOperation(
 		},
 		s.server.now(),
 	)
+	releaseAdmission()
 	if err != nil {
 		return s.handleAgentStoreError(responseContext, request, "begin agent operation", err)
 	}

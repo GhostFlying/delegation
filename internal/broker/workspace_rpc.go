@@ -69,11 +69,16 @@ func (s *session) handleSyncWorkspace(ctx context.Context, request protocol.Enve
 	}
 	defer release()
 	ctx = withCanceledWorkspacePeerCallDrain(ctx)
+	releaseAdmission, err := s.rejectDrainedMutation(ctx, request)
+	if releaseAdmission == nil {
+		return err
+	}
 	receipt, err := s.server.registry.BeginWorkspaceSync(ctx, store.WorkspaceSyncIntent{
 		Source: *request.Source, SyncID: params.SyncID,
 		TargetDeviceID: params.TargetDeviceID, GitURL: params.GitURL,
 		SourcePathHash: sha256.Sum256([]byte(params.SourcePath)),
 	}, s.server.now())
+	releaseAdmission()
 	if err != nil {
 		return s.handleWorkspaceStoreError(ctx, request, err)
 	}

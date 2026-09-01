@@ -25,9 +25,14 @@ func (s *session) handleAuthorizeResultApply(
 	if err != nil || params.Validate() != nil {
 		return s.writeError(ctx, request, protocol.ErrorInvalidParams, "invalid result apply authorization")
 	}
+	releaseAdmission, err := s.rejectDrainedMutation(ctx, request)
+	if releaseAdmission == nil {
+		return err
+	}
 	result, err := s.server.registry.AuthorizeResultApply(
 		ctx, s.deviceID, *request.Source, params, s.server.now(),
 	)
+	releaseAdmission()
 	if err != nil {
 		return s.handleAuthorizeResultApplyStoreError(ctx, request, err)
 	}

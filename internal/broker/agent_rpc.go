@@ -73,11 +73,16 @@ func (s *session) handleSpawnAgent(ctx context.Context, request protocol.Envelop
 		_ = s.writeError(ctx, request, protocol.ErrorUnavailable, "broker unavailable")
 		return fmt.Errorf("create agent ID: %w", err)
 	}
+	releaseAdmission, err := s.rejectDrainedMutation(ctx, request)
+	if releaseAdmission == nil {
+		return err
+	}
 	receipt, err := s.server.registry.BeginAgentSpawn(ctx, store.AgentSpawnIntent{
 		Source: *request.Source, SpawnID: params.SpawnID, AgentID: agentID,
 		TargetDeviceID: params.TargetDeviceID, TaskName: params.TaskName,
 		PromptDigest: sha256.Sum256([]byte(params.Message)), WorkspaceID: params.WorkspaceID,
 	}, s.server.now())
+	releaseAdmission()
 	if err != nil {
 		return s.handleAgentStoreError(ctx, request, "begin agent spawn", err)
 	}

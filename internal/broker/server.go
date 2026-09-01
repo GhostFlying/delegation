@@ -127,6 +127,7 @@ type Server struct {
 	connections             map[string]*session
 	latestRevisions         map[string]uint64
 	statusGeneration        uint64
+	upgradeIntervention     map[string]bool
 	peers                   map[*websocket.Conn]struct{}
 	pendingHellos           int
 	deviceHellos            map[string]int
@@ -152,6 +153,9 @@ type Server struct {
 	offlineRetryWake     chan struct{}
 	offlineRetryInterval time.Duration
 
+	mutationMu      sync.RWMutex
+	upgradeDraining atomic.Bool
+
 	shutdownOnce sync.Once
 	shutdownDone chan struct{}
 	shutdownErr  error
@@ -168,6 +172,8 @@ type session struct {
 	connection        *websocket.Conn
 	connectionID      string
 	deviceID          string
+	runtimeVersion    string
+	features          []string
 	credentialMAC     *store.CredentialMAC
 	revision          atomic.Uint64
 	workerInitial     uint64
@@ -175,6 +181,7 @@ type session struct {
 	workerApplied     atomic.Uint64
 	workerSyncReady   atomic.Bool
 	workerReady       atomic.Bool
+	workerReadiness   protocol.WorkerReadiness
 	versionCompatible atomic.Bool
 	draining          atomic.Bool
 	asyncSem          chan struct{}
@@ -290,6 +297,7 @@ func New(options Options) (*Server, error) {
 		reportError:             reportError,
 		connections:             map[string]*session{},
 		latestRevisions:         map[string]uint64{},
+		upgradeIntervention:     map[string]bool{},
 		peers:                   map[*websocket.Conn]struct{}{},
 		deviceHellos:            map[string]int{},
 		helloLimit:              maximumPendingHellos,
@@ -632,15 +640,17 @@ func (s *Server) acceptHello(
 	}
 	s.recordDeviceLease(device.DeviceID, device.Revision)
 	current := &session{
-		server:        s,
-		connection:    connection,
-		connectionID:  connectionID,
-		deviceID:      device.DeviceID,
-		credentialMAC: authority.credentialMAC,
-		asyncSem:      make(chan struct{}, maximumAsyncMailboxWaits),
-		asyncCancels:  make(map[string]context.CancelFunc),
-		pending:       make(map[string]peerPendingCall),
-		done:          make(chan struct{}),
+		server:         s,
+		connection:     connection,
+		connectionID:   connectionID,
+		deviceID:       device.DeviceID,
+		runtimeVersion: hello.RuntimeVersion,
+		features:       slices.Clone(hello.Features),
+		credentialMAC:  authority.credentialMAC,
+		asyncSem:       make(chan struct{}, maximumAsyncMailboxWaits),
+		asyncCancels:   make(map[string]context.CancelFunc),
+		pending:        make(map[string]peerPendingCall),
+		done:           make(chan struct{}),
 	}
 	current.revision.Store(device.Revision)
 	current.workerInitial = hello.WorkerRevision
@@ -700,6 +710,7 @@ func (s *Server) acceptHello(
 		return nil, &internalError{operation: "persist hello worker readiness", err: err}
 	}
 	current.workerReady.Store(persistedReadiness.IsReady())
+	current.workerReadiness = persistedReadiness
 	result := protocol.HelloResult{
 		ConnectionID:          connectionID,
 		HostKind:              s.hostKind,
@@ -771,6 +782,7 @@ func (s *Server) activate(current *session) (*session, bool) {
 	if previous != nil && previous.revision.Load() > current.revision.Load() {
 		return previous, false
 	}
+	current.draining.Store(s.upgradeDraining.Load() || s.upgradeIntervention[current.deviceID])
 	s.connections[current.deviceID] = current
 	s.statusGeneration++
 	return previous, true
@@ -1196,6 +1208,12 @@ func (s *session) callPeer(
 	source control.PrincipalIdentity,
 	params any,
 ) (json.RawMessage, error) {
+	return s.callPeerRequest(ctx, method, treeID, &source, params)
+}
+
+func (s *session) callPeerRequest(
+	ctx context.Context, method, treeID string, source *control.PrincipalIdentity, params any,
+) (json.RawMessage, error) {
 	if err := s.validateAuthority(ctx); err != nil {
 		if registrationDenied(err) {
 			_ = s.connection.CloseNow()
@@ -1217,8 +1235,11 @@ func (s *session) callPeer(
 		Method:          method,
 		ControllerID:    s.server.controllerID,
 		TreeID:          treeID,
-		Source:          &source,
 		Payload:         payload,
+	}
+	if source != nil {
+		copy := *source
+		request.Source = &copy
 	}
 	pending := peerPendingCall{treeID: treeID, result: make(chan peerCallResult, 1)}
 	if err := s.addPeerCall(requestID, pending); err != nil {

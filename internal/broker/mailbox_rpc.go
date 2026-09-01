@@ -25,9 +25,14 @@ func (s *session) handleSendMessage(ctx context.Context, request protocol.Envelo
 			ctx, request, protocol.ErrorInvalidParams, "invalid message payload",
 		)
 	}
+	releaseAdmission, err := s.rejectDrainedMutation(ctx, request)
+	if releaseAdmission == nil {
+		return err
+	}
 	delivery, err := s.server.registry.SendMailboxMessage(
 		ctx, principal, params.Target, params.MessageID, params.Message, s.server.now(),
 	)
+	releaseAdmission()
 	if err != nil {
 		return s.handleMailboxStoreError(ctx, request, "send mailbox message", err)
 	}
