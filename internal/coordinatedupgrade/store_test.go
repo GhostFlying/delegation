@@ -23,18 +23,16 @@ func TestStoreFreezesParticipantsAndCommitIsIrreversible(t *testing.T) {
 	}
 	for _, mutation := range []func(*Journal){
 		func(current *Journal) {
-			current.Participants[0].LocalTransactionID = testPeerTransactionID
 			current.Participants[0].TargetRuntimeDigest = testPeerRuntimeDigest
 			current.Participants[0].ConfigDigest = testPeerConfigDigest
 			current.Participants[0].SourceReadinessEpoch = 4
 			current.Participants[0].State = ParticipantPrepared
 		},
 		func(current *Journal) {
-			current.Broker = LocalParticipant{
-				TransactionID: testBrokerTransactionID, State: "prepared",
-				TargetRuntimeDigest: testBrokerRuntimeDigest, ConfigDigest: testBrokerConfigDigest,
-				UpdatedAt: current.UpdatedAt + 1,
-			}
+			current.Broker.State = "prepared"
+			current.Broker.TargetRuntimeDigest = testBrokerRuntimeDigest
+			current.Broker.ConfigDigest = testBrokerConfigDigest
+			current.Broker.UpdatedAt = current.UpdatedAt + 1
 			current.State = StateArming
 		},
 		func(current *Journal) {
@@ -134,7 +132,7 @@ func testControllerJournal() Journal {
 		Deadline: now + int64(time.Hour/time.Millisecond), CreatedAt: now, UpdatedAt: now,
 		Participants: []Participant{{
 			DeviceID: testPeerDeviceID, ConnectionID: testPeerConnectionID, SourceVersion: testSourceVersion,
-			State: ParticipantPending, UpdatedAt: now,
-		}},
+			LocalTransactionID: testPeerTransactionID, State: ParticipantPending, UpdatedAt: now,
+		}}, Broker: LocalParticipant{TransactionID: testBrokerTransactionID, UpdatedAt: now},
 	}
 }

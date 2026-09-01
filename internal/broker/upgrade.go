@@ -10,7 +10,10 @@ import (
 	"github.com/GhostFlying/delegation/internal/protocol"
 )
 
-var ErrUpgradeDrainActive = errors.New("broker upgrade drain is active")
+var (
+	ErrUpgradeDrainActive         = errors.New("broker upgrade drain is active")
+	ErrUpgradeTransactionNotFound = errors.New("peer upgrade transaction not found")
+)
 
 // UpgradePeer is the non-secret, generation-pinned view used to freeze a
 // controller transaction's participant set.
@@ -167,6 +170,10 @@ func callUpgradePeer(
 	}
 	payload, err := current.callPeerRequest(ctx, method, "", nil, params)
 	if err != nil {
+		var rpcError *peerRPCError
+		if errors.As(err, &rpcError) && rpcError.code == protocol.ErrorNotFound {
+			return protocol.UpgradeSnapshot{}, fmt.Errorf("%w: %v", ErrUpgradeTransactionNotFound, err)
+		}
 		return protocol.UpgradeSnapshot{}, err
 	}
 	var snapshot protocol.UpgradeSnapshot

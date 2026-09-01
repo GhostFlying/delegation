@@ -180,10 +180,11 @@ func validateMutation(before, after Journal) error {
 }
 
 func validateParticipantMutation(before, after Participant) error {
-	if before.LocalTransactionID != "" && (before.LocalTransactionID != after.LocalTransactionID ||
-		before.TargetRuntimeDigest != after.TargetRuntimeDigest ||
-		before.ConfigDigest != after.ConfigDigest ||
-		before.SourceReadinessEpoch != after.SourceReadinessEpoch) {
+	if before.LocalTransactionID != after.LocalTransactionID {
+		return errors.New("reserved transaction identity changed")
+	}
+	if before.State != ParticipantPending && (before.TargetRuntimeDigest != after.TargetRuntimeDigest ||
+		before.ConfigDigest != after.ConfigDigest || before.SourceReadinessEpoch != after.SourceReadinessEpoch) {
 		return errors.New("prepared transaction identity changed")
 	}
 	if participantRank(after.State) < participantRank(before.State) {
@@ -193,8 +194,10 @@ func validateParticipantMutation(before, after Participant) error {
 }
 
 func validateBrokerMutation(before, after LocalParticipant) error {
-	if before.TransactionID != "" && (before.TransactionID != after.TransactionID ||
-		before.TargetRuntimeDigest != after.TargetRuntimeDigest ||
+	if before.TransactionID != after.TransactionID {
+		return errors.New("broker reserved transaction identity changed")
+	}
+	if before.State != "" && (before.TargetRuntimeDigest != after.TargetRuntimeDigest ||
 		before.ConfigDigest != after.ConfigDigest) {
 		return errors.New("broker prepared transaction identity changed")
 	}

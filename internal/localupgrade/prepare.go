@@ -130,15 +130,17 @@ type PrepareDependencies struct {
 }
 
 type PrepareOptions struct {
-	Store           *Store
-	Home            string
-	Config          delegationconfig.Config
-	ConfigPath      string
-	EnvironmentFile string
-	SourceBinary    string
-	CurrentVersion  string
-	TargetVersion   string
-	Dependencies    PrepareDependencies
+	Store                   *Store
+	Home                    string
+	Config                  delegationconfig.Config
+	ConfigPath              string
+	EnvironmentFile         string
+	SourceBinary            string
+	CurrentVersion          string
+	TargetVersion           string
+	TransactionID           string
+	ControllerTransactionID string
+	Dependencies            PrepareDependencies
 }
 
 type PrepareResult struct {
@@ -151,6 +153,19 @@ type PrepareResult struct {
 func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error) {
 	if options.Store == nil {
 		return PrepareResult{}, errors.New("upgrade transaction store is required")
+	}
+	if options.TransactionID != "" {
+		if err := identity.ValidateID(options.TransactionID); err != nil {
+			return PrepareResult{}, fmt.Errorf("upgrade transaction ID: %w", err)
+		}
+	}
+	if options.ControllerTransactionID != "" {
+		if options.TransactionID == "" {
+			return PrepareResult{}, errors.New("controller-bound upgrade requires a reserved transaction ID")
+		}
+		if err := identity.ValidateID(options.ControllerTransactionID); err != nil {
+			return PrepareResult{}, fmt.Errorf("controller transaction ID: %w", err)
+		}
 	}
 	lock, err := acquireJournalLock(filepath.Join(options.Store.path, "prepare.lock"))
 	if err != nil {
@@ -260,9 +275,12 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	transactionID, err := dependencies.NewID()
-	if err != nil {
-		return PrepareResult{}, fmt.Errorf("create upgrade transaction ID: %w", err)
+	transactionID := options.TransactionID
+	if transactionID == "" {
+		transactionID, err = dependencies.NewID()
+		if err != nil {
+			return PrepareResult{}, fmt.Errorf("create upgrade transaction ID: %w", err)
+		}
 	}
 	materialRoot := filepath.Join(options.Store.path, "transactions", transactionID)
 	if err := delegationconfig.PreparePrivateDirectory(materialRoot); err != nil {
@@ -350,7 +368,8 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 	now := dependencies.Now().UnixMilli()
 	journal := Journal{
 		SchemaVersion: JournalSchemaVersion, TransactionID: transactionID, State: StatePrepared,
-		Role: options.Config.Role, InstanceID: options.Config.EffectiveInstanceID(),
+		ControllerTransactionID: options.ControllerTransactionID,
+		Role:                    options.Config.Role, InstanceID: options.Config.EffectiveInstanceID(),
 		ControllerID: options.Config.ControllerID, DeviceID: options.Config.DeviceID,
 		SourceVersion: options.CurrentVersion, TargetVersion: options.TargetVersion,
 		SourceRuntimeDigest: sourceDigest, TargetRuntimeDigest: runtimeMaterial.BinarySHA256,
@@ -427,6 +446,12 @@ func validateResumeRequest(journal Journal, options PrepareOptions) error {
 		journal.ControllerID != options.Config.ControllerID || journal.DeviceID != options.Config.DeviceID ||
 		journal.Invocation.ConfigPath != options.ConfigPath || journal.Invocation.EnvironmentFile != options.EnvironmentFile {
 		return errors.New("same-target upgrade does not match the configured service identity")
+	}
+	if options.TransactionID != "" && journal.TransactionID != options.TransactionID {
+		return errors.New("same-target upgrade does not match the reserved transaction identity")
+	}
+	if journal.ControllerTransactionID != options.ControllerTransactionID {
+		return errors.New("same-target upgrade does not match the controller transaction identity")
 	}
 	return nil
 }

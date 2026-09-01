@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/GhostFlying/delegation/internal/protocol"
 )
@@ -118,7 +119,11 @@ func (s *session) finishUpgradeRequest(
 ) {
 	if operationErr != nil {
 		s.client.reportError(fmt.Errorf("coordinated upgrade %s: %w", operation, operationErr))
-		if writeErr := s.writeError(request, protocol.ErrorUnavailable, "coordinated upgrade operation failed"); writeErr != nil {
+		code := protocol.ErrorUnavailable
+		if request.Method == protocol.MethodCancelUpgrade && errors.Is(operationErr, os.ErrNotExist) {
+			code = protocol.ErrorNotFound
+		}
+		if writeErr := s.writeError(request, code, "coordinated upgrade operation failed"); writeErr != nil {
 			s.close(writeErr)
 		}
 		return
