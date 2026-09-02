@@ -617,6 +617,9 @@ type managedResponsesMock struct {
 	probeCommand          string
 	probeMarkers          []string
 	protectedOutput       []managedProtectedValue
+	shellTool             string
+	allowWarmup           bool
+	warmupHandled         bool
 	runningStarted        chan struct{}
 	runningDisconnected   chan struct{}
 	runningStartedOnce    sync.Once
@@ -782,7 +785,30 @@ func (m *managedResponsesMock) ServeHTTP(writer http.ResponseWriter, request *ht
 			break
 		}
 	}
+	// TraeX may use previous_response_id for a shell continuation and send only
+	// the function output as the next Responses input. Recognize the probe's
+	// stable call ID instead of requiring the original prompt to be replayed.
+	if testCase == "" && functionCallOutput(body["input"], "call-managed-probe") != "" {
+		testCase = "first"
+	}
 	if testCase == "" {
+		m.mu.Lock()
+		warmup := m.allowWarmup && !m.warmupHandled
+		if warmup {
+			m.warmupHandled = true
+		}
+		m.mu.Unlock()
+		if warmup {
+			writeManagedSSE(writer,
+				map[string]any{"type": "response.created", "response": map[string]any{"id": "resp-managed-warmup"}},
+				map[string]any{"type": "response.output_item.done", "item": map[string]any{
+					"type": "message", "role": "assistant", "id": "msg-managed-warmup",
+					"content": []map[string]any{{"type": "output_text", "text": "ready"}},
+				}},
+				managedCompletedEvent("resp-managed-warmup"),
+			)
+			return
+		}
 		m.fail(writer, errors.New("managed model request has no test case"))
 		return
 	}
@@ -795,6 +821,10 @@ func (m *managedResponsesMock) ServeHTTP(writer http.ResponseWriter, request *ht
 		m.record(fmt.Errorf("managed worker exposes no worker-tool discovery path: %s", tools))
 	}
 	shellTool, shellArguments := managedShellTool(m.probeCommand)
+	if m.shellTool != "" {
+		shellTool = m.shellTool
+		shellArguments = map[string]any{"command": m.probeCommand, "timeout": 10_000}
+	}
 	if !strings.Contains(string(tools), `"name":"`+shellTool+`"`) {
 		m.record(fmt.Errorf("managed worker exposes no %s tool: %s", shellTool, tools))
 	}

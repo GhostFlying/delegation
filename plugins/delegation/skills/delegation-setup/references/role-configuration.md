@@ -111,7 +111,10 @@ regular file with one hard link, outside the managed home, workspace, service en
 Delegation authority files, and Tailscale authority. The peer copies its exact validated bytes
 atomically to `<peer.codexHome>/cli/auth.json`; only the app-server may use that copy, and the
 managed worker tool profile denies both the source and the copy. Keep the source for every service
-start. Restart the service after account rotation; changed bytes create a new readiness epoch.
+start. On macOS, keep both paths outside `/tmp`, `/private/tmp`, `/var/tmp`, and
+`/private/var/tmp`, including symbolic-link aliases into those roots; the worker sandbox grants
+model tools access there. Restart the service after account rotation; changed bytes create a new
+readiness epoch.
 
 All other normal CLI state remains isolated. Setup, doctor, and worker launch reject instructions,
 profiles, plugins, hooks, model providers, execution rules, non-system skills, and authentication

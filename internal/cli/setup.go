@@ -527,6 +527,11 @@ func runSetupPeer(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if networkHostKind == hostkind.TraeX {
+		if err := traexauth.ValidateSandboxPaths(
+			resolvedTraeAuthFile, traexauth.ManagedPath(resolvedCodexHome),
+		); err != nil {
+			return writeError(stderr, err)
+		}
 		if _, err := traexauth.ReadSource(resolvedTraeAuthFile); err != nil {
 			return writeError(stderr, err)
 		}

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
@@ -24,7 +25,15 @@ const (
 var (
 	ErrInvalidSource      = errors.New("TraeX authentication source is invalid")
 	ErrInvalidManagedCopy = errors.New("managed TraeX authentication copy is invalid")
+	ErrUnsafeSandboxPath  = errors.New("TraeX authentication path is readable by the macOS worker sandbox")
 )
+
+var darwinSandboxTemporaryRoots = []string{
+	"/tmp",
+	"/private/tmp",
+	"/var/tmp",
+	"/private/var/tmp",
+}
 
 type authDocument struct {
 	AuthMode string      `json:"auth_mode"`
@@ -43,6 +52,87 @@ type traeAccount struct {
 // TraeX home. The worker profile denies this exact file to model tools.
 func ManagedPath(managedHome string) string {
 	return filepath.Join(managedHome, "cli", managedAuthName)
+}
+
+// ValidateSandboxPaths rejects credential locations beneath macOS temporary
+// roots. Codex's minimal Seatbelt platform defaults grant those roots to model
+// tools after profile-specific exact-file denies have been compiled, so an
+// auth file there cannot satisfy Delegation's protected-account boundary.
+func ValidateSandboxPaths(sourcePath, managedPath string) error {
+	return validateSandboxPaths(runtime.GOOS, sourcePath, managedPath)
+}
+
+func validateSandboxPaths(platform, sourcePath, managedPath string) error {
+	if platform != "darwin" {
+		return nil
+	}
+	for _, protected := range []struct {
+		name string
+		path string
+	}{
+		{name: "TraeX credential source", path: sourcePath},
+		{name: "managed TraeX credential copy", path: managedPath},
+	} {
+		if !filepath.IsAbs(protected.path) {
+			return fmt.Errorf("%w: %s must be an absolute path", ErrUnsafeSandboxPath, protected.name)
+		}
+		unsafe, err := pathWithinDarwinTemporaryRoot(protected.path)
+		if err != nil {
+			return fmt.Errorf("%w: resolve %s: %v", ErrUnsafeSandboxPath, protected.name, err)
+		}
+		if unsafe {
+			return fmt.Errorf(
+				"%w: %s must be outside /tmp, /private/tmp, /var/tmp, and /private/var/tmp",
+				ErrUnsafeSandboxPath, protected.name,
+			)
+		}
+	}
+	return nil
+}
+
+func pathWithinDarwinTemporaryRoot(path string) (bool, error) {
+	lexical := filepath.Clean(path)
+	if withinAnyPath(lexical, darwinSandboxTemporaryRoots) {
+		return true, nil
+	}
+	canonical, err := canonicalFuturePath(lexical)
+	if err != nil {
+		return false, err
+	}
+	return withinAnyPath(canonical, darwinSandboxTemporaryRoots), nil
+}
+
+func canonicalFuturePath(path string) (string, error) {
+	current := filepath.Clean(path)
+	var missing []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			components := append([]string{resolved}, missing...)
+			return filepath.Join(components...), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", err
+		}
+		missing = append([]string{filepath.Base(current)}, missing...)
+		current = parent
+	}
+}
+
+func withinAnyPath(path string, roots []string) bool {
+	path = filepath.Clean(path)
+	for _, root := range roots {
+		root = filepath.Clean(root)
+		if strings.EqualFold(path, root) ||
+			strings.HasPrefix(strings.ToLower(path), strings.ToLower(root+string(filepath.Separator))) {
+			return true
+		}
+	}
+	return false
 }
 
 // ReadSource reads a current-user-only source and verifies the minimum Trae

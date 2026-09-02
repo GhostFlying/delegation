@@ -240,12 +240,23 @@ func TestHostIsolatesRuntimeHomeForHostKind(t *testing.T) {
 					paths.credentialSourceFile,
 					paths.managedCredentialFile,
 				} {
-					if filesystem[protected] != "deny" {
+					exact, ok := filesystem[protected].(map[string]any)
+					if !ok || exact["."] != "deny" {
 						t.Fatalf("managed TraeX profile does not deny credential file %q: %#v", protected, filesystem)
 					}
 				}
 			}
 		})
+	}
+}
+
+func TestAddExactFileDenyScopesGlobMetacharactersAsLiteralPath(t *testing.T) {
+	filesystem := make(map[string]any)
+	path := `/Users/operator/auth[*?{}]/auth.json`
+	addExactFileDeny(filesystem, path)
+	exact, ok := filesystem[path].(map[string]any)
+	if !ok || len(exact) != 1 || exact["."] != "deny" {
+		t.Fatalf("exact credential deny = %#v", filesystem[path])
 	}
 }
 

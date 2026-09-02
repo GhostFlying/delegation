@@ -59,6 +59,9 @@ TraeX peer setup additionally requires `--trae-auth-file` pointing to the host's
 `TRAECLI_HOME/auth.json`; keep that source outside the isolated managed home, workspace, service
 environment, Delegation authority, and Tailscale authority. The runtime copies it into the managed
 home for the app-server while denying managed worker tools access to both the source and the copy.
+On macOS, neither the source nor the managed home may be beneath `/tmp`, `/private/tmp`, `/var/tmp`,
+or `/private/var/tmp`, including through a symbolic-link alias, because the worker sandbox grants
+model tools access to those temporary roots.
 Set `DELEGATION_INSTANCE` in the CLI host environment before plugin startup to select a named
 peer's root MCP; an explicit `DELEGATION_CONFIG` remains authoritative and must identify the same
 instance.

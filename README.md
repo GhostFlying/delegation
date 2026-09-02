@@ -215,7 +215,10 @@ outside the managed home and workspace; the peer atomically maintains a private 
 `<peer.codexHome>/cli/auth.json` for the app-server, while the managed worker tool profile denies
 both the host source and the managed copy. Setup and every service start reject a missing,
 malformed, broadly readable, aliased, or conflicting source without printing its contents. A
-source-byte change takes effect on service restart and starts a new execution-readiness epoch.
+source-byte change takes effect on service restart and starts a new execution-readiness epoch. On
+macOS, neither the source nor the managed home may be beneath `/tmp`, `/private/tmp`, `/var/tmp`,
+or `/private/var/tmp`, including through a symbolic-link alias, because the native worker sandbox
+unconditionally grants model tools access to those temporary roots.
 
 All other normal CLI state remains isolated. Setup, doctor, and worker launch reject ambient
 instructions, profiles, plugins, hooks, model providers, execution rules, non-system skills, and
