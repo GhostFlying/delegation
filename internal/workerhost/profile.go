@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	workerProfileVersion    = 6
+	workerProfileVersion    = 7
 	workerPermissionProfile = "delegation-worker"
 	windowsWorkerProfile    = ":danger-full-access"
 	rootPluginEnabledConfig = "plugins.delegation@delegation.enabled"
@@ -69,10 +69,10 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 		filesystem[h.providerEnvironmentFile] = "deny"
 	}
 	for _, traeAuthSourceFile := range h.traeAuthSourceFiles {
-		filesystem[traeAuthSourceFile] = "deny"
+		addExactFileDeny(filesystem, traeAuthSourceFile)
 	}
 	for _, managedTraeAuthFile := range h.managedTraeAuthFiles {
-		filesystem[managedTraeAuthFile] = "deny"
+		addExactFileDeny(filesystem, managedTraeAuthFile)
 	}
 	if runtime.GOOS == "windows" {
 		// Codex requires the elevated Windows sandbox to enforce restricted reads.
@@ -130,6 +130,12 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 		"startup_timeout_sec": workerMCPTimeout,
 	}
 	return config
+}
+
+func addExactFileDeny(filesystem map[string]any, path string) {
+	// A scoped literal dot forces Codex to compile the map key as an exact
+	// path even when a valid Unix filename contains glob metacharacters.
+	filesystem[path] = map[string]any{".": "deny"}
 }
 
 func prependExecutableDirectory(path, directory string) string {

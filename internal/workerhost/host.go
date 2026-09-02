@@ -296,6 +296,11 @@ func New(ctx context.Context, options Options) (*Host, error) {
 		if sameCanonicalPath(options.TraeAuthSourceFile, options.ManagedTraeAuthFile) {
 			return nil, errors.New("TraeX credential source and managed copy must be different files")
 		}
+		if err := traexauth.ValidateSandboxPaths(
+			options.TraeAuthSourceFile, options.ManagedTraeAuthFile,
+		); err != nil {
+			return nil, err
+		}
 	}
 	for name, path := range map[string]string{
 		"peer config":       options.PeerConfigPath,

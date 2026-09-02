@@ -218,8 +218,10 @@ TraeX requires a structured CLI command and an attached shell-free launcher:
 `TRAECLI_HOME/auth.json`; it is not the Delegation peer token. Keep it outside the managed home,
 workspace, service environment, Delegation authority files, and Tailscale authority. The peer
 atomically copies validated bytes into the isolated managed `TRAECLI_HOME` for the app-server and
-denies worker tools access to both the host source and managed copy. Restart the peer after the
-Trae account token changes so qualification uses a new readiness epoch.
+denies worker tools access to both the host source and managed copy. On macOS, keep both paths
+outside `/tmp`, `/private/tmp`, `/var/tmp`, and `/private/var/tmp`, including symbolic-link aliases
+into those roots; the native worker sandbox unconditionally grants model tools access there.
+Restart the peer after the Trae account token changes so qualification uses a new readiness epoch.
 
 Repeat `--cli-argument` and `--cli-launcher-prefix-argument` once per exact argv element. Setup does
 not perform shell parsing. The TraeX peer URL is exactly

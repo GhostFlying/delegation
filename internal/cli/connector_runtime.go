@@ -105,6 +105,7 @@ func runConnectorServiceWithProviderEnvironment(
 		}
 		if cfg.EffectiveHostKind() == hostkind.TraeX &&
 			(errors.Is(authorityErr, traexauth.ErrInvalidSource) ||
+				errors.Is(authorityErr, traexauth.ErrUnsafeSandboxPath) ||
 				errors.Is(authorityErr, pathguard.ErrTraeXAuthenticationAuthority)) {
 			return errors.Join(
 				authorityErr,
@@ -851,6 +852,11 @@ func loadConnectorAuthority(
 		return connectorAuthority{}, err
 	}
 	if cfg.EffectiveHostKind() == hostkind.TraeX {
+		if err := traexauth.ValidateSandboxPaths(
+			cfg.Peer.TraeAuthFile, traexauth.ManagedPath(cfg.Peer.CodexHome),
+		); err != nil {
+			return connectorAuthority{}, err
+		}
 		auth, err := traexauth.ReadSource(cfg.Peer.TraeAuthFile)
 		if err != nil {
 			return connectorAuthority{}, err

@@ -117,6 +117,24 @@ current agent state without rewriting immutable spawn receipts. The milestone st
   must prove the same deny boundary before release acceptance; otherwise stop for an explicit
   security-model decision.
 
+### Final-validation follow-up: native macOS credential-deny enforcement
+
+- Owner: milestone integration worktree.
+- Dependencies: the protected TraeX account-reuse checkpoint and native macOS real-account
+  acceptance.
+- Write set: TraeX credential-path validation, setup/connector/worker enforcement, worker
+  filesystem-profile generation, focused/native tests, operator documentation, and review evidence.
+- Behavior: retain literal exact-path denies for the explicit host credential and managed copy.
+  On macOS, fail closed before setup persistence and again at service/worker startup when either
+  path, lexically or through a filesystem alias, is beneath `/tmp`, `/private/tmp`, `/var/tmp`, or
+  `/private/var/tmp`; Codex's minimal Seatbelt platform defaults grant those roots after dynamic
+  profile rules are compiled. Other locations and platforms retain the existing policy.
+- Acceptance: focused tests prove scoped literal entries for both protected paths and temporary-root
+  rejection, including lexical and canonical aliases; the real macOS TraeX 0.201.6 smoke proves a worker turn and result,
+  direct and symlink-alias denial of both paths, token non-leakage, app-server replacement, and
+  same-thread cold resume. This is review round 3 for the protected-auth checkpoint; any remaining
+  actionable finding requires human disposition rather than a fourth automated round.
+
 ### Final-review follow-up: reliable terminal readiness publication
 
 - Owner: milestone integration worktree.
