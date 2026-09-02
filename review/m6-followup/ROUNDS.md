@@ -471,6 +471,55 @@ Executable acceptance at the accepted frozen revision:
   focused race iterations, and macOS arm64 and Windows amd64 compile checks. The detached worktree
   remained clean.
 
+## Follow-up Checkpoint: Darwin Temporary-root Protected Authentication
+
+- Base commit: `562d2d3a335f61d29a101d72135eca99bfba34f2`
+- Review round: 3 for the protected TraeX account-reuse checkpoint
+- Frozen commit: `c65a5de85032adc5a6ad7568f2cb1e98685275fc`
+- Frozen tree: `71bba5b3d9c39b204b58937c691355010cc3c952`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `FINDINGS`
+- Finding: raising the worker profile version from 6 to 7 leaves a supported upgrade path where
+  retained non-occupied version-6 worker reservations pass upgrade preflight but make the target
+  peer reject its database at startup. The ordinary trigger is an alpha.7 peer with retained
+  `pending`, `idle`, `interrupted`, or `failed` worker history. The material impact is a
+  post-COMMIT target-service startup failure with no supported profile-history migration.
+- Protected-auth disposition: the reviewer found no additional actionable issue in temporary-root
+  rejection, future-path canonicalization, setup-before-write enforcement, durable connector
+  intervention, worker-host revalidation, or scoped literal deny generation.
+- Checkpoint disposition: human decision required. This was the third and final permitted
+  automated review round; no fourth review will be started for this checkpoint.
+
+Executable acceptance at the frozen revision:
+
+- `go test -count=1 ./internal/traexauth ./internal/workerhost ./internal/cli` and the
+  corresponding race run passed for both the owner and independent reviewer.
+- `go test -count=1 -buildvcs=false -tags=ts_omit_logtail -timeout=30m ./...` and
+  `go vet -tags=ts_omit_logtail ./...` passed.
+- Linux amd64, macOS amd64/arm64, and Windows amd64 affected packages plus the
+  `integration,live` E2E package passed compile-only validation.
+- `GO=go ./tests/posix_plugin_test.sh`, `./tests/m6_support_contract_test.sh`,
+  `git diff --check`, the full-tree gofmt check, and a tracked credential/private-path scan passed.
+- Native macOS 26.3 arm64 with TraeX 0.201.6 passed temporary-root setup rejection, durable
+  connector intervention, sandbox denial of direct and symlink access to both credential copies,
+  and the real-account turn/result, app-server replacement, and cold-resume smoke. The authorized
+  temporary token and its protected directory were removed after the run.
+
+## External Validation: Containerized Coordinated-upgrade Drill
+
+- Revision: `c65a5de85032adc5a6ad7568f2cb1e98685275fc`, mounted read-only.
+- Container: `debian:bookworm-slim` at
+  `sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171`,
+  Docker client/server 29.3.0, network disabled, read-only root, and isolated tmpfs home/cache.
+- The peer-first/broker-last order, lost peer activation response, replacement connection,
+  repeated peer activation failure followed by target-broker recovery, broker activation failure
+  followed by restart/resume, and readiness timeout to intervention scenarios passed 20 runs.
+- The protocol, local-upgrade, user-service fixture, local bridge, connector, broker, coordinated
+  upgrade, and upgrade-scoped CLI suites passed in the same container.
+- This drill validates ordering, crash/reply-loss recovery, reconnect qualification, and journal
+  behavior. It does not claim native service-manager replacement or canonical GitHub/Sigstore
+  release provenance, which require a real newer attested release and supported native hosts.
+
 ## Combined Milestone Review
 
 - Review base commit: `b406974120dcc95372a91c8d9297649fa665a431`
