@@ -583,3 +583,46 @@ canonical attested release; alpha.4 bootstrap, protocol behavior, journals, resp
 and platform service integration are covered without claiming that unavailable cross-version live
 run. These are external release gates, not unresolved code-review findings or reasons to relax the
 credential boundary.
+
+## Follow-up Checkpoint: Retained Worker-profile Migration
+
+- Base commit: `90c1fd1939c1485b1c4992a808e3dba6f2b709eb`
+- Accepted review range:
+  `90c1fd1939c1485b1c4992a808e3dba6f2b709eb..12145cff9ec937a92941b8f319b8f065c9fb543d`
+- Review round: 1
+- Frozen commit: `12145cff9ec937a92941b8f319b8f065c9fb543d`
+- Frozen tree: `8829f0ba09dba6fc7a4b26a158273360a66d2648`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `CLEAN`
+- Findings: none
+- Disposition: accepted at the exact frozen commit and tree
+
+This separately approved checkpoint resolves the protected-auth round-3 finding without starting a
+fourth review round for that checkpoint. A source runtime can now validate a forward target worker
+profile while only the exact target runtime may perform the migration. Peer PREPARE accepts
+homogeneous retained worker history from the known profile-5 and profile-6 sources, plus idempotent
+profile 7, and rejects mixed, unknown, future, foreign-authority, occupied, pending-operation, and
+unfinished-result state. The activator rewrites profile history while applying schema 15-to-16 in
+one immediate transaction on the shadow database. The canonical and rollback databases retain the
+source profile until the normal atomic switch. Broker database behavior is unchanged.
+
+Executable acceptance at the accepted frozen revision:
+
+- `go test -count=1 -buildvcs=false -tags=ts_omit_logtail -timeout=30m ./...` and
+  `go vet -tags=ts_omit_logtail ./...` passed.
+- The store, local-upgrade, worker-host, and CLI race suites passed, including ten repeated focused
+  profile-migration and activator crash-point runs.
+- Linux amd64, macOS amd64, macOS arm64, and Windows amd64 compile-only checks passed, including
+  the `integration,live` E2E package.
+- `GO=go ./tests/posix_plugin_test.sh`, `./tests/m6_support_contract_test.sh`, `git diff --check`,
+  and the full-tree gofmt check passed.
+- A network-disabled, read-only-root Debian bookworm container ran as a non-root user with isolated
+  tmpfs home and cache. The key peer-first/broker-last, response-loss, restart, and readiness
+  intervention coordinated-upgrade tests passed 20 times, followed by the protocol, local-upgrade,
+  user-service, local-bridge, connector, broker, coordinated-upgrade, and CLI package suites. This
+  drill does not claim native service-manager replacement or canonical GitHub/Sigstore provenance.
+- The independent reviewer reran the focused packages, full Linux suite, affected race suites,
+  focused vet, the support contract, macOS amd64/arm64 and Windows amd64 compile checks, and
+  `git diff --check`. The reviewer verified the target-runtime activation and journal compatibility
+  edges and found no material security, crash-consistency, protocol/version, cross-platform, or
+  test-coverage defect. The detached review worktree remained clean.
