@@ -29,7 +29,7 @@ done
 
 require_literal README.md 'Do not configure,'
 require_literal README.md '[M6 release closure](docs/m6-release-closure.md)'
-require_literal README.md 'The first move from alpha.4 requires explicit local bootstrap'
+require_literal README.md 'The first move from alpha.4 or alpha.7 requires explicit local bootstrap'
 require_literal README.md 'After every online peer and the broker run a coordination-capable version'
 require_literal README.md 'The broker freezes the online, compatible, upgrade-capable peers'
 require_literal README.md '`controllerUpgrade` transaction'
@@ -49,7 +49,7 @@ require_literal plugins/delegation/skills/delegation-setup/SKILL.md \
 require_literal plugins/delegation/skills/delegation-setup/SKILL.md \
   'Before installing a fresh user service'
 require_literal plugins/delegation/skills/delegation-setup/SKILL.md \
-  'The first move from alpha.4 requires `service upgrade ... --bootstrap`'
+  'The first move from alpha.4 or alpha.7 requires `service upgrade ... --bootstrap`'
 require_literal plugins/delegation/skills/delegation-setup/SKILL.md \
   'invoke `service upgrade` without `--bootstrap` against the'
 require_literal plugins/delegation/skills/delegation-setup/SKILL.md \
@@ -59,7 +59,7 @@ require_literal plugins/delegation/skills/delegation-setup/references/role-confi
 require_literal plugins/delegation/skills/delegation-setup/references/native-services.md \
   'Windows TraeX is unsupported; do not configure or install it.'
 require_literal plugins/delegation/skills/delegation-setup/references/native-services.md \
-  'The first move from alpha.4 requires explicit local bootstrap authorization'
+  'The first move from alpha.4 or alpha.7 requires explicit local bootstrap authorization'
 require_literal plugins/delegation/skills/delegation-setup/references/native-services.md \
   'Once every online peer and the broker run a coordination-capable version'
 require_literal plugins/delegation/skills/delegation-setup/references/native-services.md \
@@ -76,6 +76,8 @@ require_literal docs/m6-release-closure.md \
 require_literal docs/m6-release-closure.md \
   'broker-owned, peer-first and'
 require_literal docs/m6-release-closure.md \
-  'the alpha.7 source commit'
+  'the alpha.8 source commit'
+require_literal docs/m6-release-closure.md \
+  'Alpha.7 to alpha.8 is intentionally the local bootstrap boundary'
 
 printf '%s\n' 'M6_SUPPORT_CONTRACT_PASS'

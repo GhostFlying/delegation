@@ -507,9 +507,18 @@ func TestCoordinatedServiceUpgradeRecoversLostActivationResponseFromStatus(t *te
 }
 
 func TestLegacyBootstrapDiscoversAlpha4RuntimeWithoutBridge(t *testing.T) {
+	testLegacyBootstrapDiscoversRuntimeWithoutBridge(t, "0.1.0-alpha.4")
+}
+
+func TestLegacyBootstrapDiscoversAlpha7RuntimeWithoutBridge(t *testing.T) {
+	testLegacyBootstrapDiscoversRuntimeWithoutBridge(t, "0.1.0-alpha.7")
+}
+
+func testLegacyBootstrapDiscoversRuntimeWithoutBridge(t *testing.T, currentVersion string) {
+	t.Helper()
 	configPath, cfg := writeStatusTestConfig(t, delegationconfig.RolePeer)
 	environmentFile := privateTestPath(t, "peer.env")
-	legacyBinary := filepath.Join(t.TempDir(), "delegation-alpha4")
+	legacyBinary := filepath.Join(t.TempDir(), "delegation-legacy")
 	manager := &cliUpgradeManager{absent: true, snapshot: upgradeTestSnapshot(localupgrade.StatePrepared)}
 	managerFactoryCalls := 0
 	discoverCalls := 0
@@ -533,7 +542,7 @@ func TestLegacyBootstrapDiscoversAlpha4RuntimeWithoutBridge(t *testing.T) {
 				if path != legacyBinary {
 					t.Fatalf("version probe path = %q", path)
 				}
-				return "0.1.0-alpha.4", nil
+				return currentVersion, nil
 			},
 			newManager: func(
 				_ delegationconfig.Config, gotConfig, gotEnvironment, source, version string,
@@ -548,7 +557,7 @@ func TestLegacyBootstrapDiscoversAlpha4RuntimeWithoutBridge(t *testing.T) {
 					}
 					return manager, nil
 				}
-				if source != legacyBinary || version != "0.1.0-alpha.4" {
+				if source != legacyBinary || version != currentVersion {
 					t.Fatalf("legacy manager source = %q, %q", source, version)
 				}
 				manager.absent = false

@@ -311,8 +311,9 @@ attempts; a clean exit is not restarted. Upgrade changes only the runtime binary
 changes the config or environment-file path. Provider credentials may be rotated in the existing
 protected environment file, followed by a peer-service restart.
 
-The first move from alpha.4 requires explicit local bootstrap because alpha.4 has no upgrade RPC.
-Upgrade every peer first and the broker last:
+The first move from alpha.4 or alpha.7 requires explicit local bootstrap because neither release
+implements the current upgrade RPC. Use the alpha.8 or newer CLI to upgrade every peer first and
+the broker last:
 
 ```bash
 plugins/delegation/scripts/delegation-mcp service upgrade \
@@ -361,10 +362,12 @@ upgrades a homogeneous retained alpha.4/profile-5 or alpha.7/profile-6 history t
 the shadow database. Mixed or unknown profiles, occupied workers, pending operations, and unfinished
 result publication fail closed while the
 original database remains rollback material. Retrying the same target resumes the protected
-journal. `--bootstrap` can start from the alpha.4 legacy service: the
-new CLI reads and verifies its exact native definition, running process identity, and executable
-version locally, so it does not require the old service to implement the current local-bridge
-protocol or upgrade RPC. `prepared` and `armed` transactions may be cancelled with
+journal. `--bootstrap` can start from an alpha.4 or alpha.7 legacy service: the new CLI reads and
+verifies its exact native definition, running process identity, and executable version locally, so
+it does not require the old service to implement the current local-bridge protocol or upgrade RPC.
+The alpha.4 source additionally uses the bounded legacy config and database migration above;
+alpha.7 already has the current config and database schema but may require the profile-6-to-7 shadow
+migration. `prepared` and `armed` transactions may be cancelled with
 `service upgrade --cancel --config <path> --transaction-id <uuid>`; a broker config cancels its
 controller transaction and a bootstrap config cancels its local transaction. Cancellation is
 refused after global or local durable commit authorization, when recovery is forward-only. Never

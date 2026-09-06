@@ -85,8 +85,9 @@ change.
 
 ## Managed Service Upgrade
 
-The first move from alpha.4 requires explicit local bootstrap authorization because alpha.4 has no
-upgrade RPC. Upgrade every idle peer first, then the broker last:
+The first move from alpha.4 or alpha.7 requires explicit local bootstrap authorization because
+neither release implements the current upgrade RPC. Use the alpha.8 or newer CLI to upgrade every
+idle peer first, then the broker last:
 
 ```text
 service upgrade --config <peer.json> --environment-file <peer.env> \
@@ -115,9 +116,10 @@ Sigstore provenance, tag commit, workflow identity, platform, architecture, and 
 also verifies the exact current-user service definition, executable/config/environment identity,
 database and embedded-Tailscale compatibility, and the absence of occupied workers or unfinished
 operations. The new CLI performs bootstrap discovery directly from that native definition and its
-running process, so an alpha.4 service does not need the current local-bridge protocol or upgrade
-RPC. Alpha.4 bootstrap accepts only the exact schema-3 TCP config and broker-19 or peer-15
-database. After the service stops, the activator preserves rollback material, migrates protected
+running process, so an alpha.4 or alpha.7 service does not need the current local-bridge protocol
+or upgrade RPC. Alpha.4 bootstrap accepts only the exact schema-3 TCP config and broker-19 or
+peer-15 database; alpha.7 already uses the current config and database schema. After the service
+stops, the activator preserves rollback material, migrates protected
 shadows to schema 4 and broker-20 or peer-16, and switches them atomically. For a peer, PREPARE also
 checks the target worker-profile identity; the activator upgrades a homogeneous retained
 alpha.4/profile-5 or alpha.7/profile-6 history to profile 7 in the shadow only. Mixed or unknown
