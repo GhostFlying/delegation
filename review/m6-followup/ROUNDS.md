@@ -657,3 +657,22 @@ Executable acceptance at the round-3 frozen revision:
   the `integration,live` E2E package.
 - POSIX plugin, M6 support-contract, gofmt, credential-pattern, and `git diff --check` checks passed.
 - Both the writer and detached review worktrees remained clean at the frozen revision.
+
+## Release-preparation Checkpoint: Alpha.8 Source
+
+### Review Round 1
+
+- Base commit: `3254a615a05ab42763dcc9e4a45fdc208cbc82cd`
+- Frozen commit: `bb910d97842c238899200c1aa5613cafa6a1ea7a`
+- Frozen tree: `9e4b9a67b62ff9611cc4a0981ee324ccddeb7b2b`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: withdrawn after an owner finding; the reviewer did not return a
+  verdict before the revision was superseded
+- Finding: the release-plan and operator prose correctly classified alpha.7 as lacking the current
+  upgrade RPC, but incorrectly said alpha.7 already used the target broker-20 and peer-16 database
+  schemas. The published alpha.7 source actually uses config schema 4, broker schema 19, peer schema
+  15, local-bridge protocol 3, and worker profile 6.
+- Impact: an ordinary alpha.7-to-alpha.8 bootstrap operator could be given an inaccurate migration
+  description even though the implementation correctly migrates schema 19-to-20 or 15-to-16.
+- Disposition: correct the documentation to distinguish config schema from database schema, freeze
+  a new source revision, and review it as round 2.

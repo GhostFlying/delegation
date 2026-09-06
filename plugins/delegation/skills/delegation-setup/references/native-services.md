@@ -117,9 +117,9 @@ also verifies the exact current-user service definition, executable/config/envir
 database and embedded-Tailscale compatibility, and the absence of occupied workers or unfinished
 operations. The new CLI performs bootstrap discovery directly from that native definition and its
 running process, so an alpha.4 or alpha.7 service does not need the current local-bridge protocol
-or upgrade RPC. Alpha.4 bootstrap accepts only the exact schema-3 TCP config and broker-19 or
-peer-15 database; alpha.7 already uses the current config and database schema. After the service
-stops, the activator preserves rollback material, migrates protected
+or upgrade RPC. Alpha.4 bootstrap accepts only the exact schema-3 TCP config; alpha.7 already uses
+config schema 4. Both sources use broker schema 19 or peer schema 15. After the service stops, the
+activator preserves rollback material, migrates protected
 shadows to schema 4 and broker-20 or peer-16, and switches them atomically. For a peer, PREPARE also
 checks the target worker-profile identity; the activator upgrades a homogeneous retained
 alpha.4/profile-5 or alpha.7/profile-6 history to profile 7 in the shadow only. Mixed or unknown

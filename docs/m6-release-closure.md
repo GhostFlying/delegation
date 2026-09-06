@@ -21,10 +21,10 @@ The original M6 platform qualification used only fresh independent deployments. 
 adds narrow in-place paths from alpha.4 and alpha.7. Both require the alpha.8 or newer CLI to run a
 protected local bootstrap because neither source release implements the current upgrade RPC. An
 exact alpha.4 schema-3 TCP service with broker schema 19 or peer schema 15 may move forward through
-the bounded legacy migration. Alpha.7 already has the current config and database schema, while its
-homogeneous retained profile-6 worker history may migrate to profile 7 in the stopped shadow
-database. Arbitrary config/state reuse, transport migration, downgrade, and operator-selected
-binaries remain unsupported.
+the bounded legacy migration. Alpha.7 already has config schema 4 but still migrates broker schema
+19 or peer schema 15 to 20 or 16; a peer also migrates homogeneous retained profile-6 worker history
+to profile 7 in the stopped shadow database. Arbitrary config/state reuse, transport migration,
+downgrade, and operator-selected binaries remain unsupported.
 After that bootstrap boundary, coordination-capable releases support a broker-owned, peer-first and
 broker-last transaction over the existing authenticated connector sessions and protected local
 management endpoint. The coordinator freezes only online compatible peers, persists COMMIT before

@@ -365,9 +365,9 @@ original database remains rollback material. Retrying the same target resumes th
 journal. `--bootstrap` can start from an alpha.4 or alpha.7 legacy service: the new CLI reads and
 verifies its exact native definition, running process identity, and executable version locally, so
 it does not require the old service to implement the current local-bridge protocol or upgrade RPC.
-The alpha.4 source additionally uses the bounded legacy config and database migration above;
-alpha.7 already has the current config and database schema but may require the profile-6-to-7 shadow
-migration. `prepared` and `armed` transactions may be cancelled with
+The alpha.4 source additionally uses the bounded legacy config migration above. Both sources use
+broker schema 19 or peer schema 15, which migrate to 20 or 16; an alpha.7 peer may also require the
+profile-6-to-7 shadow migration. `prepared` and `armed` transactions may be cancelled with
 `service upgrade --cancel --config <path> --transaction-id <uuid>`; a broker config cancels its
 controller transaction and a bootstrap config cancels its local transaction. Cancellation is
 refused after global or local durable commit authorization, when recovery is forward-only. Never

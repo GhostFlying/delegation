@@ -11,9 +11,10 @@ local and broker-coordinated upgrade protocol.
 - Installed alpha.4 and alpha.7 services do not implement the current local management or upgrade
   protocol. Use the alpha.8 CLI to perform an explicit local `--bootstrap` upgrade on every idle
   peer first and the broker last.
-- Alpha.4 bootstrap additionally performs the bounded schema-3/config and database migration.
-- Alpha.7 bootstrap keeps the current config/database schema while migrating homogeneous retained
-  profile-6 worker history to profile 7 in the stopped shadow database.
+- Alpha.4 bootstrap additionally performs the bounded schema-3-to-4 config migration.
+- Both alpha.4 and alpha.7 migrate broker schema 19 or peer schema 15 to 20 or 16. Alpha.7 peers
+  also migrate homogeneous retained profile-6 worker history to profile 7 in the stopped shadow
+  database.
 - Once all online participants run alpha.8, later strictly newer canonical releases may use the
   broker-coordinated peer-first/broker-last path. A real coordinated-upgrade release acceptance
   therefore requires a later target release, expected to be alpha.9.
