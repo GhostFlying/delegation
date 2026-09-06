@@ -87,7 +87,11 @@ runs a coordination-capable version, invoke `service upgrade` without `--bootstr
 broker config. The broker drains mutations, freezes the online compatible peers, upgrades them
 first, and upgrades itself last. Offline old-version peers later require local bootstrap. Retrying
 the same target resumes the protected controller journal. Bootstrap discovers and verifies the old
-runtime through the exact current-user native service definition and process identity.
+runtime through the exact current-user native service definition and process identity. Peer
+activation migrates only homogeneous retained alpha.4/profile-5 or alpha.7/profile-6 worker history
+to the target profile in the stopped-service shadow database; mixed or unknown profiles, occupied
+workers, pending operations, and unfinished result publication are rejected, and the original
+database remains rollback material.
 `service upgrade --cancel --config <path> --transaction-id <uuid>` is valid only before
 durable commit authorization. After authorization, do not downgrade or restore the old definition;
 inspect `status --config <path> --json`, repair the target release, and retry forward. Windows TraeX

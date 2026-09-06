@@ -196,6 +196,38 @@ func TestJournalRejectsImmutableMutationAndUnknownFields(t *testing.T) {
 	}
 }
 
+func TestJournalBindsWorkerProfileMigrationToPeerAuthority(t *testing.T) {
+	journal := testJournal(t)
+	for _, test := range []struct {
+		name   string
+		mutate func(*Journal)
+	}{
+		{name: "missing controller", mutate: func(value *Journal) { value.Database.ControllerID = "" }},
+		{name: "wrong device", mutate: func(value *Journal) {
+			value.Database.DeviceID = "123e4567-e89b-42d3-a456-426614174899"
+		}},
+		{name: "missing profile", mutate: func(value *Journal) {
+			value.Database.TargetWorkerProfileVersion = 0
+		}},
+		{name: "older profile", mutate: func(value *Journal) {
+			value.Database.TargetWorkerProfileVersion--
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value := journal
+			test.mutate(&value)
+			if err := value.Validate(); err == nil || !strings.Contains(err.Error(), "worker profile identity") {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+	forward := journal
+	forward.Database.TargetWorkerProfileVersion++
+	if err := forward.Validate(); err != nil {
+		t.Fatalf("forward target journal validation error = %v", err)
+	}
+}
+
 func TestEveryJournalStateValidatesAndSnapshotOmitsSecrets(t *testing.T) {
 	states := []State{
 		StatePrepared, StateArmed, StateActivating, StateStarted, StateQualified, StateCommitted,
@@ -295,6 +327,9 @@ func testJournal(t *testing.T) Journal {
 			ShadowPath:     filepath.Join(root, "peer.shadow.sqlite3"),
 			RollbackPath:   filepath.Join(root, "peer.rollback.sqlite3"),
 			SourceIdentity: identity, TargetIdentity: identity,
+			ControllerID:               "123e4567-e89b-42d3-a456-426614174801",
+			DeviceID:                   "123e4567-e89b-42d3-a456-426614174802",
+			TargetWorkerProfileVersion: 7,
 		},
 		ActivatorPath: filepath.Join(root, "activate"), CreatedAt: time.Now().UnixMilli(),
 		UpdatedAt: time.Now().UnixMilli(),

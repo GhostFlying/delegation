@@ -63,7 +63,13 @@ func DefaultActivationOperations(qualify func(context.Context, Journal) error) A
 		PrepareConfiguration: PrepareConfiguration,
 		PrepareDatabase: func(ctx context.Context, database Database) (Database, error) {
 			migrate := func(ctx context.Context, path string, target store.DatabaseIdentity) error {
-				return store.MigrateUpgradeDatabase(ctx, path, database.Kind, target)
+				if database.Kind == store.DatabasePeer {
+					return store.MigratePeerUpgradeDatabase(
+						ctx, path, target, database.ControllerID, database.DeviceID,
+						database.TargetWorkerProfileVersion,
+					)
+				}
+				return store.MigrateBrokerUpgradeDatabase(ctx, path, target)
 			}
 			return PrepareDatabase(ctx, database, migrate)
 		},

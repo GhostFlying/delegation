@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/securefs"
+	"github.com/GhostFlying/delegation/internal/workerprofile"
 )
 
 // DatabaseKind identifies one Delegation state database without exposing
@@ -50,10 +52,48 @@ func SupportedUpgradeSource(kind DatabaseKind, source, target DatabaseIdentity) 
 		kind == DatabasePeer && source.SchemaVersion == 15 && target.SchemaVersion == 16
 }
 
-// MigrateUpgradeDatabase applies the only supported stopped-shadow schema
-// transitions. The canonical database is never passed to this function.
-func MigrateUpgradeDatabase(
-	ctx context.Context, path string, kind DatabaseKind, target DatabaseIdentity,
+// MigrateBrokerUpgradeDatabase applies the only supported stopped-shadow
+// broker schema transition. The canonical database is never passed here.
+func MigrateBrokerUpgradeDatabase(
+	ctx context.Context, path string, target DatabaseIdentity,
+) error {
+	return migrateUpgradeDatabase(ctx, path, DatabaseBroker, target, "", "", 0)
+}
+
+// MigratePeerUpgradeDatabase applies the supported peer schema transition and
+// rewrites one homogeneous historical worker-profile generation in the same
+// stopped-shadow transaction. The caller must never pass the live canonical
+// database.
+func MigratePeerUpgradeDatabase(
+	ctx context.Context,
+	path string,
+	target DatabaseIdentity,
+	controllerID, deviceID string,
+	targetWorkerProfileVersion int,
+) error {
+	if err := validatePeerWorkerProfileUpgradeIdentity(
+		controllerID, deviceID, targetWorkerProfileVersion,
+	); err != nil {
+		return err
+	}
+	if targetWorkerProfileVersion != workerprofile.CurrentVersion {
+		return fmt.Errorf(
+			"target worker profile version %d does not match this runtime's version %d",
+			targetWorkerProfileVersion, workerprofile.CurrentVersion,
+		)
+	}
+	return migrateUpgradeDatabase(
+		ctx, path, DatabasePeer, target, controllerID, deviceID, targetWorkerProfileVersion,
+	)
+}
+
+func migrateUpgradeDatabase(
+	ctx context.Context,
+	path string,
+	kind DatabaseKind,
+	target DatabaseIdentity,
+	controllerID, deviceID string,
+	targetWorkerProfileVersion int,
 ) error {
 	source, err := InspectUpgradeDatabase(ctx, path, kind)
 	if err != nil {
@@ -66,7 +106,7 @@ func MigrateUpgradeDatabase(
 			target.ApplicationID, target.SchemaVersion,
 		)
 	}
-	if source == target {
+	if source == target && targetWorkerProfileVersion == 0 {
 		return nil
 	}
 	database, err := sql.Open("sqlite", dataSourceName(filepath.Clean(path)))
@@ -76,10 +116,18 @@ func MigrateUpgradeDatabase(
 	defer database.Close()
 	description := string(kind) + " upgrade"
 	return withImmediateTransaction(ctx, database, description, func(connection *sql.Conn) error {
-		var statement string
-		switch kind {
-		case DatabaseBroker:
-			statement = `
+		identity, err := readSchemaIdentity(ctx, connection)
+		if err != nil {
+			return err
+		}
+		if identity.applicationID != source.ApplicationID || identity.version != source.SchemaVersion {
+			return errors.New("upgrade shadow database identity changed before migration")
+		}
+		if source != target {
+			var statement string
+			switch kind {
+			case DatabaseBroker:
+				statement = `
 CREATE TABLE device_worker_readiness (
  controller_id TEXT NOT NULL,
  device_id TEXT NOT NULL,
@@ -99,8 +147,8 @@ CREATE TABLE device_worker_readiness (
 ) STRICT;
 PRAGMA user_version = 20;
 `
-		case DatabasePeer:
-			statement = `
+			case DatabasePeer:
+				statement = `
 CREATE TABLE worker_readiness (
  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
  epoch INTEGER NOT NULL CHECK (epoch BETWEEN 1 AND 9223372036854775807),
@@ -116,21 +164,186 @@ CREATE TABLE worker_readiness (
 ) STRICT;
 PRAGMA user_version = 16;
 `
-		default:
-			return fmt.Errorf("unsupported database kind %q", kind)
+			default:
+				return fmt.Errorf("unsupported database kind %q", kind)
+			}
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply %s database migration: %w", kind, err)
+			}
 		}
-		if _, err := connection.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("apply %s database migration: %w", kind, err)
-		}
-		identity, err := readSchemaIdentity(ctx, connection)
+		identity, err = readSchemaIdentity(ctx, connection)
 		if err != nil {
 			return err
 		}
 		if identity.applicationID != target.ApplicationID || identity.version != target.SchemaVersion {
 			return errors.New("upgrade database migration did not reach its target identity")
 		}
+		if targetWorkerProfileVersion != 0 {
+			blockers, err := readUpgradeBlockers(
+				ctx, connection, DatabasePeer, controllerID, deviceID,
+			)
+			if err != nil {
+				return err
+			}
+			if !blockers.Empty() {
+				return fmt.Errorf("worker profile migration found active durable work: %+v", blockers)
+			}
+			sourceProfile, workerCount, err := validatePeerWorkerProfileRows(
+				ctx, connection, controllerID, deviceID, targetWorkerProfileVersion,
+			)
+			if err != nil {
+				return err
+			}
+			if workerCount != 0 && sourceProfile != targetWorkerProfileVersion {
+				result, err := connection.ExecContext(
+					ctx,
+					"UPDATE worker_reservations SET profile_version = ? WHERE profile_version = ?",
+					targetWorkerProfileVersion, sourceProfile,
+				)
+				if err != nil {
+					return fmt.Errorf("rewrite worker profile version: %w", err)
+				}
+				updated, err := result.RowsAffected()
+				if err != nil || updated != int64(workerCount) {
+					return errors.Join(err, errors.New("worker profile migration did not rewrite its complete source generation"))
+				}
+			}
+		}
 		return nil
 	})
+}
+
+// ValidatePeerWorkerProfileUpgrade checks the live peer database without
+// mutating it. Migration repeats this validation after service stop while it
+// holds the shadow database write transaction.
+func ValidatePeerWorkerProfileUpgrade(
+	ctx context.Context,
+	path, controllerID, deviceID string,
+	targetWorkerProfileVersion int,
+) error {
+	if err := validatePeerWorkerProfileUpgradeIdentity(
+		controllerID, deviceID, targetWorkerProfileVersion,
+	); err != nil {
+		return err
+	}
+	identity, err := InspectUpgradeDatabase(ctx, path, DatabasePeer)
+	if err != nil {
+		return err
+	}
+	target, err := CurrentDatabaseIdentity(DatabasePeer)
+	if err != nil {
+		return err
+	}
+	if !SupportedUpgradeSource(DatabasePeer, identity, target) {
+		return errors.New("worker profile upgrade schema is unsupported")
+	}
+	database, err := sql.Open("sqlite", dataSourceName(filepath.Clean(path)))
+	if err != nil {
+		return fmt.Errorf("open peer database for worker profile validation: %w", err)
+	}
+	defer database.Close()
+	transaction, err := database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin worker profile validation: %w", err)
+	}
+	defer transaction.Rollback()
+	if _, _, err := validatePeerWorkerProfileRows(
+		ctx, transaction, controllerID, deviceID, targetWorkerProfileVersion,
+	); err != nil {
+		return err
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit worker profile validation: %w", err)
+	}
+	return nil
+}
+
+// ValidatePeerWorkerProfileTarget requires every retained worker reservation
+// to use the target profile. Empty peer databases are already target-ready.
+func ValidatePeerWorkerProfileTarget(
+	ctx context.Context,
+	path, controllerID, deviceID string,
+	targetWorkerProfileVersion int,
+) error {
+	if targetWorkerProfileVersion != workerprofile.CurrentVersion {
+		return fmt.Errorf(
+			"target worker profile version %d does not match this runtime's version %d",
+			targetWorkerProfileVersion, workerprofile.CurrentVersion,
+		)
+	}
+	if err := ValidatePeerWorkerProfileUpgrade(
+		ctx, path, controllerID, deviceID, targetWorkerProfileVersion,
+	); err != nil {
+		return err
+	}
+	database, err := sql.Open("sqlite", dataSourceName(filepath.Clean(path)))
+	if err != nil {
+		return fmt.Errorf("open peer database for target worker profile validation: %w", err)
+	}
+	defer database.Close()
+	var mismatched int
+	if err := database.QueryRowContext(ctx, `
+SELECT count(*) FROM worker_reservations WHERE profile_version <> ?
+`, targetWorkerProfileVersion).Scan(&mismatched); err != nil {
+		return fmt.Errorf("validate target worker profile history: %w", err)
+	}
+	if mismatched != 0 {
+		return errors.New("peer database worker profile migration did not reach its target")
+	}
+	return nil
+}
+
+func validatePeerWorkerProfileUpgradeIdentity(
+	controllerID, deviceID string, targetWorkerProfileVersion int,
+) error {
+	if err := identity.ValidateID(controllerID); err != nil {
+		return fmt.Errorf("controllerId %w", err)
+	}
+	if err := identity.ValidateID(deviceID); err != nil {
+		return fmt.Errorf("deviceId %w", err)
+	}
+	if targetWorkerProfileVersion < workerprofile.CurrentVersion {
+		return fmt.Errorf("unsupported target worker profile version %d", targetWorkerProfileVersion)
+	}
+	return nil
+}
+
+func validatePeerWorkerProfileRows(
+	ctx context.Context,
+	queryer rowQueryer,
+	controllerID, deviceID string,
+	targetWorkerProfileVersion int,
+) (sourceProfile, workerCount int, err error) {
+	var foreignWorkers int
+	if err := queryer.QueryRowContext(ctx, `
+SELECT count(*) FROM worker_reservations
+WHERE controller_id <> ? OR device_id <> ?
+`, controllerID, deviceID).Scan(&foreignWorkers); err != nil {
+		return 0, 0, fmt.Errorf("inspect worker profile authority: %w", err)
+	}
+	if foreignWorkers != 0 {
+		return 0, 0, errors.New("peer database contains worker profile history for another controller or device")
+	}
+	var distinctProfiles int
+	if err := queryer.QueryRowContext(ctx, `
+SELECT count(*), count(DISTINCT profile_version), COALESCE(min(profile_version), 0)
+FROM worker_reservations
+`).Scan(&workerCount, &distinctProfiles, &sourceProfile); err != nil {
+		return 0, 0, fmt.Errorf("inspect worker profile history: %w", err)
+	}
+	if workerCount == 0 {
+		return 0, 0, nil
+	}
+	if distinctProfiles != 1 {
+		return 0, 0, errors.New("peer database contains mixed worker profile history")
+	}
+	if !workerprofile.CanMigrateSource(sourceProfile) || sourceProfile > targetWorkerProfileVersion {
+		return 0, 0, fmt.Errorf(
+			"worker profile version %d cannot be upgraded to %d",
+			sourceProfile, targetWorkerProfileVersion,
+		)
+	}
+	return sourceProfile, workerCount, nil
 }
 
 // ReadUpgradeBlockers reads the common pre-upgrade work tables from either
@@ -160,6 +373,22 @@ func ReadUpgradeBlockers(
 		return UpgradeBlockers{}, err
 	}
 	defer transaction.Rollback()
+	blockers, err := readUpgradeBlockers(ctx, transaction, kind, controllerID, deviceID)
+	if err != nil {
+		return UpgradeBlockers{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return UpgradeBlockers{}, err
+	}
+	return blockers, nil
+}
+
+func readUpgradeBlockers(
+	ctx context.Context,
+	queryer rowQueryer,
+	kind DatabaseKind,
+	controllerID, deviceID string,
+) (UpgradeBlockers, error) {
 	var blockers UpgradeBlockers
 	switch kind {
 	case DatabaseBroker:
@@ -174,7 +403,7 @@ func ReadUpgradeBlockers(
 			{&blockers.ResultFinalizations, "SELECT count(*) FROM result_packages WHERE controller_id = ? AND (state = 'deliveryPending' OR source_released_at = 0)"},
 		}
 		for _, query := range queries {
-			if err := transaction.QueryRowContext(ctx, query.query, controllerID).Scan(query.destination); err != nil {
+			if err := queryer.QueryRowContext(ctx, query.query, controllerID).Scan(query.destination); err != nil {
 				return UpgradeBlockers{}, fmt.Errorf("read broker upgrade blockers: %w", err)
 			}
 		}
@@ -205,15 +434,12 @@ SELECT
 				[]any{controllerID, deviceID, controllerID, deviceID, controllerID, deviceID}},
 		}
 		for _, query := range queries {
-			if err := transaction.QueryRowContext(ctx, query.query, query.arguments...).Scan(query.destination); err != nil {
+			if err := queryer.QueryRowContext(ctx, query.query, query.arguments...).Scan(query.destination); err != nil {
 				return UpgradeBlockers{}, fmt.Errorf("read peer upgrade blockers: %w", err)
 			}
 		}
 	default:
 		return UpgradeBlockers{}, fmt.Errorf("unsupported database kind %q", kind)
-	}
-	if err := transaction.Commit(); err != nil {
-		return UpgradeBlockers{}, err
 	}
 	return blockers, nil
 }

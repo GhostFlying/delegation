@@ -8,11 +8,84 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/workerprofile"
 	_ "modernc.org/sqlite"
 )
+
+func TestDefaultDatabasePreparationMigratesOnlyPeerShadowProfile(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(directory, "peer.sqlite3")
+	peer, err := store.OpenPeer(ctx, canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := store.WorkerReservation{
+		WorkerKey: store.WorkerKey{
+			ControllerID: "123e4567-e89b-42d3-a456-426614174800",
+			TreeID:       "123e4567-e89b-42d3-a456-426614174801",
+			AgentID:      "123e4567-e89b-42d3-a456-426614174802",
+		},
+		ParentAgentID:  "123e4567-e89b-42d3-a456-426614174803",
+		DeviceID:       "123e4567-e89b-42d3-a456-426614174804",
+		TaskName:       "retained worker",
+		PromptDigest:   strings.Repeat("a", 64),
+		WorkspacePath:  filepath.Join(directory, "workspace"),
+		ProfileVersion: 6,
+	}
+	if _, err := peer.ReserveWorker(ctx, worker, 1, time.Unix(1, 0)); err != nil {
+		peer.Close()
+		t.Fatal(err)
+	}
+	if _, err := peer.FailWorker(ctx, worker.WorkerKey, "retained", time.Unix(2, 0)); err != nil {
+		peer.Close()
+		t.Fatal(err)
+	}
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CurrentDatabaseIdentity(store.DatabasePeer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := Database{
+		Kind: store.DatabasePeer, CanonicalPath: canonical,
+		ShadowPath:     filepath.Join(directory, "peer.shadow.sqlite3"),
+		RollbackPath:   filepath.Join(directory, "peer.rollback.sqlite3"),
+		SourceIdentity: identity, TargetIdentity: identity,
+		ControllerID: worker.ControllerID, DeviceID: worker.DeviceID,
+		TargetWorkerProfileVersion: workerprofile.CurrentVersion,
+	}
+	operations := DefaultActivationOperations(func(context.Context, Journal) error { return nil })
+	prepared, err := operations.PrepareDatabase(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDatabaseWorkerProfile(t, canonical, 6)
+	assertDatabaseWorkerProfile(t, prepared.RollbackPath, 6)
+	assertDatabaseWorkerProfile(t, prepared.ShadowPath, workerprofile.CurrentVersion)
+	if prepared.SourceDigest == prepared.TargetDigest {
+		t.Fatal("profile migration did not change the shadow database digest")
+	}
+
+	resumed, err := operations.PrepareDatabase(ctx, prepared)
+	if err != nil || resumed.TargetDigest != prepared.TargetDigest {
+		t.Fatalf("resume prepared database = %#v, %v", resumed, err)
+	}
+	if switched, err := ReconcileDatabaseSwitch(prepared); err != nil || !switched {
+		t.Fatalf("switch migrated database = %v, %v", switched, err)
+	}
+	assertDatabaseWorkerProfile(t, canonical, workerprofile.CurrentVersion)
+	assertDatabaseWorkerProfile(t, prepared.RollbackPath, 6)
+}
 
 func TestPrepareSwitchAndRollbackPeerDatabaseIncludesWAL(t *testing.T) {
 	ctx := context.Background()
@@ -347,4 +420,20 @@ func fixtureRowCount(t *testing.T, path string) int {
 		t.Fatal(err)
 	}
 	return count
+}
+
+func assertDatabaseWorkerProfile(t *testing.T, path string, want int) {
+	t.Helper()
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var got int
+	if err := database.QueryRow(`SELECT profile_version FROM worker_reservations`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("worker profile = %d, want %d", got, want)
+	}
 }

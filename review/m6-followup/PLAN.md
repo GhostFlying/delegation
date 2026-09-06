@@ -148,6 +148,30 @@ current agent state without rewriting immutable spawn receipts. The milestone st
   terminal update and acknowledgement; invalid acknowledgements remain retryable; existing
   once-per-connection and lost-acknowledgement tests pass under the race detector.
 
+### Rescoped follow-up: worker profile upgrade compatibility
+
+- Human disposition: approved after protected-auth review round 3; this is a new checkpoint whose
+  independent review starts at round 1 rather than extending the exhausted protected-auth review.
+- Owner: milestone integration worktree.
+- Dependencies: local atomic upgrade, protected TraeX authentication, and the frozen round-3
+  finding at `c65a5de85032adc5a6ad7568f2cb1e98685275fc`.
+- Write set: stopped-shadow peer database migration, upgrade preflight/activation wiring, focused
+  migration and rollback tests, operator documentation, and review evidence.
+- Behavior: when the target runtime's worker permission profile advances to version 7, the
+  stopped-service activator may atomically rewrite retained version-5 alpha.4 or version-6 alpha.7
+  worker reservations only in
+  the peer shadow database and only after the existing blocker snapshot proves there is no occupied
+  worker, pending operation, or unfinished result publication. Reject mixed, unknown, future, or
+  occupied profile history. The canonical version-6 database remains untouched as rollback material
+  until the normal database switch. Fresh databases and already-version-7 shadow databases remain
+  idempotent. Broker databases are unchanged.
+- Acceptance: exact alpha.4/profile-5 and alpha.7/profile-6 peer fixtures with `pending`, `idle`,
+  `interrupted`, and `failed` history migrate to profile 7 and let worker-host authority validation
+  start; occupied, unfinished, mixed-version, and unknown-version cases fail before switch; every activator crash
+  point preserves either the original canonical database or a validated target shadow with intact
+  rollback material; Linux tests, race tests, macOS/Windows compile checks, and the containerized
+  peer-first/broker-last drill pass.
+
 ## Freeze, Review, and Integration
 
 For every checkpoint, record the base, frozen commit and tree, focused acceptance command and raw

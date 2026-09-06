@@ -118,8 +118,11 @@ operations. The new CLI performs bootstrap discovery directly from that native d
 running process, so an alpha.4 service does not need the current local-bridge protocol or upgrade
 RPC. Alpha.4 bootstrap accepts only the exact schema-3 TCP config and broker-19 or peer-15
 database. After the service stops, the activator preserves rollback material, migrates protected
-shadows to schema 4 and broker-20 or peer-16, and switches them atomically. A same-target retry
-resumes the existing journal. Peer completion requires target runtime/config digests, lifecycle
+shadows to schema 4 and broker-20 or peer-16, and switches them atomically. For a peer, PREPARE also
+checks the target worker-profile identity; the activator upgrades a homogeneous retained
+alpha.4/profile-5 or alpha.7/profile-6 history to profile 7 in the shadow only. Mixed or unknown
+profile history and any occupied or unfinished worker state fail closed, and the original database
+remains rollback material. A same-target retry resumes the existing journal. Peer completion requires target runtime/config digests, lifecycle
 synchronization, dispatchability, and a ready epoch newer than the source epoch.
 
 Arming installs a transaction-specific one-shot activator without changing the main service.

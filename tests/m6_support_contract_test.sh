@@ -33,6 +33,7 @@ require_literal README.md 'The first move from alpha.4 requires explicit local b
 require_literal README.md 'After every online peer and the broker run a coordination-capable version'
 require_literal README.md 'The broker freezes the online, compatible, upgrade-capable peers'
 require_literal README.md '`controllerUpgrade` transaction'
+require_literal README.md 'alpha.4/profile-5 or alpha.7/profile-6 history to profile 7 only in'
 
 require_literal docs/m6-embedded-tailscale.md 'They do not block M6 release acceptance'
 require_literal docs/m6-embedded-tailscale.md 'TraeX brokers, peers, or managed workers on Windows;'
@@ -51,6 +52,8 @@ require_literal plugins/delegation/skills/delegation-setup/SKILL.md \
   'The first move from alpha.4 requires `service upgrade ... --bootstrap`'
 require_literal plugins/delegation/skills/delegation-setup/SKILL.md \
   'invoke `service upgrade` without `--bootstrap` against the'
+require_literal plugins/delegation/skills/delegation-setup/SKILL.md \
+  'alpha.4/profile-5 or alpha.7/profile-6 worker history'
 require_literal plugins/delegation/skills/delegation-setup/references/role-configuration.md \
   'Do not create a Windows TraeX broker, peer, managed home, or native service.'
 require_literal plugins/delegation/skills/delegation-setup/references/native-services.md \
@@ -61,6 +64,8 @@ require_literal plugins/delegation/skills/delegation-setup/references/native-ser
   'Once every online peer and the broker run a coordination-capable version'
 require_literal plugins/delegation/skills/delegation-setup/references/native-services.md \
   'broker listeners expose no upgrade API.'
+require_literal plugins/delegation/skills/delegation-setup/references/native-services.md \
+  'alpha.4/profile-5 or alpha.7/profile-6 history to profile 7 in the shadow only.'
 
 require_literal docs/m6-release-closure.md \
   'Windows TraeX is a product-scope exclusion, not a successful qualification.'

@@ -355,8 +355,13 @@ commit, workflow identity, platform, architecture, and binary digest match. It a
 native-service ownership, schema compatibility, and the absence of active work. The alpha.4
 bootstrap path accepts only its exact schema-3 TCP config and broker-19 or peer-15 database; the
 stopped-service activator preserves protected rollback material, migrates a shadow to schema 4 and
-broker-20 or peer-16, and atomically switches those files before starting the target. Retrying the same
-target resumes the protected journal. `--bootstrap` can start from the alpha.4 legacy service: the
+broker-20 or peer-16, and atomically switches those files before starting the target. Peer PREPARE
+also binds the target worker-permission profile identity. After stopping the service, the activator
+upgrades a homogeneous retained alpha.4/profile-5 or alpha.7/profile-6 history to profile 7 only in
+the shadow database. Mixed or unknown profiles, occupied workers, pending operations, and unfinished
+result publication fail closed while the
+original database remains rollback material. Retrying the same target resumes the protected
+journal. `--bootstrap` can start from the alpha.4 legacy service: the
 new CLI reads and verifies its exact native definition, running process identity, and executable
 version locally, so it does not require the old service to implement the current local-bridge
 protocol or upgrade RPC. `prepared` and `armed` transactions may be cancelled with

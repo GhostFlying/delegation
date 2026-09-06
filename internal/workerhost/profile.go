@@ -17,10 +17,11 @@ import (
 	"github.com/GhostFlying/delegation/internal/identity"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/store"
+	"github.com/GhostFlying/delegation/internal/workerprofile"
 )
 
 const (
-	workerProfileVersion    = 7
+	workerProfileVersion    = workerprofile.CurrentVersion
 	workerPermissionProfile = "delegation-worker"
 	windowsWorkerProfile    = ":danger-full-access"
 	rootPluginEnabledConfig = "plugins.delegation@delegation.enabled"

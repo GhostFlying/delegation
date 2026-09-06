@@ -20,6 +20,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/localupgrade"
 	"github.com/GhostFlying/delegation/internal/protocol"
 	"github.com/GhostFlying/delegation/internal/userservice"
+	"github.com/GhostFlying/delegation/internal/workerprofile"
 	"github.com/GhostFlying/delegation/internal/workerreadiness"
 )
 
@@ -655,19 +656,40 @@ func TestServiceUpgradeCompatibilityRequiresInternalContract(t *testing.T) {
 		})
 	}
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	if code := runServiceUpgradeCompatibility(
-		[]string{"--config", brokerConfig, "--json"}, &stdout, &stderr,
-	); code != 0 || stderr.Len() != 0 {
-		t.Fatalf("compatibility = %d, stderr %q", code, stderr.String())
-	}
-	var compatibility localupgrade.Compatibility
-	if err := json.Unmarshal(stdout.Bytes(), &compatibility); err != nil {
-		t.Fatal(err)
-	}
-	if err := compatibility.Validate(); err != nil {
-		t.Fatalf("compatibility = %#v: %v", compatibility, err)
+	for _, test := range []struct {
+		name        string
+		args        []string
+		wantKind    string
+		wantProfile int
+	}{
+		{name: "broker", args: []string{"--config", brokerConfig, "--json"}, wantKind: "broker"},
+		{name: "peer", args: []string{
+			"--config", peerConfig, "--environment-file", privateTestPath(t, "peer.env"), "--json",
+		}, wantKind: "peer", wantProfile: workerprofile.CurrentVersion},
+	} {
+		t.Run(test.name+" identity", func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if code := runServiceUpgradeCompatibility(test.args, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+				t.Fatalf("compatibility = %d, stderr %q", code, stderr.String())
+			}
+			var document map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &document); err != nil {
+				t.Fatal(err)
+			}
+			if document["schemaVersion"] != float64(localupgrade.CompatibilitySchemaVersion) ||
+				document["databaseKind"] != test.wantKind ||
+				document["workerProfileVersion"] != float64(test.wantProfile) {
+				t.Fatalf("compatibility JSON = %#v", document)
+			}
+			var compatibility localupgrade.Compatibility
+			if err := json.Unmarshal(stdout.Bytes(), &compatibility); err != nil {
+				t.Fatal(err)
+			}
+			if err := compatibility.Validate(); err != nil {
+				t.Fatalf("compatibility = %#v: %v", compatibility, err)
+			}
+		})
 	}
 }
 
