@@ -676,3 +676,36 @@ Executable acceptance at the round-3 frozen revision:
   description even though the implementation correctly migrates schema 19-to-20 or 15-to-16.
 - Disposition: correct the documentation to distinguish config schema from database schema, freeze
   a new source revision, and review it as round 2.
+
+### Review Round 2
+
+- Base commit: `3254a615a05ab42763dcc9e4a45fdc208cbc82cd`
+- Frozen commit: `3a681769ec6b499379e66e2770eba4407ab1ee14`
+- Frozen tree: `c886ad59fb1bf734bcccdee3460f84d63331e0ce`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `FINDINGS`
+- Finding: the alpha.8 release plan correctly disabled the optional native-signing candidate flow,
+  but its stop conditions still required that disabled flow's `release-signing` approval and
+  candidate identity. The supported unsigned release workflow uses only the `github-release`
+  environment and rebuilds and verifies the tag artifacts directly.
+- Impact: an operator following the documented unsigned alpha.8 path would necessarily stop for
+  prerequisites that the selected release workflow neither creates nor consumes.
+- Disposition: remove the signed-candidate-only prerequisites from the unsigned alpha.8 stop list,
+  retain the GitHub-release, tag-protection, immutable-release, manifest, and provenance gates, and
+  freeze the corrected source for the third and final review round.
+
+Executable validation at the round-2 frozen revision passed after the reviewer reran the one
+load-sensitive failure without concurrent heavy validation:
+
+- focused build-info, CLI, local-upgrade, store, and release-pack tests;
+- the full Linux suite, full race suite, and `go vet -tags=ts_omit_logtail ./...`;
+- all six Linux, macOS, and Windows amd64/arm64 ordinary and `integration,live` compile-only
+  targets;
+- POSIX plugin and M6 support-contract tests, gofmt, and `git diff --check`;
+- ten focused alpha.4/alpha.7 no-bridge and worker-profile migration repetitions; and
+- two byte-identical temporary release builds, each accepted by `verify-release`, with generated
+  manifest SHA-256 `9c58b7c19edbdca5ccc222e8fa6e9606de1fc416ef011061a62b049795161dbc`.
+
+The reviewer's first full-suite attempt ran beside other heavy checks and had one broker-health
+readiness timeout. The standalone full-suite retry and ten focused repetitions of that exact test
+passed. The detached review worktree remained clean.

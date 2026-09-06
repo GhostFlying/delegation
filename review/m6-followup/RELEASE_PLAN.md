@@ -47,5 +47,7 @@ local and broker-coordinated upgrade protocol.
 - Do not tag or publish before the source checkpoint is clean and accepted.
 - Do not claim coordinated cross-version E2E from alpha.7 to alpha.8; that boundary is local
   bootstrap. Use alpha.8 to alpha.9 for the first real coordinated-upgrade release E2E.
-- Stop on missing release-signing or GitHub-release environment approval, tag protection, immutable
-  release support, candidate identity, or provenance. Do not weaken the release trust policy.
+- Stop on missing GitHub-release environment approval, tag protection, immutable release support,
+  manifest identity, or provenance. The disabled native-signing candidate flow adds its own
+  release-signing and candidate-identity gates only if it is deliberately enabled later. Do not
+  weaken the release trust policy.
