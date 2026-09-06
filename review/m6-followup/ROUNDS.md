@@ -576,13 +576,13 @@ Executable acceptance at the accepted frozen revision:
 - The independent reviewer found no tracked credential or machine-specific private data and did not
   access the real TraeX token. The detached review worktree remained clean.
 
-Release acceptance still requires native macOS execution of the real-account TraeX authorization
-and denial path. The available remote macOS workspace had no authorized secret mount, so no
-credential was transferred. A real coordinated higher-version upgrade also requires a newer
-canonical attested release; alpha.4 bootstrap, protocol behavior, journals, response-loss handling,
-and platform service integration are covered without claiming that unavailable cross-version live
-run. These are external release gates, not unresolved code-review findings or reasons to relax the
-credential boundary.
+At this round, release acceptance still required native macOS execution of the real-account TraeX
+authorization and denial path because the available remote workspace had no authorized secret
+mount. The later Darwin temporary-root checkpoint above completed that native real-account gate. A
+real coordinated higher-version upgrade still requires a newer canonical attested release; alpha.4
+bootstrap, protocol behavior, journals, response-loss handling, and platform service integration
+are covered without claiming that unavailable cross-version live run. This is an external release
+gate, not an unresolved code-review finding or a reason to relax the credential boundary.
 
 ## Follow-up Checkpoint: Retained Worker-profile Migration
 
@@ -626,3 +626,34 @@ Executable acceptance at the accepted frozen revision:
   `git diff --check`. The reviewer verified the target-runtime activation and journal compatibility
   edges and found no material security, crash-consistency, protocol/version, cross-platform, or
   test-coverage defect. The detached review worktree remained clean.
+
+### Combined Milestone Review Round 3
+
+- Review base commit: `b406974120dcc95372a91c8d9297649fa665a431`
+- Frozen commit: `2c892b975c7d259d4f204fd7229eb6031c0ea9e1`
+- Frozen tree: `32620d7d81284504e1fac483392327d257d9e566`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `CLEAN`
+- Findings: none
+- Disposition: the complete M6 Follow-up implementation is accepted at the exact frozen commit and
+  tree. This was the third and final permitted automated combined-milestone review round.
+
+The reviewer audited the complete range from the M6 Follow-up plan through the retained
+worker-profile migration, with particular attention to interactions added after round 2. Native
+macOS protected TraeX authentication rejects lexical and canonical temporary-root aliases at setup
+and runtime, while profile 7 retains exact-file denial for both credential copies. Homogeneous
+retained profile-5 or profile-6 history migrates transactionally in the stopped shadow database;
+shutdown drains worker-host completion work, the activator acquires the exclusive database lease,
+and crash recovery validates the target digest and profile identity without changing canonical or
+rollback material before switch. Protocol 5 treats alpha.7 protocol 3 as legacy and uses explicit
+target-owned bootstrap instead of an unsupported source upgrade RPC.
+
+Executable acceptance at the round-3 frozen revision:
+
+- Owner and reviewer full Linux Go suites and `go vet -tags=ts_omit_logtail ./...` passed.
+- Owner and reviewer affected race suites passed; the reviewer additionally ran ten iterations of
+  the focused profile-migration and activator crash/resume cases.
+- Linux amd64, macOS amd64, macOS arm64, and Windows amd64 compile-only checks passed, including
+  the `integration,live` E2E package.
+- POSIX plugin, M6 support-contract, gofmt, credential-pattern, and `git diff --check` checks passed.
+- Both the writer and detached review worktrees remained clean at the frozen revision.
