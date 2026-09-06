@@ -109,12 +109,16 @@ func freeAddress(t *testing.T) string {
 	return address
 }
 
-func waitForHealth(t *testing.T, endpoint string) {
+func waitForHealth(t *testing.T, endpoint string, service *serviceProcess) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
+	var lastErr error
+	var lastStatus int
 	for time.Now().Before(deadline) {
 		response, err := http.Get(endpoint)
+		lastErr = err
 		if err == nil {
+			lastStatus = response.StatusCode
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
 				return
@@ -122,7 +126,13 @@ func waitForHealth(t *testing.T, endpoint string) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("broker health endpoint did not become ready: %s", endpoint)
+	logPath := service.configPath + ".service.log"
+	serviceLog, logErr := os.ReadFile(logPath)
+	t.Fatalf(
+		"broker health endpoint did not become ready: %s "+
+			"(lastStatus=%d, lastError=%v, serviceLog=%q, logError=%v)",
+		endpoint, lastStatus, lastErr, serviceLog, logErr,
+	)
 }
 
 func waitForCount(t *testing.T, statePath, query string, want int) {
