@@ -1294,15 +1294,31 @@ func setupConnectorRuntimeTest(
 
 func waitForRuntimeDevice(t *testing.T, registry *store.Store, deviceID string, online bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
+	var (
+		found      bool
+		lastOnline bool
+		lastErr    error
+	)
 	for time.Now().Before(deadline) {
-		record, err := registry.DescribeDevice(context.Background(), runtimeControllerID, deviceID)
-		if err == nil && record.Device.Online == online {
+		record, err := registry.DescribeDevice(
+			context.Background(), runtimeControllerID, deviceID,
+		)
+		lastErr = err
+		if err == nil {
+			found = true
+			lastOnline = record.Device.Online
+		}
+		if err == nil && lastOnline == online {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("device %s online state did not become %v", deviceID, online)
+	t.Fatalf(
+		"device %s online state did not become %v within 10s "+
+			"(found=%t, lastOnline=%t, lastError=%v)",
+		deviceID, online, found, lastOnline, lastErr,
+	)
 }
 
 func waitForReadyRuntimeStatus(

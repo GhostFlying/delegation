@@ -8,8 +8,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/GhostFlying/delegation/internal/localbridge"
 )
 
 const (
@@ -66,16 +69,18 @@ func TestCodexPeerTopology(t *testing.T) {
 	workspaceScenarios := createTopologyGitRepositories(t, root, peers)
 	mock.setWorkspaceScenarios(workspaceScenarios)
 	brokerAddress := freeAddress(t)
+	statusAddress := freeAddress(t)
 	brokerConfig := filepath.Join(peers[0].delegationHome, "broker.json")
 	statePath := filepath.Join(peers[0].delegationHome, "state", "broker.sqlite3")
 	brokerToken := filepath.Join(peers[0].delegationHome, "secrets", "broker.token")
 	run(t, commandEnv(peers[0]), delegationBinary,
 		"setup", "broker", "--config", brokerConfig,
 		"--controller-id", networkID, "--listen", brokerAddress,
+		"--status-listen", statusAddress,
 		"--state", statePath, "--auth-mode", "token", "--token-file", brokerToken, "--json",
 	)
-	startService(t, commandEnv(peers[0]), delegationBinary, brokerConfig)
-	waitForHealth(t, "http://"+brokerAddress+"/healthz")
+	brokerService := startService(t, commandEnv(peers[0]), delegationBinary, brokerConfig)
+	waitForHealth(t, "http://"+brokerAddress+"/healthz", brokerService)
 
 	peerServices := make(map[string]*serviceProcess, len(peers))
 	for _, current := range peers {
@@ -158,10 +163,7 @@ func TestCodexPeerTopology(t *testing.T) {
 		})
 	}
 	for _, current := range peers {
-		matches, err := filepath.Glob(filepath.Join(current.home, ".delegation", "run", "*.sock"))
-		if err != nil || len(matches) != 1 {
-			t.Fatalf("peer %s local bridge sockets = %v, error %v", current.label, matches, err)
-		}
+		assertLocalBridgeSockets(t, current)
 	}
 	t.Run("managed root MCP flow", func(t *testing.T) {
 		testManagedRootMCPFlow(
@@ -225,6 +227,35 @@ func TestCodexPeerTopology(t *testing.T) {
 		)
 	}
 	mock.verify(t, expectedCases)
+}
+
+func assertLocalBridgeSockets(t *testing.T, current peer) {
+	t.Helper()
+	peerEndpoint, err := localbridge.Endpoint(networkID, deviceIDs[current.label])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join(
+		current.home, ".delegation", "run", filepath.Base(peerEndpoint),
+	)}
+	if current.label == "A" {
+		brokerEndpoint, err := localbridge.BrokerEndpointForInstance("default", networkID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, filepath.Join(
+			current.home, ".delegation", "run", filepath.Base(brokerEndpoint),
+		))
+	}
+	matches, err := filepath.Glob(filepath.Join(current.home, ".delegation", "run", "*.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(matches)
+	slices.Sort(want)
+	if !slices.Equal(matches, want) {
+		t.Fatalf("peer %s local bridge sockets = %v, want %v", current.label, matches, want)
+	}
 }
 
 func createPeers(t *testing.T, root, modelURL string) []peer {
