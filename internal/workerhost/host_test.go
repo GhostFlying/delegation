@@ -2858,6 +2858,71 @@ func TestHostRejectsStoredWorkerAuthorityDrift(t *testing.T) {
 	}
 }
 
+func TestHostAcceptsRetainedWorkerAfterProfileUpgrade(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	workspaceRoot := filepath.Join(root, "workspaces")
+	if err := os.Mkdir(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(root, "state", "peer.sqlite3")
+	state, err := store.OpenPeer(ctx, statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := store.WorkerReservation{
+		WorkerKey: store.WorkerKey{
+			ControllerID: testControllerID, TreeID: testTreeID,
+			AgentID: "123e4567-e89b-42d3-a456-42661417443d",
+		},
+		ParentAgentID: testParentID, DeviceID: testDeviceID, TaskName: "migrated authority",
+		PromptDigest: promptDigest("migrated authority"),
+		WorkspacePath: filepath.Join(
+			workspaceRoot, testTreeID+"-123e4567-e89b-42d3-a456-42661417443d",
+		),
+		ProfileVersion: workerProfileVersion - 1,
+	}
+	if _, err := state.ReserveWorker(ctx, worker, 1, time.Unix(1_700_000_000, 0)); err != nil {
+		state.Close()
+		t.Fatal(err)
+	}
+	if _, err := state.FailWorker(
+		ctx, worker.WorkerKey, "retained", time.Unix(1_700_000_001, 0),
+	); err != nil {
+		state.Close()
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CurrentDatabaseIdentity(store.DatabasePeer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MigratePeerUpgradeDatabase(
+		ctx, statePath, identity, testControllerID, testDeviceID, workerProfileVersion,
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.OpenPeer(ctx, statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	anchored, err := os.OpenRoot(workspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer anchored.Close()
+	host := &Host{
+		controllerID: testControllerID, deviceID: testDeviceID,
+		workspaceRoot: anchored, state: state,
+	}
+	if err := host.validateStoredAuthority(ctx); err != nil {
+		t.Fatalf("validate migrated authority: %v", err)
+	}
+}
+
 func TestHostRejectsManagedCodexConfigurationBeforeLaunch(t *testing.T) {
 	application := newFakeApplication()
 	host, _, paths := newTestHost(t, 1, application)

@@ -23,25 +23,27 @@ import (
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/traexauth"
 	"github.com/GhostFlying/delegation/internal/userservice"
+	"github.com/GhostFlying/delegation/internal/workerprofile"
 	"github.com/GhostFlying/delegation/internal/workerreadiness"
 )
 
 const (
-	CompatibilitySchemaVersion = 1
+	CompatibilitySchemaVersion = 2
 	TailscaleGeneration        = 1
 	maximumCompatibilityOutput = 16 << 10
 	maximumConfigDigestFile    = 1 << 20
 )
 
 type Compatibility struct {
-	SchemaVersion       int                    `json:"schemaVersion"`
-	RuntimeVersion      string                 `json:"runtimeVersion"`
-	Platform            string                 `json:"platform"`
-	Architecture        string                 `json:"architecture"`
-	ConfigSchemaVersion int                    `json:"configSchemaVersion"`
-	DatabaseKind        store.DatabaseKind     `json:"databaseKind"`
-	DatabaseIdentity    store.DatabaseIdentity `json:"databaseIdentity"`
-	TailscaleGeneration int                    `json:"tailscaleGeneration"`
+	SchemaVersion        int                    `json:"schemaVersion"`
+	RuntimeVersion       string                 `json:"runtimeVersion"`
+	Platform             string                 `json:"platform"`
+	Architecture         string                 `json:"architecture"`
+	ConfigSchemaVersion  int                    `json:"configSchemaVersion"`
+	DatabaseKind         store.DatabaseKind     `json:"databaseKind"`
+	DatabaseIdentity     store.DatabaseIdentity `json:"databaseIdentity"`
+	WorkerProfileVersion int                    `json:"workerProfileVersion"`
+	TailscaleGeneration  int                    `json:"tailscaleGeneration"`
 }
 
 func (c Compatibility) Validate() error {
@@ -60,6 +62,13 @@ func (c Compatibility) Validate() error {
 	}
 	if c.DatabaseIdentity.ApplicationID != current.ApplicationID || c.DatabaseIdentity.SchemaVersion < 1 {
 		return errors.New("target runtime database identity is invalid")
+	}
+	if c.DatabaseKind == store.DatabasePeer {
+		if c.WorkerProfileVersion < workerprofile.CurrentVersion {
+			return errors.New("target runtime worker profile version is invalid")
+		}
+	} else if c.WorkerProfileVersion != 0 {
+		return errors.New("broker compatibility contains a worker profile version")
 	}
 	if c.TailscaleGeneration != TailscaleGeneration {
 		return errors.New("target runtime Tailscale compatibility generation differs")
@@ -82,6 +91,9 @@ func CurrentCompatibility(role delegationconfig.Role, runtimeVersion string) (Co
 		ConfigSchemaVersion: delegationconfig.CurrentSchemaVersion,
 		DatabaseKind:        kind, DatabaseIdentity: databaseIdentity,
 		TailscaleGeneration: TailscaleGeneration,
+	}
+	if role == delegationconfig.RolePeer {
+		result.WorkerProfileVersion = workerprofile.CurrentVersion
 	}
 	return result, result.Validate()
 }
@@ -319,6 +331,14 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 	if !store.SupportedUpgradeSource(databaseKind, sourceIdentity, compatibility.DatabaseIdentity) {
 		return PrepareResult{}, errors.New("source database schema is not directly compatible with the target runtime")
 	}
+	if databaseKind == store.DatabasePeer {
+		if err := store.ValidatePeerWorkerProfileUpgrade(
+			ctx, databasePath, options.Config.ControllerID, options.Config.DeviceID,
+			compatibility.WorkerProfileVersion,
+		); err != nil {
+			return PrepareResult{}, fmt.Errorf("validate worker profile upgrade: %w", err)
+		}
+	}
 	var sourceReadinessEpoch uint64
 	if options.Config.Role == delegationconfig.RolePeer && dependencies.ReadReadinessEpoch != nil {
 		sourceReadinessEpoch, err = dependencies.ReadReadinessEpoch(ctx)
@@ -370,6 +390,17 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 	if err := writeProtectedMaterial(materialRoot, filepath.Base(newDefinitionPath), plan.NewDefinition); err != nil {
 		return PrepareResult{}, err
 	}
+	databaseMaterial := Database{
+		Kind: databaseKind, CanonicalPath: databasePath,
+		ShadowPath:     filepath.Join(filepath.Dir(databasePath), "."+filepath.Base(databasePath)+"-upgrade-"+transactionID+".shadow"),
+		RollbackPath:   filepath.Join(filepath.Dir(databasePath), "."+filepath.Base(databasePath)+"-upgrade-"+transactionID+".rollback"),
+		SourceIdentity: sourceIdentity, TargetIdentity: compatibility.DatabaseIdentity,
+	}
+	if databaseKind == store.DatabasePeer {
+		databaseMaterial.ControllerID = options.Config.ControllerID
+		databaseMaterial.DeviceID = options.Config.DeviceID
+		databaseMaterial.TargetWorkerProfileVersion = compatibility.WorkerProfileVersion
+	}
 	now := dependencies.Now().UnixMilli()
 	journal := Journal{
 		SchemaVersion: JournalSchemaVersion, TransactionID: transactionID, State: StatePrepared,
@@ -399,12 +430,7 @@ func Prepare(ctx context.Context, options PrepareOptions) (PrepareResult, error)
 			RollbackPath: filepath.Join(filepath.Dir(options.ConfigPath), "."+filepath.Base(options.ConfigPath)+"-upgrade-"+transactionID+".rollback"),
 			SourceDigest: digestBytes(sourceConfig), TargetDigest: digestBytes(targetConfig),
 		},
-		Database: Database{
-			Kind: databaseKind, CanonicalPath: databasePath,
-			ShadowPath:     filepath.Join(filepath.Dir(databasePath), "."+filepath.Base(databasePath)+"-upgrade-"+transactionID+".shadow"),
-			RollbackPath:   filepath.Join(filepath.Dir(databasePath), "."+filepath.Base(databasePath)+"-upgrade-"+transactionID+".rollback"),
-			SourceIdentity: sourceIdentity, TargetIdentity: compatibility.DatabaseIdentity,
-		},
+		Database:      databaseMaterial,
 		ActivatorPath: filepath.Join(materialRoot, activatorDefinitionName(transactionID)), CreatedAt: now, UpdatedAt: now,
 	}
 	created, resumed, err := options.Store.CreateOrResume(journal)

@@ -51,6 +51,9 @@ func PrepareDatabase(
 		if err := store.ValidateUpgradeDatabase(ctx, database.RollbackPath, database.Kind, database.SourceIdentity); err != nil {
 			return Database{}, fmt.Errorf("validate existing rollback database: %w", err)
 		}
+		if err := validateDatabaseWorkerProfile(ctx, database.CanonicalPath, database); err != nil {
+			return Database{}, fmt.Errorf("validate switched database worker profile: %w", err)
+		}
 		return database, nil
 	}
 	if canonicalIdentity != database.SourceIdentity {
@@ -102,6 +105,9 @@ func PrepareDatabase(
 				if err := store.ValidateUpgradeDatabase(ctx, database.ShadowPath, database.Kind, database.TargetIdentity); err != nil {
 					return Database{}, fmt.Errorf("validate existing shadow database: %w", err)
 				}
+				if err := validateDatabaseWorkerProfile(ctx, database.ShadowPath, database); err != nil {
+					return Database{}, fmt.Errorf("validate existing shadow worker profile: %w", err)
+				}
 				return database, nil
 			}
 		}
@@ -134,6 +140,9 @@ func PrepareDatabase(
 	if err := store.ValidateUpgradeDatabase(ctx, database.ShadowPath, database.Kind, database.TargetIdentity); err != nil {
 		return Database{}, fmt.Errorf("validate shadow database: %w", err)
 	}
+	if err := validateDatabaseWorkerProfile(ctx, database.ShadowPath, database); err != nil {
+		return Database{}, fmt.Errorf("validate shadow worker profile: %w", err)
+	}
 	database.TargetDigest, err = digestAt(root, shadowName)
 	if err != nil {
 		return Database{}, err
@@ -146,6 +155,15 @@ func PrepareDatabase(
 		return Database{}, errors.New("rollback database differs from checkpointed source")
 	}
 	return database, nil
+}
+
+func validateDatabaseWorkerProfile(ctx context.Context, path string, database Database) error {
+	if database.Kind != store.DatabasePeer || database.TargetWorkerProfileVersion == 0 {
+		return nil
+	}
+	return store.ValidatePeerWorkerProfileTarget(
+		ctx, path, database.ControllerID, database.DeviceID, database.TargetWorkerProfileVersion,
+	)
 }
 
 func ReconcileDatabaseSwitch(database Database) (bool, error) {

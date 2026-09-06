@@ -17,6 +17,7 @@ import (
 	"github.com/GhostFlying/delegation/internal/releaseverify"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/userservice"
+	"github.com/GhostFlying/delegation/internal/workerprofile"
 )
 
 func TestPrepareCreatesProtectedJournalAndResumesBeforeAcquisition(t *testing.T) {
@@ -117,6 +118,88 @@ func TestPrepareRejectsCompatibilityAndConfigurationDrift(t *testing.T) {
 	}
 }
 
+func TestCompatibilityPublishesAndValidatesWorkerProfileIdentity(t *testing.T) {
+	peer := testCompatibility(t, delegationconfig.RolePeer, "0.1.0-alpha.8")
+	if peer.SchemaVersion != CompatibilitySchemaVersion ||
+		peer.WorkerProfileVersion != workerprofile.CurrentVersion {
+		t.Fatalf("peer compatibility = %#v", peer)
+	}
+	for _, profile := range []int{0, workerprofile.CurrentVersion - 1} {
+		drifted := peer
+		drifted.WorkerProfileVersion = profile
+		if err := drifted.Validate(); err == nil || !strings.Contains(err.Error(), "worker profile") {
+			t.Fatalf("profile %d validation error = %v", profile, err)
+		}
+	}
+	forward := peer
+	forward.WorkerProfileVersion++
+	if err := forward.Validate(); err != nil {
+		t.Fatalf("forward target profile validation error = %v", err)
+	}
+	broker := testCompatibility(t, delegationconfig.RoleBroker, "0.1.0-alpha.8")
+	if broker.WorkerProfileVersion != 0 {
+		t.Fatalf("broker compatibility = %#v", broker)
+	}
+	broker.WorkerProfileVersion = workerprofile.CurrentVersion
+	if err := broker.Validate(); err == nil || !strings.Contains(err.Error(), "broker compatibility") {
+		t.Fatalf("broker profile validation error = %v", err)
+	}
+}
+
+func TestPrepareFreezesTargetWorkerProfileAndRejectsUnsupportedHistory(t *testing.T) {
+	options := prepareFixture(t)
+	result, err := Prepare(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Journal.Database.ControllerID != options.Config.ControllerID ||
+		result.Journal.Database.DeviceID != options.Config.DeviceID ||
+		result.Journal.Database.TargetWorkerProfileVersion != workerprofile.CurrentVersion {
+		t.Fatalf("frozen worker profile identity = %#v", result.Journal.Database)
+	}
+
+	options = prepareFixture(t)
+	database, err := sql.Open("sqlite", options.Config.Peer.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+INSERT INTO worker_reservations(
+ controller_id, tree_id, agent_id, parent_agent_id, device_id, task_name, prompt_digest,
+ workspace_path, profile_version, status, failure_code, revision, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, 'unknown profile', ?, ?, 4, 'failed', 'failed', 1, 1, 1)
+`, options.Config.ControllerID, "123e4567-e89b-42d3-a456-426614174810",
+		"123e4567-e89b-42d3-a456-426614174811",
+		"123e4567-e89b-42d3-a456-426614174812", options.Config.DeviceID,
+		strings.Repeat("a", 64), filepath.Join(options.Home, "worker")); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Prepare(context.Background(), options); err == nil ||
+		!strings.Contains(err.Error(), "cannot be upgraded") {
+		t.Fatalf("unsupported history error = %v", err)
+	}
+}
+
+func TestPrepareAcceptsForwardTargetWorkerProfileForTargetActivator(t *testing.T) {
+	options := prepareFixture(t)
+	options.Dependencies.ProbeTarget = func(context.Context, string, string, string) (Compatibility, error) {
+		compatibility := testCompatibility(t, delegationconfig.RolePeer, options.TargetVersion)
+		compatibility.WorkerProfileVersion++
+		return compatibility, compatibility.Validate()
+	}
+	result, err := Prepare(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Journal.Database.TargetWorkerProfileVersion != workerprofile.CurrentVersion+1 {
+		t.Fatalf("forward target profile = %d", result.Journal.Database.TargetWorkerProfileVersion)
+	}
+}
+
 func TestPrepareFreezesTraeXAuthenticationSource(t *testing.T) {
 	options := prepareTraeXFixture(t)
 	result, err := Prepare(context.Background(), options)
@@ -212,7 +295,8 @@ func TestPrepareAcceptsExactAlpha4PeerConfigAndDatabase(t *testing.T) {
 	if journal.Configuration.SourceDigest == journal.Configuration.TargetDigest ||
 		journal.SourceConfigDigest == journal.ConfigDigest || journal.SourceReadinessEpoch != 0 ||
 		journal.Database.SourceIdentity.SchemaVersion != 15 ||
-		journal.Database.TargetIdentity.SchemaVersion != 16 {
+		journal.Database.TargetIdentity.SchemaVersion != 16 ||
+		journal.Database.TargetWorkerProfileVersion != workerprofile.CurrentVersion {
 		t.Fatalf("alpha.4 preparation journal = %#v", journal)
 	}
 	if source, err := os.ReadFile(journal.Configuration.SourcePath); err != nil ||

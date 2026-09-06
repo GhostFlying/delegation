@@ -2,12 +2,17 @@ package localupgrade
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/userservice"
+	"github.com/GhostFlying/delegation/internal/workerprofile"
 )
 
 func TestActivatorResumesAfterEveryUnjournaledAction(t *testing.T) {
@@ -45,6 +50,57 @@ func TestActivatorResumesAfterEveryUnjournaledAction(t *testing.T) {
 			if fake.startCalls != 1 {
 				t.Fatalf("target start calls = %d, want exactly one", fake.startCalls)
 			}
+		})
+	}
+}
+
+func TestActivatorProfileMigrationPreservesRecoverableDatabaseAtEveryCrashPoint(t *testing.T) {
+	steps := []activationStep{
+		stepServiceStop, stepConfigurationPrepare, stepDatabasePrepare, stepDefinitionSwitch,
+		stepConfigurationSwitch, stepDatabaseSwitch, stepServiceStart, stepQualification,
+	}
+	for stepIndex, step := range steps {
+		t.Run(string(step), func(t *testing.T) {
+			transactionStore, journal := createAuthorizedActivationJournal(t)
+			seedActivationProfileDatabase(t, journal, 6)
+			fake := newFakeActivation()
+			operations := fake.operations()
+			defaults := DefaultActivationOperations(func(context.Context, Journal) error { return nil })
+			operations.PrepareDatabase = defaults.PrepareDatabase
+			operations.SwitchDatabase = func(database Database) (bool, error) {
+				fake.switchDatabaseCalls++
+				return ReconcileDatabaseSwitch(database)
+			}
+			activator, err := NewActivator(transactionStore, operations)
+			if err != nil {
+				t.Fatal(err)
+			}
+			crashed := false
+			activator.afterAction = func(completed activationStep) error {
+				if completed == step && !crashed {
+					crashed = true
+					return errors.New("injected activator process loss")
+				}
+				return nil
+			}
+			if _, err := activator.Run(context.Background(), journal.TransactionID); err == nil {
+				t.Fatal("first activation did not reach injected crash point")
+			}
+			if stepIndex < 5 {
+				assertActivationProfile(t, journal.Database.CanonicalPath, 6)
+			} else {
+				assertActivationProfile(t, journal.Database.CanonicalPath, workerprofile.CurrentVersion)
+			}
+			if stepIndex >= 2 {
+				assertActivationProfile(t, journal.Database.RollbackPath, 6)
+				assertActivationProfile(t, journal.Database.ShadowPath, workerprofile.CurrentVersion)
+			}
+			result, err := activator.Run(context.Background(), journal.TransactionID)
+			if err != nil || result.State != StateCommitted {
+				t.Fatalf("resumed activation = %#v, %v", result, err)
+			}
+			assertActivationProfile(t, journal.Database.CanonicalPath, workerprofile.CurrentVersion)
+			assertActivationProfile(t, journal.Database.RollbackPath, 6)
 		})
 	}
 }
@@ -273,4 +329,54 @@ func createAuthorizedActivationJournal(t *testing.T) (*Store, Journal) {
 		t.Fatal(err)
 	}
 	return transactionStore, journal
+}
+
+func seedActivationProfileDatabase(t *testing.T, journal Journal, profile int) {
+	t.Helper()
+	ctx := context.Background()
+	if err := os.Chmod(filepath.Dir(journal.Database.CanonicalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.OpenPeer(ctx, journal.Database.CanonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := store.WorkerReservation{
+		WorkerKey: store.WorkerKey{
+			ControllerID: journal.ControllerID,
+			TreeID:       "123e4567-e89b-42d3-a456-426614174810",
+			AgentID:      "123e4567-e89b-42d3-a456-426614174811",
+		},
+		ParentAgentID: "123e4567-e89b-42d3-a456-426614174812", DeviceID: journal.DeviceID,
+		TaskName: "retained worker", PromptDigest: strings.Repeat("a", 64),
+		WorkspacePath:  filepath.Join(filepath.Dir(journal.Database.CanonicalPath), "workspace"),
+		ProfileVersion: profile,
+	}
+	if _, err := state.ReserveWorker(ctx, worker, 1, time.Unix(1, 0)); err != nil {
+		state.Close()
+		t.Fatal(err)
+	}
+	if _, err := state.FailWorker(ctx, worker.WorkerKey, "retained", time.Unix(2, 0)); err != nil {
+		state.Close()
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertActivationProfile(t *testing.T, path string, want int) {
+	t.Helper()
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var got int
+	if err := database.QueryRow(`SELECT profile_version FROM worker_reservations`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("worker profile in %s = %d, want %d", filepath.Base(path), got, want)
+	}
 }

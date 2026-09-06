@@ -21,11 +21,12 @@ import (
 	"github.com/GhostFlying/delegation/internal/instanceid"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/userservice"
+	"github.com/GhostFlying/delegation/internal/workerprofile"
 	"golang.org/x/mod/semver"
 )
 
 const (
-	JournalSchemaVersion = 3
+	JournalSchemaVersion = 4
 	maximumJournalBytes  = 64 << 10
 	maximumFailureBytes  = 64
 )
@@ -67,14 +68,17 @@ type Definition struct {
 }
 
 type Database struct {
-	Kind           store.DatabaseKind     `json:"kind"`
-	CanonicalPath  string                 `json:"canonicalPath"`
-	ShadowPath     string                 `json:"shadowPath"`
-	RollbackPath   string                 `json:"rollbackPath"`
-	SourceIdentity store.DatabaseIdentity `json:"sourceIdentity"`
-	TargetIdentity store.DatabaseIdentity `json:"targetIdentity"`
-	SourceDigest   string                 `json:"sourceDigest,omitempty"`
-	TargetDigest   string                 `json:"targetDigest,omitempty"`
+	Kind                       store.DatabaseKind     `json:"kind"`
+	CanonicalPath              string                 `json:"canonicalPath"`
+	ShadowPath                 string                 `json:"shadowPath"`
+	RollbackPath               string                 `json:"rollbackPath"`
+	SourceIdentity             store.DatabaseIdentity `json:"sourceIdentity"`
+	TargetIdentity             store.DatabaseIdentity `json:"targetIdentity"`
+	ControllerID               string                 `json:"controllerId,omitempty"`
+	DeviceID                   string                 `json:"deviceId,omitempty"`
+	TargetWorkerProfileVersion int                    `json:"targetWorkerProfileVersion,omitempty"`
+	SourceDigest               string                 `json:"sourceDigest,omitempty"`
+	TargetDigest               string                 `json:"targetDigest,omitempty"`
 }
 
 type Configuration struct {
@@ -257,6 +261,16 @@ func (j Journal) Validate() error {
 		j.Database.TargetIdentity.ApplicationID != j.Database.SourceIdentity.ApplicationID ||
 		j.Database.TargetIdentity.SchemaVersion < j.Database.SourceIdentity.SchemaVersion {
 		return errors.New("upgrade database identities are incompatible")
+	}
+	if j.Role == delegationconfig.RolePeer {
+		if j.Database.Kind != store.DatabasePeer ||
+			j.Database.ControllerID != j.ControllerID || j.Database.DeviceID != j.DeviceID ||
+			j.Database.TargetWorkerProfileVersion < workerprofile.CurrentVersion {
+			return errors.New("peer upgrade worker profile identity is invalid")
+		}
+	} else if j.Database.ControllerID != "" || j.Database.DeviceID != "" ||
+		j.Database.TargetWorkerProfileVersion != 0 {
+		return errors.New("broker upgrade contains a worker profile identity")
 	}
 	if j.Platform != runtime.GOOS || j.Architecture != runtime.GOARCH {
 		return errors.New("upgrade journal platform does not match this runtime")
