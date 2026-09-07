@@ -16,16 +16,16 @@ as the source of the first broker-coordinated upgrade acceptance.
 - Add a focused regression test for a logical home path that is a symlink to a physical home path.
 - Freeze, run focused and full acceptance, and obtain an independent read-only review.
 
-## Checkpoint 2: Local Peer Bootstrap Qualification
+## Checkpoint 2: Peer-First Activation Qualification
 
-- For a local peer transaction without a controller transaction ID, require the target local
-  runtime, protected configuration, service identity, and a newer target-bound execution-readiness
-  epoch. Do not require the upgraded peer to reconnect to an older broker before the broker-last
-  bootstrap step.
-- Keep controller-coordinated peer activation strict: connection, lifecycle synchronization,
-  readiness, and dispatchability are all required before qualification.
-- Update the operator contract and add table-driven tests covering local disconnected bootstrap and
-  coordinated disconnected rejection.
+- For every peer-first activation, require the target local runtime, protected configuration,
+  service identity, and a newer target-bound execution-readiness epoch. Do not require the upgraded
+  peer to reconnect to the old broker before the broker-last activation step.
+- Keep the controller completion gate strict after the target broker starts: connection, target
+  version, lifecycle synchronization, target-bound readiness, and committed peer status remain
+  required before the participant qualifies and the drain can end.
+- Update the operator contract and add table-driven tests covering disconnected local activation
+  while retaining the existing coordinated reconnect and timeout/intervention tests.
 - Freeze, run focused and full acceptance, and obtain an independent read-only review.
 
 ## Release And E2E

@@ -185,7 +185,7 @@ func TestServiceUpgradeBootstrapReadsAlpha4Schema3Config(t *testing.T) {
 	}
 }
 
-func TestQualifyLocalUpgradeRequiresFreshReadySynchronizedPeer(t *testing.T) {
+func TestQualifyLocalUpgradeRequiresFreshReadyLocalPeer(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("qualification endpoint isolation is covered by Windows local-bridge tests")
 	}
@@ -248,12 +248,20 @@ func TestQualifyLocalUpgradeRequiresFreshReadySynchronizedPeer(t *testing.T) {
 		want   string
 	}{
 		{name: "ready"},
+		{name: "disconnected before broker upgrade", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
+			status.ConnectionState = localbridge.ConnectionConnecting
+			status.Connected = false
+			status.WorkerRevision = 0
+			status.BrokerWorkerRevision = 0
+			status.WorkerSyncReady = false
+			status.Dispatchable = false
+		}},
 		{name: "stale epoch", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
 			status.WorkerReadiness.Epoch = journal.SourceReadinessEpoch
 		}, want: "new execution-readiness epoch"},
 		{name: "status version", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
 			status.Version = "0.1.0-alpha.6"
-		}, want: "connection and lifecycle synchronization"},
+		}, want: "not running the target runtime"},
 		{name: "pending", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
 			status.WorkerReadiness.State = protocol.WorkerReadinessPending
 			status.WorkerReadiness.AttemptCount = 0
@@ -274,12 +282,6 @@ func TestQualifyLocalUpgradeRequiresFreshReadySynchronizedPeer(t *testing.T) {
 		{name: "config digest", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
 			status.WorkerReadiness.ConfigDigest = strings.Repeat("d", 64)
 		}, want: "new execution-readiness epoch"},
-		{name: "lifecycle synchronizing", mutate: func(status *localbridge.StatusSnapshot, _ *localbridge.ServiceIdentity) {
-			status.ConnectionState = localbridge.ConnectionSynchronizing
-			status.BrokerWorkerRevision = 0
-			status.WorkerSyncReady = false
-			status.Dispatchable = false
-		}, want: "connection and lifecycle synchronization"},
 		{name: "identity mismatch", mutate: func(_ *localbridge.StatusSnapshot, identity *localbridge.ServiceIdentity) {
 			identity.DeviceID = statusTestOtherID
 		}, want: "local bridge identity mismatch"},
