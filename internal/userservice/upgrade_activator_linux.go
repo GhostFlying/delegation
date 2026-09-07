@@ -47,28 +47,17 @@ func platformInstallUpgradeActivator(ctx context.Context, plan UpgradeActivatorP
 		return err
 	}
 	linked, err := runSystemctl("--user", "--no-ask-password", "link", plan.DefinitionPath)
-	if err != nil || linked.ExitCode != 0 {
-		linkPath, pathErr := linuxUserSystemdPath(plan.Name)
-		present, match, inspectErr := false, false, error(nil)
-		if pathErr == nil {
-			present, match, inspectErr = systemdActivatorLinkIdentity(plan, linkPath)
-		}
-		if pathErr != nil || inspectErr != nil || !present || !match {
-			return errors.Join(
-				err, commandFailure("link systemd upgrade activator", linked), pathErr, inspectErr,
-			)
-		}
-	}
+	linkErr := errors.Join(err, commandFailure("link systemd upgrade activator", linked))
 	reloaded, err := runSystemctl("--user", "--no-ask-password", "daemon-reload")
 	if err != nil || reloaded.ExitCode != 0 {
-		return errors.Join(err, commandFailure("reload systemd upgrade activator", reloaded))
+		return errors.Join(linkErr, err, commandFailure("reload systemd upgrade activator", reloaded))
 	}
-	_, matched, err := systemdActivatorIdentity(plan)
+	_, matched, _, err := systemdActivatorIdentity(plan)
 	if err != nil {
-		return err
+		return errors.Join(linkErr, err)
 	}
 	if !matched {
-		return errors.New("systemd upgrade activator is loaded from an unexpected path")
+		return errors.Join(linkErr, errors.New("systemd upgrade activator is loaded from an unexpected path"))
 	}
 	return nil
 }
@@ -77,7 +66,7 @@ func platformLaunchUpgradeActivator(ctx context.Context, plan UpgradeActivatorPl
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, matched, err := systemdActivatorIdentity(plan)
+	_, matched, _, err := systemdActivatorIdentity(plan)
 	if err != nil || !matched {
 		return errors.Join(err, errors.New("systemd upgrade activator identity does not match"))
 	}
@@ -94,142 +83,82 @@ func platformRemoveUpgradeActivator(ctx context.Context, plan UpgradeActivatorPl
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	present, matched, err := systemdActivatorIdentity(plan)
+	reloaded, runErr := runSystemctl("--user", "--no-ask-password", "daemon-reload")
+	if runErr != nil || reloaded.ExitCode != 0 {
+		return errors.Join(runErr, commandFailure("reload systemd upgrade activator before removal", reloaded))
+	}
+	present, matched, linkPath, err := systemdActivatorIdentity(plan)
 	if err != nil {
 		return err
-	}
-	if !present {
-		linkPath, pathErr := linuxUserSystemdPath(plan.Name)
-		if pathErr != nil {
-			return pathErr
-		}
-		linkPresent, linkMatched, inspectErr := systemdActivatorLinkIdentity(plan, linkPath)
-		if inspectErr != nil {
-			return inspectErr
-		}
-		if linkPresent && !linkMatched {
-			return errors.New("systemd upgrade activator name is occupied by another definition")
-		}
-		if linkMatched {
-			reloaded, runErr := runSystemctl("--user", "--no-ask-password", "daemon-reload")
-			if runErr != nil || reloaded.ExitCode != 0 {
-				return errors.Join(
-					runErr, commandFailure("reload systemd upgrade activator before removal", reloaded),
-				)
-			}
-			present, matched, err = systemdActivatorIdentity(plan)
-			if err != nil {
-				return err
-			}
-			if !present {
-				return errors.New("systemd upgrade activator did not load before removal")
-			}
-		}
-	}
-	if present && !matched {
-		linkPath, pathErr := linuxUserSystemdPath(plan.Name)
-		if pathErr != nil {
-			return pathErr
-		}
-		linkPresent, _, inspectErr := systemdActivatorLinkIdentity(plan, linkPath)
-		if inspectErr != nil {
-			return inspectErr
-		}
-		if !linkPresent {
-			reloaded, runErr := runSystemctl("--user", "--no-ask-password", "daemon-reload")
-			if runErr != nil || reloaded.ExitCode != 0 {
-				return errors.Join(
-					runErr, commandFailure("reload stale systemd upgrade activator", reloaded),
-				)
-			}
-			present, matched, err = systemdActivatorIdentity(plan)
-			if err != nil {
-				return err
-			}
-		}
 	}
 	if present && !matched {
 		return errors.New("systemd upgrade activator name is occupied by another definition")
 	}
+	var disableErr error
+	removedLinkPath := ""
 	if matched {
+		removedLinkPath = linkPath
 		disabled, runErr := runSystemctl("--user", "--no-ask-password", "disable", plan.Name)
-		if runErr != nil || disabled.ExitCode != 0 {
-			linkPath, pathErr := linuxUserSystemdPath(plan.Name)
-			stillPresent := false
-			var inspectErr error
-			if pathErr == nil {
-				stillPresent, _, inspectErr = systemdActivatorLinkIdentity(plan, linkPath)
-			}
-			if pathErr != nil || inspectErr != nil || stillPresent {
-				return errors.Join(
-					runErr, commandFailure("unlink systemd upgrade activator", disabled),
-					pathErr, inspectErr,
-				)
-			}
-		}
+		disableErr = errors.Join(runErr, commandFailure("unlink systemd upgrade activator", disabled))
 	}
-	reloaded, runErr := runSystemctl("--user", "--no-ask-password", "daemon-reload")
+	reloaded, runErr = runSystemctl("--user", "--no-ask-password", "daemon-reload")
 	if runErr != nil || reloaded.ExitCode != 0 {
-		return errors.Join(runErr, commandFailure("reload removed systemd upgrade activator", reloaded))
+		return errors.Join(disableErr, runErr, commandFailure("reload removed systemd upgrade activator", reloaded))
 	}
-	if stillPresent, _, matchErr := systemdActivatorIdentity(plan); matchErr != nil {
-		return matchErr
+	if stillPresent, _, _, matchErr := systemdActivatorIdentity(plan); matchErr != nil {
+		return errors.Join(disableErr, matchErr)
 	} else if stillPresent {
-		return errors.New("systemd upgrade activator name remained occupied after removal")
+		return errors.Join(disableErr, errors.New("systemd upgrade activator name remained occupied after removal"))
 	}
-	linkPath, err := linuxUserSystemdPath(plan.Name)
-	if err != nil {
-		return err
-	}
-	if stillPresent, _, inspectErr := systemdActivatorLinkIdentity(plan, linkPath); inspectErr != nil {
-		return inspectErr
-	} else if stillPresent {
-		return errors.New("systemd upgrade activator link remained after removal")
+	if removedLinkPath != "" {
+		if stillPresent, _, inspectErr := systemdActivatorLinkIdentity(plan, removedLinkPath); inspectErr != nil {
+			return errors.Join(disableErr, inspectErr)
+		} else if stillPresent {
+			return errors.Join(disableErr, errors.New("systemd upgrade activator link remained after removal"))
+		}
 	}
 	return nil
 }
 
-func systemdActivatorIdentity(plan UpgradeActivatorPlan) (bool, bool, error) {
-	linkPath, err := linuxUserSystemdPath(plan.Name)
-	if err != nil {
-		return false, false, err
-	}
+func systemdActivatorIdentity(plan UpgradeActivatorPlan) (bool, bool, string, error) {
 	result, err := runSystemctl(
 		"--user", "--no-ask-password", "show", plan.Name,
 		"--property=LoadState", "--property=FragmentPath", "--property=DropInPaths",
 		"--property=UnitFileState",
 	)
 	if err != nil || result.ExitCode != 0 {
-		return false, false, errors.Join(err, commandFailure("inspect systemd upgrade activator", result))
+		return false, false, "", errors.Join(err, commandFailure("inspect systemd upgrade activator", result))
 	}
 	properties := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(result.Output)), "\n") {
 		key, value, found := strings.Cut(line, "=")
 		if !found || key == "" {
-			return false, false, errors.New("systemd returned malformed activator identity")
+			return false, false, "", errors.New("systemd returned malformed activator identity")
 		}
 		if _, duplicate := properties[key]; duplicate {
-			return false, false, errors.New("systemd returned duplicate activator identity")
+			return false, false, "", errors.New("systemd returned duplicate activator identity")
 		}
 		properties[key] = value
 	}
 	if len(properties) != 4 {
-		return false, false, errors.New("systemd omitted activator identity properties")
+		return false, false, "", errors.New("systemd omitted activator identity properties")
 	}
 	if properties["LoadState"] == "not-found" && properties["FragmentPath"] == "" &&
 		properties["DropInPaths"] == "" && properties["UnitFileState"] == "" {
-		return false, false, nil
+		return false, false, "", nil
 	}
-	if properties["LoadState"] != "loaded" || properties["FragmentPath"] != linkPath ||
+	linkPath := properties["FragmentPath"]
+	if properties["LoadState"] != "loaded" || linkPath == "" || !filepath.IsAbs(linkPath) ||
+		filepath.Clean(linkPath) != linkPath || filepath.Base(linkPath) != plan.Name ||
 		strings.TrimSpace(properties["DropInPaths"]) != "" ||
 		properties["UnitFileState"] != "linked" {
-		return true, false, nil
+		return true, false, linkPath, nil
 	}
 	present, matched, err := systemdActivatorLinkIdentity(plan, linkPath)
 	if err != nil {
-		return true, false, err
+		return true, false, linkPath, err
 	}
-	return true, present && matched, nil
+	return true, present && matched, linkPath, nil
 }
 
 func systemdActivatorLinkIdentity(

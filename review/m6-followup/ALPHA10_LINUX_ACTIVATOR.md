@@ -15,11 +15,12 @@ The observed transaction `995fddd0-6598-40c0-af32-2068d643b859` remained `prepar
 
 ## Implementation Plan
 
-1. Resolve the one canonical persistent user-unit link path for the activator name. Respect an
-   absolute `XDG_CONFIG_HOME`; otherwise use the current user's `.config/systemd/user` directory.
-2. Accept an installed activator only when systemd reports that canonical path, `UnitFileState` is
-   exactly `linked`, there are no drop-ins, and the path is a current-user-owned symbolic link whose
-   absolute target is exactly the protected transaction definition.
+1. Ask the existing user manager to link and reload the activator, then use its absolute, clean
+   `FragmentPath` with the exact activator basename. Do not infer the manager's configuration
+   directory from the management CLI process's `XDG_CONFIG_HOME`.
+2. Accept an installed activator only when `UnitFileState` is exactly `linked`, there are no
+   drop-ins, and the reported fragment is a current-user-owned symbolic link whose absolute target
+   is exactly the protected transaction definition.
 3. Remove an exact linked activator with `systemctl --user disable`, reload the manager, and require
    the unit to become absent. Never remove a regular file, a foreign target, a shadowed fragment, or
    a unit with drop-ins.
@@ -32,6 +33,23 @@ The observed transaction `995fddd0-6598-40c0-af32-2068d643b859` remained `prepar
 6. Run the focused tests and the real round trip, then the full Go, race, vet, plugin, support, and
    cross-platform compile acceptance. Freeze the exact source commit and tree for independent
    read-only review before publication.
+
+## Review Rounds
+
+### Round 1
+
+- Frozen commit: `1bd15240486f1795ed75446b830eff30e6f272ae`.
+- Frozen tree: `c3e7ab971617ce7f9b411e274b7d3203e16aff79`.
+- Independent review result: `FINDINGS`.
+- Finding: the implementation derived the activator link from the management CLI process's
+  `XDG_CONFIG_HOME`, but `systemctl --user link` operates in the already-running user manager and
+  reports that manager's actual link as `FragmentPath`. A supported invocation with a different
+  absolute client value therefore rejected its own valid link and could not arm or cancel.
+- Disposition: trust systemd only for locating its actual absolute, clean, canonical-basename
+  fragment, then retain the current-user symlink, exact protected target, definition owner/mode,
+  linked-state, and no-drop-in checks. Reload before install/removal reconciliation so crash retries
+  do not need to guess the manager's configuration directory. Add a real custom-client-home
+  round-trip before freezing Round 2.
 
 ## Release And E2E Disposition
 

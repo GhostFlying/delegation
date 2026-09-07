@@ -185,13 +185,6 @@ func linuxServicePath(role ServiceRole, instanceID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return linuxUserSystemdPath(spec.systemdUnit)
-}
-
-func linuxUserSystemdPath(unitName string) (string, error) {
-	if unitName == "" || filepath.Base(unitName) != unitName {
-		return "", errors.New("systemd user unit name must be a base name")
-	}
 	configHome := os.Getenv("XDG_CONFIG_HOME")
 	if configHome == "" {
 		home, err := os.UserHomeDir()
@@ -203,5 +196,5 @@ func linuxUserSystemdPath(unitName string) (string, error) {
 	if !filepath.IsAbs(configHome) {
 		return "", errors.New("XDG_CONFIG_HOME must be absolute")
 	}
-	return filepath.Join(configHome, "systemd", "user", unitName), nil
+	return filepath.Join(configHome, "systemd", "user", spec.systemdUnit), nil
 }
