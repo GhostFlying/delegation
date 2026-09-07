@@ -194,6 +194,9 @@ func TestLinuxUpgradeActivatorRejectsForeignIdentityBeforeLaunch(t *testing.T) {
 		foreignOwner   bool
 	}{
 		{name: "shadowed fragment", fragment: func(string) string { return "/tmp/foreign.service" }, unitFileState: "linked"},
+		{name: "relative fragment", fragment: func(string) string { return filepath.Base("/tmp/foreign.service") }, unitFileState: "linked"},
+		{name: "unclean fragment", fragment: func(linkPath string) string { return filepath.Dir(linkPath) + "/./" + filepath.Base(linkPath) }, unitFileState: "linked"},
+		{name: "wrong basename", fragment: func(linkPath string) string { return filepath.Join(filepath.Dir(linkPath), "foreign.service") }, unitFileState: "linked"},
 		{name: "drop-in override", dropIns: "/tmp/foreign.conf", unitFileState: "linked"},
 		{name: "enabled regular unit", unitFileState: "enabled"},
 		{name: "missing canonical link", unitFileState: "linked", linkMissing: true},
@@ -264,6 +267,7 @@ func TestLinuxUpgradeActivatorRemoveAcceptsDisableErrorAfterLinkDisappears(t *te
 	t.Cleanup(func() { runSystemctl = originalRunner })
 	loaded := true
 	reloaded := false
+	disabled := false
 	runSystemctl = func(args ...string) (userServiceCommandResult, error) {
 		switch {
 		case slices.Contains(args, "show"):
@@ -272,9 +276,12 @@ func TestLinuxUpgradeActivatorRemoveAcceptsDisableErrorAfterLinkDisappears(t *te
 			if err := os.Remove(linkPath); err != nil {
 				t.Fatal(err)
 			}
+			disabled = true
 			return userServiceCommandResult{ExitCode: 1, Output: []byte("link already absent")}, nil
 		case slices.Contains(args, "daemon-reload"):
-			loaded = false
+			if disabled {
+				loaded = false
+			}
 			reloaded = true
 			return userServiceCommandResult{}, nil
 		default:
@@ -287,6 +294,9 @@ func TestLinuxUpgradeActivatorRemoveAcceptsDisableErrorAfterLinkDisappears(t *te
 	if !reloaded {
 		t.Fatal("RemoveUpgradeActivator did not reload the user manager")
 	}
+	if !disabled {
+		t.Fatal("RemoveUpgradeActivator did not exercise the failed disable path")
+	}
 }
 
 func TestLinuxUpgradeActivatorRemoveRejectsSuccessfulDisableThatLeavesLink(t *testing.T) {
@@ -297,14 +307,18 @@ func TestLinuxUpgradeActivatorRemoveRejectsSuccessfulDisableThatLeavesLink(t *te
 	originalRunner := runSystemctl
 	t.Cleanup(func() { runSystemctl = originalRunner })
 	loaded := true
+	disabled := false
 	runSystemctl = func(args ...string) (userServiceCommandResult, error) {
 		switch {
 		case slices.Contains(args, "show"):
 			return linuxActivatorIdentityResult(loaded, linkPath, "", "linked"), nil
 		case slices.Contains(args, "disable"):
+			disabled = true
 			return userServiceCommandResult{}, nil
 		case slices.Contains(args, "daemon-reload"):
-			loaded = false
+			if disabled {
+				loaded = false
+			}
 		}
 		return userServiceCommandResult{}, nil
 	}
@@ -314,12 +328,12 @@ func TestLinuxUpgradeActivatorRemoveRejectsSuccessfulDisableThatLeavesLink(t *te
 	}
 }
 
-func TestLinuxUpgradeActivatorRejectsRelativeXDGConfigHome(t *testing.T) {
+func TestLinuxUpgradeActivatorUsesSystemdFragmentAcrossClientConfigHome(t *testing.T) {
 	plan, linkPath := prepareLinuxActivatorTest(t, testUpgradeTransactionID)
 	if err := os.Symlink(plan.DefinitionPath, linkPath); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("XDG_CONFIG_HOME", "relative")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	originalRunner := runSystemctl
 	t.Cleanup(func() { runSystemctl = originalRunner })
 	started := false
@@ -332,12 +346,11 @@ func TestLinuxUpgradeActivatorRejectsRelativeXDGConfigHome(t *testing.T) {
 		}
 		return userServiceCommandResult{}, nil
 	}
-	if err := LaunchUpgradeActivator(context.Background(), plan); err == nil ||
-		!strings.Contains(err.Error(), "XDG_CONFIG_HOME must be absolute") {
-		t.Fatalf("LaunchUpgradeActivator() error = %v", err)
+	if err := LaunchUpgradeActivator(context.Background(), plan); err != nil {
+		t.Fatalf("LaunchUpgradeActivator() = %v", err)
 	}
-	if started {
-		t.Fatal("LaunchUpgradeActivator started with relative XDG_CONFIG_HOME")
+	if !started {
+		t.Fatal("LaunchUpgradeActivator did not use systemd's reported fragment")
 	}
 }
 
@@ -348,18 +361,20 @@ func TestLinuxUpgradeActivatorRefusesToRemoveForeignUnit(t *testing.T) {
 	}
 	originalRunner := runSystemctl
 	t.Cleanup(func() { runSystemctl = originalRunner })
-	mutated := false
+	disabled := false
 	runSystemctl = func(args ...string) (userServiceCommandResult, error) {
 		if slices.Contains(args, "show") {
 			return linuxActivatorIdentityResult(true, linkPath, "", "linked"), nil
 		}
-		mutated = true
+		if slices.Contains(args, "disable") {
+			disabled = true
+		}
 		return userServiceCommandResult{}, nil
 	}
 	if err := RemoveUpgradeActivator(context.Background(), plan); err == nil {
 		t.Fatal("RemoveUpgradeActivator accepted a foreign unit")
 	}
-	if mutated {
+	if disabled {
 		t.Fatal("RemoveUpgradeActivator mutated a foreign unit")
 	}
 }
@@ -372,7 +387,8 @@ func TestLinuxUpgradeActivatorRealSystemdLinkRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("XDG_CONFIG_HOME", "")
+	clientConfigHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", clientConfigHome)
 	root := t.TempDir()
 	definition := filepath.Join(root, "delegation-upgrade-"+transactionID+".service")
 	plan, err := PrepareUpgradeActivator(
@@ -385,19 +401,19 @@ func TestLinuxUpgradeActivatorRealSystemdLinkRoundTrip(t *testing.T) {
 	if err := os.WriteFile(definition, plan.Definition, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	linkPath, err := linuxUserSystemdPath(plan.Name)
-	if err != nil {
-		t.Fatal(err)
-	}
 	t.Cleanup(func() {
 		_, _ = runSystemctl("--user", "--no-ask-password", "disable", plan.Name)
 		_, _ = runSystemctl("--user", "--no-ask-password", "daemon-reload")
 	})
-	if _, err := os.Lstat(linkPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("activator link was present before the test: %v", err)
-	}
 	if err := InstallUpgradeActivator(context.Background(), plan); err != nil {
 		t.Fatal(err)
+	}
+	present, matched, linkPath, err := systemdActivatorIdentity(plan)
+	if err != nil || !present || !matched {
+		t.Fatalf("systemd activator identity = %t, %t, %q, %v", present, matched, linkPath, err)
+	}
+	if strings.HasPrefix(linkPath, clientConfigHome+string(filepath.Separator)) {
+		t.Fatalf("systemd unexpectedly used client-only XDG_CONFIG_HOME: %q", linkPath)
 	}
 	if target, err := os.Readlink(linkPath); err != nil || target != plan.DefinitionPath {
 		t.Fatalf("systemd link target = %q, %v; want %q", target, err, plan.DefinitionPath)
@@ -426,10 +442,7 @@ func prepareLinuxActivatorTest(t *testing.T, transactionID string) (UpgradeActiv
 	if err := os.WriteFile(definition, plan.Definition, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	linkPath, err := linuxUserSystemdPath(plan.Name)
-	if err != nil {
-		t.Fatal(err)
-	}
+	linkPath := filepath.Join(configHome, "systemd", "user", plan.Name)
 	if err := os.MkdirAll(filepath.Dir(linkPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
