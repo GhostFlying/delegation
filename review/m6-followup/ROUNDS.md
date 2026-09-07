@@ -709,3 +709,44 @@ load-sensitive failure without concurrent heavy validation:
 The reviewer's first full-suite attempt ran beside other heavy checks and had one broker-health
 readiness timeout. The standalone full-suite retry and ten focused repetitions of that exact test
 passed. The detached review worktree remained clean.
+
+## Follow-up Checkpoint: Alpha.8 Native Windows CI
+
+### Review Round 1
+
+- Base commit: `45ad6b46f86a6d807d4c22fc4321f183f6c8c289`
+- Frozen commit: `ac84e41fbeba9cbe02be9b333b116931230724ef`
+- Frozen tree: `9cec55df4691413a86be142228b309c6129511e3`
+- Review checkout: clean detached worktree at the frozen commit and tree
+- Independent review result: `FINDINGS`
+- Finding: the checkpoint acceptance incorrectly required the release manifest to remain equal to
+  the previous alpha.8 manifest on the premise that the checkpoint changed tests only. The range
+  also contained production protected-file and installed-runtime validation changes, so all six
+  rebuilt archives necessarily changed.
+- Impact: the frozen checkpoint could not pass its own source-to-manifest gate, and retaining the
+  old manifest would bind alpha.8 to binaries built from different source behavior.
+- Disposition: require two byte-identical verified release builds, then create and independently
+  review a new direct-child manifest-only commit from the accepted source revision.
+
+Owner native Windows acceptance at the round-1 revision passed all seven affected package suites
+and twenty iterations of the three load-sensitive app-server tests. The first full suite then
+exposed an unrelated pre-existing changes-artifact test budget: under full Windows runner load, its
+twenty-five-millisecond RPC deadline could expire before the fake broker response was scheduled,
+closing the session before the intended local acknowledgement timeout. The exact test passed one
+hundred standalone native Windows iterations. The round-2 revision raises only that test's call
+budget to a bounded half second; the production thirty-second limit is unchanged.
+
+### Review Round 2
+
+- Frozen commit: `5c045b7628ea5ffb1f4eeb02d7db7f69657700ba`
+- Frozen tree: `d00eb847ffc3a0ca81bf97660aa530a849749e3a`
+- Independent review result: withdrawn after an owner finding; the reviewer was interrupted before
+  returning a verdict because the revision was superseded
+- Finding: the full native Windows suite passed the prior connector failure but a local Named Pipe
+  readiness fixture exhausted its one-second probe context while writing the identity frame under
+  full runner load. The exact test passed one hundred standalone native Windows iterations.
+- Impact: ordinary protected-main Windows CI could fail despite the production readiness window
+  being ten seconds and the local service becoming responsive normally.
+- Disposition: use a shared five-second bound for the three equivalent readiness probe fixtures,
+  keep all production deadlines unchanged, and validate the complete native Windows suite before
+  freezing the third and final review round.

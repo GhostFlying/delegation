@@ -301,9 +301,16 @@ func TestCloseWaitsForConfirmedExitAfterForcedTermination(t *testing.T) {
 func TestCloseFailsClosedWhenForcedExitIsUnconfirmed(t *testing.T) {
 	owner := &gatedOwnedProcess{terminated: make(chan struct{})}
 	client := closeContractClient(owner, 5*time.Millisecond)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-	err := client.Close(ctx)
+	ctx := newGatedDeadlineContext()
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- client.Close(ctx) }()
+	select {
+	case <-owner.terminated:
+	case <-time.After(time.Second):
+		t.Fatal("forced termination did not start")
+	}
+	ctx.expire()
+	err := <-closeDone
 	if !errors.Is(err, ErrCloseTimeout) || !errors.Is(err, ErrProcessExitUnconfirmed) ||
 		!errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Close() error = %v", err)
@@ -386,9 +393,16 @@ func TestCloseClosesOutputWhenForcedExitIsUnconfirmed(t *testing.T) {
 	owner := &gatedOwnedProcess{terminated: make(chan struct{})}
 	client := closeContractClient(owner, 5*time.Millisecond)
 	stdout, stderr := attachBlockingOutput(client)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-	err := client.Close(ctx)
+	ctx := newGatedDeadlineContext()
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- client.Close(ctx) }()
+	select {
+	case <-owner.terminated:
+	case <-time.After(time.Second):
+		t.Fatal("forced termination did not start")
+	}
+	ctx.expire()
+	err := <-closeDone
 	if !errors.Is(err, ErrProcessExitUnconfirmed) {
 		t.Fatalf("Close() error = %v, want ErrProcessExitUnconfirmed", err)
 	}
@@ -467,6 +481,32 @@ type gatedOwnedProcess struct {
 	once         sync.Once
 	terminateErr error
 	onTerminate  func()
+}
+
+type gatedDeadlineContext struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func newGatedDeadlineContext() *gatedDeadlineContext {
+	return &gatedDeadlineContext{done: make(chan struct{})}
+}
+
+func (*gatedDeadlineContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *gatedDeadlineContext) Done() <-chan struct{}     { return c.done }
+func (c *gatedDeadlineContext) Value(any) any             { return nil }
+
+func (c *gatedDeadlineContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (c *gatedDeadlineContext) expire() {
+	c.once.Do(func() { close(c.done) })
 }
 
 type blockingReadCloser struct {
@@ -899,14 +939,14 @@ func startHelperClient(t *testing.T, mode string, overrides Options) *Client {
 		},
 		Environment:      environment,
 		UnsetEnvironment: overrides.UnsetEnvironment,
-		ClientVersion:    "test", HandshakeTimeout: 2 * time.Second,
+		ClientVersion:    "test", HandshakeTimeout: 10 * time.Second,
 		CloseTimeout: overrides.CloseTimeout, StderrLimit: overrides.StderrLimit,
 		NotificationBuffer: overrides.NotificationBuffer, MaxPendingCalls: overrides.MaxPendingCalls,
 	}
 	if len(overrides.Launch.PrefixArguments) > 0 {
 		options.Launch.PrefixArguments = slices.Clone(overrides.Launch.PrefixArguments)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	client, err := Start(ctx, options)
 	if err != nil {

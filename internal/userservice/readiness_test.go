@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	readinessControllerID = "123e4567-e89b-42d3-a456-426614174700"
-	readinessDeviceID     = "123e4567-e89b-42d3-a456-426614174701"
+	readinessControllerID     = "123e4567-e89b-42d3-a456-426614174700"
+	readinessDeviceID         = "123e4567-e89b-42d3-a456-426614174701"
+	readinessProbeTestTimeout = 5 * time.Second
 )
 
 type readinessBackend struct{}
@@ -202,7 +203,7 @@ func TestConnectorReadinessRejectsWrongBridgeIdentity(t *testing.T) {
 			t.Error("readiness bridge did not stop")
 		}
 	})
-	probeContext, cancelProbe := context.WithTimeout(context.Background(), time.Second)
+	probeContext, cancelProbe := context.WithTimeout(context.Background(), readinessProbeTestTimeout)
 	defer cancelProbe()
 	if err := probeService(probeContext, cfg); err == nil {
 		t.Fatal("probeService accepted a connector bridge from another controller")
@@ -257,7 +258,7 @@ func TestConnectorReadinessUsesInstanceEndpoint(t *testing.T) {
 			t.Error("readiness bridge did not stop")
 		}
 	})
-	probeContext, cancelProbe := context.WithTimeout(context.Background(), time.Second)
+	probeContext, cancelProbe := context.WithTimeout(context.Background(), readinessProbeTestTimeout)
 	defer cancelProbe()
 	if err := probeService(probeContext, cfg); err != nil {
 		t.Fatal(err)
@@ -312,7 +313,7 @@ func TestConnectorReadinessRejectsWrongInstanceIdentity(t *testing.T) {
 			t.Error("readiness bridge did not stop")
 		}
 	})
-	probeContext, cancelProbe := context.WithTimeout(context.Background(), time.Second)
+	probeContext, cancelProbe := context.WithTimeout(context.Background(), readinessProbeTestTimeout)
 	defer cancelProbe()
 	if err := probeService(probeContext, cfg); err == nil {
 		t.Fatal("probeService accepted a connector bridge from another instance")

@@ -5,7 +5,18 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 )
+
+func privateStoreTestDirectory(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	if err := delegationconfig.PreparePrivateDirectory(directory); err != nil {
+		t.Fatal(err)
+	}
+	return directory
+}
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()

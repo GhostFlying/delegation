@@ -385,7 +385,7 @@ func TestConnectorAcknowledgementTimeoutDoesNotStarveLaterArtifact(t *testing.T)
 	client := newChangesArtifactClient(t, websocketURL(server.URL), source)
 	client.reconnectMin = 50 * time.Millisecond
 	client.reconnectMax = 50 * time.Millisecond
-	client.artifactCallLimit = 25 * time.Millisecond
+	client.artifactCallLimit = 500 * time.Millisecond
 	reported := make(chan error, 1)
 	client.reportError = func(err error) {
 		select {

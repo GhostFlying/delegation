@@ -255,6 +255,17 @@ func ReadProtectedSingleLinkFile(path string, maximumBytes int) ([]byte, error) 
 	return readProtectedFile(path, maximumBytes, true)
 }
 
+// ValidateProtectedFile non-mutatingly verifies a current-user-only regular
+// file through the same no-alias authority checks used for Delegation
+// configuration.
+func ValidateProtectedFile(path string) error {
+	file, err := openProtectedConfig(path)
+	if err != nil {
+		return err
+	}
+	return file.Close()
+}
+
 func readProtectedFile(path string, maximumBytes int, requireSingleLink bool) ([]byte, error) {
 	if maximumBytes < 1 || maximumBytes > maximumProtectedReadSize {
 		return nil, fmt.Errorf("protected file limit must be from 1 through %d bytes", maximumProtectedReadSize)

@@ -40,10 +40,7 @@ func TestPrepareCreatesProtectedJournalAndResumesBeforeAcquisition(t *testing.T)
 		t.Fatalf("resume = %#v, %v, acquire calls = %d", second, err, calls)
 	}
 	for _, path := range []string{first.Journal.Definition.OldPath, first.Journal.Definition.NewPath} {
-		info, statErr := os.Stat(path)
-		if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-			t.Fatalf("definition material %s = %#v, %v", path, info, statErr)
-		}
+		assertProtectedUpgradeTestFile(t, path)
 	}
 }
 
@@ -201,6 +198,9 @@ func TestPrepareAcceptsForwardTargetWorkerProfileForTargetActivator(t *testing.T
 }
 
 func TestPrepareFreezesTraeXAuthenticationSource(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TraeX service upgrade is unsupported on Windows")
+	}
 	options := prepareTraeXFixture(t)
 	result, err := Prepare(context.Background(), options)
 	if err != nil {
@@ -219,6 +219,9 @@ func TestPrepareFreezesTraeXAuthenticationSource(t *testing.T) {
 }
 
 func TestPrepareRejectsTraeXAuthenticationSourceDrift(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("TraeX service upgrade is unsupported on Windows")
+	}
 	options := prepareTraeXFixture(t)
 	originalPrepare := options.Dependencies.PrepareService
 	options.Dependencies.PrepareService = func(
@@ -311,7 +314,7 @@ func TestPrepareAcceptsExactAlpha4PeerConfigAndDatabase(t *testing.T) {
 
 func prepareFixture(t *testing.T) PrepareOptions {
 	t.Helper()
-	root := t.TempDir()
+	root := privateUpgradeTestDirectory(t)
 	for _, directory := range []string{root, filepath.Join(root, "codex-home"), filepath.Join(root, "workspaces")} {
 		if err := os.Chmod(directory, 0o700); err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)

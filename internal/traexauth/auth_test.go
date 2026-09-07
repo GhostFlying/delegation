@@ -47,11 +47,9 @@ func TestReadSourceRequiresProtectedSupportedTraeAccount(t *testing.T) {
 	if err := os.WriteFile(path, valid, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	makeAuthFileUnsafe(t, path)
 	if _, err := ReadSource(path); !errors.Is(err, ErrInvalidSource) ||
-		!strings.Contains(err.Error(), "mode 0600") {
+		!strings.Contains(err.Error(), unsafeAuthFileError()) {
 		t.Fatalf("broad source mode error = %v", err)
 	}
 }
@@ -102,7 +100,7 @@ func TestValidateManagedCopyRejectsMissingMalformedAndBroadCopy(t *testing.T) {
 		t.Fatalf("missing managed copy error = %v", err)
 	}
 	path := ManagedPath(managedHome)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := delegationconfig.PreparePrivateDirectory(filepath.Dir(path)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(`{`), 0o600); err != nil {
@@ -115,11 +113,9 @@ func TestValidateManagedCopyRejectsMissingMalformedAndBroadCopy(t *testing.T) {
 	if err := os.WriteFile(path, testAuth("token"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	makeAuthFileUnsafe(t, path)
 	if err := ValidateManagedCopy(managedHome, true); !errors.Is(err, ErrInvalidManagedCopy) ||
-		!strings.Contains(err.Error(), "mode 0600") {
+		!strings.Contains(err.Error(), unsafeAuthFileError()) {
 		t.Fatalf("broad managed copy error = %v", err)
 	}
 }
@@ -143,8 +139,7 @@ func assertManagedAuth(t *testing.T, path string, want []byte) {
 	if err != nil || string(got) != string(want) {
 		t.Fatalf("managed copy = %q, %v; want exact source bytes", got, err)
 	}
-	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("managed copy mode = %#v, %v", info, err)
+	if err := delegationconfig.ValidateProtectedFile(path); err != nil {
+		t.Fatalf("managed copy protection: %v", err)
 	}
 }
