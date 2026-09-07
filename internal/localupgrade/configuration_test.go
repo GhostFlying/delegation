@@ -7,7 +7,7 @@ import (
 )
 
 func TestPrepareSwitchResumeAndRollbackConfiguration(t *testing.T) {
-	directory := t.TempDir()
+	directory := privateUpgradeTestDirectory(t)
 	canonical := filepath.Join(directory, "peer.json")
 	sourceMaterial := filepath.Join(directory, "transaction-source.json")
 	targetMaterial := filepath.Join(directory, "transaction-target.json")
@@ -58,7 +58,7 @@ func TestPrepareSwitchResumeAndRollbackConfiguration(t *testing.T) {
 }
 
 func TestConfigurationPreparationRejectsChangedMaterial(t *testing.T) {
-	directory := t.TempDir()
+	directory := privateUpgradeTestDirectory(t)
 	source := []byte("source configuration\n")
 	target := []byte("target configuration\n")
 	configuration := Configuration{
@@ -86,7 +86,7 @@ func TestConfigurationPreparationRejectsChangedMaterial(t *testing.T) {
 }
 
 func TestPrepareConfigurationSupportsCurrentSchemaNoOp(t *testing.T) {
-	directory := t.TempDir()
+	directory := privateUpgradeTestDirectory(t)
 	data := []byte("current configuration\n")
 	configuration := Configuration{
 		CanonicalPath: filepath.Join(directory, "peer.json"),

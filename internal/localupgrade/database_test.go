@@ -19,7 +19,7 @@ import (
 
 func TestDefaultDatabasePreparationMigratesOnlyPeerShadowProfile(t *testing.T) {
 	ctx := context.Background()
-	directory := t.TempDir()
+	directory := privateUpgradeTestDirectory(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestDefaultDatabasePreparationMigratesOnlyPeerShadowProfile(t *testing.T) {
 
 func TestPrepareSwitchAndRollbackPeerDatabaseIncludesWAL(t *testing.T) {
 	ctx := context.Background()
-	directory := t.TempDir()
+	directory := privateUpgradeTestDirectory(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestWALCrashHelper(t *testing.T) {
 
 func TestPrepareDatabaseCheckpointsCrashedMigrationWAL(t *testing.T) {
 	ctx := context.Background()
-	directory := t.TempDir()
+	directory := privateUpgradeTestDirectory(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestMigrationWALCrashHelper(t *testing.T) {
 
 func TestDifferentSchemaMigrationAndResumeAfterCanonicalSwitch(t *testing.T) {
 	ctx := context.Background()
-	directory := t.TempDir()
+	directory := privateUpgradeTestDirectory(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,7 @@ func TestDifferentSchemaMigrationAndResumeAfterCanonicalSwitch(t *testing.T) {
 
 func TestPrepareDatabaseResumesAfterRollbackAndShadowCreation(t *testing.T) {
 	ctx := context.Background()
-	directory := t.TempDir()
+	directory := privateUpgradeTestDirectory(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestPrepareDatabaseResumesAfterRollbackAndShadowCreation(t *testing.T) {
 
 func TestPrepareDatabaseRejectsMigrationFailureAndUnsupportedSchema(t *testing.T) {
 	ctx := context.Background()
-	directory := t.TempDir()
+	directory := privateUpgradeTestDirectory(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}

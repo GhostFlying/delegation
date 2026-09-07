@@ -158,9 +158,7 @@ func TestServiceUpgradeBootstrapReadsAlpha4Schema3Config(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacy = append(legacy, '\n')
-	if err := delegationconfig.ReplaceProtectedFile(configPath, current, legacy); err != nil {
-		t.Fatal(err)
-	}
+	replaceProtectedTestFile(t, configPath, current, legacy)
 
 	called := 0
 	var stdout bytes.Buffer

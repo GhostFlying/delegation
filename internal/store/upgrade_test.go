@@ -58,7 +58,7 @@ func TestMigrateExactAlpha4DatabasesPreservesExistingData(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			directory := t.TempDir()
+			directory := privateStoreTestDirectory(t)
 			if err := os.Chmod(directory, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -172,7 +172,7 @@ func TestMigrateUpgradeDatabaseRejectsUnsupportedVersionGap(t *testing.T) {
 	for _, kind := range []DatabaseKind{DatabaseBroker, DatabasePeer} {
 		t.Run(string(kind), func(t *testing.T) {
 			ctx := context.Background()
-			directory := t.TempDir()
+			directory := privateStoreTestDirectory(t)
 			if err := os.Chmod(directory, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -363,7 +363,7 @@ type profileWorker struct {
 func peerUpgradeProfileFixture(t *testing.T, schemaVersion int, workers []profileWorker) string {
 	t.Helper()
 	ctx := context.Background()
-	directory := t.TempDir()
+	directory := privateStoreTestDirectory(t)
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}

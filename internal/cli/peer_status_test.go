@@ -684,9 +684,7 @@ func rewriteStatusTestConfig(t *testing.T, path string, cfg delegationconfig.Con
 		t.Fatal(err)
 	}
 	replacement = append(replacement, '\n')
-	if err := delegationconfig.ReplaceProtectedFile(path, original, replacement); err != nil {
-		t.Fatal(err)
-	}
+	replaceProtectedTestFile(t, path, original, replacement)
 }
 
 func persistStatusTestReadinessFailure(

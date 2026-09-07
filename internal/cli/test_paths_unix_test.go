@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 )
 
 func unsafeTestDirectory(t *testing.T) string {
@@ -18,4 +20,11 @@ func unsafeTestDirectory(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func replaceProtectedTestFile(t *testing.T, path string, original, replacement []byte) {
+	t.Helper()
+	if err := delegationconfig.ReplaceProtectedFile(path, original, replacement); err != nil {
+		t.Fatal(err)
+	}
 }

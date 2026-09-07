@@ -70,6 +70,9 @@ func InstallRuntime(
 		return RuntimeMaterial{}, fmt.Errorf("create runtime staging directory: %w", err)
 	}
 	defer os.RemoveAll(stage)
+	if err := delegationconfig.PreparePrivateDirectory(stage); err != nil {
+		return RuntimeMaterial{}, fmt.Errorf("protect runtime staging directory: %w", err)
+	}
 	if err := extractRuntimeArchive(verified.Artifact.Content, CurrentPlatform(), stage); err != nil {
 		return RuntimeMaterial{}, err
 	}
@@ -261,6 +264,9 @@ func syncRuntimeDirectory(path string) error {
 func validateRuntimeDirectory(
 	ctx context.Context, directory, version string, probe VersionProbe,
 ) (RuntimeMaterial, error) {
+	if err := delegationconfig.ValidatePrivateDirectory(directory); err != nil {
+		return RuntimeMaterial{}, fmt.Errorf("validate runtime directory protection: %w", err)
+	}
 	root, err := securefs.OpenRoot(directory, nil)
 	if err != nil {
 		return RuntimeMaterial{}, err
@@ -277,7 +283,12 @@ func validateRuntimeDirectory(
 			return RuntimeMaterial{}, errors.New("runtime directory contains a non-regular file")
 		}
 		expectedMode, _, expectedEntry := expectedRuntimeEntry(entry.Name())
-		if !expectedEntry || info.Mode().Perm() != expectedMode.Perm() {
+		if !expectedEntry {
+			return RuntimeMaterial{}, errors.New("runtime directory contains an unexpected entry")
+		}
+		if err := validateInstalledRuntimeEntry(
+			filepath.Join(directory, entry.Name()), info, expectedMode,
+		); err != nil {
 			return RuntimeMaterial{}, errors.New("runtime directory contains an entry with unexpected permissions")
 		}
 		names = append(names, entry.Name())

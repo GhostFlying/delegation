@@ -278,7 +278,7 @@ func fullProgress() Progress {
 
 func testJournal(t *testing.T) Journal {
 	t.Helper()
-	root := t.TempDir()
+	root := privateUpgradeTestDirectory(t)
 	identity, err := store.CurrentDatabaseIdentity(store.DatabasePeer)
 	if err != nil {
 		t.Fatal(err)
