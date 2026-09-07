@@ -50,11 +50,9 @@ esac
 
 delegation_home=${DELEGATION_HOME:-"$HOME/.delegation"}
 binary="$delegation_home/bin/$version/$os-$arch/delegation"
-if [ ! -e "$binary" ] && [ ! -L "$binary" ]; then
-  if ! "$script_dir/install-runtime" >/dev/null; then
-    printf '%s\n' "delegation: automatic runtime installation failed for $version $os-$arch" >&2
-    exit 127
-  fi
+if ! "$script_dir/install-runtime" >/dev/null; then
+  printf '%s\n' "delegation: automatic runtime installation failed for $version $os-$arch" >&2
+  exit 127
 fi
 
 validate_binary "$binary" "runtime $version for $os-$arch"

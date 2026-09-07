@@ -146,6 +146,19 @@ test -x "$cold_home/bin/$version/$os-$arch/delegation"
 PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$cold_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/delegation-mcp" version --json >"$tmp/warm-version"
 grep -F "\"version\":\"$version\"" "$tmp/warm-version" >/dev/null
 test ! -s "$download_log"
+chmod 0755 "$cold_home/bin"
+if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$cold_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/delegation-mcp" version >"$tmp/warm-unsafe-out" 2>"$tmp/warm-unsafe-err"; then
+  printf '%s\n' 'expected the warm launcher to reject an unsafe existing runtime layout' >&2
+  exit 1
+fi
+grep -F 'runtime bin directory must be owned by' "$tmp/warm-unsafe-err" >/dev/null
+grep -F 'mode 0700; refusing to modify existing permissions' "$tmp/warm-unsafe-err" >/dev/null
+grep -F 'automatic runtime installation failed' "$tmp/warm-unsafe-err" >/dev/null
+case "$os" in
+  linux) test "$(stat -c '%a' "$cold_home/bin")" = 755 ;;
+  darwin) test "$(stat -f '%Lp' "$cold_home/bin")" = 755 ;;
+esac
+test ! -s "$download_log"
 
 postcondition_plugin="$tmp/postcondition-plugin"
 cp -R "$tmp/plugin" "$postcondition_plugin"
