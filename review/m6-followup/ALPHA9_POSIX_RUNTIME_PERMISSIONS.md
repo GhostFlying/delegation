@@ -59,3 +59,19 @@ Finding and disposition:
      warm cases.
 
 The tracked fix requires Round 2 on a new frozen commit and tree.
+
+### Round 2
+
+- Base commit: `4d4c42fa09c925e0b250dd3566343e2d34a254fc`.
+- Frozen commit: `812220b876b61f12cee46c5558b2f82990be1be5`.
+- Frozen tree: `b80ba299ea040fa685a2053334194ed69373682c`.
+- Review checkout: clean detached worktree at the frozen commit and tree.
+- Independent review result: `CLEAN`.
+- Confirmed disposition: every non-override launcher execution now uses the idempotent installer
+  validation path; a private warm installation remains download-free, while the canonical alpha.8
+  broad layout fails before runtime execution and remains byte-for-byte and mode-for-mode unchanged.
+- Executable checks: POSIX plugin contract, full Go suite, `/bin/sh` and `dash` syntax checks,
+  `git diff --check`, and an independent real legacy-layout launcher reproduction passed.
+- Findings: none.
+
+The checkpoint is accepted at the Round 2 frozen commit and tree.
