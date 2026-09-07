@@ -34,7 +34,11 @@ jobs:
       - name: Verify Go toolchain
         run: go env GOVERSION
       - name: Test
+        if: runner.os != 'Windows'
         run: go test -tags=ts_omit_logtail -timeout 20m ./...
+      - name: Test (Windows serialized packages)
+        if: runner.os == 'Windows'
+        run: go test -p=1 -tags=ts_omit_logtail -timeout 20m ./...
       - name: Vet
         run: go vet -tags=ts_omit_logtail ./...
       - name: Prepare Linux sandbox
