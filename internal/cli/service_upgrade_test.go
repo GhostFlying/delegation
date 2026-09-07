@@ -363,6 +363,49 @@ func TestQualifyLocalUpgradeBindsBrokerRuntimeConfigAndIdentity(t *testing.T) {
 	}
 }
 
+func TestValidateUpgradeActivatorRuntimeAcceptsSymlinkedTargetPath(t *testing.T) {
+	physicalRoot := t.TempDir()
+	logicalRoot := filepath.Join(t.TempDir(), "logical-home")
+	if err := os.Symlink(physicalRoot, logicalRoot); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+	runtimePath := filepath.Join(physicalRoot, "bin", "delegation")
+	if err := os.MkdirAll(filepath.Dir(runtimePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runtimePath, []byte("target runtime\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := workerreadiness.RuntimeDigest(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := localupgrade.Journal{
+		TargetVersion: buildinfo.Version, TargetRuntimeDigest: digest,
+		Invocation: localupgrade.Invocation{
+			TargetBinaryPath: filepath.Join(logicalRoot, "bin", "delegation"),
+		},
+	}
+	if err := validateUpgradeActivatorRuntimePath(journal, runtimePath); err != nil {
+		t.Fatalf("symlinked target runtime = %v", err)
+	}
+
+	otherPath := filepath.Join(physicalRoot, "bin", "other")
+	if err := os.WriteFile(otherPath, []byte("target runtime\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateUpgradeActivatorRuntimePath(journal, otherPath); err == nil ||
+		!strings.Contains(err.Error(), "identity does not match") {
+		t.Fatalf("different resolved runtime error = %v", err)
+	}
+
+	journal.TargetRuntimeDigest = strings.Repeat("f", 64)
+	if err := validateUpgradeActivatorRuntimePath(journal, runtimePath); err == nil ||
+		!strings.Contains(err.Error(), "identity does not match") {
+		t.Fatalf("runtime digest mismatch error = %v", err)
+	}
+}
+
 func TestServiceUpgradePrefersCurrentProtectedLocalBridge(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the shared Windows test environment cannot replace the process user profile")

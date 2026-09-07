@@ -617,15 +617,23 @@ func validateUpgradeActivatorRuntime(journal localupgrade.Journal) error {
 	if err != nil {
 		return err
 	}
-	runtimePath, err = filepath.EvalSymlinks(runtimePath)
+	return validateUpgradeActivatorRuntimePath(journal, runtimePath)
+}
+
+func validateUpgradeActivatorRuntimePath(journal localupgrade.Journal, runtimePath string) error {
+	runtimePath, err := filepath.EvalSymlinks(runtimePath)
 	if err != nil {
 		return err
+	}
+	targetPath, err := filepath.EvalSymlinks(journal.Invocation.TargetBinaryPath)
+	if err != nil {
+		return fmt.Errorf("resolve protected target runtime: %w", err)
 	}
 	digest, err := workerreadiness.RuntimeDigest(runtimePath)
 	if err != nil {
 		return err
 	}
-	if filepath.Clean(runtimePath) != filepath.Clean(journal.Invocation.TargetBinaryPath) ||
+	if filepath.Clean(runtimePath) != filepath.Clean(targetPath) ||
 		digest != journal.TargetRuntimeDigest {
 		return errors.New("activator runtime identity does not match protected target material")
 	}
