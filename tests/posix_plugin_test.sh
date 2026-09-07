@@ -76,7 +76,14 @@ fi
 printf '%s\n' "$url" >>"$DELEGATION_TEST_DOWNLOAD_LOG"
 cp "$DELEGATION_TEST_ARTIFACT" "$output"
 if [ -n "${DELEGATION_TEST_CREATE_TARGET:-}" ]; then
-  mkdir -p "$DELEGATION_TEST_CREATE_TARGET"
+  (umask 077 && mkdir -p "$DELEGATION_TEST_CREATE_TARGET")
+fi
+if [ -n "${DELEGATION_TEST_DIRECTORY_MODE_LOG:-}" ]; then
+  staging=$(dirname "$output")
+  case "$(uname -s)" in
+    Linux) printf '%s %s\n' "$(stat -c '%a' "$staging")" "$(stat -c '%u' "$staging")" ;;
+    Darwin) printf '%s %s\n' "$(stat -f '%Lp' "$staging")" "$(stat -f '%u' "$staging")" ;;
+  esac >"$DELEGATION_TEST_DIRECTORY_MODE_LOG"
 fi
 EOF
 chmod 0755 "$tmp/fake-bin/curl"
@@ -203,12 +210,74 @@ esac
 test ! -s "$download_log"
 test ! -e "$unsafe_home/bin"
 
+assert_directory_mode() {
+  expected_mode=$1
+  directory=$2
+  case "$os" in
+    linux) test "$(stat -c '%a' "$directory")" = "$expected_mode" ;;
+    darwin) test "$(stat -f '%Lp' "$directory")" = "$expected_mode" ;;
+  esac
+}
+assert_directory_owner() {
+  directory=$1
+  case "$os" in
+    linux) test "$(stat -c '%u' "$directory")" = "$(id -u)" ;;
+    darwin) test "$(stat -f '%u' "$directory")" = "$(id -u)" ;;
+  esac
+}
+
+unsafe_bin_home="$tmp/unsafe-bin-home"
+(umask 077 && mkdir "$unsafe_bin_home")
+(umask 022 && mkdir "$unsafe_bin_home/bin")
+printf '%s\n' preserved >"$unsafe_bin_home/bin/marker"
+: >"$download_log"
+if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$unsafe_bin_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime" >"$tmp/unsafe-bin-out" 2>"$tmp/unsafe-bin-err"; then
+  printf '%s\n' 'expected an unsafe existing runtime bin directory to fail' >&2
+  exit 1
+fi
+grep -F 'runtime bin directory must be owned by' "$tmp/unsafe-bin-err" >/dev/null
+grep -F 'mode 0700; refusing to modify existing permissions' "$tmp/unsafe-bin-err" >/dev/null
+assert_directory_mode 755 "$unsafe_bin_home/bin"
+test "$(sed -n '1p' "$unsafe_bin_home/bin/marker")" = preserved
+test ! -s "$download_log"
+
+unsafe_version_home="$tmp/unsafe-version-home"
+(umask 077 && mkdir -p "$unsafe_version_home/bin")
+(umask 022 && mkdir "$unsafe_version_home/bin/$version")
+printf '%s\n' preserved >"$unsafe_version_home/bin/$version/marker"
+: >"$download_log"
+if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$unsafe_version_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime" >"$tmp/unsafe-version-out" 2>"$tmp/unsafe-version-err"; then
+  printf '%s\n' 'expected an unsafe existing runtime version directory to fail' >&2
+  exit 1
+fi
+grep -F 'runtime version directory must be owned by' "$tmp/unsafe-version-err" >/dev/null
+grep -F 'mode 0700; refusing to modify existing permissions' "$tmp/unsafe-version-err" >/dev/null
+assert_directory_mode 755 "$unsafe_version_home/bin/$version"
+test "$(sed -n '1p' "$unsafe_version_home/bin/$version/marker")" = preserved
+test ! -s "$download_log"
+
+unsafe_platform_home="$tmp/unsafe-platform-home"
+(umask 077 && mkdir -p "$unsafe_platform_home/bin/$version")
+(umask 022 && mkdir "$unsafe_platform_home/bin/$version/$os-$arch")
+printf '%s\n' preserved >"$unsafe_platform_home/bin/$version/$os-$arch/marker"
+: >"$download_log"
+if PATH="$tmp/fake-bin:$PATH" DELEGATION_HOME="$unsafe_platform_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime" >"$tmp/unsafe-platform-out" 2>"$tmp/unsafe-platform-err"; then
+  printf '%s\n' 'expected an unsafe existing runtime platform directory to fail' >&2
+  exit 1
+fi
+grep -F 'runtime platform directory must be owned by' "$tmp/unsafe-platform-err" >/dev/null
+grep -F 'mode 0700; refusing to modify existing permissions' "$tmp/unsafe-platform-err" >/dev/null
+assert_directory_mode 755 "$unsafe_platform_home/bin/$version/$os-$arch"
+test "$(sed -n '1p' "$unsafe_platform_home/bin/$version/$os-$arch/marker")" = preserved
+test ! -s "$download_log"
+
 runtime_user_home="$tmp/runtime-user-home"
 runtime_home="$runtime_user_home/.delegation"
+directory_mode_log="$tmp/runtime-directory-mode.log"
 umask 022
 mkdir -p "$runtime_user_home"
 : >"$download_log"
-installed=$(PATH="$tmp/fake-bin:$PATH" HOME="$runtime_user_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" "$tmp/plugin/scripts/install-runtime")
+installed=$(PATH="$tmp/fake-bin:$PATH" HOME="$runtime_user_home" DELEGATION_TEST_ARTIFACT="$tmp/artifact.tar.gz" DELEGATION_TEST_DIRECTORY_MODE_LOG="$directory_mode_log" "$tmp/plugin/scripts/install-runtime")
 test "$installed" = "$runtime_home/bin/$version/$os-$arch/delegation"
 test -x "$installed"
 test -f "$(dirname "$installed")/THIRD_PARTY_NOTICES.txt"
@@ -217,9 +286,24 @@ test "$(LC_ALL=C ls -A1 "$(dirname "$installed")")" = "THIRD_PARTY_NOTICES.txt
 delegation"
 test "$(wc -l <"$download_log")" -eq 1
 case "$os" in
-  linux) test "$(stat -c '%a' "$runtime_home")" = 700 ;;
-  darwin) test "$(stat -f '%Lp' "$runtime_home")" = 700 ;;
+  linux)
+    test "$(stat -c '%a' "$runtime_home")" = 700
+    test "$(stat -c '%a' "$runtime_home/bin")" = 700
+    test "$(stat -c '%a' "$runtime_home/bin/$version")" = 700
+    test "$(stat -c '%a' "$(dirname "$installed")")" = 700
+    ;;
+  darwin)
+    test "$(stat -f '%Lp' "$runtime_home")" = 700
+    test "$(stat -f '%Lp' "$runtime_home/bin")" = 700
+    test "$(stat -f '%Lp' "$runtime_home/bin/$version")" = 700
+    test "$(stat -f '%Lp' "$(dirname "$installed")")" = 700
+    ;;
 esac
+assert_directory_owner "$runtime_home"
+assert_directory_owner "$runtime_home/bin"
+assert_directory_owner "$runtime_home/bin/$version"
+assert_directory_owner "$(dirname "$installed")"
+test "$(sed -n '1p' "$directory_mode_log")" = "700 $(id -u)"
 "$installed" version --json >"$tmp/installed-version"
 grep -F "\"version\":\"$version\"" "$tmp/installed-version" >/dev/null
 HOME="$runtime_user_home" "$tmp/plugin/scripts/delegation-mcp" version --json >"$tmp/launcher-installed-version"

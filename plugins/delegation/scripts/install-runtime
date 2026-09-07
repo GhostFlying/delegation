@@ -64,13 +64,53 @@ if [ "$home_mode" != 700 ] || [ "$home_owner" != "$current_uid" ]; then
   printf '%s\n' "delegation: delegation home must be owned by uid $current_uid with mode 0700; refusing to modify existing permissions: $delegation_home" >&2
   exit 1
 fi
-target_parent="$delegation_home/bin/$version"
+
+validate_private_directory() {
+  private_path=$1
+  private_description=$2
+  if [ -L "$private_path" ] || [ ! -d "$private_path" ]; then
+    printf '%s\n' "delegation: $private_description must be a non-symlink directory: $private_path" >&2
+    return 1
+  fi
+  case "$os" in
+    linux)
+      private_mode=$(stat -c '%a' "$private_path")
+      private_owner=$(stat -c '%u' "$private_path")
+      ;;
+    darwin)
+      private_mode=$(stat -f '%Lp' "$private_path")
+      private_owner=$(stat -f '%u' "$private_path")
+      ;;
+  esac
+  if [ "$private_mode" != 700 ] || [ "$private_owner" != "$current_uid" ]; then
+    printf '%s\n' "delegation: $private_description must be owned by uid $current_uid with mode 0700; refusing to modify existing permissions: $private_path" >&2
+    return 1
+  fi
+}
+
+ensure_private_directory() {
+  private_path=$1
+  private_description=$2
+  if [ ! -e "$private_path" ] && [ ! -L "$private_path" ]; then
+    if ! (umask 077 && mkdir "$private_path") 2>/dev/null; then
+      if [ ! -e "$private_path" ] && [ ! -L "$private_path" ]; then
+        printf '%s\n' "delegation: failed to create private $private_description: $private_path" >&2
+        return 1
+      fi
+    fi
+  fi
+  validate_private_directory "$private_path" "$private_description"
+}
+
+bin_root="$delegation_home/bin"
+target_parent="$bin_root/$version"
 target="$target_parent/$os-$arch"
 binary="$target/delegation"
 notice="$target/THIRD_PARTY_NOTICES.txt"
-if [ -L "$target" ]; then
-  printf '%s\n' "delegation: runtime target must not be a symbolic link: $target" >&2
-  exit 1
+ensure_private_directory "$bin_root" "runtime bin directory"
+ensure_private_directory "$target_parent" "runtime version directory"
+if [ -e "$target" ] || [ -L "$target" ]; then
+  validate_private_directory "$target" "runtime platform directory"
 fi
 if [ -e "$binary" ] || [ -L "$binary" ]; then
   if [ ! -f "$binary" ] || [ -L "$binary" ] || [ ! -x "$binary" ]; then
@@ -110,13 +150,13 @@ if ! command -v link >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "$target_parent"
-staging=$(mktemp -d "$target_parent/.install-$os-$arch.XXXXXX")
+staging=$(umask 077 && mktemp -d "$target_parent/.install-$os-$arch.XXXXXX")
 archive="$staging/$artifact"
 cleanup() {
   rm -rf "$staging"
 }
 trap cleanup EXIT HUP INT TERM
+validate_private_directory "$staging" "runtime staging directory"
 
 url="https://github.com/GhostFlying/delegation/releases/download/v$version/$artifact"
 curl --fail --location --silent --show-error --output "$archive" "$url"
@@ -164,12 +204,7 @@ if [ "$installed_version" != "$version" ]; then
 fi
 rm "$archive"
 
-if ! mkdir "$target" 2>/dev/null; then
-  if [ ! -d "$target" ] || [ -L "$target" ]; then
-    printf '%s\n' "delegation: runtime target appeared during installation: $target" >&2
-    exit 1
-  fi
-fi
+ensure_private_directory "$target" "runtime platform directory"
 target_entries=$(LC_ALL=C ls -A1 "$target")
 case "$target_entries" in
   "") ;;
