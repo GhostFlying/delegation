@@ -143,6 +143,13 @@ not silently restore the old runtime. The protected local Unix socket or Windows
 only running-service management channel; broker listeners expose no upgrade API. Windows activators
 invoke the native `delegation.exe` directly.
 
+A peer activator commits after the target local service reports the expected runtime and config
+digests plus a ready execution epoch newer than the source epoch. It does not require a connection
+to the old broker during the peer-first window. After a coordinated broker activation, the
+controller completion gate separately requires each participating peer to reconnect at the target
+version, synchronize lifecycle state, retain the target-bound readiness epoch, and report a
+committed local upgrade before the participant qualifies and the controller drain can end.
+
 Each embedded Tailscale service owns one `tsnet` node and one exclusive Tailscale state-directory
 lease. It does not use system `tailscaled`. Keep broker and peer state directories distinct, and
 require `--auth-mode token` for every embedded broker and peer. Keep Codex and TraeX in separate

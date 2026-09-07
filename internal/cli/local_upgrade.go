@@ -594,16 +594,14 @@ func qualifyLocalUpgrade(ctx context.Context, journal localupgrade.Journal) erro
 		return fmt.Errorf("qualify target peer status: %w", err)
 	}
 	readiness := status.WorkerReadiness
-	if status.Version != journal.TargetVersion || !status.ServiceRunning ||
-		status.ConnectionState != localbridge.ConnectionReady || !status.Connected ||
-		!status.WorkerSyncReady {
-		return errors.New("target peer has not completed connection and lifecycle synchronization")
+	if status.Version != journal.TargetVersion || !status.ServiceRunning {
+		return errors.New("target peer service is not running the target runtime")
 	}
 	if readiness.Epoch <= journal.SourceReadinessEpoch ||
 		readiness.State != protocol.WorkerReadinessReady ||
 		readiness.RuntimeDigest != journal.TargetRuntimeDigest ||
 		readiness.ConfigDigest != journal.ConfigDigest ||
-		!status.WorkerReady || !status.Dispatchable {
+		!status.WorkerReady {
 		return errors.New("target peer has not completed the required new execution-readiness epoch")
 	}
 	return nil
