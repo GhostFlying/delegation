@@ -51,6 +51,24 @@ The observed transaction `995fddd0-6598-40c0-af32-2068d643b859` remained `prepar
   do not need to guess the manager's configuration directory. Add a real custom-client-home
   round-trip before freezing Round 2.
 
+### Round 2
+
+- Base commit: `ef46740f0ca7a99bbeffbf8c6d51fa13ef1c8f65`.
+- Frozen commit: `006b0119b282640cae8a674470a0225ca598e560`.
+- Frozen tree: `bead8710fb0fcfd63ebe78f9d7a15e0471f55a51`.
+- Review checkout: clean detached worktree at the frozen commit and tree.
+- Independent review result: `CLEAN`.
+- Confirmed disposition: the activator reloads the user manager and validates systemd's reported
+  absolute, clean, exact-basename `FragmentPath`, independently of the management client's
+  `XDG_CONFIG_HOME`, while retaining strict linked-state, no-drop-in, ownership, mode, and exact
+  target checks.
+- Executable checks: focused user-service and local-upgrade tests, the user-service race suite,
+  `git diff --check`, and the opt-in real systemd link/install/remove round trip with a custom
+  client `XDG_CONFIG_HOME` passed. The real-manager test left no activator unit links behind.
+- Findings: none.
+
+The checkpoint is accepted at the Round 2 frozen commit and tree.
+
 ## Release And E2E Disposition
 
 Alpha.8 and alpha.9 cannot be Linux coordinated-upgrade sources because ARM executes this broken
