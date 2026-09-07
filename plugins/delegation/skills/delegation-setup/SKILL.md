@@ -46,6 +46,13 @@ launcher for every runtime command below.
 5. Do not invoke a bare `delegation` command or assume setup created a `PATH` shim; the runtime
    remains in its versioned directory.
 
+On Linux and macOS, the Delegation home and each managed `bin`, version, platform, and staging
+directory must be owned by the current user with mode `0700`. The installer creates new directories
+with that protection and validates the complete hierarchy on cold and warm launcher paths. It never
+changes permissions on an existing directory. If an alpha.8 cold installation reports a broader
+directory, stop and inspect its owner and contents before an operator deliberately secures or
+recreates it; do not let setup silently take ownership of that path.
+
 ## Configure The Installation
 
 An installation may host a broker, a peer, or both. Run `setup broker --help` or `setup peer --help`
