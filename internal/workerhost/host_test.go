@@ -88,6 +88,34 @@ func TestHostUsesOneAppServerAndEnforcesWorkerSlots(t *testing.T) {
 	}
 }
 
+func TestManagedProfileControlsCodexCodeModeWithoutChangingTraeX(t *testing.T) {
+	for _, kind := range []hostkind.Kind{hostkind.Codex, hostkind.TraeX} {
+		t.Run(string(kind), func(t *testing.T) {
+			host, _, _ := newTestHostForKind(t, kind, 1)
+			config := host.managedConfig(store.WorkerReservation{})
+			if kind == hostkind.Codex {
+				if config["features.code_mode"] != true || config["agents.enabled"] != false {
+					t.Fatalf("Codex code-mode or native-agent controls = %#v", config)
+				}
+			} else {
+				for _, key := range []string{"features.code_mode", "agents.enabled"} {
+					if _, found := config[key]; found {
+						t.Fatalf("TraeX receives Codex-only control %s", key)
+					}
+				}
+			}
+			for _, key := range []string{"features.multi_agent", "features.multi_agent_v2", "features.enable_fanout"} {
+				if config[key] != false {
+					t.Fatalf("native agent feature %s = %#v", key, config[key])
+				}
+			}
+			if config["mcp_servers."+workerServerName] == nil || config["model"] != "test-model" {
+				t.Fatal("managed worker MCP or provider model was replaced")
+			}
+		})
+	}
+}
+
 func TestHostPassesStructuredCLILaunchToAppServer(t *testing.T) {
 	application := newFakeApplication()
 	host, _, paths := newTestHost(t, 1, application)
@@ -3354,6 +3382,9 @@ func assertManagedProfile(
 		if config[key] != false {
 			t.Fatalf("managed config %s = %#v", key, config[key])
 		}
+	}
+	if config["features.code_mode"] != true || config["agents.enabled"] != false {
+		t.Fatalf("managed Codex code-mode or native-agent controls = %#v", config)
 	}
 	if config["model"] != "test-model" {
 		t.Fatalf("provider config = %#v", config)

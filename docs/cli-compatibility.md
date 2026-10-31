@@ -9,6 +9,20 @@ Ordinary CI installs exact Codex `0.163.0` for native managed-worker tests and t
 TraeX real-account acceptance runs separately because it requires an explicitly provided protected
 account file. Do not copy account credentials into CI configuration or evidence.
 
+## Managed Worker Profile
+
+Managed worker profile 8 enables the Codex code-mode tool surface required by code-mode-only
+models such as `gpt-6.1-sol`. Native Codex agents remain disabled with the runtime-controlled
+`agents.enabled=false` setting and the existing multi-agent feature flags. The Delegation worker
+MCP remains available. Provider JSON cannot override these controls. TraeX retains its own tool
+surface and model selection; the Codex-only controls are not passed to TraeX.
+
+The common profile version also applies to TraeX history. The stopped-shadow upgrade accepts
+homogeneous inactive histories from profiles 5, 6, or 7 and rewrites them to profile 8. Active work,
+unfinished result publication, mixed generations, and foreign authority remain upgrade blockers.
+This does not change filesystem permissions or credential-file protections. Historical M6 records
+continue to describe the profile and runtime that produced their evidence.
+
 ## Executable Acceptance
 
 For Linux and macOS, build the exact checkpoint and run the Codex mock integration tests with the

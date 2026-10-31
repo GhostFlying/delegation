@@ -237,7 +237,8 @@ func TestMigratePeerUpgradeDatabaseRewritesHistoricalProfiles(t *testing.T) {
 	}{
 		{name: "alpha4 profile 5", schemaVersion: 15, profile: 5},
 		{name: "alpha7 profile 6", schemaVersion: 16, profile: 6},
-		{name: "current profile 7", schemaVersion: 16, profile: workerprofile.CurrentVersion},
+		{name: "alpha11 profile 7", schemaVersion: 16, profile: 7},
+		{name: "current profile", schemaVersion: 16, profile: workerprofile.CurrentVersion},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -321,6 +322,12 @@ func TestMigratePeerUpgradeDatabaseRejectsUnsafeHistoryAtomically(t *testing.T) 
 		{name: "occupied worker", workers: []profileWorker{
 			{profile: 6, status: WorkerReserved},
 		}, want: "active durable work"},
+		{name: "alpha11 occupied worker", workers: []profileWorker{
+			{profile: 7, status: WorkerRunning},
+		}, want: "active durable work"},
+		{name: "alpha11 unfinished result publication", workers: []profileWorker{
+			{profile: 7, status: WorkerIdle},
+		}, seed: seedUnfinishedUpgradeArtifact, want: "active durable work"},
 		{name: "pending operation", workers: []profileWorker{
 			{profile: 6, status: WorkerPending},
 		}, seed: seedPendingUpgradeOperation, want: "active durable work"},

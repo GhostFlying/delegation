@@ -54,6 +54,13 @@ func (h *Host) managedConfig(worker store.WorkerReservation) map[string]any {
 	config["features.multi_agent"] = false
 	config["features.multi_agent_v2"] = false
 	config["features.enable_fanout"] = false
+	if h.hostKind == hostkind.Codex {
+		// Code-mode-only models need this tool surface. Disable native agents
+		// explicitly because model metadata can select them independently of
+		// the multi_agent feature flags.
+		config["features.code_mode"] = true
+		config["agents.enabled"] = false
+	}
 	config[rootPluginEnabledConfig] = false
 	filesystem := map[string]any{
 		":minimal": "read",
