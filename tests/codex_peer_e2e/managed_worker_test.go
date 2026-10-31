@@ -820,7 +820,7 @@ func (m *managedResponsesMock) ServeHTTP(writer http.ResponseWriter, request *ht
 		!strings.Contains(string(tools), "mcp__delegation_worker") {
 		m.record(fmt.Errorf("managed worker exposes no worker-tool discovery path: %s", tools))
 	}
-	shellTool, shellArguments := managedShellTool(m.probeCommand)
+	shellTool, shellArguments := managedShellTool(m.probeCommand, body["tools"])
 	if m.shellTool != "" {
 		shellTool = m.shellTool
 		shellArguments = map[string]any{"command": m.probeCommand, "timeout": 10_000}
@@ -886,8 +886,9 @@ func (m *managedResponsesMock) ServeHTTP(writer http.ResponseWriter, request *ht
 	)
 }
 
-func managedShellTool(command string) (string, map[string]any) {
-	if runtime.GOOS == "windows" {
+func managedShellTool(command string, modelTools any) (string, map[string]any) {
+	tools, _ := json.Marshal(modelTools)
+	if !bytes.Contains(tools, []byte(`"name":"exec_command"`)) {
 		return "shell_command", map[string]any{
 			"command":    command,
 			"timeout_ms": 10_000,

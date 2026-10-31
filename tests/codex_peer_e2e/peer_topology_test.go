@@ -260,6 +260,7 @@ func assertLocalBridgeSockets(t *testing.T, current peer) {
 
 func createPeers(t *testing.T, root, modelURL string) []peer {
 	t.Helper()
+	// The mock needs a catalogued Responses model with search-tool support.
 	peers := make([]peer, 0, 3)
 	for _, label := range []string{"A", "B", "C"} {
 		base := filepath.Join(root, strings.ToLower(label))
@@ -271,7 +272,7 @@ func createPeers(t *testing.T, root, modelURL string) []peer {
 		}
 		current.configPath = filepath.Join(current.delegationHome, "peer.json")
 		current.managedConfig = fmt.Sprintf(`{
-				"model":"gpt-5.2",
+				"model":"gpt-5.5",
 				"model_provider":"delegation_mock",
 				"model_providers.delegation_mock":{
 					"name":"Delegation acceptance mock",
@@ -288,7 +289,7 @@ func createPeers(t *testing.T, root, modelURL string) []peer {
 				t.Fatal(err)
 			}
 		}
-		config := fmt.Sprintf(`model = "gpt-5.2"
+		config := fmt.Sprintf(`model = "gpt-5.5"
 model_provider = "delegation_mock"
 approval_policy = "never"
 sandbox_mode = "read-only"
