@@ -655,10 +655,19 @@ func authorizeNewResultPackage(
 	if err != nil {
 		return "", err
 	}
-	if spawn.Agent.SpawnStatus != protocol.AgentSpawnStarted ||
-		spawn.Agent.Principal != principal.Identity() ||
+	if spawn.Agent.Principal != principal.Identity() ||
 		spawn.Agent.Principal.ParentAgentID != tree.RootAgentID ||
 		spawn.Agent.Principal.DeviceID != connectedDeviceID {
+		return "", ErrAuthorizationDenied
+	}
+
+	// A fast worker can publish before the spawn RPC's successful reply is
+	// committed. Keep the package unaccepted while the broker confirms startup;
+	// the connector can retry without treating valid in-flight work as forged.
+	if spawn.Agent.SpawnStatus == protocol.AgentSpawnPending {
+		return "", ErrResultPackageLifecycleNotReady
+	}
+	if spawn.Agent.SpawnStatus != protocol.AgentSpawnStarted {
 		return "", ErrAuthorizationDenied
 	}
 
