@@ -32,6 +32,9 @@ func TestManagedWorkerLiveProviderSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if codexOverrides["model"] != codexAcceptanceModel {
+		t.Fatalf("live Codex model = %v, want %s", codexOverrides["model"], codexAcceptanceModel)
+	}
 	codexLaunch, err := codexcommand.Resolve(codexBinary)
 	if err != nil {
 		t.Fatal(err)

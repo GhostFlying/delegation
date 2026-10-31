@@ -132,7 +132,8 @@ func TestManagedWorkerUsesEnvOnlyProviderAndColdResume(t *testing.T) {
 		{label: "external fixture credential", value: "outside-credential-test-value"},
 	}
 	providerJSON := fmt.Sprintf(
-		`{"model":"gpt-5.2","model_provider":"delegation_mock","model_providers.delegation_mock":{"name":"Delegation managed-worker mock","base_url":%q,"wire_api":"responses","env_key":%q,"requires_openai_auth":false}}`,
+		`{"model":%q,"model_provider":"delegation_mock","model_providers.delegation_mock":{"name":"Delegation managed-worker mock","base_url":%q,"wire_api":"responses","env_key":%q,"requires_openai_auth":false}}`,
+		codexAcceptanceModel,
 		modelServer.URL+"/v1",
 		providerEnvironment,
 	)
@@ -777,6 +778,7 @@ func (m *managedResponsesMock) ServeHTTP(writer http.ResponseWriter, request *ht
 		m.fail(writer, err)
 		return
 	}
+	writer = modelResponseWriter(writer, body, true)
 	encoded, _ := json.Marshal(body)
 	testCase := ""
 	for _, candidate := range []string{managedCrashResumeCase, managedCrashRunningCase, "resume", "first"} {
@@ -812,20 +814,21 @@ func (m *managedResponsesMock) ServeHTTP(writer http.ResponseWriter, request *ht
 		m.fail(writer, errors.New("managed model request has no test case"))
 		return
 	}
-	tools, _ := json.Marshal(body["tools"])
+	tools, _ := json.Marshal(modelToolDeclarations(body))
 	if strings.Contains(string(tools), "spawn_agent") || strings.Contains(string(tools), "multi_agent") {
 		m.record(fmt.Errorf("managed worker exposes recursive delegation tools: %s", tools))
 	}
 	if !strings.Contains(string(tools), "tool_search") &&
-		!strings.Contains(string(tools), "mcp__delegation_worker") {
+		!strings.Contains(string(tools), "mcp__delegation_worker") &&
+		!modelToolExposed(modelToolDeclarations(body), "exec") {
 		m.record(fmt.Errorf("managed worker exposes no worker-tool discovery path: %s", tools))
 	}
-	shellTool, shellArguments := managedShellTool(m.probeCommand, body["tools"])
+	shellTool, shellArguments := managedShellTool(m.probeCommand, modelToolDeclarations(body))
 	if m.shellTool != "" {
 		shellTool = m.shellTool
 		shellArguments = map[string]any{"command": m.probeCommand, "timeout": 10_000}
 	}
-	if !strings.Contains(string(tools), `"name":"`+shellTool+`"`) {
+	if !modelToolExposed(modelToolDeclarations(body), shellTool) {
 		m.record(fmt.Errorf("managed worker exposes no %s tool: %s", shellTool, tools))
 	}
 	m.mu.Lock()
@@ -887,8 +890,7 @@ func (m *managedResponsesMock) ServeHTTP(writer http.ResponseWriter, request *ht
 }
 
 func managedShellTool(command string, modelTools any) (string, map[string]any) {
-	tools, _ := json.Marshal(modelTools)
-	if !bytes.Contains(tools, []byte(`"name":"exec_command"`)) {
+	if !modelToolExposed(modelTools, "exec_command") {
 		return "shell_command", map[string]any{
 			"command":    command,
 			"timeout_ms": 10_000,
@@ -929,12 +931,8 @@ func functionCallOutput(value any, callID string) string {
 			}
 		}
 	case map[string]any:
-		if typed["type"] == "function_call_output" && typed["call_id"] == callID {
-			if output, ok := typed["output"].(string); ok {
-				return output
-			}
-			encoded, _ := json.Marshal(typed["output"])
-			return string(encoded)
+		if (typed["type"] == "function_call_output" || typed["type"] == "custom_tool_call_output") && typed["call_id"] == callID {
+			return modelOutputText(typed["output"])
 		}
 		for _, item := range typed {
 			if output := functionCallOutput(item, callID); output != "" {
@@ -1010,6 +1008,7 @@ func writeManagedSSE(writer http.ResponseWriter, events ...map[string]any) {
 	writer.Header().Set("Content-Type", "text/event-stream")
 	buffer := bufio.NewWriter(writer)
 	for _, event := range events {
+		event = modelResponseEvent(writer, event)
 		data, _ := json.Marshal(event)
 		_, _ = fmt.Fprintf(buffer, "event: %s\ndata: %s\n\n", event["type"], data)
 	}

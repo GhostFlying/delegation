@@ -40,6 +40,7 @@ func (m *artifactWorkerMock) ServeHTTP(writer http.ResponseWriter, request *http
 		m.fail(writer, err)
 		return
 	}
+	writer = modelResponseWriter(writer, body, true)
 	encoded, _ := json.Marshal(body)
 	if !bytes.Contains(encoded, []byte("managed-worker-case="+m.testCase)) {
 		m.fail(writer, errors.New("managed model request has no artifact test case"))
@@ -50,12 +51,12 @@ func (m *artifactWorkerMock) ServeHTTP(writer http.ResponseWriter, request *http
 	m.calls++
 	m.mu.Unlock()
 	command := artifactE2EWorkerCommand(m.leaveDirty)
-	shellTool, shellArguments := managedShellTool(command, body["tools"])
+	shellTool, shellArguments := managedShellTool(command, modelToolDeclarations(body))
 	callID := "call-artifact-cross-platform"
 	switch call {
 	case 0:
-		tools, _ := json.Marshal(body["tools"])
-		if !bytes.Contains(tools, []byte(`"name":"`+shellTool+`"`)) {
+		tools, _ := json.Marshal(modelToolDeclarations(body))
+		if !modelToolExposed(modelToolDeclarations(body), shellTool) {
 			m.record(fmt.Errorf("managed worker exposes no %s tool: %s", shellTool, tools))
 		}
 		arguments, _ := json.Marshal(shellArguments)
