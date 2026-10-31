@@ -480,6 +480,8 @@ func TestTraeXIdleCompletesTurnBeforeStartResponse(t *testing.T) {
 }
 
 func TestTraeXStaleIdleAroundTurnStartDoesNotRetireClient(t *testing.T) {
+	// Reaching the barriers includes real workspace and SQLite operations.
+	const spawnWait = 10 * time.Second
 	tests := map[string]func(*fakeApplication) (<-chan struct{}, func()){
 		"before turn creation": func(application *fakeApplication) (<-chan struct{}, func()) {
 			application.turnStartGate = make(chan struct{})
@@ -498,8 +500,9 @@ func TestTraeXStaleIdleAroundTurnStartDoesNotRetireClient(t *testing.T) {
 			ready, release := arrange(application)
 			var releaseOnce sync.Once
 			releaseTurnStart := func() { releaseOnce.Do(release) }
-			t.Cleanup(releaseTurnStart)
 			host, state, _ := newTestHostForKind(t, hostkind.TraeX, 1, application)
+			// Unblock an in-flight spawn before the host helper's cleanup runs.
+			t.Cleanup(releaseTurnStart)
 			agentID := newTestID()
 			key := store.WorkerKey{
 				ControllerID: testControllerID,
@@ -520,7 +523,9 @@ func TestTraeXStaleIdleAroundTurnStartDoesNotRetireClient(t *testing.T) {
 			}()
 			select {
 			case <-ready:
-			case <-time.After(time.Second):
+			case result := <-spawnDone:
+				t.Fatalf("Spawn returned before the prepared window: %#v, %v", result.started, result.err)
+			case <-time.After(spawnWait):
 				t.Fatal("turn/start did not reach the prepared window")
 			}
 			worker, err := state.GetWorker(context.Background(), key)
@@ -554,7 +559,7 @@ func TestTraeXStaleIdleAroundTurnStartDoesNotRetireClient(t *testing.T) {
 				if result.err != nil || result.started.Worker.Status != store.WorkerRunning {
 					t.Fatalf("Spawn() after stale idle = %#v, %v", result.started, result.err)
 				}
-			case <-time.After(time.Second):
+			case <-time.After(spawnWait):
 				t.Fatal("Spawn did not finish after stale idle")
 			}
 		})
