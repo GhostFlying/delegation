@@ -51,6 +51,7 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		m.fail(writer, err)
 		return
 	}
+	writer = modelResponseWriter(writer, body, peerLabel == "")
 	testCase := requestCase(body)
 	if testCase == "" {
 		m.fail(writer, errors.New("model request did not contain a known acceptance case"))
@@ -63,7 +64,7 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		m.calls[key] = call + 1
 		block := m.workerBlocks[testCase]
 		m.mu.Unlock()
-		encodedTools, _ := json.Marshal(body["tools"])
+		encodedTools, _ := json.Marshal(modelToolDeclarations(body))
 		for _, forbidden := range []string{
 			"sync_workspace", "spawn_agent", "list_agents", "list_devices", "describe_device",
 			"followup_task", "interrupt_agent",
@@ -133,22 +134,15 @@ func (m *mockResponses) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	searchID := "search-" + suffix
 	callID := "call-" + suffix
 	if call == 0 {
-		encodedTools, _ := json.Marshal(body["tools"])
-		if !bytes.Contains(encodedTools, []byte(`"tool_search"`)) {
-			m.record(fmt.Errorf("case %s model tools do not expose tool_search: %s", key, encodedTools))
+		encodedTools, _ := json.Marshal(modelToolDeclarations(body))
+		if !modelToolExposed(modelToolDeclarations(body), "exec") {
+			m.record(fmt.Errorf("case %s model tools do not expose code-mode discovery: %s", key, encodedTools))
 		}
 		writeToolSearchResponse(writer, key, searchID)
 		return
 	}
 	if call == 1 {
-		searchOutput, err := callOutputItem(body, "tool_search_output", searchID)
-		encodedOutput, _ := json.Marshal(searchOutput)
-		if err != nil {
-			m.record(fmt.Errorf("case %s: %w", key, err))
-		} else if !bytes.Contains(encodedOutput, []byte(`"mcp__delegation"`)) ||
-			!bytes.Contains(encodedOutput, []byte(`"list_devices"`)) {
-			m.record(fmt.Errorf("case %s tool search did not expose delegation list_devices: %s", key, encodedOutput))
-		}
+		m.validateRootToolSearch(body, key, searchID, "list_devices")
 		writeToolCallResponse(writer, key, callID)
 		return
 	}
@@ -259,12 +253,12 @@ func (m *mockResponses) handleWorkerWorkspace(
 			`commit -m 'worker result commit' && `+
 			`printf '%s\n' `+managedPOSIXShellLiteral(scenario.workerMarker)+` > worker-change.txt && `+
 			`printf '%s\n' `+managedPOSIXShellLiteral(successMarker),
-		body["tools"],
+		modelToolDeclarations(body),
 	)
 	switch call {
 	case 0:
-		tools, _ := json.Marshal(body["tools"])
-		if !bytes.Contains(tools, []byte(`"name":"`+shellTool+`"`)) {
+		tools, _ := json.Marshal(modelToolDeclarations(body))
+		if !modelToolExposed(modelToolDeclarations(body), shellTool) {
 			m.record(fmt.Errorf("case %s exposes no %s tool: %s", key, shellTool, tools))
 		}
 		arguments, _ := json.Marshal(shellArguments)
@@ -365,7 +359,7 @@ func (m *mockResponses) validateRootToolSearch(
 	searchID string,
 	tool string,
 ) {
-	searchOutput, err := callOutputItem(body, "tool_search_output", searchID)
+	searchOutput, err := functionOutput(body, searchID)
 	if err != nil {
 		m.record(fmt.Errorf("case %s: %w", key, err))
 		return
@@ -496,7 +490,7 @@ func (m *mockResponses) handleWorkerMailboxFollowup(
 }
 
 func (m *mockResponses) validateWorkerToolSearch(body map[string]any, key, searchID string) {
-	searchOutput, err := callOutputItem(body, "tool_search_output", searchID)
+	searchOutput, err := functionOutput(body, searchID)
 	if err != nil {
 		m.record(fmt.Errorf("case %s: %w", key, err))
 		return
@@ -532,43 +526,31 @@ func (m *mockResponses) validateWorkerToolSearch(body map[string]any, key, searc
 	}
 }
 
-func toolSearchNamespaces(output map[string]any) (map[string][]string, error) {
-	tools, ok := output["tools"].([]any)
-	if !ok {
-		return nil, errors.New("tool_search_output tools is not an array")
-	}
-	namespaces := make(map[string][]string, len(tools))
-	for _, value := range tools {
-		namespace, ok := value.(map[string]any)
-		if !ok || namespace["type"] != "namespace" {
-			return nil, fmt.Errorf("tool_search_output contains a non-namespace tool: %#v", value)
+func toolSearchNamespaces(output string) (map[string][]string, error) {
+	// functions.exec outputs a timing banner followed by typed text content.
+	for index := strings.IndexByte(output, '{'); index >= 0; {
+		var catalog struct {
+			Tools []string `json:"delegation_tools"`
 		}
-		name, ok := namespace["name"].(string)
-		if !ok || name == "" {
-			return nil, fmt.Errorf("tool_search_output contains an unnamed namespace: %#v", value)
-		}
-		if _, duplicate := namespaces[name]; duplicate {
-			return nil, fmt.Errorf("tool_search_output repeats namespace %s", name)
-		}
-		values, ok := namespace["tools"].([]any)
-		if !ok {
-			return nil, fmt.Errorf("tool_search_output namespace %s tools is not an array", name)
-		}
-		names := make([]string, 0, len(values))
-		for _, value := range values {
-			tool, ok := value.(map[string]any)
-			if !ok || tool["type"] != "function" {
-				return nil, fmt.Errorf("tool_search_output namespace %s contains a non-function tool: %#v", name, value)
+		if json.NewDecoder(strings.NewReader(output[index:])).Decode(&catalog) == nil && catalog.Tools != nil {
+			namespaces := make(map[string][]string)
+			for _, name := range catalog.Tools {
+				separator := strings.LastIndex(name, "__")
+				if separator < 0 {
+					return nil, fmt.Errorf("invalid discovered tool name %q", name)
+				}
+				namespace, tool := name[:separator], name[separator+2:]
+				namespaces[namespace] = append(namespaces[namespace], tool)
 			}
-			toolName, ok := tool["name"].(string)
-			if !ok || toolName == "" {
-				return nil, fmt.Errorf("tool_search_output namespace %s contains an unnamed tool: %#v", name, value)
-			}
-			names = append(names, toolName)
+			return namespaces, nil
 		}
-		namespaces[name] = names
+		next := strings.IndexByte(output[index+1:], '{')
+		if next < 0 {
+			break
+		}
+		index += next + 1
 	}
-	return namespaces, nil
+	return nil, fmt.Errorf("code-mode discovery did not return its tool catalog: %s", output)
 }
 
 func decodeRequest(request *http.Request) (map[string]any, error) {
@@ -618,51 +600,10 @@ func requestCase(body map[string]any) string {
 }
 
 func functionOutput(body map[string]any, callID string) (string, error) {
-	var visit func(any) (string, bool)
-	visit = func(value any) (string, bool) {
-		switch typed := value.(type) {
-		case map[string]any:
-			if typed["type"] == "function_call_output" && typed["call_id"] == callID {
-				switch output := typed["output"].(type) {
-				case string:
-					return output, true
-				default:
-					data, _ := json.Marshal(output)
-					return string(data), true
-				}
-			}
-			for _, child := range typed {
-				if output, ok := visit(child); ok {
-					return output, true
-				}
-			}
-		case []any:
-			for _, child := range typed {
-				if output, ok := visit(child); ok {
-					return output, true
-				}
-			}
-		}
-		return "", false
-	}
-	if output, ok := visit(body); ok {
+	if output := functionCallOutput(body["input"], callID); output != "" {
 		return output, nil
 	}
-	return "", fmt.Errorf("missing function_call_output for %s", callID)
-}
-
-func callOutputItem(body map[string]any, outputType, callID string) (map[string]any, error) {
-	inputs, ok := body["input"].([]any)
-	if !ok {
-		return nil, errors.New("model request input is not an array")
-	}
-	for _, input := range inputs {
-		item, ok := input.(map[string]any)
-		if ok && item["type"] == outputType && item["call_id"] == callID {
-			return item, nil
-		}
-	}
-	return nil, fmt.Errorf("missing %s for %s", outputType, callID)
+	return "", fmt.Errorf("missing tool call output for %s", callID)
 }
 
 func findRoster(output string) (map[string]any, bool) {
@@ -895,6 +836,7 @@ func completedEvent(id string) map[string]any {
 func writeSSE(writer http.ResponseWriter, events ...map[string]any) {
 	writer.Header().Set("Content-Type", "text/event-stream")
 	for _, event := range events {
+		event = modelResponseEvent(writer, event)
 		data, _ := json.Marshal(event)
 		fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", event["type"], data)
 	}

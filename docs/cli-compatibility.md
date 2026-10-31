@@ -5,6 +5,12 @@ The current acceptance inputs are Codex `0.163.0`, TraeX `0.213.1`, warmpool `0.
 alone is not execution acceptance. Historical M6 review and release records retain the versions
 that actually produced those results.
 
+Current Codex-backed tests use `gpt-6.1-sol`; TraeX acceptance may continue with `gpt-5.6`.
+Codex mock coverage exercises Responses Lite declarations in `additional_tools`, actual
+`functions.exec` calls and runtime `ALL_TOOLS` discovery. Managed workers enable code mode through
+the controlled runtime profile and disable native agents with `agents.enabled = false`; provider
+JSON cannot override those capability controls. Live Codex smoke rejects a different model.
+
 Ordinary CI installs exact Codex `0.163.0` for native managed-worker tests and the plugin contract.
 TraeX real-account acceptance runs separately because it requires an explicitly provided protected
 account file. Do not copy account credentials into CI configuration or evidence.

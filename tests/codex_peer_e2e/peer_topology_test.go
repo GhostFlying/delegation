@@ -260,7 +260,7 @@ func assertLocalBridgeSockets(t *testing.T, current peer) {
 
 func createPeers(t *testing.T, root, modelURL string) []peer {
 	t.Helper()
-	// The mock needs a catalogued Responses model with search-tool support.
+	// Exercise the current model and its Responses Lite/code-mode tool surface.
 	peers := make([]peer, 0, 3)
 	for _, label := range []string{"A", "B", "C"} {
 		base := filepath.Join(root, strings.ToLower(label))
@@ -272,7 +272,7 @@ func createPeers(t *testing.T, root, modelURL string) []peer {
 		}
 		current.configPath = filepath.Join(current.delegationHome, "peer.json")
 		current.managedConfig = fmt.Sprintf(`{
-				"model":"gpt-5.5",
+				"model":%q,
 				"model_provider":"delegation_mock",
 				"model_providers.delegation_mock":{
 					"name":"Delegation acceptance mock",
@@ -280,7 +280,7 @@ func createPeers(t *testing.T, root, modelURL string) []peer {
 					"wire_api":"responses",
 					"requires_openai_auth":false
 				}
-			}`, modelURL+"/v1")
+			}`, codexAcceptanceModel, modelURL+"/v1")
 		for _, directory := range []string{current.home, current.codexHome, current.delegationHome} {
 			if err := os.MkdirAll(directory, 0o700); err != nil {
 				t.Fatal(err)
@@ -289,13 +289,14 @@ func createPeers(t *testing.T, root, modelURL string) []peer {
 				t.Fatal(err)
 			}
 		}
-		config := fmt.Sprintf(`model = "gpt-5.5"
+		config := fmt.Sprintf(`model = %q
 model_provider = "delegation_mock"
 approval_policy = "never"
 sandbox_mode = "read-only"
 
 [features]
 plugins = true
+code_mode = true
 
 [plugins."delegation@delegation".mcp_servers.delegation]
 default_tools_approval_mode = "approve"
@@ -309,7 +310,7 @@ supports_websockets = false
 request_max_retries = 0
 stream_max_retries = 0
 http_headers = { "x-delegation-test-peer" = %q }
-`, modelURL+"/v1", label)
+`, codexAcceptanceModel, modelURL+"/v1", label)
 		if err := os.WriteFile(filepath.Join(current.codexHome, "config.toml"), []byte(config), 0o600); err != nil {
 			t.Fatal(err)
 		}

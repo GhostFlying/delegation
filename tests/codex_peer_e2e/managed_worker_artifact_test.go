@@ -277,7 +277,8 @@ func testManagedWorkerPublishesResultPackage(t *testing.T, scenario artifactE2ES
 	modelServer := httptest.NewServer(mock)
 	defer modelServer.Close()
 	providerJSON := fmt.Sprintf(
-		`{"model":"gpt-5.2","model_provider":"delegation_mock","model_providers.delegation_mock":{"name":"Delegation artifact mock","base_url":%q,"wire_api":"responses","requires_openai_auth":false}}`,
+		`{"model":%q,"model_provider":"delegation_mock","model_providers.delegation_mock":{"name":"Delegation artifact mock","base_url":%q,"wire_api":"responses","requires_openai_auth":false}}`,
+		codexAcceptanceModel,
 		modelServer.URL+"/v1",
 	)
 	providerDirectory := filepath.Join(root, "provider")
