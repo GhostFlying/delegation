@@ -44,7 +44,7 @@ No logged-in Windows 11 machine is currently available for this acceptance campa
 that machine are `SKIP`, with that reason retained in the result. This does not remove Windows
 Codex from the supported product scope or disable the existing Windows CI jobs.
 
-A fresh Kross Windows container can execute compatible native Go tests, PowerShell launcher and
+A fresh Windows build container can execute compatible native Go tests, PowerShell launcher and
 process tests, qualification-handoff fixtures, and Codex mock integration tests. Record those as
 Windows-container results, including the actual Windows Server and PowerShell versions. They do
 not establish Windows 11 interactive-user Task Scheduler or real-machine qualification.
@@ -52,4 +52,5 @@ not establish Windows 11 interactive-user Task Scheduler or real-machine qualifi
 Keep real-machine-only Task Scheduler and logged-in-user qualification as separate `SKIP` rows.
 Windows TraeX remains unsupported; its exclusion is not a passing or skipped supported-path test.
 
-Current execution results are recorded separately from this baseline and its historical M6 evidence.
+See the [2026-10-31 execution record](../review/cli-baseline-refresh/ACCEPTANCE.md) for actual
+results and remaining gaps. Historical M6 evidence remains unchanged.
