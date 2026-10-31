@@ -50,7 +50,7 @@ func (m *artifactWorkerMock) ServeHTTP(writer http.ResponseWriter, request *http
 	m.calls++
 	m.mu.Unlock()
 	command := artifactE2EWorkerCommand(m.leaveDirty)
-	shellTool, shellArguments := managedShellTool(command)
+	shellTool, shellArguments := managedShellTool(command, body["tools"])
 	callID := "call-artifact-cross-platform"
 	switch call {
 	case 0:

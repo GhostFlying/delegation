@@ -249,16 +249,17 @@ func (m *mockResponses) handleWorkerWorkspace(
 	callID := "call-worker-workspace-" + scenario.name + "-shell"
 	successMarker := "WORKSPACE_" + strings.ToUpper(scenario.name) + "_OK"
 	shellTool, shellArguments := managedShellTool(
-		`test "$(cat source.txt)" = ` + managedPOSIXShellLiteral(scenario.sourceMarker) + ` && ` +
-			`test "$(cat dirty-source.txt)" = ` + managedPOSIXShellLiteral(scenario.dirtyMarker) + ` && ` +
-			`test "$(git -C .. ls-files --others --exclude-standard -- nested/dirty-source.txt)" = nested/dirty-source.txt && ` +
-			`test "$(git rev-parse HEAD)" = ` + managedPOSIXShellLiteral(scenario.head) + ` && ` +
-			`printf '%s\n' ` + managedPOSIXShellLiteral(scenario.workerCommitMarker) + ` > source.txt && ` +
-			`git -C .. add -- nested/source.txt && ` +
-			`git -C .. -c user.name='Delegation Worker Test' -c user.email='worker@example.invalid' ` +
-			`commit -m 'worker result commit' && ` +
-			`printf '%s\n' ` + managedPOSIXShellLiteral(scenario.workerMarker) + ` > worker-change.txt && ` +
-			`printf '%s\n' ` + managedPOSIXShellLiteral(successMarker),
+		`test "$(cat source.txt)" = `+managedPOSIXShellLiteral(scenario.sourceMarker)+` && `+
+			`test "$(cat dirty-source.txt)" = `+managedPOSIXShellLiteral(scenario.dirtyMarker)+` && `+
+			`test "$(git -C .. ls-files --others --exclude-standard -- nested/dirty-source.txt)" = nested/dirty-source.txt && `+
+			`test "$(git rev-parse HEAD)" = `+managedPOSIXShellLiteral(scenario.head)+` && `+
+			`printf '%s\n' `+managedPOSIXShellLiteral(scenario.workerCommitMarker)+` > source.txt && `+
+			`git -C .. add -- nested/source.txt && `+
+			`git -C .. -c user.name='Delegation Worker Test' -c user.email='worker@example.invalid' `+
+			`commit -m 'worker result commit' && `+
+			`printf '%s\n' `+managedPOSIXShellLiteral(scenario.workerMarker)+` > worker-change.txt && `+
+			`printf '%s\n' `+managedPOSIXShellLiteral(successMarker),
+		body["tools"],
 	)
 	switch call {
 	case 0:

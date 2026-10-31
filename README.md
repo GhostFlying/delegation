@@ -86,6 +86,10 @@ python3 /path/to/skill-creator/scripts/quick_validate.py \
 The Python paths above refer to the validators bundled with the local Codex installation; they are
 not runtime dependencies of Delegation.
 
+See [the current CLI acceptance baseline](docs/cli-compatibility.md) for pinned CLI versions,
+executable checks, and the distinction between Windows-container results and Windows 11
+real-machine acceptance.
+
 ## Prepare A Release
 
 Pre-1.0 alpha releases use deterministic unsigned archives. For every runtime compatibility
