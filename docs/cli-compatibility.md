@@ -72,5 +72,6 @@ not establish Windows 11 interactive-user Task Scheduler or real-machine qualifi
 Keep real-machine-only Task Scheduler and logged-in-user qualification as separate `SKIP` rows.
 Windows TraeX remains unsupported; its exclusion is not a passing or skipped supported-path test.
 
-See the [2026-10-31 execution record](../review/cli-baseline-refresh/ACCEPTANCE.md) for actual
-results and remaining gaps. Historical M6 evidence remains unchanged.
+See the [2026-11-01 Sol execution record](../review/codex-sol-acceptance/ACCEPTANCE.md) for current
+results and remaining gaps. The [2026-10-31 execution record](../review/cli-baseline-refresh/ACCEPTANCE.md)
+remains historical evidence. Historical M6 evidence remains unchanged.
