@@ -380,6 +380,44 @@ func TestResultPackagePublishConflictsAreAtomicByPackageAndSourceTurn(t *testing
 	}
 }
 
+// A fast target can finish and publish before the broker goroutine consumes
+// SpawnWorker's successful reply and commits MarkAgentSpawnStarted.
+func TestResultPackagePublishWaitsForSpawnAcknowledgement(t *testing.T) {
+	fixture := prepareResultPackageFixture(t, false, false)
+	ctx := context.Background()
+	params := protocol.PublishResultPackageParams{Metadata: fixture.Metadata}
+	if _, err := fixture.Registry.PublishResultPackage(
+		ctx, fixture.Worker.DeviceID, fixture.Worker, params, time.Unix(40, 0),
+	); !errors.Is(err, ErrResultPackageLifecycleNotReady) {
+		t.Fatalf("publication before spawn acknowledgement = %v, want retryable authority", err)
+	}
+	assertResultPackageCount(t, fixture.Registry, 0)
+
+	if _, err := fixture.Registry.MarkAgentSpawnStarted(ctx, AgentSpawnKey{
+		ControllerID: fixture.Worker.ControllerID, TreeID: fixture.Worker.TreeID,
+		SourceAgentID: fixture.Root.AgentID, SpawnID: agentSpawnID,
+	}, time.Unix(41, 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	future := fixture.Manifest
+	future.LifecycleRevision++
+	if _, err := fixture.Registry.PublishResultPackage(
+		ctx, fixture.Worker.DeviceID, fixture.Worker,
+		protocol.PublishResultPackageParams{Metadata: encodeResultMetadata(t, future)}, time.Unix(42, 0),
+	); !errors.Is(err, ErrResultPackageLifecycleNotReady) {
+		t.Fatalf("spawn acknowledgement bypassed lifecycle authority: %v", err)
+	}
+	assertResultPackageCount(t, fixture.Registry, 0)
+
+	if _, err := fixture.Registry.PublishResultPackage(
+		ctx, fixture.Worker.DeviceID, fixture.Worker, params, time.Unix(43, 0),
+	); err != nil {
+		t.Fatalf("publication after spawn acknowledgement: %v", err)
+	}
+	assertResultPackageCount(t, fixture.Registry, 1)
+}
+
 func TestResultPackagePublishBindsIntroducedLifecycleAuthorityRevision(t *testing.T) {
 	t.Run("peer cursor behind is retryable and creates no package", func(t *testing.T) {
 		fixture := prepareResultPackageFixture(t, false, true)
@@ -490,15 +528,54 @@ func TestResultPackagePublishEnforcesConnectionSpawnAndWorkspaceAuthority(t *tes
 		assertResultPackageCount(t, fixture.Registry, 0)
 	})
 
-	t.Run("unstarted spawn", func(t *testing.T) {
+	t.Run("failed spawn", func(t *testing.T) {
 		fixture := prepareResultPackageFixture(t, false, false)
+		if _, err := fixture.Registry.MarkAgentSpawnFailed(context.Background(), AgentSpawnKey{
+			ControllerID: fixture.Worker.ControllerID, TreeID: fixture.Worker.TreeID,
+			SourceAgentID: fixture.Root.AgentID, SpawnID: agentSpawnID,
+		}, "spawn_failed", time.Unix(39, 0)); err != nil {
+			t.Fatal(err)
+		}
 		_, err := fixture.Registry.PublishResultPackage(
 			context.Background(), fixture.Worker.DeviceID, fixture.Worker,
 			protocol.PublishResultPackageParams{Metadata: fixture.Metadata}, time.Unix(40, 0),
 		)
 		if !errors.Is(err, ErrAuthorizationDenied) {
-			t.Fatalf("unstarted spawn publish error = %v", err)
+			t.Fatalf("failed spawn publish error = %v", err)
 		}
+	})
+
+	t.Run("pending spawn does not authorize a foreign principal", func(t *testing.T) {
+		fixture := prepareResultPackageFixture(t, false, false)
+		foreign := fixture.Worker
+		foreign.ParentAgentID = resultRelayParent
+		if _, err := fixture.Registry.PublishResultPackage(
+			context.Background(), fixture.Worker.DeviceID, foreign,
+			protocol.PublishResultPackageParams{Metadata: fixture.Metadata}, time.Unix(40, 0),
+		); !errors.Is(err, ErrAuthorizationDenied) {
+			t.Fatalf("foreign pending spawn publication = %v", err)
+		}
+		assertResultPackageCount(t, fixture.Registry, 0)
+	})
+
+	t.Run("worker without a spawn receipt", func(t *testing.T) {
+		fixture := prepareResultPackageFixture(t, false, false)
+		worker, err := fixture.Registry.CreateWorkerPrincipal(
+			context.Background(), fixture.Worker.ControllerID, fixture.Worker.TreeID,
+			resultRelayParent, fixture.Root.AgentID, fixture.Worker.DeviceID, time.Unix(39, 0),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifest := fixture.Manifest
+		manifest.SourceAgentID = worker.AgentID
+		if _, err := fixture.Registry.PublishResultPackage(
+			context.Background(), worker.DeviceID, worker.Identity(),
+			protocol.PublishResultPackageParams{Metadata: encodeResultMetadata(t, manifest)}, time.Unix(40, 0),
+		); !errors.Is(err, ErrAuthorizationDenied) {
+			t.Fatalf("publication without spawn receipt = %v", err)
+		}
+		assertResultPackageCount(t, fixture.Registry, 0)
 	})
 
 	t.Run("workspace base and consumption", func(t *testing.T) {
