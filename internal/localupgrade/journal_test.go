@@ -12,6 +12,7 @@ import (
 	delegationconfig "github.com/GhostFlying/delegation/internal/config"
 	"github.com/GhostFlying/delegation/internal/store"
 	"github.com/GhostFlying/delegation/internal/userservice"
+	"github.com/GhostFlying/delegation/internal/workerprofile"
 )
 
 func TestJournalCreateResumeConflictAndMonotonicTransitions(t *testing.T) {
@@ -329,7 +330,7 @@ func testJournal(t *testing.T) Journal {
 			SourceIdentity: identity, TargetIdentity: identity,
 			ControllerID:               "123e4567-e89b-42d3-a456-426614174801",
 			DeviceID:                   "123e4567-e89b-42d3-a456-426614174802",
-			TargetWorkerProfileVersion: 7,
+			TargetWorkerProfileVersion: workerprofile.CurrentVersion,
 		},
 		ActivatorPath: filepath.Join(root, "activate"), CreatedAt: time.Now().UnixMilli(),
 		UpdatedAt: time.Now().UnixMilli(),

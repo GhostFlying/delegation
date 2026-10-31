@@ -157,6 +157,8 @@ func TestLoadRejectsUnsupportedTopLevelConfiguration(t *testing.T) {
 		"approval":                `"approval_policy":"never"`,
 		"shell environment":       `"shell_environment_policy":{"inherit":"all"}`,
 		"features":                `"features":{"plugins":true}`,
+		"code mode":               `"features.code_mode":true`,
+		"native agents":           `"agents.enabled":true`,
 		"plugins":                 `"plugins":{"delegation":{"enabled":true}}`,
 		"profile":                 `"profile":"unsafe"`,
 		"working directory":       `"cwd":"/tmp"`,

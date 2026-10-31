@@ -1,9 +1,9 @@
 package workerprofile
 
-// CurrentVersion identifies the managed-worker permission semantics emitted by
-// this runtime. Stored workers are resumed only after their profile history has
-// been explicitly qualified for this version.
-const CurrentVersion = 7
+// CurrentVersion identifies the managed-worker runtime and permission semantics
+// emitted by this runtime. Stored workers are resumed only after their profile
+// history has been explicitly qualified for this version.
+const CurrentVersion = 8
 
 // CanMigrateSource reports the exact persisted profile generations whose
 // inactive worker history has semantics understood by this runtime. A future
@@ -11,7 +11,7 @@ const CurrentVersion = 7
 // still make the final CanUpgrade check with that target runtime's own table.
 func CanMigrateSource(source int) bool {
 	switch source {
-	case 5, 6, CurrentVersion:
+	case 5, 6, 7, CurrentVersion:
 		return true
 	default:
 		return false
@@ -20,7 +20,9 @@ func CanMigrateSource(source int) bool {
 
 // CanUpgrade reports the exact historical profile transitions supported by
 // this runtime's stopped-shadow database migration. Versions 5 and 6 are the
-// profiles published by alpha.4 and alpha.7 respectively.
+// profiles published by alpha.4 and alpha.7 respectively. Version 7 is the
+// alpha.11 profile; version 8 adds the controlled Codex code-mode tool surface
+// while preserving the existing permission and TraeX boundaries.
 func CanUpgrade(source, target int) bool {
 	if target != CurrentVersion {
 		return false
