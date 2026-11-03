@@ -72,6 +72,13 @@ not establish Windows 11 interactive-user Task Scheduler or real-machine qualifi
 Keep real-machine-only Task Scheduler and logged-in-user qualification as separate `SKIP` rows.
 Windows TraeX remains unsupported; its exclusion is not a passing or skipped supported-path test.
 
-See the [2026-11-01 Sol execution record](../review/codex-sol-acceptance/ACCEPTANCE.md) for current
-results and remaining gaps. The [2026-10-31 execution record](../review/cli-baseline-refresh/ACCEPTANCE.md)
-remains historical evidence. Historical M6 evidence remains unchanged.
+See the [2026-11-04 real Sol execution record](../review/codex-sol-live-acceptance/ACCEPTANCE.md)
+for the successful real-provider tool/result probe. That isolated probe used the configured
+provider's case-sensitive wire ID `GPT-6.1-Sol`; the lowercase ID was not an alias for it. This is
+the same requested model family, with no fallback to an older model. Repository mock inputs and
+the named Go live-smoke model assertion remain `gpt-6.1-sol`; that named live smoke was not rerun
+under a different ID. The successful probe does not establish a published canonical upgrade.
+
+The [2026-11-01 Sol execution record](../review/codex-sol-acceptance/ACCEPTANCE.md) and
+[2026-10-31 execution record](../review/cli-baseline-refresh/ACCEPTANCE.md) retain their original
+results and source boundaries. Historical M6 evidence remains unchanged.
