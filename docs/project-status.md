@@ -7,7 +7,7 @@
 | M6 | CLOSED | Historical technical acceptance remains UNBLOCKED; the project owner deferred the additional live-upgrade campaign. |
 | Current published runtime | 0.1.0-alpha.12 | Release commit `ec291b9f8e24e6dab7c07e4e969ff57635bf3917`; official publication, archive checksums, and Sigstore provenance verified. |
 | Current CLI/model baseline | Recorded | See the [CLI acceptance baseline](cli-compatibility.md); real Sol execution passed on the identified Linux candidate, separately from published upgrade acceptance. |
-| M7 | SELECTED, SCOPE PENDING | Cross-CLI collaboration and capability alignment between Codex and TraeX. Definition follows M6 closure review. |
+| M7 | IN PROGRESS: scope and acceptance defined; runtime implementation pending | [Cross-CLI collaboration and capability alignment](m7-cross-cli-collaboration.md) between Codex and TraeX. M6 closure review and integration completed first. |
 
 The [M6 closure record](m6-release-closure.md) preserves historical supported-platform acceptance
 and the current owner disposition. Closure is a scope decision, not a claim that every subsequent
