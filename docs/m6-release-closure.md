@@ -3,6 +3,31 @@
 This record closes the technical acceptance scope for M6 and its `0.1.0-alpha.8` follow-up.
 Publication remains a separate release operation performed from the final reviewed commit.
 
+## Current Campaign Disposition: 2026-11-04
+
+The project owner closed M6 and deferred the additional alpha.11 to alpha.12 live-upgrade campaign.
+The historical technical acceptance below remains unchanged. The current published compatibility
+checkpoint is [v0.1.0-alpha.12](https://github.com/GhostFlying/delegation/releases/tag/v0.1.0-alpha.12),
+at release commit `ec291b9f8e24e6dab7c07e4e969ff57635bf3917`.
+
+Publication and verification of the official archives, checksum manifest, and Sigstore provenance
+completed. A separate stateless acquisition using the production Go acquisition path also passed
+from an alternate network environment. These results establish artifact acquisition and trust;
+they do not establish service activation, retained-history migration, or cold recovery.
+
+The attempted coordinated upgrade canceled during preparation, before global COMMIT, and left the
+source services at alpha.11. Its `BLOCKED` result is retained. The fresh coordinated retry,
+post-upgrade code-mode execution, and retained-thread cold-resume checks are now `DEFERRED`, with
+those unexecuted checks remaining `NOT_RUN`. Closing M6 does not convert them to `PASS`.
+
+Windows 11 logged-in-user and isolated macOS TraeX real-account checks retain their current-campaign
+`SKIP` dispositions. Existing platform evidence keeps its original runtime and environment
+boundaries. Windows TraeX remains unsupported.
+
+The [project status](project-status.md) carries these items outside the closed M6 milestone. The
+selected next milestone is M7 cross-CLI collaboration and capability alignment; its scope and
+acceptance must be defined separately before implementation.
+
 ## Supported Scope
 
 | Host OS | Managed CLI | M6 disposition |

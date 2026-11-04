@@ -4,7 +4,12 @@ Delegation is a plugin for assigning bounded Codex or TraeX work across trusted 
 operating systems, toolchains, or local capabilities. Every participating device can host
 user-created root tasks and managed workers.
 
-The project is delivered in reviewed milestones. The current M6 checkpoint includes the M5 named
+The project is delivered in reviewed milestones. M6 is closed; the current published runtime is
+`0.1.0-alpha.12`. The additional live-upgrade campaign is deferred by project-owner decision,
+with its incomplete results preserved. See [project status](docs/project-status.md) for the closure
+boundary, deferred acceptance, and the selected next milestone.
+
+The completed M6 checkpoint includes the M5 named
 instances, native services, and Codex or TraeX worker hosting plus an embedded Tailscale transport.
 Each broker and peer process runs its own userspace `tsnet` node; Delegation does not install, start,
 or connect to a system `tailscaled`. Codex and TraeX remain separate deployments with independent
